@@ -8,7 +8,6 @@
  * Development of this code funded by Astaro AG (http://www.astaro.com/)
  */
 
-#include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/list.h>
@@ -29,12 +28,12 @@ static const char *const comments[__NFT_TRACETYPE_MAX] = {
 	[NFT_TRACETYPE_RULE]	= "rule",
 };
 
-static const struct nf_loginfo trace_loginfo = {
+static struct nf_loginfo trace_loginfo = {
 	.type = NF_LOG_TYPE_LOG,
 	.u = {
 		.log = {
-			.level = LOGLEVEL_WARNING,
-			.logflags = NF_LOG_DEFAULT_MASK,
+			.level = 4,
+			.logflags = NF_LOG_MASK,
 	        },
 	},
 };
@@ -65,7 +64,7 @@ static inline void nft_trace_packet(struct nft_traceinfo *info,
 				    int rulenum,
 				    enum nft_trace_types type)
 {
-	if (static_branch_unlikely(&nft_trace_enabled)) {
+	if (static_key_false(&nft_trace_enabled)) {
 		info->rule = rule;
 		__nft_trace_packet(info, chain, rulenum, type);
 	}
@@ -93,15 +92,12 @@ static bool nft_payload_fast_eval(const struct nft_expr *expr,
 
 	if (priv->base == NFT_PAYLOAD_NETWORK_HEADER)
 		ptr = skb_network_header(skb);
-	else {
-		if (!pkt->tprot_set)
-			return false;
+	else
 		ptr = skb_network_header(skb) + pkt->xt.thoff;
-	}
 
 	ptr += priv->offset;
 
-	if (unlikely(ptr + priv->len > skb_tail_pointer(skb)))
+	if (unlikely(ptr + priv->len >= skb_tail_pointer(skb)))
 		return false;
 
 	*dest = 0;
@@ -114,22 +110,6 @@ static bool nft_payload_fast_eval(const struct nft_expr *expr,
 	return true;
 }
 
-DEFINE_STATIC_KEY_FALSE(nft_counters_enabled);
-
-static noinline void nft_update_chain_stats(const struct nft_chain *chain,
-					    const struct nft_pktinfo *pkt)
-{
-	struct nft_stats *stats;
-
-	local_bh_disable();
-	stats = this_cpu_ptr(rcu_dereference(nft_base_chain(chain)->stats));
-	u64_stats_update_begin(&stats->syncp);
-	stats->pkts++;
-	stats->bytes += pkt->skb->len;
-	u64_stats_update_end(&stats->syncp);
-	local_bh_enable();
-}
-
 struct nft_jumpstack {
 	const struct nft_chain	*chain;
 	const struct nft_rule	*rule;
@@ -137,21 +117,27 @@ struct nft_jumpstack {
 };
 
 unsigned int
-nft_do_chain(struct nft_pktinfo *pkt, void *priv)
+nft_do_chain(struct nft_pktinfo *pkt, const struct nf_hook_ops *ops)
 {
-	const struct nft_chain *chain = priv, *basechain = chain;
+	const struct nft_chain *chain = ops->priv, *basechain = chain;
+	const struct net *chain_net = read_pnet(&nft_base_chain(basechain)->pnet);
 	const struct net *net = nft_net(pkt);
 	const struct nft_rule *rule;
 	const struct nft_expr *expr, *last;
 	struct nft_regs regs;
 	unsigned int stackptr = 0;
 	struct nft_jumpstack jumpstack[NFT_JUMP_STACK_SIZE];
+	struct nft_stats *stats;
 	int rulenum;
 	unsigned int gencursor = nft_genmask_cur(net);
 	struct nft_traceinfo info;
 
+	/* Ignore chains that are not for the current network namespace */
+	if (!net_eq(net, chain_net))
+		return NF_ACCEPT;
+
 	info.trace = false;
-	if (static_branch_unlikely(&nft_trace_enabled))
+	if (static_key_false(&nft_trace_enabled))
 		nft_trace_init(&info, pkt, &regs.verdict, basechain);
 do_chain:
 	rulenum = 0;
@@ -193,7 +179,6 @@ next_rule:
 	case NF_ACCEPT:
 	case NF_DROP:
 	case NF_QUEUE:
-	case NF_STOLEN:
 		nft_trace_packet(&info, chain, rule,
 				 rulenum, NFT_TRACETYPE_RULE);
 		return regs.verdict.code;
@@ -235,8 +220,13 @@ next_rule:
 	nft_trace_packet(&info, basechain, NULL, -1,
 			 NFT_TRACETYPE_POLICY);
 
-	if (static_branch_unlikely(&nft_counters_enabled))
-		nft_update_chain_stats(basechain, pkt);
+	rcu_read_lock_bh();
+	stats = this_cpu_ptr(rcu_dereference(nft_base_chain(basechain)->stats));
+	u64_stats_update_begin(&stats->syncp);
+	stats->pkts++;
+	stats->bytes += pkt->skb->len;
+	u64_stats_update_end(&stats->syncp);
+	rcu_read_unlock_bh();
 
 	return nft_base_chain(basechain)->policy;
 }

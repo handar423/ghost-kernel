@@ -572,8 +572,7 @@ static int tpci200_pci_probe(struct pci_dev *pdev,
 	/* Register the carrier in the industry pack bus driver */
 	tpci200->info->ipack_bus = ipack_bus_register(&pdev->dev,
 						      TPCI200_NB_SLOT,
-						      &tpci200_bus_ops,
-						      THIS_MODULE);
+						      &tpci200_bus_ops);
 	if (!tpci200->info->ipack_bus) {
 		dev_err(&pdev->dev,
 			"error registering the carrier on ipack driver\n");

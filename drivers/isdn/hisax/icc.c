@@ -134,7 +134,7 @@ icc_empty_fifo(struct IsdnCardState *cs, int count)
 
 		t += sprintf(t, "icc_empty_fifo cnt %d", count);
 		QuickHex(t, ptr, count);
-		debugl1(cs, "%s", cs->dlog);
+		debugl1(cs, cs->dlog);
 	}
 }
 
@@ -168,6 +168,7 @@ icc_fill_fifo(struct IsdnCardState *cs)
 		debugl1(cs, "icc_fill_fifo dbusytimer running");
 		del_timer(&cs->dbusytimer);
 	}
+	init_timer(&cs->dbusytimer);
 	cs->dbusytimer.expires = jiffies + ((DBUSY_TIMER_VALUE * HZ)/1000);
 	add_timer(&cs->dbusytimer);
 	if (cs->debug & L1_DEB_ISAC_FIFO) {
@@ -175,7 +176,7 @@ icc_fill_fifo(struct IsdnCardState *cs)
 
 		t += sprintf(t, "icc_fill_fifo cnt %d", count);
 		QuickHex(t, ptr, count);
-		debugl1(cs, "%s", cs->dlog);
+		debugl1(cs, cs->dlog);
 	}
 }
 
@@ -216,7 +217,7 @@ icc_interrupt(struct IsdnCardState *cs, u_char val)
 				if (!(skb = alloc_skb(count, GFP_ATOMIC)))
 					printk(KERN_WARNING "HiSax: D receive out of memory\n");
 				else {
-					skb_put_data(skb, cs->rcvbuf, count);
+					memcpy(skb_put(skb, count), cs->rcvbuf, count);
 					skb_queue_tail(&cs->rq, skb);
 				}
 			}
@@ -424,7 +425,7 @@ afterXPR:
 				if (cs->debug & L1_DEB_MONITOR)
 					debugl1(cs, "ICC %02x -> MOX1", cs->dc.icc.mon_tx[cs->dc.icc.mon_txp - 1]);
 			}
-		AfterMOX1: ;
+		AfterMOX1:
 #endif
 		}
 	}
@@ -579,9 +580,8 @@ DC_Close_icc(struct IsdnCardState *cs) {
 }
 
 static void
-dbusy_timer_handler(struct timer_list *t)
+dbusy_timer_handler(struct IsdnCardState *cs)
 {
-	struct IsdnCardState *cs = from_timer(cs, t, dbusytimer);
 	struct PStack *stptr;
 	int	rbch, star;
 
@@ -676,5 +676,7 @@ clear_pending_icc_ints(struct IsdnCardState *cs)
 void setup_icc(struct IsdnCardState *cs)
 {
 	INIT_WORK(&cs->tqueue, icc_bh);
-	timer_setup(&cs->dbusytimer, dbusy_timer_handler, 0);
+	cs->dbusytimer.function = (void *) dbusy_timer_handler;
+	cs->dbusytimer.data = (long) cs;
+	init_timer(&cs->dbusytimer);
 }

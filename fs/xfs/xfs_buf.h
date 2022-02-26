@@ -26,7 +26,6 @@
 #include <linux/dax.h>
 #include <linux/buffer_head.h>
 #include <linux/uio.h>
-#include <linux/list_lru.h>
 
 /*
  *	Base types
@@ -47,7 +46,7 @@ typedef enum {
 #define XBF_ASYNC	 (1 << 4) /* initiator will not wait for completion */
 #define XBF_DONE	 (1 << 5) /* all pages in the buffer uptodate */
 #define XBF_STALE	 (1 << 6) /* buffer has been staled, do not find it */
-#define XBF_WRITE_FAIL	 (1 << 24)/* async writes have failed on this buffer */
+#define XBF_WRITE_FAIL	 (1 << 25)/* async writes have failed on this buffer */
 
 /* I/O hints for the BIO layer */
 #define XBF_SYNCIO	 (1 << 10)/* treat this buffer as synchronous I/O */
@@ -85,12 +84,11 @@ typedef unsigned int xfs_buf_flags_t;
 	{ _XBF_DELWRI_Q,	"DELWRI_Q" }, \
 	{ _XBF_COMPOUND,	"COMPOUND" }
 
-
 /*
  * Internal state flags.
  */
-#define XFS_BSTATE_DISPOSE	 (1 << 0)	/* buffer being discarded */
-#define XFS_BSTATE_IN_FLIGHT	 (1 << 1)	/* I/O in flight */
+#define XFS_BSTATE_DISPOSE	(1 << 0)	/* buffer being discarded */
+#define XFS_BSTATE_IN_FLIGHT	(1 << 1)	/* I/O in flight */
 
 /*
  * The xfs_buftarg contains 2 notions of "sector size" -
@@ -108,6 +106,7 @@ typedef unsigned int xfs_buf_flags_t;
 typedef struct xfs_buftarg {
 	dev_t			bt_dev;
 	struct block_device	*bt_bdev;
+	struct backing_dev_info	*bt_bdi;
 	struct dax_device	*bt_daxdev;
 	struct xfs_mount	*bt_mount;
 	unsigned int		bt_meta_sectorsize;
@@ -117,7 +116,9 @@ typedef struct xfs_buftarg {
 
 	/* LRU control structures */
 	struct shrinker		bt_shrinker;
-	struct list_lru		bt_lru;
+	struct list_head	bt_lru;
+	spinlock_t		bt_lru_lock;
+	unsigned int		bt_lru_nr;
 
 	struct percpu_counter	bt_io_count;
 } xfs_buftarg_t;
@@ -140,6 +141,7 @@ struct xfs_buf_ops {
 	char *name;
 	void (*verify_read)(struct xfs_buf *);
 	void (*verify_write)(struct xfs_buf *);
+	xfs_failaddr_t (*verify_struct)(struct xfs_buf *bp);
 };
 
 typedef struct xfs_buf {
@@ -150,7 +152,7 @@ typedef struct xfs_buf {
 	 * which is the only bit that is touched if we hit the semaphore
 	 * fast-path on locking.
 	 */
-	struct rhash_head	b_rhash_head;	/* pag buffer hash node */
+	struct rb_node		b_rbnode;	/* rbtree node */
 	xfs_daddr_t		b_bn;		/* block number of buffer */
 	int			b_length;	/* size of buffer in BBs */
 	atomic_t		b_hold;		/* reference count */
@@ -216,20 +218,9 @@ typedef struct xfs_buf {
 } xfs_buf_t;
 
 /* Finding and Reading Buffers */
-struct xfs_buf *_xfs_buf_find(struct xfs_buftarg *target,
-			      struct xfs_buf_map *map, int nmaps,
-			      xfs_buf_flags_t flags, struct xfs_buf *new_bp);
-
-static inline struct xfs_buf *
-xfs_incore(
-	struct xfs_buftarg	*target,
-	xfs_daddr_t		blkno,
-	size_t			numblks,
-	xfs_buf_flags_t		flags)
-{
-	DEFINE_SINGLE_BUF_MAP(map, blkno, numblks);
-	return _xfs_buf_find(target, &map, 1, flags, NULL);
-}
+struct xfs_buf *xfs_buf_incore(struct xfs_buftarg *target,
+			   xfs_daddr_t blkno, size_t numblks,
+			   xfs_buf_flags_t flags);
 
 struct xfs_buf *_xfs_buf_alloc(struct xfs_buftarg *target,
 			       struct xfs_buf_map *map, int nmaps,
@@ -315,10 +306,18 @@ extern void xfs_buf_unlock(xfs_buf_t *);
 /* Buffer Read and Write Routines */
 extern int xfs_bwrite(struct xfs_buf *bp);
 extern void xfs_buf_ioend(struct xfs_buf *bp);
-extern void xfs_buf_ioerror(xfs_buf_t *, int);
+extern void __xfs_buf_ioerror(struct xfs_buf *bp, int error,
+		xfs_failaddr_t failaddr);
+#define xfs_buf_ioerror(bp, err) __xfs_buf_ioerror((bp), (err), __this_address)
 extern void xfs_buf_ioerror_alert(struct xfs_buf *, const char *func);
-extern void xfs_buf_submit(struct xfs_buf *bp);
-extern int xfs_buf_submit_wait(struct xfs_buf *bp);
+
+extern int __xfs_buf_submit(struct xfs_buf *bp, bool);
+static inline int xfs_buf_submit(struct xfs_buf *bp)
+{
+	bool wait = bp->b_flags & XBF_ASYNC ? false : true;
+	return __xfs_buf_submit(bp, wait);
+}
+
 extern void xfs_buf_iomove(xfs_buf_t *, size_t, size_t, void *,
 				xfs_buf_rw_t);
 #define xfs_buf_zero(bp, off, len) \
@@ -353,6 +352,18 @@ extern void xfs_buf_terminate(void);
 #define XFS_BUF_SET_ADDR(bp, bno)	((bp)->b_maps[0].bm_bn = (xfs_daddr_t)(bno))
 
 void xfs_buf_set_ref(struct xfs_buf *bp, int lru_ref);
+
+/*
+ * If the buffer is already on the LRU, do nothing. Otherwise set the buffer
+ * up with a reference count of 0 so it will be tossed from the cache when
+ * released.
+ */
+static inline void xfs_buf_oneshot(struct xfs_buf *bp)
+{
+	if (!list_empty(&bp->b_lru) || atomic_read(&bp->b_lru_ref) > 1)
+		return;
+	atomic_set(&bp->b_lru_ref, 0);
+}
 
 static inline int xfs_buf_ispinned(struct xfs_buf *bp)
 {

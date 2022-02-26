@@ -29,7 +29,6 @@
 #include "core.h"
 #include "host.h"
 #include "slot-gpio.h"
-#include "pwrseq.h"
 #include "sdio_ops.h"
 
 #define cls_dev_to_mmc_host(d)	container_of(d, struct mmc_host, class_dev)
@@ -160,9 +159,9 @@ out:
 	return err;
 }
 
-static void mmc_retune_timer(struct timer_list *t)
+static void mmc_retune_timer(unsigned long data)
 {
-	struct mmc_host *host = from_timer(host, t, retune_timer);
+	struct mmc_host *host = (struct mmc_host *)data;
 
 	mmc_retune_needed(host);
 }
@@ -178,17 +177,19 @@ static void mmc_retune_timer(struct timer_list *t)
  */
 int mmc_of_parse(struct mmc_host *host)
 {
-	struct device *dev = host->parent;
-	u32 bus_width, drv_type;
+	struct device_node *np;
+	u32 bus_width;
 	int ret;
 	bool cd_cap_invert, cd_gpio_invert = false;
 	bool ro_cap_invert, ro_gpio_invert = false;
 
-	if (!dev || !dev_fwnode(dev))
+	if (!host->parent || !host->parent->of_node)
 		return 0;
 
+	np = host->parent->of_node;
+
 	/* "bus-width" is translated to MMC_CAP_*_BIT_DATA flags */
-	if (device_property_read_u32(dev, "bus-width", &bus_width) < 0) {
+	if (of_property_read_u32(np, "bus-width", &bus_width) < 0) {
 		dev_dbg(host->parent,
 			"\"bus-width\" property is missing, assuming 1 bit.\n");
 		bus_width = 1;
@@ -210,7 +211,7 @@ int mmc_of_parse(struct mmc_host *host)
 	}
 
 	/* f_max is obtained from the optional "max-frequency" property */
-	device_property_read_u32(dev, "max-frequency", &host->f_max);
+	of_property_read_u32(np, "max-frequency", &host->f_max);
 
 	/*
 	 * Configure CD and WP pins. They are both by default active low to
@@ -225,12 +226,12 @@ int mmc_of_parse(struct mmc_host *host)
 	 */
 
 	/* Parse Card Detection */
-	if (device_property_read_bool(dev, "non-removable")) {
+	if (of_property_read_bool(np, "non-removable")) {
 		host->caps |= MMC_CAP_NONREMOVABLE;
 	} else {
-		cd_cap_invert = device_property_read_bool(dev, "cd-inverted");
+		cd_cap_invert = of_property_read_bool(np, "cd-inverted");
 
-		if (device_property_read_bool(dev, "broken-cd"))
+		if (of_property_read_bool(np, "broken-cd"))
 			host->caps |= MMC_CAP_NEEDS_POLL;
 
 		ret = mmc_gpiod_request_cd(host, "cd", 0, true,
@@ -256,7 +257,7 @@ int mmc_of_parse(struct mmc_host *host)
 	}
 
 	/* Parse Write Protection */
-	ro_cap_invert = device_property_read_bool(dev, "wp-inverted");
+	ro_cap_invert = of_property_read_bool(np, "wp-inverted");
 
 	ret = mmc_gpiod_request_ro(host, "wp", 0, false, 0, &ro_gpio_invert);
 	if (!ret)
@@ -264,73 +265,64 @@ int mmc_of_parse(struct mmc_host *host)
 	else if (ret != -ENOENT && ret != -ENOSYS)
 		return ret;
 
-	if (device_property_read_bool(dev, "disable-wp"))
+	if (of_property_read_bool(np, "disable-wp"))
 		host->caps2 |= MMC_CAP2_NO_WRITE_PROTECT;
 
 	/* See the comment on CD inversion above */
 	if (ro_cap_invert ^ ro_gpio_invert)
 		host->caps2 |= MMC_CAP2_RO_ACTIVE_HIGH;
 
-	if (device_property_read_bool(dev, "cap-sd-highspeed"))
+	if (of_property_read_bool(np, "cap-sd-highspeed"))
 		host->caps |= MMC_CAP_SD_HIGHSPEED;
-	if (device_property_read_bool(dev, "cap-mmc-highspeed"))
+	if (of_property_read_bool(np, "cap-mmc-highspeed"))
 		host->caps |= MMC_CAP_MMC_HIGHSPEED;
-	if (device_property_read_bool(dev, "sd-uhs-sdr12"))
+	if (of_property_read_bool(np, "sd-uhs-sdr12"))
 		host->caps |= MMC_CAP_UHS_SDR12;
-	if (device_property_read_bool(dev, "sd-uhs-sdr25"))
+	if (of_property_read_bool(np, "sd-uhs-sdr25"))
 		host->caps |= MMC_CAP_UHS_SDR25;
-	if (device_property_read_bool(dev, "sd-uhs-sdr50"))
+	if (of_property_read_bool(np, "sd-uhs-sdr50"))
 		host->caps |= MMC_CAP_UHS_SDR50;
-	if (device_property_read_bool(dev, "sd-uhs-sdr104"))
+	if (of_property_read_bool(np, "sd-uhs-sdr104"))
 		host->caps |= MMC_CAP_UHS_SDR104;
-	if (device_property_read_bool(dev, "sd-uhs-ddr50"))
+	if (of_property_read_bool(np, "sd-uhs-ddr50"))
 		host->caps |= MMC_CAP_UHS_DDR50;
-	if (device_property_read_bool(dev, "cap-power-off-card"))
+	if (of_property_read_bool(np, "cap-power-off-card"))
 		host->caps |= MMC_CAP_POWER_OFF_CARD;
-	if (device_property_read_bool(dev, "cap-mmc-hw-reset"))
+	if (of_property_read_bool(np, "cap-mmc-hw-reset"))
 		host->caps |= MMC_CAP_HW_RESET;
-	if (device_property_read_bool(dev, "cap-sdio-irq"))
+	if (of_property_read_bool(np, "cap-sdio-irq"))
 		host->caps |= MMC_CAP_SDIO_IRQ;
-	if (device_property_read_bool(dev, "full-pwr-cycle"))
+	if (of_property_read_bool(np, "full-pwr-cycle"))
 		host->caps2 |= MMC_CAP2_FULL_PWR_CYCLE;
-	if (device_property_read_bool(dev, "keep-power-in-suspend"))
+	if (of_property_read_bool(np, "keep-power-in-suspend"))
 		host->pm_caps |= MMC_PM_KEEP_POWER;
-	if (device_property_read_bool(dev, "wakeup-source") ||
-	    device_property_read_bool(dev, "enable-sdio-wakeup")) /* legacy */
+	if (of_property_read_bool(np, "wakeup-source") ||
+	    of_property_read_bool(np, "enable-sdio-wakeup")) /* legacy */
 		host->pm_caps |= MMC_PM_WAKE_SDIO_IRQ;
-	if (device_property_read_bool(dev, "mmc-ddr-3_3v"))
+	if (of_property_read_bool(np, "mmc-ddr-3_3v"))
 		host->caps |= MMC_CAP_3_3V_DDR;
-	if (device_property_read_bool(dev, "mmc-ddr-1_8v"))
+	if (of_property_read_bool(np, "mmc-ddr-1_8v"))
 		host->caps |= MMC_CAP_1_8V_DDR;
-	if (device_property_read_bool(dev, "mmc-ddr-1_2v"))
+	if (of_property_read_bool(np, "mmc-ddr-1_2v"))
 		host->caps |= MMC_CAP_1_2V_DDR;
-	if (device_property_read_bool(dev, "mmc-hs200-1_8v"))
+	if (of_property_read_bool(np, "mmc-hs200-1_8v"))
 		host->caps2 |= MMC_CAP2_HS200_1_8V_SDR;
-	if (device_property_read_bool(dev, "mmc-hs200-1_2v"))
+	if (of_property_read_bool(np, "mmc-hs200-1_2v"))
 		host->caps2 |= MMC_CAP2_HS200_1_2V_SDR;
-	if (device_property_read_bool(dev, "mmc-hs400-1_8v"))
+	if (of_property_read_bool(np, "mmc-hs400-1_8v"))
 		host->caps2 |= MMC_CAP2_HS400_1_8V | MMC_CAP2_HS200_1_8V_SDR;
-	if (device_property_read_bool(dev, "mmc-hs400-1_2v"))
+	if (of_property_read_bool(np, "mmc-hs400-1_2v"))
 		host->caps2 |= MMC_CAP2_HS400_1_2V | MMC_CAP2_HS200_1_2V_SDR;
-	if (device_property_read_bool(dev, "mmc-hs400-enhanced-strobe"))
+	if (of_property_read_bool(np, "mmc-hs400-enhanced-strobe"))
 		host->caps2 |= MMC_CAP2_HS400_ES;
-	if (device_property_read_bool(dev, "no-sdio"))
+	if (of_property_read_bool(np, "no-sdio"))
 		host->caps2 |= MMC_CAP2_NO_SDIO;
-	if (device_property_read_bool(dev, "no-sd"))
+	if (of_property_read_bool(np, "no-sd"))
 		host->caps2 |= MMC_CAP2_NO_SD;
-	if (device_property_read_bool(dev, "no-mmc"))
+	if (of_property_read_bool(np, "no-mmc"))
 		host->caps2 |= MMC_CAP2_NO_MMC;
 
-	/* Must be after "non-removable" check */
-	if (device_property_read_u32(dev, "fixed-emmc-driver-type", &drv_type) == 0) {
-		if (host->caps & MMC_CAP_NONREMOVABLE)
-			host->fixed_drv_type = drv_type;
-		else
-			dev_err(host->parent,
-				"can't use fixed driver type, media is removable\n");
-	}
-
-	host->dsr_req = !device_property_read_u32(dev, "dsr", &host->dsr);
+	host->dsr_req = !of_property_read_u32(np, "dsr", &host->dsr);
 	if (host->dsr_req && (host->dsr & ~0xffff)) {
 		dev_err(host->parent,
 			"device tree specified broken value for DSR: 0x%x, ignoring\n",
@@ -338,7 +330,7 @@ int mmc_of_parse(struct mmc_host *host)
 		host->dsr_req = 0;
 	}
 
-	return mmc_pwrseq_alloc(host);
+	return 0;
 }
 
 EXPORT_SYMBOL(mmc_of_parse);
@@ -389,20 +381,18 @@ struct mmc_host *mmc_alloc_host(int extra, struct device *dev)
 	init_waitqueue_head(&host->wq);
 	INIT_DELAYED_WORK(&host->detect, mmc_rescan);
 	INIT_DELAYED_WORK(&host->sdio_irq_work, sdio_irq_work);
-	timer_setup(&host->retune_timer, mmc_retune_timer, 0);
+	setup_timer(&host->retune_timer, mmc_retune_timer, (unsigned long)host);
 
 	/*
 	 * By default, hosts do not support SGIO or large requests.
 	 * They have to set these according to their abilities.
 	 */
 	host->max_segs = 1;
-	host->max_seg_size = PAGE_SIZE;
+	host->max_seg_size = PAGE_CACHE_SIZE;
 
-	host->max_req_size = PAGE_SIZE;
+	host->max_req_size = PAGE_CACHE_SIZE;
 	host->max_blk_size = 512;
-	host->max_blk_count = PAGE_SIZE / 512;
-
-	host->fixed_drv_type = -EINVAL;
+	host->max_blk_count = PAGE_CACHE_SIZE / 512;
 
 	return host;
 }
@@ -474,7 +464,6 @@ EXPORT_SYMBOL(mmc_remove_host);
  */
 void mmc_free_host(struct mmc_host *host)
 {
-	mmc_pwrseq_free(host);
 	put_device(&host->class_dev);
 }
 

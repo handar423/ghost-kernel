@@ -15,11 +15,9 @@
 #include <linux/list.h>
 #include <linux/moduleparam.h>
 #include <linux/blkdev.h>
-#include <linux/backing-dev.h>
 #include <linux/hdreg.h>
 #include <linux/completion.h>
 #include <linux/kobject.h>
-#include <linux/refcount.h>
 
 #include "dm-stats.h"
 
@@ -39,7 +37,7 @@
  */
 struct dm_dev_internal {
 	struct list_head list;
-	refcount_t count;
+	atomic_t count;
 	struct dm_dev *dm_dev;
 };
 
@@ -75,6 +73,8 @@ bool dm_table_all_blk_mq_devices(struct dm_table *t);
 void dm_table_free_md_mempools(struct dm_table *t);
 struct dm_md_mempools *dm_table_get_md_mempools(struct dm_table *t);
 
+int dm_queue_merge_is_compulsory(struct request_queue *q);
+
 void dm_lock_md_type(struct mapped_device *md);
 void dm_unlock_md_type(struct mapped_device *md);
 void dm_set_md_type(struct mapped_device *md, enum dm_queue_mode type);
@@ -96,7 +96,8 @@ int dm_setup_md_queue(struct mapped_device *md, struct dm_table *t);
 /*
  * To check whether the target type is request-based or not (bio-based).
  */
-#define dm_target_request_based(t) ((t)->type->clone_and_map_rq != NULL)
+#define dm_target_request_based(t) (((t)->type->map_rq != NULL) || \
+				    ((t)->type->clone_and_map_rq != NULL))
 
 /*
  * To check whether the target type is a hybrid (capable of being

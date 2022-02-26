@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  *    Copyright IBM Corp. 2007
  *    Author(s): Utz Bacher <utz.bacher@de.ibm.com>,
@@ -79,7 +78,7 @@ static ssize_t qeth_dev_card_type_show(struct device *dev,
 
 static DEVICE_ATTR(card_type, 0444, qeth_dev_card_type_show, NULL);
 
-static const char *qeth_get_bufsize_str(struct qeth_card *card)
+static inline const char *qeth_get_bufsize_str(struct qeth_card *card)
 {
 	if (card->qdio.in_buf_size == 16384)
 		return "16k";
@@ -154,17 +153,52 @@ static DEVICE_ATTR(portno, 0644, qeth_dev_portno_show, qeth_dev_portno_store);
 static ssize_t qeth_dev_portname_show(struct device *dev,
 				struct device_attribute *attr, char *buf)
 {
-	return sprintf(buf, "no portname required\n");
+	struct qeth_card *card = dev_get_drvdata(dev);
+	char portname[9] = {0, };
+
+	if (!card)
+		return -EINVAL;
+
+	if (card->info.portname_required) {
+		memcpy(portname, card->info.portname + 1, 8);
+		EBCASC(portname, 8);
+		return sprintf(buf, "%s\n", portname);
+	} else
+		return sprintf(buf, "no portname required\n");
 }
 
 static ssize_t qeth_dev_portname_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t count)
 {
 	struct qeth_card *card = dev_get_drvdata(dev);
+	char *tmp;
+	int i, rc = 0;
 
-	dev_warn_once(&card->gdev->dev,
-		      "portname is deprecated and is ignored\n");
-	return count;
+	if (!card)
+		return -EINVAL;
+
+	mutex_lock(&card->conf_mutex);
+	if ((card->state != CARD_STATE_DOWN) &&
+	    (card->state != CARD_STATE_RECOVER)) {
+		rc = -EPERM;
+		goto out;
+	}
+
+	tmp = strsep((char **) &buf, "\n");
+	if ((strlen(tmp) > 8) || (strlen(tmp) == 0)) {
+		rc = -EINVAL;
+		goto out;
+	}
+
+	card->info.portname[0] = strlen(tmp);
+	/* for beauty reasons */
+	for (i = 1; i < 9; i++)
+		card->info.portname[i] = ' ';
+	strcpy(card->info.portname + 1, tmp);
+	ASCEBC(card->info.portname + 1, 8);
+out:
+	mutex_unlock(&card->conf_mutex);
+	return rc ? rc : count;
 }
 
 static DEVICE_ATTR(portname, 0644, qeth_dev_portname_show,
@@ -197,6 +231,7 @@ static ssize_t qeth_dev_prioqing_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t count)
 {
 	struct qeth_card *card = dev_get_drvdata(dev);
+	char *tmp;
 	int rc = 0;
 
 	if (!card)
@@ -218,39 +253,40 @@ static ssize_t qeth_dev_prioqing_store(struct device *dev,
 		goto out;
 	}
 
-	if (sysfs_streq(buf, "prio_queueing_prec")) {
+	tmp = strsep((char **) &buf, "\n");
+	if (!strcmp(tmp, "prio_queueing_prec")) {
 		card->qdio.do_prio_queueing = QETH_PRIO_Q_ING_PREC;
 		card->qdio.default_out_queue = QETH_DEFAULT_QUEUE;
-	} else if (sysfs_streq(buf, "prio_queueing_skb")) {
+	} else if (!strcmp(tmp, "prio_queueing_skb")) {
 		card->qdio.do_prio_queueing = QETH_PRIO_Q_ING_SKB;
 		card->qdio.default_out_queue = QETH_DEFAULT_QUEUE;
-	} else if (sysfs_streq(buf, "prio_queueing_tos")) {
+	} else if (!strcmp(tmp, "prio_queueing_tos")) {
 		card->qdio.do_prio_queueing = QETH_PRIO_Q_ING_TOS;
 		card->qdio.default_out_queue = QETH_DEFAULT_QUEUE;
-	} else if (sysfs_streq(buf, "prio_queueing_vlan")) {
+	} else if (!strcmp(tmp, "prio_queueing_vlan")) {
 		if (!card->options.layer2) {
 			rc = -ENOTSUPP;
 			goto out;
 		}
 		card->qdio.do_prio_queueing = QETH_PRIO_Q_ING_VLAN;
 		card->qdio.default_out_queue = QETH_DEFAULT_QUEUE;
-	} else if (sysfs_streq(buf, "no_prio_queueing:0")) {
+	} else if (!strcmp(tmp, "no_prio_queueing:0")) {
 		card->qdio.do_prio_queueing = QETH_NO_PRIO_QUEUEING;
 		card->qdio.default_out_queue = 0;
-	} else if (sysfs_streq(buf, "no_prio_queueing:1")) {
+	} else if (!strcmp(tmp, "no_prio_queueing:1")) {
 		card->qdio.do_prio_queueing = QETH_NO_PRIO_QUEUEING;
 		card->qdio.default_out_queue = 1;
-	} else if (sysfs_streq(buf, "no_prio_queueing:2")) {
+	} else if (!strcmp(tmp, "no_prio_queueing:2")) {
 		card->qdio.do_prio_queueing = QETH_NO_PRIO_QUEUEING;
 		card->qdio.default_out_queue = 2;
-	} else if (sysfs_streq(buf, "no_prio_queueing:3")) {
+	} else if (!strcmp(tmp, "no_prio_queueing:3")) {
 		if (card->info.type == QETH_CARD_TYPE_IQD) {
 			rc = -EPERM;
 			goto out;
 		}
 		card->qdio.do_prio_queueing = QETH_NO_PRIO_QUEUEING;
 		card->qdio.default_out_queue = 3;
-	} else if (sysfs_streq(buf, "no_prio_queueing")) {
+	} else if (!strcmp(tmp, "no_prio_queueing")) {
 		card->qdio.do_prio_queueing = QETH_NO_PRIO_QUEUEING;
 		card->qdio.default_out_queue = QETH_DEFAULT_QUEUE;
 	} else
@@ -414,7 +450,7 @@ static ssize_t qeth_dev_layer2_store(struct device *dev,
 
 	if (card->options.layer2 == newdis)
 		goto out;
-	if (card->info.layer_enforced) {
+	if (card->info.type == QETH_CARD_TYPE_OSM) {
 		/* fixed layer, can't switch */
 		rc = -EOPNOTSUPP;
 		goto out;
@@ -471,13 +507,17 @@ static ssize_t qeth_dev_isolation_store(struct device *dev,
 	struct qeth_card *card = dev_get_drvdata(dev);
 	enum qeth_ipa_isolation_modes isolation;
 	int rc = 0;
+	char *tmp, *curtoken;
+	curtoken = (char *) buf;
 
 	if (!card)
 		return -EINVAL;
 
 	mutex_lock(&card->conf_mutex);
+	/* check for unknown, too, in case we do not yet know who we are */
 	if (card->info.type != QETH_CARD_TYPE_OSD &&
-	    card->info.type != QETH_CARD_TYPE_OSX) {
+	    card->info.type != QETH_CARD_TYPE_OSX &&
+	    card->info.type != QETH_CARD_TYPE_UNKNOWN) {
 		rc = -EOPNOTSUPP;
 		dev_err(&card->gdev->dev, "Adapter does not "
 			"support QDIO data connection isolation\n");
@@ -485,11 +525,12 @@ static ssize_t qeth_dev_isolation_store(struct device *dev,
 	}
 
 	/* parse input into isolation mode */
-	if (sysfs_streq(buf, ATTR_QETH_ISOLATION_NONE)) {
+	tmp = strsep(&curtoken, "\n");
+	if (!strcmp(tmp, ATTR_QETH_ISOLATION_NONE)) {
 		isolation = ISOLATION_MODE_NONE;
-	} else if (sysfs_streq(buf, ATTR_QETH_ISOLATION_FWD)) {
+	} else if (!strcmp(tmp, ATTR_QETH_ISOLATION_FWD)) {
 		isolation = ISOLATION_MODE_FWD;
-	} else if (sysfs_streq(buf, ATTR_QETH_ISOLATION_DROP)) {
+	} else if (!strcmp(tmp, ATTR_QETH_ISOLATION_DROP)) {
 		isolation = ISOLATION_MODE_DROP;
 	} else {
 		rc = -EINVAL;
@@ -500,7 +541,8 @@ static ssize_t qeth_dev_isolation_store(struct device *dev,
 	/* defer IP assist if device is offline (until discipline->set_online)*/
 	card->options.prev_isolation = card->options.isolation;
 	card->options.isolation = isolation;
-	if (qeth_card_hw_is_reachable(card)) {
+	if (card->state == CARD_STATE_SOFTSETUP ||
+	    card->state == CARD_STATE_UP) {
 		int ipa_rc = qeth_set_access_ctrl_online(card, 1);
 		if (ipa_rc != 0)
 			rc = ipa_rc;
@@ -523,7 +565,7 @@ static ssize_t qeth_dev_switch_attrs_show(struct device *dev,
 	if (!card)
 		return -EINVAL;
 
-	if (!qeth_card_hw_is_reachable(card))
+	if (card->state != CARD_STATE_SOFTSETUP && card->state != CARD_STATE_UP)
 		return sprintf(buf, "n/a\n");
 
 	rc = qeth_query_switch_attributes(card, &sw_info);
@@ -566,16 +608,19 @@ static ssize_t qeth_hw_trap_store(struct device *dev,
 {
 	struct qeth_card *card = dev_get_drvdata(dev);
 	int rc = 0;
+	char *tmp, *curtoken;
 	int state = 0;
+	curtoken = (char *)buf;
 
 	if (!card)
 		return -EINVAL;
 
 	mutex_lock(&card->conf_mutex);
-	if (qeth_card_hw_is_reachable(card))
+	if (card->state == CARD_STATE_SOFTSETUP || card->state == CARD_STATE_UP)
 		state = 1;
+	tmp = strsep(&curtoken, "\n");
 
-	if (sysfs_streq(buf, "arm") && !card->info.hwtrap) {
+	if (!strcmp(tmp, "arm") && !card->info.hwtrap) {
 		if (state) {
 			if (qeth_is_diagass_supported(card,
 			    QETH_DIAGS_CMD_TRAP)) {
@@ -586,14 +631,14 @@ static ssize_t qeth_hw_trap_store(struct device *dev,
 				rc = -EINVAL;
 		} else
 			card->info.hwtrap = 1;
-	} else if (sysfs_streq(buf, "disarm") && card->info.hwtrap) {
+	} else if (!strcmp(tmp, "disarm") && card->info.hwtrap) {
 		if (state) {
 			rc = qeth_hw_trap(card, QETH_DIAGS_TRAP_DISARM);
 			if (!rc)
 				card->info.hwtrap = 0;
 		} else
 			card->info.hwtrap = 0;
-	} else if (sysfs_streq(buf, "trap") && state && card->info.hwtrap)
+	} else if (!strcmp(tmp, "trap") && state && card->info.hwtrap)
 		rc = qeth_hw_trap(card, QETH_DIAGS_TRAP_CAPTURE);
 	else
 		rc = -EINVAL;

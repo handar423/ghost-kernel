@@ -126,10 +126,10 @@ static void ccid2_change_l_seq_window(struct sock *sk, u64 val)
 						  DCCPF_SEQ_WMAX));
 }
 
-static void ccid2_hc_tx_rto_expire(struct timer_list *t)
+static void ccid2_hc_tx_rto_expire(unsigned long data)
 {
-	struct ccid2_hc_tx_sock *hc = from_timer(hc, t, tx_rtotimer);
-	struct sock *sk = hc->sk;
+	struct sock *sk = (struct sock *)data;
+	struct ccid2_hc_tx_sock *hc = ccid2_hc_tx_sk(sk);
 	const bool sender_was_blocked = ccid2_cwnd_network_limited(hc);
 
 	bh_lock_sock(sk);
@@ -139,9 +139,6 @@ static void ccid2_hc_tx_rto_expire(struct timer_list *t)
 	}
 
 	ccid2_pr_debug("RTO_EXPIRE\n");
-
-	if (sk->sk_state == DCCP_CLOSED)
-		goto out;
 
 	/* back-off timer */
 	hc->tx_rto <<= 1;
@@ -236,7 +233,7 @@ static void ccid2_hc_tx_packet_sent(struct sock *sk, unsigned int len)
 {
 	struct dccp_sock *dp = dccp_sk(sk);
 	struct ccid2_hc_tx_sock *hc = ccid2_hc_tx_sk(sk);
-	const u32 now = ccid2_jiffies32;
+	const u32 now = ccid2_time_stamp;
 	struct ccid2_seq *next;
 
 	/* slow-start after idle periods (RFC 2581, RFC 2861) */
@@ -392,6 +389,7 @@ static void ccid2_rtt_estimator(struct sock *sk, const long mrtt)
 		hc->tx_mdev += m;
 
 		if (hc->tx_mdev > hc->tx_mdev_max) {
+			gmb();
 			hc->tx_mdev_max = hc->tx_mdev;
 			if (hc->tx_mdev_max > hc->tx_rttvar)
 				hc->tx_rttvar = hc->tx_mdev_max;
@@ -469,7 +467,7 @@ static void ccid2_new_ack(struct sock *sk, struct ccid2_seq *seqp,
 	 * The cleanest solution is to not use the ccid2s_sent field at all
 	 * and instead use DCCP timestamps: requires changes in other places.
 	 */
-	ccid2_rtt_estimator(sk, ccid2_jiffies32 - seqp->ccid2s_sent);
+	ccid2_rtt_estimator(sk, ccid2_time_stamp - seqp->ccid2s_sent);
 }
 
 static void ccid2_congestion_event(struct sock *sk, struct ccid2_seq *seqp)
@@ -481,7 +479,7 @@ static void ccid2_congestion_event(struct sock *sk, struct ccid2_seq *seqp)
 		return;
 	}
 
-	hc->tx_last_cong = ccid2_jiffies32;
+	hc->tx_last_cong = ccid2_time_stamp;
 
 	hc->tx_cwnd      = hc->tx_cwnd / 2 ? : 1U;
 	hc->tx_ssthresh  = max(hc->tx_cwnd, 2U);
@@ -734,10 +732,10 @@ static int ccid2_hc_tx_init(struct ccid *ccid, struct sock *sk)
 
 	hc->tx_rto	 = DCCP_TIMEOUT_INIT;
 	hc->tx_rpdupack  = -1;
-	hc->tx_last_cong = hc->tx_lsndtime = hc->tx_cwnd_stamp = ccid2_jiffies32;
+	hc->tx_last_cong = hc->tx_lsndtime = hc->tx_cwnd_stamp = ccid2_time_stamp;
 	hc->tx_cwnd_used = 0;
-	hc->sk		 = sk;
-	timer_setup(&hc->tx_rtotimer, ccid2_hc_tx_rto_expire, 0);
+	setup_timer(&hc->tx_rtotimer, ccid2_hc_tx_rto_expire,
+			(unsigned long)sk);
 	INIT_LIST_HEAD(&hc->tx_av_chunks);
 	return 0;
 }
@@ -752,7 +750,6 @@ static void ccid2_hc_tx_exit(struct sock *sk)
 	for (i = 0; i < hc->tx_seqbufc; i++)
 		kfree(hc->tx_seqbuf[i]);
 	hc->tx_seqbufc = 0;
-	dccp_ackvec_parsed_cleanup(&hc->tx_av_chunks);
 }
 
 static void ccid2_hc_rx_packet_recv(struct sock *sk, struct sk_buff *skb)

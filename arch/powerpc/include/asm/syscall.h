@@ -14,8 +14,8 @@
 #define _ASM_SYSCALL_H	1
 
 #include <uapi/linux/audit.h>
+#include <linux/compat.h>
 #include <linux/sched.h>
-#include <linux/thread_info.h>
 
 /* ftrace syscalls requires exporting the sys_call_table */
 #ifdef CONFIG_FTRACE_SYSCALLS

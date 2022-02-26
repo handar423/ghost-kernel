@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * Device operations for the pnfs nfs4 file layout driver.
  *
@@ -369,6 +368,25 @@ out:
 	return fh;
 }
 
+int
+nfs4_ff_layout_select_ds_stateid(struct pnfs_layout_segment *lseg,
+				u32 mirror_idx,
+				nfs4_stateid *stateid)
+{
+	struct nfs4_ff_layout_mirror *mirror = FF_LAYOUT_COMP(lseg, mirror_idx);
+
+	if (!ff_layout_mirror_valid(lseg, mirror, false)) {
+		pr_err_ratelimited("NFS: %s: No data server for mirror offset index %d\n",
+			__func__, mirror_idx);
+		goto out;
+	}
+
+	nfs4_stateid_copy(stateid, &mirror->stateid);
+	return 1;
+out:
+	return 0;
+}
+
 /**
  * nfs4_ff_layout_prepare_ds - prepare a DS connection for an RPC call
  * @lseg: the layout segment we're operating on
@@ -420,7 +438,8 @@ nfs4_ff_layout_prepare_ds(struct pnfs_layout_segment *lseg, u32 ds_idx,
 	status = nfs4_pnfs_ds_connect(s, ds, devid, dataserver_timeo,
 			     dataserver_retrans,
 			     mirror->mirror_ds->ds_versions[0].version,
-			     mirror->mirror_ds->ds_versions[0].minor_version);
+			     mirror->mirror_ds->ds_versions[0].minor_version,
+			     RPC_AUTH_UNIX);
 
 	/* connect success, check rsize/wsize limit */
 	if (!status) {
@@ -452,7 +471,7 @@ ff_layout_get_ds_cred(struct pnfs_layout_segment *lseg, u32 ds_idx,
 	struct nfs4_ff_layout_mirror *mirror = FF_LAYOUT_COMP(lseg, ds_idx);
 	struct rpc_cred *cred;
 
-	if (mirror) {
+	if (mirror && !mirror->mirror_ds->ds_versions[0].tightly_coupled) {
 		cred = ff_layout_get_mirror_cred(mirror, lseg->pls_range.iomode);
 		if (!cred)
 			cred = get_rpccred(mdscred);

@@ -20,8 +20,17 @@
 
 #include "nvmet.h"
 
-static const struct config_item_type nvmet_host_type;
-static const struct config_item_type nvmet_subsys_type;
+static struct config_item_type nvmet_host_type;
+static struct config_item_type nvmet_subsys_type;
+
+static const struct nvmet_transport_name {
+	u8		type;
+	const char	*name;
+} nvmet_transport_names[] = {
+	{ NVMF_TRTYPE_RDMA,	"rdma" },
+	{ NVMF_TRTYPE_FC,	"fc" },
+	{ NVMF_TRTYPE_LOOP,	"loop" },
+};
 
 /*
  * nvmet_port Generic ConfigFS definitions.
@@ -128,8 +137,10 @@ static ssize_t nvmet_addr_traddr_store(struct config_item *item,
 		pr_err("Disable the address before modifying\n");
 		return -EACCES;
 	}
-	return snprintf(port->disc_addr.traddr,
-			sizeof(port->disc_addr.traddr), "%s", page);
+
+	if (sscanf(page, "%s\n", port->disc_addr.traddr) != 1)
+		return -EINVAL;
+	return count;
 }
 
 CONFIGFS_ATTR(nvmet_, addr_traddr);
@@ -199,52 +210,70 @@ static ssize_t nvmet_addr_trsvcid_store(struct config_item *item,
 		pr_err("Disable the address before modifying\n");
 		return -EACCES;
 	}
-	return snprintf(port->disc_addr.trsvcid,
-			sizeof(port->disc_addr.trsvcid), "%s", page);
+
+	if (sscanf(page, "%s\n", port->disc_addr.trsvcid) != 1)
+		return -EINVAL;
+	return count;
 }
 
 CONFIGFS_ATTR(nvmet_, addr_trsvcid);
 
+static ssize_t nvmet_param_inline_data_size_show(struct config_item *item,
+		char *page)
+{
+	struct nvmet_port *port = to_nvmet_port(item);
+
+	return snprintf(page, PAGE_SIZE, "%d\n", port->inline_data_size);
+}
+
+static ssize_t nvmet_param_inline_data_size_store(struct config_item *item,
+		const char *page, size_t count)
+{
+	struct nvmet_port *port = to_nvmet_port(item);
+	int ret;
+
+	if (port->enabled) {
+		pr_err("Cannot modify inline_data_size while port enabled\n");
+		pr_err("Disable the port before modifying\n");
+		return -EACCES;
+	}
+	ret = kstrtoint(page, 0, &port->inline_data_size);
+	if (ret) {
+		pr_err("Invalid value '%s' for inline_data_size\n", page);
+		return -EINVAL;
+	}
+	return count;
+}
+
+CONFIGFS_ATTR(nvmet_, param_inline_data_size);
+
 static ssize_t nvmet_addr_trtype_show(struct config_item *item,
 		char *page)
 {
-	switch (to_nvmet_port(item)->disc_addr.trtype) {
-	case NVMF_TRTYPE_RDMA:
-		return sprintf(page, "rdma\n");
-	case NVMF_TRTYPE_LOOP:
-		return sprintf(page, "loop\n");
-	case NVMF_TRTYPE_FC:
-		return sprintf(page, "fc\n");
-	default:
-		return sprintf(page, "\n");
+	struct nvmet_port *port = to_nvmet_port(item);
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(nvmet_transport_names); i++) {
+		if (port->disc_addr.trtype != nvmet_transport_names[i].type)
+			continue;
+		return sprintf(page, "%s\n", nvmet_transport_names[i].name);
 	}
+
+	return sprintf(page, "\n");
 }
 
 static void nvmet_port_init_tsas_rdma(struct nvmet_port *port)
 {
-	port->disc_addr.trtype = NVMF_TRTYPE_RDMA;
-	memset(&port->disc_addr.tsas.rdma, 0, NVMF_TSAS_SIZE);
 	port->disc_addr.tsas.rdma.qptype = NVMF_RDMA_QPTYPE_CONNECTED;
 	port->disc_addr.tsas.rdma.prtype = NVMF_RDMA_PRTYPE_NOT_SPECIFIED;
 	port->disc_addr.tsas.rdma.cms = NVMF_RDMA_CMS_RDMA_CM;
-}
-
-static void nvmet_port_init_tsas_loop(struct nvmet_port *port)
-{
-	port->disc_addr.trtype = NVMF_TRTYPE_LOOP;
-	memset(&port->disc_addr.tsas, 0, NVMF_TSAS_SIZE);
-}
-
-static void nvmet_port_init_tsas_fc(struct nvmet_port *port)
-{
-	port->disc_addr.trtype = NVMF_TRTYPE_FC;
-	memset(&port->disc_addr.tsas, 0, NVMF_TSAS_SIZE);
 }
 
 static ssize_t nvmet_addr_trtype_store(struct config_item *item,
 		const char *page, size_t count)
 {
 	struct nvmet_port *port = to_nvmet_port(item);
+	int i;
 
 	if (port->enabled) {
 		pr_err("Cannot modify address while enabled\n");
@@ -252,17 +281,18 @@ static ssize_t nvmet_addr_trtype_store(struct config_item *item,
 		return -EACCES;
 	}
 
-	if (sysfs_streq(page, "rdma")) {
-		nvmet_port_init_tsas_rdma(port);
-	} else if (sysfs_streq(page, "loop")) {
-		nvmet_port_init_tsas_loop(port);
-	} else if (sysfs_streq(page, "fc")) {
-		nvmet_port_init_tsas_fc(port);
-	} else {
-		pr_err("Invalid value '%s' for trtype\n", page);
-		return -EINVAL;
+	for (i = 0; i < ARRAY_SIZE(nvmet_transport_names); i++) {
+		if (sysfs_streq(page, nvmet_transport_names[i].name))
+			goto found;
 	}
 
+	pr_err("Invalid value '%s' for trtype\n", page);
+	return -EINVAL;
+found:
+	memset(&port->disc_addr.tsas, 0, NVMF_TSAS_SIZE);
+	port->disc_addr.trtype = nvmet_transport_names[i].type;
+	if (port->disc_addr.trtype == NVMF_TRTYPE_RDMA)
+		nvmet_port_init_tsas_rdma(port);
 	return count;
 }
 
@@ -281,6 +311,7 @@ static ssize_t nvmet_ns_device_path_store(struct config_item *item,
 {
 	struct nvmet_ns *ns = to_nvmet_ns(item);
 	struct nvmet_subsys *subsys = ns->subsys;
+	size_t len;
 	int ret;
 
 	mutex_lock(&subsys->lock);
@@ -288,10 +319,14 @@ static ssize_t nvmet_ns_device_path_store(struct config_item *item,
 	if (ns->enabled)
 		goto out_unlock;
 
-	kfree(ns->device_path);
+	ret = -EINVAL;
+	len = strcspn(page, "\n");
+	if (!len)
+		goto out_unlock;
 
+	kfree(ns->device_path);
 	ret = -ENOMEM;
-	ns->device_path = kstrdup(page, GFP_KERNEL);
+	ns->device_path = kstrndup(page, len, GFP_KERNEL);
 	if (!ns->device_path)
 		goto out_unlock;
 
@@ -325,7 +360,7 @@ static ssize_t nvmet_ns_device_uuid_store(struct config_item *item,
 	}
 
 
-	if (uuid_parse(page, &ns->uuid))
+	if (uuid_be_to_bin(page, &ns->uuid))
 		ret = -EINVAL;
 
 out_unlock:
@@ -333,12 +368,12 @@ out_unlock:
 	return ret ? ret : count;
 }
 
+CONFIGFS_ATTR(nvmet_ns_, device_uuid);
+
 static ssize_t nvmet_ns_device_nguid_show(struct config_item *item, char *page)
 {
 	return sprintf(page, "%pUb\n", &to_nvmet_ns(item)->nguid);
 }
-
-CONFIGFS_ATTR(nvmet_ns_, device_uuid);
 
 static ssize_t nvmet_ns_device_nguid_store(struct config_item *item,
 		const char *page, size_t count)
@@ -425,7 +460,7 @@ static struct configfs_item_operations nvmet_ns_item_ops = {
 	.release		= nvmet_ns_release,
 };
 
-static const struct config_item_type nvmet_ns_type = {
+static struct config_item_type nvmet_ns_type = {
 	.ct_item_ops		= &nvmet_ns_item_ops,
 	.ct_attrs		= nvmet_ns_attrs,
 	.ct_owner		= THIS_MODULE,
@@ -464,7 +499,7 @@ static struct configfs_group_operations nvmet_namespaces_group_ops = {
 	.make_group		= nvmet_ns_make,
 };
 
-static const struct config_item_type nvmet_namespaces_type = {
+static struct config_item_type nvmet_namespaces_type = {
 	.ct_group_ops		= &nvmet_namespaces_group_ops,
 	.ct_owner		= THIS_MODULE,
 };
@@ -511,7 +546,7 @@ out_free_link:
 	return ret;
 }
 
-static void nvmet_port_subsys_drop_link(struct config_item *parent,
+static int nvmet_port_subsys_drop_link(struct config_item *parent,
 		struct config_item *target)
 {
 	struct nvmet_port *port = to_nvmet_port(parent->ci_parent);
@@ -524,15 +559,17 @@ static void nvmet_port_subsys_drop_link(struct config_item *parent,
 			goto found;
 	}
 	up_write(&nvmet_config_sem);
-	return;
+	return -EINVAL;
 
 found:
 	list_del(&p->entry);
+	nvmet_port_del_ctrls(port, subsys);
 	nvmet_genctr++;
 	if (list_empty(&port->subsystems))
 		nvmet_disable_port(port);
 	up_write(&nvmet_config_sem);
 	kfree(p);
+	return 0;
 }
 
 static struct configfs_item_operations nvmet_port_subsys_item_ops = {
@@ -540,7 +577,7 @@ static struct configfs_item_operations nvmet_port_subsys_item_ops = {
 	.drop_link		= nvmet_port_subsys_drop_link,
 };
 
-static const struct config_item_type nvmet_port_subsys_type = {
+static struct config_item_type nvmet_port_subsys_type = {
 	.ct_item_ops		= &nvmet_port_subsys_item_ops,
 	.ct_owner		= THIS_MODULE,
 };
@@ -586,7 +623,7 @@ out_free_link:
 	return ret;
 }
 
-static void nvmet_allowed_hosts_drop_link(struct config_item *parent,
+static int nvmet_allowed_hosts_drop_link(struct config_item *parent,
 		struct config_item *target)
 {
 	struct nvmet_subsys *subsys = to_subsys(parent->ci_parent);
@@ -599,13 +636,14 @@ static void nvmet_allowed_hosts_drop_link(struct config_item *parent,
 			goto found;
 	}
 	up_write(&nvmet_config_sem);
-	return;
+	return -EINVAL;
 
 found:
 	list_del(&p->entry);
 	nvmet_genctr++;
 	up_write(&nvmet_config_sem);
 	kfree(p);
+	return 0;
 }
 
 static struct configfs_item_operations nvmet_allowed_hosts_item_ops = {
@@ -613,7 +651,7 @@ static struct configfs_item_operations nvmet_allowed_hosts_item_ops = {
 	.drop_link		= nvmet_allowed_hosts_drop_link,
 };
 
-static const struct config_item_type nvmet_allowed_hosts_type = {
+static struct config_item_type nvmet_allowed_hosts_type = {
 	.ct_item_ops		= &nvmet_allowed_hosts_item_ops,
 	.ct_owner		= THIS_MODULE,
 };
@@ -729,7 +767,7 @@ static struct configfs_item_operations nvmet_subsys_item_ops = {
 	.release		= nvmet_subsys_release,
 };
 
-static const struct config_item_type nvmet_subsys_type = {
+static struct config_item_type nvmet_subsys_type = {
 	.ct_item_ops		= &nvmet_subsys_item_ops,
 	.ct_attrs		= nvmet_subsys_attrs,
 	.ct_owner		= THIS_MODULE,
@@ -746,8 +784,8 @@ static struct config_group *nvmet_subsys_make(struct config_group *group,
 	}
 
 	subsys = nvmet_subsys_alloc(name, NVME_NQN_NVME);
-	if (!subsys)
-		return ERR_PTR(-ENOMEM);
+	if (IS_ERR(subsys))
+		return ERR_CAST(subsys);
 
 	config_group_init_type_name(&subsys->group, name, &nvmet_subsys_type);
 
@@ -767,7 +805,7 @@ static struct configfs_group_operations nvmet_subsystems_group_ops = {
 	.make_group		= nvmet_subsys_make,
 };
 
-static const struct config_item_type nvmet_subsystems_type = {
+static struct config_item_type nvmet_subsystems_type = {
 	.ct_group_ops		= &nvmet_subsystems_group_ops,
 	.ct_owner		= THIS_MODULE,
 };
@@ -827,7 +865,7 @@ static struct configfs_item_operations nvmet_referral_item_ops = {
 	.release	= nvmet_referral_release,
 };
 
-static const struct config_item_type nvmet_referral_type = {
+static struct config_item_type nvmet_referral_type = {
 	.ct_owner	= THIS_MODULE,
 	.ct_attrs	= nvmet_referral_attrs,
 	.ct_item_ops	= &nvmet_referral_item_ops,
@@ -852,7 +890,7 @@ static struct configfs_group_operations nvmet_referral_group_ops = {
 	.make_group		= nvmet_referral_make,
 };
 
-static const struct config_item_type nvmet_referrals_type = {
+static struct config_item_type nvmet_referrals_type = {
 	.ct_owner	= THIS_MODULE,
 	.ct_group_ops	= &nvmet_referral_group_ops,
 };
@@ -873,6 +911,7 @@ static struct configfs_attribute *nvmet_port_attrs[] = {
 	&nvmet_attr_addr_traddr,
 	&nvmet_attr_addr_trsvcid,
 	&nvmet_attr_addr_trtype,
+	&nvmet_attr_param_inline_data_size,
 	NULL,
 };
 
@@ -880,7 +919,7 @@ static struct configfs_item_operations nvmet_port_item_ops = {
 	.release		= nvmet_port_release,
 };
 
-static const struct config_item_type nvmet_port_type = {
+static struct config_item_type nvmet_port_type = {
 	.ct_attrs		= nvmet_port_attrs,
 	.ct_item_ops		= &nvmet_port_item_ops,
 	.ct_owner		= THIS_MODULE,
@@ -902,6 +941,7 @@ static struct config_group *nvmet_ports_make(struct config_group *group,
 	INIT_LIST_HEAD(&port->entry);
 	INIT_LIST_HEAD(&port->subsystems);
 	INIT_LIST_HEAD(&port->referrals);
+	port->inline_data_size = -1;	/* < 0 == let the transport choose */
 
 	port->disc_addr.portid = cpu_to_le16(portid);
 	config_group_init_type_name(&port->group, name, &nvmet_port_type);
@@ -921,7 +961,7 @@ static struct configfs_group_operations nvmet_ports_group_ops = {
 	.make_group		= nvmet_ports_make,
 };
 
-static const struct config_item_type nvmet_ports_type = {
+static struct config_item_type nvmet_ports_type = {
 	.ct_group_ops		= &nvmet_ports_group_ops,
 	.ct_owner		= THIS_MODULE,
 };
@@ -940,7 +980,7 @@ static struct configfs_item_operations nvmet_host_item_ops = {
 	.release		= nvmet_host_release,
 };
 
-static const struct config_item_type nvmet_host_type = {
+static struct config_item_type nvmet_host_type = {
 	.ct_item_ops		= &nvmet_host_item_ops,
 	.ct_owner		= THIS_MODULE,
 };
@@ -963,14 +1003,14 @@ static struct configfs_group_operations nvmet_hosts_group_ops = {
 	.make_group		= nvmet_hosts_make_group,
 };
 
-static const struct config_item_type nvmet_hosts_type = {
+static struct config_item_type nvmet_hosts_type = {
 	.ct_group_ops		= &nvmet_hosts_group_ops,
 	.ct_owner		= THIS_MODULE,
 };
 
 static struct config_group nvmet_hosts_group;
 
-static const struct config_item_type nvmet_root_type = {
+static struct config_item_type nvmet_root_type = {
 	.ct_owner		= THIS_MODULE,
 };
 

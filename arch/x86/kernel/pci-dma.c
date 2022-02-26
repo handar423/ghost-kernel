@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 #include <linux/dma-mapping.h>
 #include <linux/dma-debug.h>
 #include <linux/dmar.h>
@@ -18,7 +17,7 @@
 
 static int forbid_dac __read_mostly;
 
-const struct dma_map_ops *dma_ops = &nommu_dma_ops;
+struct dma_map_ops *dma_ops = &nommu_dma_ops;
 EXPORT_SYMBOL(dma_ops);
 
 static int iommu_sac_force __read_mostly;
@@ -59,6 +58,19 @@ EXPORT_SYMBOL(x86_dma_fallback_dev);
 /* Number of entries preallocated for DMA-API debugging */
 #define PREALLOC_DMA_DEBUG_ENTRIES       65536
 
+int dma_set_mask(struct device *dev, u64 mask)
+{
+	if (!dev->dma_mask || !dma_supported(dev, mask))
+		return -EIO;
+
+	dma_check_mask(dev, mask);
+
+	*dev->dma_mask = mask;
+
+	return 0;
+}
+EXPORT_SYMBOL(dma_set_mask);
+
 void __init pci_iommu_alloc(void)
 {
 	struct iommu_table_entry *p;
@@ -78,7 +90,7 @@ void __init pci_iommu_alloc(void)
 }
 void *dma_generic_alloc_coherent(struct device *dev, size_t size,
 				 dma_addr_t *dma_addr, gfp_t flag,
-				 unsigned long attrs)
+				 struct dma_attrs *attrs)
 {
 	unsigned long dma_mask;
 	struct page *page;
@@ -87,13 +99,12 @@ void *dma_generic_alloc_coherent(struct device *dev, size_t size,
 
 	dma_mask = dma_alloc_coherent_mask(dev, flag);
 
-	flag &= ~__GFP_ZERO;
+	flag |= __GFP_ZERO;
 again:
 	page = NULL;
 	/* CMA can be used only in the context which permits sleeping */
-	if (gfpflags_allow_blocking(flag)) {
-		page = dma_alloc_from_contiguous(dev, count, get_order(size),
-						 flag);
+	if (flag & __GFP_WAIT) {
+		page = dma_alloc_from_contiguous(dev, count, get_order(size));
 		if (page) {
 			addr = phys_to_dma(dev, page_to_phys(page));
 			if (addr + size > dma_mask) {
@@ -119,13 +130,13 @@ again:
 
 		return NULL;
 	}
-	memset(page_address(page), 0, size);
+
 	*dma_addr = addr;
 	return page_address(page);
 }
 
 void dma_generic_free_coherent(struct device *dev, size_t size, void *vaddr,
-			       dma_addr_t dma_addr, unsigned long attrs)
+			       dma_addr_t dma_addr, struct dma_attrs *attrs)
 {
 	unsigned int count = PAGE_ALIGN(size) >> PAGE_SHIFT;
 	struct page *page = virt_to_page(vaddr);
@@ -217,14 +228,19 @@ static __init int iommu_setup(char *p)
 }
 early_param("iommu", iommu_setup);
 
-int x86_dma_supported(struct device *dev, u64 mask)
+int dma_supported(struct device *dev, u64 mask)
 {
+	struct dma_map_ops *ops = get_dma_ops(dev);
+
 #ifdef CONFIG_PCI
 	if (mask > 0xffffffff && forbid_dac > 0) {
 		dev_info(dev, "PCI: Disallowing DAC for device\n");
 		return 0;
 	}
 #endif
+
+	if (ops->dma_supported)
+		return ops->dma_supported(dev, mask);
 
 	/* Copied from i386. Doesn't make much sense, because it will
 	   only work for pci_alloc_coherent.
@@ -251,6 +267,7 @@ int x86_dma_supported(struct device *dev, u64 mask)
 
 	return 1;
 }
+EXPORT_SYMBOL(dma_supported);
 
 static int __init pci_iommu_init(void)
 {

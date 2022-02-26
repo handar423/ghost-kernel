@@ -21,7 +21,6 @@
 #include <linux/dma-mapping.h>
 #include <linux/slab.h>
 #include <linux/scatterlist.h>
-#include <linux/swiotlb.h>
 #include <linux/regulator/consumer.h>
 #include <linux/pm_runtime.h>
 #include <linux/of.h>
@@ -503,7 +502,8 @@ static int sdhci_pre_dma_transfer(struct sdhci_host *host,
 		return data->sg_count;
 
 	sg_count = dma_map_sg(mmc_dev(host->mmc), data->sg, data->sg_len,
-			      mmc_get_dma_dir(data));
+				data->flags & MMC_DATA_WRITE ?
+				DMA_TO_DEVICE : DMA_FROM_DEVICE);
 
 	if (sg_count == 0)
 		return -ENOSPC;
@@ -2200,6 +2200,19 @@ out:
 }
 EXPORT_SYMBOL_GPL(sdhci_execute_tuning);
 
+static int sdhci_select_drive_strength(struct mmc_card *card,
+				       unsigned int max_dtr, int host_drv,
+				       int card_drv, int *drv_type)
+{
+	struct sdhci_host *host = mmc_priv(card->host);
+
+	if (!host->ops->select_drive_strength)
+		return 0;
+
+	return host->ops->select_drive_strength(host, card, max_dtr, host_drv,
+						card_drv, drv_type);
+}
+
 static void sdhci_enable_preset_value(struct sdhci_host *host, bool enable)
 {
 	/* Host Controller v3.00 defines preset value registers */
@@ -2237,7 +2250,8 @@ static void sdhci_post_req(struct mmc_host *mmc, struct mmc_request *mrq,
 
 	if (data->host_cookie != COOKIE_UNMAPPED)
 		dma_unmap_sg(mmc_dev(host->mmc), data->sg, data->sg_len,
-			     mmc_get_dma_dir(data));
+			     data->flags & MMC_DATA_WRITE ?
+			       DMA_TO_DEVICE : DMA_FROM_DEVICE);
 
 	data->host_cookie = COOKIE_UNMAPPED;
 }
@@ -2312,6 +2326,7 @@ static const struct mmc_host_ops sdhci_ops = {
 	.start_signal_voltage_switch	= sdhci_start_signal_voltage_switch,
 	.prepare_hs400_tuning		= sdhci_prepare_hs400_tuning,
 	.execute_tuning			= sdhci_execute_tuning,
+	.select_drive_strength		= sdhci_select_drive_strength,
 	.card_event			= sdhci_card_event,
 	.card_busy	= sdhci_card_busy,
 };
@@ -2353,7 +2368,8 @@ static bool sdhci_request_done(struct sdhci_host *host)
 
 		if (data && data->host_cookie == COOKIE_MAPPED) {
 			dma_unmap_sg(mmc_dev(host->mmc), data->sg, data->sg_len,
-				     mmc_get_dma_dir(data));
+				     (data->flags & MMC_DATA_READ) ?
+				     DMA_FROM_DEVICE : DMA_TO_DEVICE);
 			data->host_cookie = COOKIE_UNMAPPED;
 		}
 	}
@@ -2408,12 +2424,12 @@ static void sdhci_tasklet_finish(unsigned long param)
 		;
 }
 
-static void sdhci_timeout_timer(struct timer_list *t)
+static void sdhci_timeout_timer(unsigned long data)
 {
 	struct sdhci_host *host;
 	unsigned long flags;
 
-	host = from_timer(host, t, timer);
+	host = (struct sdhci_host*)data;
 
 	spin_lock_irqsave(&host->lock, flags);
 
@@ -2430,12 +2446,12 @@ static void sdhci_timeout_timer(struct timer_list *t)
 	spin_unlock_irqrestore(&host->lock, flags);
 }
 
-static void sdhci_timeout_data_timer(struct timer_list *t)
+static void sdhci_timeout_data_timer(unsigned long data)
 {
 	struct sdhci_host *host;
 	unsigned long flags;
 
-	host = from_timer(host, t, data_timer);
+	host = (struct sdhci_host *)data;
 
 	spin_lock_irqsave(&host->lock, flags);
 
@@ -3652,29 +3668,22 @@ int sdhci_setup_host(struct sdhci_host *host)
 	spin_lock_init(&host->lock);
 
 	/*
+	 * Maximum number of segments. Depends on if the hardware
+	 * can do scatter/gather or not.
+	 */
+	if (host->flags & SDHCI_USE_ADMA)
+		mmc->max_segs = SDHCI_MAX_SEGS;
+	else if (host->flags & SDHCI_USE_SDMA)
+		mmc->max_segs = 1;
+	else /* PIO */
+		mmc->max_segs = SDHCI_MAX_SEGS;
+
+	/*
 	 * Maximum number of sectors in one transfer. Limited by SDMA boundary
 	 * size (512KiB). Note some tuning modes impose a 4MiB limit, but this
 	 * is less anyway.
 	 */
 	mmc->max_req_size = 524288;
-
-	/*
-	 * Maximum number of segments. Depends on if the hardware
-	 * can do scatter/gather or not.
-	 */
-	if (host->flags & SDHCI_USE_ADMA) {
-		mmc->max_segs = SDHCI_MAX_SEGS;
-	} else if (host->flags & SDHCI_USE_SDMA) {
-		mmc->max_segs = 1;
-		if (swiotlb_max_segment()) {
-			unsigned int max_req_size = (1 << IO_TLB_SHIFT) *
-						IO_TLB_SEGSIZE;
-			mmc->max_req_size = min(mmc->max_req_size,
-						max_req_size);
-		}
-	} else { /* PIO */
-		mmc->max_segs = SDHCI_MAX_SEGS;
-	}
 
 	/*
 	 * Maximum segment size. Could be one segment with the maximum number
@@ -3757,8 +3766,9 @@ int __sdhci_add_host(struct sdhci_host *host)
 	tasklet_init(&host->finish_tasklet,
 		sdhci_tasklet_finish, (unsigned long)host);
 
-	timer_setup(&host->timer, sdhci_timeout_timer, 0);
-	timer_setup(&host->data_timer, sdhci_timeout_data_timer, 0);
+	setup_timer(&host->timer, sdhci_timeout_timer, (unsigned long)host);
+	setup_timer(&host->data_timer, sdhci_timeout_data_timer,
+		    (unsigned long)host);
 
 	init_waitqueue_head(&host->buf_ready_int);
 

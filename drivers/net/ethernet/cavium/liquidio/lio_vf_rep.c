@@ -40,13 +40,14 @@ static void lio_vf_rep_get_stats64(struct net_device *dev,
 static int lio_vf_rep_change_mtu(struct net_device *ndev, int new_mtu);
 
 static const struct net_device_ops lio_vf_rep_ndev_ops = {
+	.ndo_size = sizeof(struct net_device_ops),
 	.ndo_open = lio_vf_rep_open,
 	.ndo_stop = lio_vf_rep_stop,
 	.ndo_start_xmit = lio_vf_rep_pkt_xmit,
 	.ndo_tx_timeout = lio_vf_rep_tx_timeout,
-	.ndo_get_phys_port_name = lio_vf_rep_phys_port_name,
+	.extended.ndo_get_phys_port_name = lio_vf_rep_phys_port_name,
 	.ndo_get_stats64 = lio_vf_rep_get_stats64,
-	.ndo_change_mtu = lio_vf_rep_change_mtu,
+	.extended.ndo_change_mtu = lio_vf_rep_change_mtu,
 };
 
 static void
@@ -201,13 +202,14 @@ lio_vf_rep_get_stats64(struct net_device *dev,
 {
 	struct lio_vf_rep_desc *vf_rep = netdev_priv(dev);
 
-	stats64->tx_packets = vf_rep->stats.tx_packets;
-	stats64->tx_bytes   = vf_rep->stats.tx_bytes;
-	stats64->tx_dropped = vf_rep->stats.tx_dropped;
+	/* Swap tx and rx stats as VF rep is a switch port */
+	stats64->tx_packets = vf_rep->stats.rx_packets;
+	stats64->tx_bytes   = vf_rep->stats.rx_bytes;
+	stats64->tx_dropped = vf_rep->stats.rx_dropped;
 
-	stats64->rx_packets = vf_rep->stats.rx_packets;
-	stats64->rx_bytes   = vf_rep->stats.rx_bytes;
-	stats64->rx_dropped = vf_rep->stats.rx_dropped;
+	stats64->rx_packets = vf_rep->stats.tx_packets;
+	stats64->rx_bytes   = vf_rep->stats.tx_bytes;
+	stats64->rx_dropped = vf_rep->stats.tx_dropped;
 }
 
 static int
@@ -533,8 +535,8 @@ lio_vf_rep_create(struct octeon_device *oct)
 			goto cleanup;
 		}
 
-		ndev->min_mtu = LIO_MIN_MTU_SIZE;
-		ndev->max_mtu = LIO_MAX_MTU_SIZE;
+		ndev->extended->min_mtu = LIO_MIN_MTU_SIZE;
+		ndev->extended->max_mtu = LIO_MAX_MTU_SIZE;
 		ndev->netdev_ops = &lio_vf_rep_ndev_ops;
 		SWITCHDEV_SET_OPS(ndev, &lio_vf_rep_switchdev_ops);
 
@@ -679,7 +681,7 @@ static struct notifier_block lio_vf_rep_netdev_notifier = {
 int
 lio_vf_rep_modinit(void)
 {
-	if (register_netdevice_notifier(&lio_vf_rep_netdev_notifier)) {
+	if (register_netdevice_notifier_rh(&lio_vf_rep_netdev_notifier)) {
 		pr_err("netdev notifier registration failed\n");
 		return -EFAULT;
 	}
@@ -690,6 +692,6 @@ lio_vf_rep_modinit(void)
 void
 lio_vf_rep_modexit(void)
 {
-	if (unregister_netdevice_notifier(&lio_vf_rep_netdev_notifier))
+	if (unregister_netdevice_notifier_rh(&lio_vf_rep_netdev_notifier))
 		pr_err("netdev notifier unregister failed\n");
 }

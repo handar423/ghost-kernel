@@ -139,7 +139,8 @@ xfs_attr_shortform_list(xfs_attr_list_context_t *context)
 		    ((char *)sfe >= ((char *)sf + dp->i_afp->if_bytes)))) {
 			XFS_CORRUPTION_ERROR("xfs_attr_shortform_list",
 					     XFS_ERRLEVEL_LOW,
-					     context->dp->i_mount, sfe);
+					     context->dp->i_mount, sfe,
+					     sizeof(*sfe));
 			kmem_free(sbuf);
 			return -EFSCORRUPTED;
 		}
@@ -241,7 +242,7 @@ xfs_attr_node_list_lookup(
 		if (magic != XFS_DA_NODE_MAGIC &&
 		    magic != XFS_DA3_NODE_MAGIC) {
 			XFS_CORRUPTION_ERROR(__func__, XFS_ERRLEVEL_LOW, mp,
-					node);
+					node, sizeof(*node));
 			goto out_corruptbuf;
 		}
 
@@ -453,8 +454,7 @@ xfs_attr3_leaf_list_int(
 			cursor->offset = 0;
 		}
 
-		if ((entry->flags & XFS_ATTR_INCOMPLETE) &&
-		    !(context->flags & ATTR_INCOMPLETE))
+		if (entry->flags & XFS_ATTR_INCOMPLETE)
 			continue;		/* skip incomplete entries */
 
 		if (entry->flags & XFS_ATTR_LOCAL) {
@@ -566,6 +566,7 @@ xfs_attr_put_listent(
 	attrlist_ent_t *aep;
 	int arraytop;
 
+	ASSERT(!context->seen_enough);
 	ASSERT(!(context->flags & ATTR_KERNOVAL));
 	ASSERT(context->count >= 0);
 	ASSERT(context->count < (ATTR_MAX_VALUELEN/8));
@@ -628,10 +629,6 @@ xfs_attr_list(
 		return -EINVAL;
 	if ((cursor->initted == 0) &&
 	    (cursor->hashval || cursor->blkno || cursor->offset))
-		return -EINVAL;
-
-	/* Only internal consumers can retrieve incomplete attrs. */
-	if (flags & ATTR_INCOMPLETE)
 		return -EINVAL;
 
 	/*

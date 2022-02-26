@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  *  Copyright (C) 1991, 1992  Linus Torvalds
  *  Copyright (C) 1997 Martin Mares
@@ -29,16 +28,12 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdarg.h>
-#include <sys/types.h>
+#include <linux/types.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <tools/le_byteshift.h>
-
-typedef unsigned char  u8;
-typedef unsigned short u16;
-typedef unsigned int   u32;
 
 #define DEFAULT_MAJOR_ROOT 0
 #define DEFAULT_MINOR_ROOT 0
@@ -50,6 +45,7 @@ typedef unsigned int   u32;
 
 /* This must be large enough to hold the entire setup */
 u8 buf[SETUP_SECT_MAX*512];
+int is_big_kernel;
 
 #define PECOFF_RELOC_RESERVE 0x20
 

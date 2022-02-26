@@ -20,7 +20,7 @@
  *
  */
 
-#include <linux/export.h>
+#include <linux/module.h>
 #include <linux/kvm_host.h>
 
 #include "irq.h"
@@ -60,7 +60,7 @@ static int kvm_cpu_has_extint(struct kvm_vcpu *v)
 		if (irqchip_split(v->kvm))
 			return pending_userspace_extint(v);
 		else
-			return v->kvm->arch.vpic->output;
+			return pic_irqchip(v->kvm)->output;
 	} else
 		return 0;
 }

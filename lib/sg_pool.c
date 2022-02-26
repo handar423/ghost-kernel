@@ -14,25 +14,25 @@ struct sg_pool {
 };
 
 #define SP(x) { .size = x, "sgpool-" __stringify(x) }
-#if (SG_CHUNK_SIZE < 32)
-#error SG_CHUNK_SIZE is too small (must be 32 or greater)
+#if (SCSI_MAX_SG_SEGMENTS < 32)
+#error SCSI_MAX_SG_SEGMENTS is too small (must be 32 or greater)
 #endif
 static struct sg_pool sg_pools[] = {
 	SP(8),
 	SP(16),
-#if (SG_CHUNK_SIZE > 32)
+#if (SCSI_MAX_SG_SEGMENTS > 32)
 	SP(32),
-#if (SG_CHUNK_SIZE > 64)
+#if (SCSI_MAX_SG_SEGMENTS > 64)
 	SP(64),
-#if (SG_CHUNK_SIZE > 128)
+#if (SCSI_MAX_SG_SEGMENTS > 128)
 	SP(128),
-#if (SG_CHUNK_SIZE > 256)
-#error SG_CHUNK_SIZE is too large (256 MAX)
+#if (SCSI_MAX_SG_SEGMENTS > 256)
+#error SCSI_MAX_SG_SEGMENTS is too large (256 MAX)
 #endif
 #endif
 #endif
 #endif
-	SP(SG_CHUNK_SIZE)
+	SP(SCSI_MAX_SG_SEGMENTS)
 };
 #undef SP
 
@@ -96,7 +96,7 @@ EXPORT_SYMBOL_GPL(sg_free_table_chained);
  *
  **/
 int sg_alloc_table_chained(struct sg_table *table, int nents,
-		struct scatterlist *first_chunk)
+			      gfp_t gfp_mask, struct scatterlist *first_chunk)
 {
 	int ret;
 
@@ -111,7 +111,7 @@ int sg_alloc_table_chained(struct sg_table *table, int nents,
 	}
 
 	ret = __sg_alloc_table(table, nents, SG_CHUNK_SIZE,
-			       first_chunk, GFP_ATOMIC, sg_pool_alloc);
+			       first_chunk, gfp_mask, sg_pool_alloc);
 	if (unlikely(ret))
 		sg_free_table_chained(table, (bool)first_chunk);
 	return ret;
@@ -170,3 +170,4 @@ static __exit void sg_pool_exit(void)
 
 module_init(sg_pool_init);
 module_exit(sg_pool_exit);
+

@@ -47,11 +47,11 @@ module_param_array(id, charp, NULL, 0444);
 MODULE_PARM_DESC(id, "ID string for Sound Blaster soundcard.");
 module_param_array(enable, bool, NULL, 0444);
 MODULE_PARM_DESC(enable, "Enable Sound Blaster soundcard.");
-module_param_hw_array(port, long, ioport, NULL, 0444);
+module_param_array(port, long, NULL, 0444);
 MODULE_PARM_DESC(port, "Port # for SB8 driver.");
-module_param_hw_array(irq, int, irq, NULL, 0444);
+module_param_array(irq, int, NULL, 0444);
 MODULE_PARM_DESC(irq, "IRQ # for SB8 driver.");
-module_param_hw_array(dma8, int, dma, NULL, 0444);
+module_param_array(dma8, int, NULL, 0444);
 MODULE_PARM_DESC(dma8, "8-bit DMA # for SB8 driver.");
 
 struct snd_sb8 {
@@ -157,7 +157,7 @@ static int snd_sb8_probe(struct device *pdev, unsigned int dev)
 		goto _err;
 	}
 
-	if ((err = snd_sb8dsp_pcm(chip, 0)) < 0)
+	if ((err = snd_sb8dsp_pcm(chip, 0, NULL)) < 0)
 		goto _err;
 
 	if ((err = snd_sbmixer_new(chip)) < 0)
@@ -182,7 +182,7 @@ static int snd_sb8_probe(struct device *pdev, unsigned int dev)
 			goto _err;
 	}
 
-	if ((err = snd_sb8dsp_midi(chip, 0)) < 0)
+	if ((err = snd_sb8dsp_midi(chip, 0, NULL)) < 0)
 		goto _err;
 
 	strcpy(card->driver, chip->hardware == SB_HW_PRO ? "SB Pro" : "SB8");
@@ -206,6 +206,7 @@ static int snd_sb8_probe(struct device *pdev, unsigned int dev)
 static int snd_sb8_remove(struct device *pdev, unsigned int dev)
 {
 	snd_card_free(dev_get_drvdata(pdev));
+	dev_set_drvdata(pdev, NULL);
 	return 0;
 }
 
@@ -251,4 +252,15 @@ static struct isa_driver snd_sb8_driver = {
 	},
 };
 
-module_isa_driver(snd_sb8_driver, SNDRV_CARDS);
+static int __init alsa_card_sb8_init(void)
+{
+	return isa_register_driver(&snd_sb8_driver, SNDRV_CARDS);
+}
+
+static void __exit alsa_card_sb8_exit(void)
+{
+	isa_unregister_driver(&snd_sb8_driver);
+}
+
+module_init(alsa_card_sb8_init)
+module_exit(alsa_card_sb8_exit)

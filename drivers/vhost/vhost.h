@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _VHOST_H
 #define _VHOST_H
 
@@ -32,7 +31,7 @@ struct vhost_work {
 struct vhost_poll {
 	poll_table                table;
 	wait_queue_head_t        *wqh;
-	wait_queue_entry_t              wait;
+	wait_queue_t              wait;
 	struct vhost_work	  work;
 	unsigned long		  mask;
 	struct vhost_dev	 *dev;
@@ -49,7 +48,7 @@ void vhost_poll_stop(struct vhost_poll *poll);
 void vhost_poll_flush(struct vhost_poll *poll);
 void vhost_poll_queue(struct vhost_poll *poll);
 void vhost_work_flush(struct vhost_dev *dev, struct vhost_work *work);
-long vhost_vring_ioctl(struct vhost_dev *d, int ioctl, void __user *argp);
+long vhost_vring_ioctl(struct vhost_dev *d, unsigned int ioctl, void __user *argp);
 
 struct vhost_log {
 	u64 addr;
@@ -72,7 +71,7 @@ struct vhost_umem_node {
 };
 
 struct vhost_umem {
-	struct rb_root_cached umem_tree;
+	struct rb_root umem_tree;
 	struct list_head umem_list;
 	int numem;
 };
@@ -153,9 +152,9 @@ struct vhost_virtqueue {
 };
 
 struct vhost_msg_node {
-  struct vhost_msg msg;
-  struct vhost_virtqueue *vq;
-  struct list_head node;
+	struct vhost_msg msg;
+	struct vhost_virtqueue *vq;
+	struct list_head node;
 };
 
 struct vhost_dev {
@@ -173,9 +172,14 @@ struct vhost_dev {
 	struct list_head read_list;
 	struct list_head pending_list;
 	wait_queue_head_t wait;
+	int iov_limit;
+	int weight;
+	int byte_weight;
 };
 
-void vhost_dev_init(struct vhost_dev *, struct vhost_virtqueue **vqs, int nvqs);
+bool vhost_exceeds_weight(struct vhost_virtqueue *vq, int pkts, int total_len);
+long vhost_dev_init(struct vhost_dev *, struct vhost_virtqueue **vqs,
+		    int nvqs, int iov_limit, int weight, int byte_weight);
 long vhost_dev_set_owner(struct vhost_dev *dev);
 bool vhost_dev_has_owner(struct vhost_dev *dev);
 long vhost_dev_check_owner(struct vhost_dev *);
@@ -184,9 +188,9 @@ void vhost_dev_reset_owner(struct vhost_dev *, struct vhost_umem *);
 void vhost_dev_cleanup(struct vhost_dev *, bool locked);
 void vhost_dev_stop(struct vhost_dev *);
 long vhost_dev_ioctl(struct vhost_dev *, unsigned int ioctl, void __user *argp);
-long vhost_vring_ioctl(struct vhost_dev *d, int ioctl, void __user *argp);
-int vhost_vq_access_ok(struct vhost_virtqueue *vq);
-int vhost_log_access_ok(struct vhost_dev *);
+long vhost_vring_ioctl(struct vhost_dev *d, unsigned int ioctl, void __user *argp);
+bool vhost_vq_access_ok(struct vhost_virtqueue *vq);
+bool vhost_log_access_ok(struct vhost_dev *);
 
 int vhost_get_vq_desc(struct vhost_virtqueue *,
 		      struct iovec iov[], unsigned int iov_count,
@@ -194,7 +198,7 @@ int vhost_get_vq_desc(struct vhost_virtqueue *,
 		      struct vhost_log *log, unsigned int *log_num);
 void vhost_discard_vq_desc(struct vhost_virtqueue *, int n);
 
-int vhost_vq_init_access(struct vhost_virtqueue *);
+int vhost_init_used(struct vhost_virtqueue *);
 int vhost_add_used(struct vhost_virtqueue *, unsigned int head, int len);
 int vhost_add_used_n(struct vhost_virtqueue *, struct vring_used_elem *heads,
 		     unsigned count);
@@ -208,7 +212,8 @@ bool vhost_vq_avail_empty(struct vhost_dev *, struct vhost_virtqueue *);
 bool vhost_enable_notify(struct vhost_dev *, struct vhost_virtqueue *);
 
 int vhost_log_write(struct vhost_virtqueue *vq, struct vhost_log *log,
-		    unsigned int log_num, u64 len);
+		    unsigned int log_num, u64 len,
+		    struct iovec *iov, int count);
 int vq_iotlb_prefetch(struct vhost_virtqueue *vq);
 
 struct vhost_msg_node *vhost_new_msg(struct vhost_virtqueue *vq, int type);
@@ -219,10 +224,10 @@ struct vhost_msg_node *vhost_dequeue_msg(struct vhost_dev *dev,
 					 struct list_head *head);
 unsigned int vhost_chr_poll(struct file *file, struct vhost_dev *dev,
 			    poll_table *wait);
-ssize_t vhost_chr_read_iter(struct vhost_dev *dev, struct iov_iter *to,
+ssize_t vhost_chr_read_iter(struct vhost_dev *dev, const struct iovec *to,
 			    int noblock);
 ssize_t vhost_chr_write_iter(struct vhost_dev *dev,
-			     struct iov_iter *from);
+			     const struct iovec *from);
 int vhost_init_device_iotlb(struct vhost_dev *d, bool enabled);
 
 #define vq_err(vq, fmt, ...) do {                                  \
@@ -235,9 +240,7 @@ enum {
 	VHOST_FEATURES = (1ULL << VIRTIO_F_NOTIFY_ON_EMPTY) |
 			 (1ULL << VIRTIO_RING_F_INDIRECT_DESC) |
 			 (1ULL << VIRTIO_RING_F_EVENT_IDX) |
-			 (1ULL << VHOST_F_LOG_ALL) |
-			 (1ULL << VIRTIO_F_ANY_LAYOUT) |
-			 (1ULL << VIRTIO_F_VERSION_1)
+			 (1ULL << VHOST_F_LOG_ALL),
 };
 
 static inline bool vhost_has_feature(struct vhost_virtqueue *vq, int bit)
@@ -245,17 +248,10 @@ static inline bool vhost_has_feature(struct vhost_virtqueue *vq, int bit)
 	return vq->acked_features & (1ULL << bit);
 }
 
-#ifdef CONFIG_VHOST_CROSS_ENDIAN_LEGACY
 static inline bool vhost_is_little_endian(struct vhost_virtqueue *vq)
 {
 	return vq->is_le;
 }
-#else
-static inline bool vhost_is_little_endian(struct vhost_virtqueue *vq)
-{
-	return virtio_legacy_is_little_endian() || vq->is_le;
-}
-#endif
 
 /* Memory accessors */
 static inline u16 vhost16_to_cpu(struct vhost_virtqueue *vq, __virtio16 val)

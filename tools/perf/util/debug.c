@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /* For general debugging purposes */
 
 #include "../perf.h"
@@ -232,7 +231,6 @@ int perf_quiet_option(void)
 		var++;
 	}
 
-	quiet = true;
 	return 0;
 }
 

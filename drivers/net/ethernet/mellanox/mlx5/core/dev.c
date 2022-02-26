@@ -132,24 +132,13 @@ void mlx5_add_device(struct mlx5_interface *intf, struct mlx5_priv *priv)
 	delayed_event_start(priv);
 
 	dev_ctx->context = intf->add(dev);
-	set_bit(MLX5_INTERFACE_ADDED, &dev_ctx->state);
-	if (intf->attach)
-		set_bit(MLX5_INTERFACE_ATTACHED, &dev_ctx->state);
-
 	if (dev_ctx->context) {
+		set_bit(MLX5_INTERFACE_ADDED, &dev_ctx->state);
+		if (intf->attach)
+			set_bit(MLX5_INTERFACE_ATTACHED, &dev_ctx->state);
+
 		spin_lock_irq(&priv->ctx_lock);
 		list_add_tail(&dev_ctx->list, &priv->ctx_list);
-
-#ifdef CONFIG_INFINIBAND_ON_DEMAND_PAGING
-		if (dev_ctx->intf->pfault) {
-			if (priv->pfault) {
-				mlx5_core_err(dev, "multiple page fault handlers not supported");
-			} else {
-				priv->pfault_ctx = dev_ctx->context;
-				priv->pfault = dev_ctx->intf->pfault;
-			}
-		}
-#endif
 		spin_unlock_irq(&priv->ctx_lock);
 	}
 
@@ -179,15 +168,6 @@ void mlx5_remove_device(struct mlx5_interface *intf, struct mlx5_priv *priv)
 	if (!dev_ctx)
 		return;
 
-#ifdef CONFIG_INFINIBAND_ON_DEMAND_PAGING
-	spin_lock_irq(&priv->ctx_lock);
-	if (priv->pfault == dev_ctx->intf->pfault)
-		priv->pfault = NULL;
-	spin_unlock_irq(&priv->ctx_lock);
-
-	synchronize_srcu(&priv->pfault_srcu);
-#endif
-
 	spin_lock_irq(&priv->ctx_lock);
 	list_del(&dev_ctx->list);
 	spin_unlock_irq(&priv->ctx_lock);
@@ -211,12 +191,17 @@ static void mlx5_attach_interface(struct mlx5_interface *intf, struct mlx5_priv 
 	if (intf->attach) {
 		if (test_bit(MLX5_INTERFACE_ATTACHED, &dev_ctx->state))
 			goto out;
-		intf->attach(dev, dev_ctx->context);
+		if (intf->attach(dev, dev_ctx->context))
+			goto out;
+
 		set_bit(MLX5_INTERFACE_ATTACHED, &dev_ctx->state);
 	} else {
 		if (test_bit(MLX5_INTERFACE_ADDED, &dev_ctx->state))
 			goto out;
 		dev_ctx->context = intf->add(dev);
+		if (!dev_ctx->context)
+			goto out;
+
 		set_bit(MLX5_INTERFACE_ADDED, &dev_ctx->state);
 	}
 
@@ -302,7 +287,7 @@ void mlx5_unregister_device(struct mlx5_core_dev *dev)
 	struct mlx5_interface *intf;
 
 	mutex_lock(&mlx5_intf_mutex);
-	list_for_each_entry(intf, &intf_list, list)
+	list_for_each_entry_reverse(intf, &intf_list, list)
 		mlx5_remove_device(intf, priv);
 	list_del(&priv->dev_list);
 	mutex_unlock(&mlx5_intf_mutex);
@@ -336,6 +321,35 @@ void mlx5_unregister_interface(struct mlx5_interface *intf)
 	mutex_unlock(&mlx5_intf_mutex);
 }
 EXPORT_SYMBOL(mlx5_unregister_interface);
+
+/* Must be called with intf_mutex held */
+static bool mlx5_has_added_dev_by_protocol(struct mlx5_core_dev *mdev, int protocol)
+{
+	struct mlx5_device_context *dev_ctx;
+	struct mlx5_interface *intf;
+	bool found = false;
+
+	list_for_each_entry(intf, &intf_list, list) {
+		if (intf->protocol == protocol) {
+			dev_ctx = mlx5_get_device(intf, &mdev->priv);
+			if (dev_ctx && test_bit(MLX5_INTERFACE_ADDED, &dev_ctx->state))
+				found = true;
+			break;
+		}
+	}
+
+	return found;
+}
+
+void mlx5_reload_interface(struct mlx5_core_dev *mdev, int protocol)
+{
+	mutex_lock(&mlx5_intf_mutex);
+	if (mlx5_has_added_dev_by_protocol(mdev, protocol)) {
+		mlx5_remove_dev_by_protocol(mdev, protocol);
+		mlx5_add_dev_by_protocol(mdev, protocol);
+	}
+	mutex_unlock(&mlx5_intf_mutex);
+}
 
 void *mlx5_get_protocol_dev(struct mlx5_core_dev *mdev, int protocol)
 {
@@ -383,16 +397,17 @@ void mlx5_remove_dev_by_protocol(struct mlx5_core_dev *dev, int protocol)
 		}
 }
 
-static u16 mlx5_gen_pci_id(struct mlx5_core_dev *dev)
+static u32 mlx5_gen_pci_id(struct mlx5_core_dev *dev)
 {
-	return (u16)((dev->pdev->bus->number << 8) |
+	return (u32)((pci_domain_nr(dev->pdev->bus) << 16) |
+		     (dev->pdev->bus->number << 8) |
 		     PCI_SLOT(dev->pdev->devfn));
 }
 
 /* Must be called with intf_mutex held */
 struct mlx5_core_dev *mlx5_get_next_phys_dev(struct mlx5_core_dev *dev)
 {
-	u16 pci_id = mlx5_gen_pci_id(dev);
+	u32 pci_id = mlx5_gen_pci_id(dev);
 	struct mlx5_core_dev *res = NULL;
 	struct mlx5_core_dev *tmp_dev;
 	struct mlx5_priv *priv;
@@ -432,20 +447,6 @@ void mlx5_core_event(struct mlx5_core_dev *dev, enum mlx5_dev_event event,
 
 	spin_unlock_irqrestore(&priv->ctx_lock, flags);
 }
-
-#ifdef CONFIG_INFINIBAND_ON_DEMAND_PAGING
-void mlx5_core_page_fault(struct mlx5_core_dev *dev,
-			  struct mlx5_pagefault *pfault)
-{
-	struct mlx5_priv *priv = &dev->priv;
-	int srcu_idx;
-
-	srcu_idx = srcu_read_lock(&priv->pfault_srcu);
-	if (priv->pfault)
-		priv->pfault(dev, priv->pfault_ctx, pfault);
-	srcu_read_unlock(&priv->pfault_srcu, srcu_idx);
-}
-#endif
 
 void mlx5_dev_list_lock(void)
 {

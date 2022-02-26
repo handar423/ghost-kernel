@@ -77,8 +77,6 @@ u16 nvmet_parse_fabrics_cmd(struct nvmet_req *req)
 {
 	struct nvme_command *cmd = req->cmd;
 
-	req->ns = NULL;
-
 	switch (cmd->fabrics.fctype) {
 	case nvme_fabrics_type_property_set:
 		req->data_len = 0;
@@ -117,6 +115,12 @@ static u16 nvmet_install_queue(struct nvmet_ctrl *ctrl, struct nvmet_req *req)
 	/* note: convert queue size from 0's-based value to 1's-based value */
 	nvmet_cq_setup(ctrl, req->cq, qid, sqsize + 1);
 	nvmet_sq_setup(ctrl, req->sq, qid, sqsize + 1);
+
+	if (c->cattr & NVME_CONNECT_DISABLE_SQFLOW) {
+		req->sq->sqhd_disabled = true;
+		req->rsp->sq_head = cpu_to_le16(0xffff);
+	}
+
 	return 0;
 }
 
@@ -225,7 +229,7 @@ static void nvmet_execute_io_connect(struct nvmet_req *req)
 		goto out_ctrl_put;
 	}
 
-	pr_info("adding queue %d to ctrl %d.\n", qid, ctrl->cntlid);
+	pr_debug("adding queue %d to ctrl %d.\n", qid, ctrl->cntlid);
 
 out:
 	kfree(d);
@@ -241,8 +245,6 @@ out_ctrl_put:
 u16 nvmet_parse_connect_cmd(struct nvmet_req *req)
 {
 	struct nvme_command *cmd = req->cmd;
-
-	req->ns = NULL;
 
 	if (cmd->common.opcode != nvme_fabrics_command) {
 		pr_err("invalid command 0x%x on unconnected queue.\n",

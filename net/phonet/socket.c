@@ -27,8 +27,6 @@
 #include <linux/kernel.h>
 #include <linux/net.h>
 #include <linux/poll.h>
-#include <linux/sched/signal.h>
-
 #include <net/sock.h>
 #include <net/tcp_states.h>
 
@@ -142,15 +140,13 @@ void pn_deliver_sock_broadcast(struct net *net, struct sk_buff *skb)
 	rcu_read_unlock();
 }
 
-int pn_sock_hash(struct sock *sk)
+void pn_sock_hash(struct sock *sk)
 {
 	struct hlist_head *hlist = pn_hash_list(pn_sk(sk)->sobject);
 
 	mutex_lock(&pnsocks.lock);
 	sk_add_node_rcu(sk, hlist);
 	mutex_unlock(&pnsocks.lock);
-
-	return 0;
 }
 EXPORT_SYMBOL(pn_sock_hash);
 
@@ -204,7 +200,7 @@ static int pn_socket_bind(struct socket *sock, struct sockaddr *addr, int len)
 	pn->resource = spn->spn_resource;
 
 	/* Enable RX on the socket */
-	err = sk->sk_prot->hash(sk);
+	sk->sk_prot->hash(sk);
 out_port:
 	mutex_unlock(&port_mutex);
 out:
@@ -305,7 +301,7 @@ out:
 }
 
 static int pn_socket_accept(struct socket *sock, struct socket *newsock,
-			    int flags, bool kern)
+				int flags)
 {
 	struct sock *sk = sock->sk;
 	struct sock *newsk;
@@ -314,7 +310,7 @@ static int pn_socket_accept(struct socket *sock, struct socket *newsock,
 	if (unlikely(sk->sk_state != TCP_LISTEN))
 		return -EINVAL;
 
-	newsk = sk->sk_prot->accept(sk, flags, &err, kern);
+	newsk = sk->sk_prot->accept(sk, flags, &err);
 	if (!newsk)
 		return err;
 
@@ -360,7 +356,7 @@ static unsigned int pn_socket_poll(struct file *file, struct socket *sock,
 		return POLLHUP;
 
 	if (sk->sk_state == TCP_ESTABLISHED &&
-		refcount_read(&sk->sk_wmem_alloc) < sk->sk_sndbuf &&
+		atomic_read(&sk->sk_wmem_alloc) < sk->sk_sndbuf &&
 		atomic_read(&pn->tx_credits))
 		mask |= POLLOUT | POLLWRNORM | POLLWRBAND;
 
@@ -429,15 +425,15 @@ out:
 	return err;
 }
 
-static int pn_socket_sendmsg(struct socket *sock, struct msghdr *m,
-			     size_t total_len)
+static int pn_socket_sendmsg(struct kiocb *iocb, struct socket *sock,
+				struct msghdr *m, size_t total_len)
 {
 	struct sock *sk = sock->sk;
 
 	if (pn_socket_autobind(sock))
 		return -EAGAIN;
 
-	return sk->sk_prot->sendmsg(sk, m, total_len);
+	return sk->sk_prot->sendmsg(iocb, sk, m, total_len);
 }
 
 const struct proto_ops phonet_dgram_ops = {
@@ -599,25 +595,26 @@ static void pn_sock_seq_stop(struct seq_file *seq, void *v)
 
 static int pn_sock_seq_show(struct seq_file *seq, void *v)
 {
-	seq_setwidth(seq, 127);
+	int len;
+
 	if (v == SEQ_START_TOKEN)
-		seq_puts(seq, "pt  loc  rem rs st tx_queue rx_queue "
-			"  uid inode ref pointer drops");
+		seq_printf(seq, "%s%n", "pt  loc  rem rs st tx_queue rx_queue "
+			"  uid inode ref pointer drops", &len);
 	else {
 		struct sock *sk = v;
 		struct pn_sock *pn = pn_sk(sk);
 
 		seq_printf(seq, "%2d %04X:%04X:%02X %02X %08X:%08X %5d %lu "
-			"%d %pK %d",
+			"%d %pK %d%n",
 			sk->sk_protocol, pn->sobject, pn->dobject,
 			pn->resource, sk->sk_state,
 			sk_wmem_alloc_get(sk), sk_rmem_alloc_get(sk),
 			from_kuid_munged(seq_user_ns(seq), sock_i_uid(sk)),
 			sock_i_ino(sk),
-			refcount_read(&sk->sk_refcnt), sk,
-			atomic_read(&sk->sk_drops));
+			atomic_read(&sk->sk_refcnt), sk,
+			atomic_read(&sk->sk_drops), &len);
 	}
-	seq_pad(seq, '\n');
+	seq_printf(seq, "%*s\n", 127 - len, "");
 	return 0;
 }
 
@@ -788,19 +785,20 @@ static void pn_res_seq_stop(struct seq_file *seq, void *v)
 
 static int pn_res_seq_show(struct seq_file *seq, void *v)
 {
-	seq_setwidth(seq, 63);
+	int len;
+
 	if (v == SEQ_START_TOKEN)
-		seq_puts(seq, "rs   uid inode");
+		seq_printf(seq, "%s%n", "rs   uid inode", &len);
 	else {
 		struct sock **psk = v;
 		struct sock *sk = *psk;
 
-		seq_printf(seq, "%02X %5u %lu",
+		seq_printf(seq, "%02X %5u %lu%n",
 			   (int) (psk - pnres.sk),
 			   from_kuid_munged(seq_user_ns(seq), sock_i_uid(sk)),
-			   sock_i_ino(sk));
+			   sock_i_ino(sk), &len);
 	}
-	seq_pad(seq, '\n');
+	seq_printf(seq, "%*s\n", 63 - len, "");
 	return 0;
 }
 

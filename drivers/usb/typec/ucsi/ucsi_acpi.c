@@ -20,14 +20,14 @@ struct ucsi_acpi {
 	struct device *dev;
 	struct ucsi *ucsi;
 	struct ucsi_ppm ppm;
-	guid_t guid;
+	uuid_le uuid;
 };
 
 static int ucsi_acpi_dsm(struct ucsi_acpi *ua, int func)
 {
 	union acpi_object *obj;
 
-	obj = acpi_evaluate_dsm(ACPI_HANDLE(ua->dev), &ua->guid, 1, func,
+	obj = acpi_evaluate_dsm(ACPI_HANDLE(ua->dev), ua->uuid.b, 1, func,
 				NULL);
 	if (!obj) {
 		dev_err(ua->dev, "%s: failed to evaluate _DSM %d\n",
@@ -92,7 +92,7 @@ static int ucsi_acpi_probe(struct platform_device *pdev)
 	if (!ua->ppm.data->version)
 		return -ENODEV;
 
-	ret = guid_parse(UCSI_DSM_UUID, &ua->guid);
+	ret = uuid_le_to_bin(UCSI_DSM_UUID, &ua->uuid);
 	if (ret)
 		return ret;
 

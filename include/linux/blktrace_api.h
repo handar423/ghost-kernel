@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef BLKTRACE_H
 #define BLKTRACE_H
 
@@ -6,7 +5,6 @@
 #include <linux/relay.h>
 #include <linux/compat.h>
 #include <uapi/linux/blktrace_api.h>
-#include <linux/list.h>
 
 #if defined(CONFIG_BLK_DEV_IO_TRACE)
 
@@ -25,16 +23,13 @@ struct blk_trace {
 	struct dentry *dir;
 	struct dentry *dropped_file;
 	struct dentry *msg_file;
-	struct list_head running_list;
 	atomic_t dropped;
 };
 
-struct blkcg;
-
 extern int blk_trace_ioctl(struct block_device *, unsigned, char __user *);
 extern void blk_trace_shutdown(struct request_queue *);
-extern __printf(3, 4)
-void __trace_note_message(struct blk_trace *, struct blkcg *blkcg, const char *fmt, ...);
+extern __printf(2, 3)
+void __trace_note_message(struct blk_trace *, const char *fmt, ...);
 
 /**
  * blk_add_trace_msg - Add a (simple) message to the blktrace stream
@@ -49,23 +44,17 @@ void __trace_note_message(struct blk_trace *, struct blkcg *blkcg, const char *f
  *     NOTE: Can not use 'static inline' due to presence of var args...
  *
  **/
-#define blk_add_cgroup_trace_msg(q, cg, fmt, ...)			\
-	do {								\
-		struct blk_trace *bt = (q)->blk_trace;			\
-		if (unlikely(bt))					\
-			__trace_note_message(bt, cg, fmt, ##__VA_ARGS__);\
-	} while (0)
 #define blk_add_trace_msg(q, fmt, ...)					\
-	blk_add_cgroup_trace_msg(q, NULL, fmt, ##__VA_ARGS__)
+	do {								\
+		struct blk_trace *bt;					\
+									\
+		rcu_read_lock();					\
+		bt = rcu_dereference((q)->blk_trace);			\
+		if (unlikely(bt))					\
+			__trace_note_message(bt, fmt, ##__VA_ARGS__);	\
+		rcu_read_unlock();					\
+	} while (0)
 #define BLK_TN_MAX_MSG		128
-
-static inline bool blk_trace_note_message_enabled(struct request_queue *q)
-{
-	struct blk_trace *bt = q->blk_trace;
-	if (likely(!bt))
-		return false;
-	return bt->act_mask & BLK_TC_NOTIFY;
-}
 
 extern void blk_add_driver_data(struct request_queue *q, struct request *rq,
 				void *data, size_t len);
@@ -87,9 +76,7 @@ extern struct attribute_group blk_trace_attr_group;
 # define blk_trace_startstop(q, start)			(-ENOTTY)
 # define blk_trace_remove(q)				(-ENOTTY)
 # define blk_add_trace_msg(q, fmt, ...)			do { } while (0)
-# define blk_add_cgroup_trace_msg(q, cg, fmt, ...)	do { } while (0)
 # define blk_trace_remove_sysfs(dev)			do { } while (0)
-# define blk_trace_note_message_enabled(q)		(false)
 static inline int blk_trace_init_sysfs(struct device *dev)
 {
 	return 0;
@@ -100,7 +87,7 @@ static inline int blk_trace_init_sysfs(struct device *dev)
 #ifdef CONFIG_COMPAT
 
 struct compat_blk_user_trace_setup {
-	char name[BLKTRACE_BDEV_SIZE];
+	char name[32];
 	u16 act_mask;
 	u32 buf_size;
 	u32 buf_nr;
@@ -112,16 +99,16 @@ struct compat_blk_user_trace_setup {
 
 #endif
 
-extern void blk_fill_rwbs(char *rwbs, unsigned int op, int bytes);
+#if defined(CONFIG_EVENT_TRACING) && defined(CONFIG_BLOCK)
 
-static inline sector_t blk_rq_trace_sector(struct request *rq)
+static inline int blk_cmd_buf_len(struct request *rq)
 {
-	return blk_rq_is_passthrough(rq) ? 0 : blk_rq_pos(rq);
+	return (rq->cmd_type == REQ_TYPE_BLOCK_PC) ? rq->cmd_len * 3 : 1;
 }
 
-static inline unsigned int blk_rq_trace_nr_sectors(struct request *rq)
-{
-	return blk_rq_is_passthrough(rq) ? 0 : blk_rq_sectors(rq);
-}
+extern void blk_dump_cmd(char *buf, struct request *rq);
+extern void blk_fill_rwbs(char *rwbs, u32 rw, int bytes);
+
+#endif /* CONFIG_EVENT_TRACING && CONFIG_BLOCK */
 
 #endif

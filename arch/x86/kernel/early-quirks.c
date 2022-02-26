@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /* Various workarounds for chipset bugs.
    This code runs very early and can't use the regular PCI subsystem
    The entries are keyed to PCI bridges which usually identify chipsets
@@ -12,11 +11,7 @@
 
 #include <linux/pci.h>
 #include <linux/acpi.h>
-#include <linux/delay.h>
 #include <linux/pci_ids.h>
-#include <linux/bcma/bcma.h>
-#include <linux/bcma/bcma_regs.h>
-#include <linux/platform_data/x86/apple.h>
 #include <drm/i915_drm.h>
 #include <asm/pci-direct.h>
 #include <asm/dma.h>
@@ -26,9 +21,6 @@
 #include <asm/iommu.h>
 #include <asm/gart.h>
 #include <asm/irq_remapping.h>
-#include <asm/early_ioremap.h>
-
-#define dev_err(msg)  pr_err("pci 0000:%02x:%02x.%d: %s", bus, slot, func, msg)
 
 static void __init fix_hypertransport_config(int num, int slot, int func)
 {
@@ -83,13 +75,6 @@ static void __init nvidia_bugs(int num, int slot, int func)
 {
 #ifdef CONFIG_ACPI
 #ifdef CONFIG_X86_IO_APIC
-	/*
-	 * Only applies to Nvidia root ports (bus 0) and not to
-	 * Nvidia graphics cards with PCI ports on secondary buses.
-	 */
-	if (num)
-		return;
-
 	/*
 	 * All timer overrides on Nvidia are
 	 * wrong unless HPET is enabled.
@@ -219,15 +204,18 @@ static void __init intel_remapping_check(int num, int slot, int func)
 	revision = read_pci_config_byte(num, slot, func, PCI_REVISION_ID);
 
 	/*
-	 * Revision <= 13 of all triggering devices id in this quirk
-	 * have a problem draining interrupts when irq remapping is
-	 * enabled, and should be flagged as broken. Additionally
-	 * revision 0x22 of device id 0x3405 has this problem.
+ 	 * Revision 13 of all triggering devices id in this quirk have
+	 * a problem draining interrupts when irq remapping is enabled,
+	 * and should be flagged as broken.  Additionally revisions 0x12
+	 * and 0x22 of device id 0x3405 has this problem.
 	 */
-	if (revision <= 0x13)
+	if (revision == 0x13)
 		set_irq_remapping_broken();
-	else if (device == 0x3405 && revision == 0x22)
+	else if ((device == 0x3405) &&
+	    ((revision == 0x12) ||
+	     (revision == 0x22)))
 		set_irq_remapping_broken();
+
 }
 
 /*
@@ -243,7 +231,7 @@ static void __init intel_remapping_check(int num, int slot, int func)
 #define KB(x)	((x) * 1024UL)
 #define MB(x)	(KB (KB (x)))
 
-static size_t __init i830_tseg_size(void)
+static resource_size_t __init i830_tseg_size(void)
 {
 	u8 esmramc = read_pci_config_byte(0, 0, 0, I830_ESMRAMC);
 
@@ -256,7 +244,7 @@ static size_t __init i830_tseg_size(void)
 		return KB(512);
 }
 
-static size_t __init i845_tseg_size(void)
+static resource_size_t __init i845_tseg_size(void)
 {
 	u8 esmramc = read_pci_config_byte(0, 0, 0, I845_ESMRAMC);
 	u8 tseg_size = esmramc & I845_TSEG_SIZE_MASK;
@@ -273,7 +261,7 @@ static size_t __init i845_tseg_size(void)
 	return 0;
 }
 
-static size_t __init i85x_tseg_size(void)
+static resource_size_t __init i85x_tseg_size(void)
 {
 	u8 esmramc = read_pci_config_byte(0, 0, 0, I85X_ESMRAMC);
 
@@ -283,12 +271,12 @@ static size_t __init i85x_tseg_size(void)
 	return MB(1);
 }
 
-static size_t __init i830_mem_size(void)
+static resource_size_t __init i830_mem_size(void)
 {
 	return read_pci_config_byte(0, 0, 0, I830_DRB3) * MB(32);
 }
 
-static size_t __init i85x_mem_size(void)
+static resource_size_t __init i85x_mem_size(void)
 {
 	return read_pci_config_byte(0, 0, 1, I85X_DRB3) * MB(32);
 }
@@ -297,36 +285,36 @@ static size_t __init i85x_mem_size(void)
  * On 830/845/85x the stolen memory base isn't available in any
  * register. We need to calculate it as TOM-TSEG_SIZE-stolen_size.
  */
-static phys_addr_t __init i830_stolen_base(int num, int slot, int func,
-					   size_t stolen_size)
+static resource_size_t __init i830_stolen_base(int num, int slot, int func,
+					       resource_size_t stolen_size)
 {
-	return (phys_addr_t)i830_mem_size() - i830_tseg_size() - stolen_size;
+	return i830_mem_size() - i830_tseg_size() - stolen_size;
 }
 
-static phys_addr_t __init i845_stolen_base(int num, int slot, int func,
-					   size_t stolen_size)
+static resource_size_t __init i845_stolen_base(int num, int slot, int func,
+					       resource_size_t stolen_size)
 {
-	return (phys_addr_t)i830_mem_size() - i845_tseg_size() - stolen_size;
+	return i830_mem_size() - i845_tseg_size() - stolen_size;
 }
 
-static phys_addr_t __init i85x_stolen_base(int num, int slot, int func,
-					   size_t stolen_size)
+static resource_size_t __init i85x_stolen_base(int num, int slot, int func,
+					       resource_size_t stolen_size)
 {
-	return (phys_addr_t)i85x_mem_size() - i85x_tseg_size() - stolen_size;
+	return i85x_mem_size() - i85x_tseg_size() - stolen_size;
 }
 
-static phys_addr_t __init i865_stolen_base(int num, int slot, int func,
-					   size_t stolen_size)
+static resource_size_t __init i865_stolen_base(int num, int slot, int func,
+					       resource_size_t stolen_size)
 {
 	u16 toud = 0;
 
 	toud = read_pci_config_16(0, 0, 0, I865_TOUD);
 
-	return (phys_addr_t)(toud << 16) + i845_tseg_size();
+	return toud * KB(64) + i845_tseg_size();
 }
 
-static phys_addr_t __init gen3_stolen_base(int num, int slot, int func,
-					   size_t stolen_size)
+static resource_size_t __init gen3_stolen_base(int num, int slot, int func,
+					       resource_size_t stolen_size)
 {
 	u32 bsm;
 
@@ -337,10 +325,10 @@ static phys_addr_t __init gen3_stolen_base(int num, int slot, int func,
 	 */
 	bsm = read_pci_config(num, slot, func, INTEL_BSM);
 
-	return (phys_addr_t)bsm & INTEL_BSM_MASK;
+	return bsm & INTEL_BSM_MASK;
 }
 
-static size_t __init i830_stolen_size(int num, int slot, int func)
+static resource_size_t __init i830_stolen_size(int num, int slot, int func)
 {
 	u16 gmch_ctrl;
 	u16 gms;
@@ -361,7 +349,7 @@ static size_t __init i830_stolen_size(int num, int slot, int func)
 	return 0;
 }
 
-static size_t __init gen3_stolen_size(int num, int slot, int func)
+static resource_size_t __init gen3_stolen_size(int num, int slot, int func)
 {
 	u16 gmch_ctrl;
 	u16 gms;
@@ -390,7 +378,7 @@ static size_t __init gen3_stolen_size(int num, int slot, int func)
 	return 0;
 }
 
-static size_t __init gen6_stolen_size(int num, int slot, int func)
+static resource_size_t __init gen6_stolen_size(int num, int slot, int func)
 {
 	u16 gmch_ctrl;
 	u16 gms;
@@ -398,10 +386,10 @@ static size_t __init gen6_stolen_size(int num, int slot, int func)
 	gmch_ctrl = read_pci_config_16(num, slot, func, SNB_GMCH_CTRL);
 	gms = (gmch_ctrl >> SNB_GMCH_GMS_SHIFT) & SNB_GMCH_GMS_MASK;
 
-	return (size_t)gms * MB(32);
+	return gms * MB(32);
 }
 
-static size_t __init gen8_stolen_size(int num, int slot, int func)
+static resource_size_t __init gen8_stolen_size(int num, int slot, int func)
 {
 	u16 gmch_ctrl;
 	u16 gms;
@@ -409,10 +397,10 @@ static size_t __init gen8_stolen_size(int num, int slot, int func)
 	gmch_ctrl = read_pci_config_16(num, slot, func, SNB_GMCH_CTRL);
 	gms = (gmch_ctrl >> BDW_GMCH_GMS_SHIFT) & BDW_GMCH_GMS_MASK;
 
-	return (size_t)gms * MB(32);
+	return gms * MB(32);
 }
 
-static size_t __init chv_stolen_size(int num, int slot, int func)
+static resource_size_t __init chv_stolen_size(int num, int slot, int func)
 {
 	u16 gmch_ctrl;
 	u16 gms;
@@ -426,14 +414,14 @@ static size_t __init chv_stolen_size(int num, int slot, int func)
 	 * 0x17 to 0x1d: 4MB increments start at 36MB
 	 */
 	if (gms < 0x11)
-		return (size_t)gms * MB(32);
+		return gms * MB(32);
 	else if (gms < 0x17)
-		return (size_t)(gms - 0x11 + 2) * MB(4);
+		return (gms - 0x11) * MB(4) + MB(8);
 	else
-		return (size_t)(gms - 0x17 + 9) * MB(4);
+		return (gms - 0x17) * MB(4) + MB(36);
 }
 
-static size_t __init gen9_stolen_size(int num, int slot, int func)
+static resource_size_t __init gen9_stolen_size(int num, int slot, int func)
 {
 	u16 gmch_ctrl;
 	u16 gms;
@@ -444,14 +432,15 @@ static size_t __init gen9_stolen_size(int num, int slot, int func)
 	/* 0x0  to 0xef: 32MB increments starting at 0MB */
 	/* 0xf0 to 0xfe: 4MB increments starting at 4MB */
 	if (gms < 0xf0)
-		return (size_t)gms * MB(32);
+		return gms * MB(32);
 	else
-		return (size_t)(gms - 0xf0 + 1) * MB(4);
+		return (gms - 0xf0) * MB(4) + MB(4);
 }
 
 struct intel_early_ops {
-	size_t (*stolen_size)(int num, int slot, int func);
-	phys_addr_t (*stolen_base)(int num, int slot, int func, size_t size);
+	resource_size_t (*stolen_size)(int num, int slot, int func);
+	resource_size_t (*stolen_base)(int num, int slot, int func,
+				       resource_size_t size);
 };
 
 static const struct intel_early_ops i830_early_ops __initconst = {
@@ -527,16 +516,20 @@ static const struct pci_device_id intel_early_ids[] __initconst = {
 	INTEL_SKL_IDS(&gen9_early_ops),
 	INTEL_BXT_IDS(&gen9_early_ops),
 	INTEL_KBL_IDS(&gen9_early_ops),
+	INTEL_CFL_IDS(&gen9_early_ops),
 	INTEL_GLK_IDS(&gen9_early_ops),
 	INTEL_CNL_IDS(&gen9_early_ops),
 };
+
+struct resource intel_graphics_stolen_res = DEFINE_RES_MEM(0, 0);
+EXPORT_SYMBOL(intel_graphics_stolen_res);
 
 static void __init
 intel_graphics_stolen(int num, int slot, int func,
 		      const struct intel_early_ops *early_ops)
 {
-	phys_addr_t base, end;
-	size_t size;
+	resource_size_t base, size;
+	resource_size_t end;
 
 	size = early_ops->stolen_size(num, slot, func);
 	base = early_ops->stolen_base(num, slot, func, size);
@@ -545,12 +538,16 @@ intel_graphics_stolen(int num, int slot, int func,
 		return;
 
 	end = base + size - 1;
-	printk(KERN_INFO "Reserving Intel graphics memory at %pa-%pa\n",
-	       &base, &end);
+
+	intel_graphics_stolen_res.start = base;
+	intel_graphics_stolen_res.end = end;
+
+	printk(KERN_INFO "Reserving Intel graphics memory at %pR\n",
+	       &intel_graphics_stolen_res);
 
 	/* Mark this space as reserved */
-	e820__range_add(base, size, E820_TYPE_RESERVED);
-	e820__update_table(e820_table);
+	e820_add_region(base, size, E820_RESERVED);
+	sanitize_e820_map(e820.map, ARRAY_SIZE(e820.map), &e820.nr_map);
 }
 
 static void __init intel_graphics_quirks(int num, int slot, int func)
@@ -578,66 +575,11 @@ static void __init intel_graphics_quirks(int num, int slot, int func)
 static void __init force_disable_hpet(int num, int slot, int func)
 {
 #ifdef CONFIG_HPET_TIMER
-	boot_hpet_disable = true;
+	boot_hpet_disable = 1;
 	pr_info("x86/hpet: Will disable the HPET for this platform because it's not reliable\n");
 #endif
 }
 
-#define BCM4331_MMIO_SIZE	16384
-#define BCM4331_PM_CAP		0x40
-#define bcma_aread32(reg)	ioread32(mmio + 1 * BCMA_CORE_SIZE + reg)
-#define bcma_awrite32(reg, val)	iowrite32(val, mmio + 1 * BCMA_CORE_SIZE + reg)
-
-static void __init apple_airport_reset(int bus, int slot, int func)
-{
-	void __iomem *mmio;
-	u16 pmcsr;
-	u64 addr;
-	int i;
-
-	if (!x86_apple_machine)
-		return;
-
-	/* Card may have been put into PCI_D3hot by grub quirk */
-	pmcsr = read_pci_config_16(bus, slot, func, BCM4331_PM_CAP + PCI_PM_CTRL);
-
-	if ((pmcsr & PCI_PM_CTRL_STATE_MASK) != PCI_D0) {
-		pmcsr &= ~PCI_PM_CTRL_STATE_MASK;
-		write_pci_config_16(bus, slot, func, BCM4331_PM_CAP + PCI_PM_CTRL, pmcsr);
-		mdelay(10);
-
-		pmcsr = read_pci_config_16(bus, slot, func, BCM4331_PM_CAP + PCI_PM_CTRL);
-		if ((pmcsr & PCI_PM_CTRL_STATE_MASK) != PCI_D0) {
-			dev_err("Cannot power up Apple AirPort card\n");
-			return;
-		}
-	}
-
-	addr  =      read_pci_config(bus, slot, func, PCI_BASE_ADDRESS_0);
-	addr |= (u64)read_pci_config(bus, slot, func, PCI_BASE_ADDRESS_1) << 32;
-	addr &= PCI_BASE_ADDRESS_MEM_MASK;
-
-	mmio = early_ioremap(addr, BCM4331_MMIO_SIZE);
-	if (!mmio) {
-		dev_err("Cannot iomap Apple AirPort card\n");
-		return;
-	}
-
-	pr_info("Resetting Apple AirPort card (left enabled by EFI)\n");
-
-	for (i = 0; bcma_aread32(BCMA_RESET_ST) && i < 30; i++)
-		udelay(10);
-
-	bcma_awrite32(BCMA_RESET_CTL, BCMA_RESET_CTL_RESET);
-	bcma_aread32(BCMA_RESET_CTL);
-	udelay(1);
-
-	bcma_awrite32(BCMA_RESET_CTL, 0);
-	bcma_aread32(BCMA_RESET_CTL);
-	udelay(10);
-
-	early_iounmap(mmio, BCM4331_MMIO_SIZE);
-}
 
 #define QFLAG_APPLY_ONCE 	0x1
 #define QFLAG_APPLIED		0x2
@@ -651,6 +593,12 @@ struct chipset {
 	void (*f)(int num, int slot, int func);
 };
 
+/*
+ * Only works for devices on the root bus. If you add any devices
+ * not on bus 0 readd another loop level in early_quirks(). But
+ * be careful because at least the Nvidia quirk here relies on
+ * only matching on bus 0.
+ */
 static struct chipset early_qrk[] __initdata = {
 	{ PCI_VENDOR_ID_NVIDIA, PCI_ANY_ID,
 	  PCI_CLASS_BRIDGE_PCI, PCI_ANY_ID, QFLAG_APPLY_ONCE, nvidia_bugs },
@@ -680,12 +628,8 @@ static struct chipset early_qrk[] __initdata = {
 	 */
 	{ PCI_VENDOR_ID_INTEL, 0x0f00,
 		PCI_CLASS_BRIDGE_HOST, PCI_ANY_ID, 0, force_disable_hpet},
-	{ PCI_VENDOR_ID_BROADCOM, 0x4331,
-	  PCI_CLASS_NETWORK_OTHER, PCI_ANY_ID, 0, apple_airport_reset},
 	{}
 };
-
-static void __init early_pci_scan_bus(int bus);
 
 /**
  * check_dev_quirk - apply early quirks to a given PCI device
@@ -695,7 +639,7 @@ static void __init early_pci_scan_bus(int bus);
  *
  * Check the vendor & device ID against the early quirks table.
  *
- * If the device is single function, let early_pci_scan_bus() know so we don't
+ * If the device is single function, let early_quirks() know so we don't
  * poke at this device again.
  */
 static int __init check_dev_quirk(int num, int slot, int func)
@@ -704,7 +648,6 @@ static int __init check_dev_quirk(int num, int slot, int func)
 	u16 vendor;
 	u16 device;
 	u8 type;
-	u8 sec;
 	int i;
 
 	class = read_pci_config_16(num, slot, func, PCI_CLASS_DEVICE);
@@ -732,36 +675,25 @@ static int __init check_dev_quirk(int num, int slot, int func)
 
 	type = read_pci_config_byte(num, slot, func,
 				    PCI_HEADER_TYPE);
-
-	if ((type & 0x7f) == PCI_HEADER_TYPE_BRIDGE) {
-		sec = read_pci_config_byte(num, slot, func, PCI_SECONDARY_BUS);
-		if (sec > num)
-			early_pci_scan_bus(sec);
-	}
-
 	if (!(type & 0x80))
 		return -1;
 
 	return 0;
 }
 
-static void __init early_pci_scan_bus(int bus)
+void __init early_quirks(void)
 {
 	int slot, func;
 
-	/* Poor man's PCI discovery */
-	for (slot = 0; slot < 32; slot++)
-		for (func = 0; func < 8; func++) {
-			/* Only probe function 0 on single fn devices */
-			if (check_dev_quirk(bus, slot, func))
-				break;
-		}
-}
-
-void __init early_quirks(void)
-{
 	if (!early_pci_allowed())
 		return;
 
-	early_pci_scan_bus(0);
+	/* Poor man's PCI discovery */
+	/* Only scan the root bus */
+	for (slot = 0; slot < 32; slot++)
+		for (func = 0; func < 8; func++) {
+			/* Only probe function 0 on single fn devices */
+			if (check_dev_quirk(0, slot, func))
+				break;
+		}
 }

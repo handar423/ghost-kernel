@@ -34,7 +34,6 @@
 #include <linux/kref.h>
 #include <linux/device.h>
 #include <linux/input.h>
-#include <linux/time64.h>
 
 /* Driver identification */
 #define DRIVER_NAME	"ibmasm"
@@ -54,11 +53,9 @@ extern int ibmasm_debug;
 
 static inline char *get_timestamp(char *buf)
 {
-	struct timespec64 now;
-
-	ktime_get_real_ts64(&now);
-	sprintf(buf, "%llu.%.08lu", (long long)now.tv_sec,
-				now.tv_nsec / NSEC_PER_USEC);
+	struct timeval now;
+	do_gettimeofday(&now);
+	sprintf(buf, "%lu.%lu", now.tv_sec, now.tv_usec);
 	return buf;
 }
 

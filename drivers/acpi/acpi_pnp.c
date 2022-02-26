@@ -15,6 +15,8 @@
 #include <linux/ctype.h>
 
 static const struct acpi_device_id acpi_pnp_device_ids[] = {
+	/* soc_button_array */
+	{"PNP0C40"},
 	/* pata_isapnp */
 	{"PNP0600"},		/* Generic ESDI/IDE/ATA compatible hard disk controller */
 	/* floppy */
@@ -151,7 +153,6 @@ static const struct acpi_device_id acpi_pnp_device_ids[] = {
 	{"AEI0250"},		/* PROLiNK 1456VH ISA PnP K56flex Fax Modem */
 	{"AEI1240"},		/* Actiontec ISA PNP 56K X2 Fax Modem */
 	{"AKY1021"},		/* Rockwell 56K ACF II Fax+Data+Voice Modem */
-	{"ALI5123"},		/* ALi Fast Infrared Controller */
 	{"AZT4001"},		/* AZT3005 PnP SOUND DEVICE */
 	{"BDP3336"},		/* Best Data Products Inc. Smart One 336F PnP Modem */
 	{"BRI0A49"},		/* Boca Complete Ofc Communicator 14.4 Data-FAX */
@@ -316,7 +317,7 @@ static const struct acpi_device_id acpi_pnp_device_ids[] = {
 	{""},
 };
 
-static bool matching_id(const char *idstr, const char *list_id)
+static bool matching_id(char *idstr, char *list_id)
 {
 	int i;
 
@@ -333,7 +334,7 @@ static bool matching_id(const char *idstr, const char *list_id)
 	return true;
 }
 
-static bool acpi_pnp_match(const char *idstr, const struct acpi_device_id **matchid)
+static bool acpi_pnp_match(char *idstr, const struct acpi_device_id **matchid)
 {
 	const struct acpi_device_id *devid;
 
@@ -367,7 +368,7 @@ static struct acpi_scan_handler acpi_pnp_handler = {
  */
 static int is_cmos_rtc_device(struct acpi_device *adev)
 {
-	static const struct acpi_device_id ids[] = {
+	struct acpi_device_id ids[] = {
 		{ "PNP0B00" },
 		{ "PNP0B01" },
 		{ "PNP0B02" },

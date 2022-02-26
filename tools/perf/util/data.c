@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 #include <linux/compiler.h>
 #include <linux/kernel.h>
 #include <sys/types.h>
@@ -11,16 +10,6 @@
 #include "data.h"
 #include "util.h"
 #include "debug.h"
-
-#ifndef O_CLOEXEC
-#ifdef __sparc__
-#define O_CLOEXEC	0x400000
-#elif defined(__alpha__) || defined(__hppa__)
-#define O_CLOEXEC	010000000
-#else
-#define O_CLOEXEC	02000000
-#endif
-#endif
 
 static bool check_pipe(struct perf_data *data)
 {

@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef	_I386_HW_BREAKPOINT_H
 #define	_I386_HW_BREAKPOINT_H
 
@@ -13,9 +12,9 @@
  */
 struct arch_hw_breakpoint {
 	unsigned long	address;
-	unsigned long	mask;
 	u8		len;
 	u8		type;
+	RH_KABI_EXTEND(unsigned long mask)
 };
 
 #include <linux/kdebug.h>

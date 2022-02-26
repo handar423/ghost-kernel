@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 /*
  *	Access to VGA videoram
  *
@@ -8,7 +7,7 @@
 #ifndef _ASM_X86_VGA_H
 #define _ASM_X86_VGA_H
 
-#include <asm/set_memory.h>
+#include <asm/cacheflush.h>
 
 /*
  *	On the PC, we can just recalculate addresses and then
@@ -29,5 +28,11 @@
 
 #define vga_readb(x) (*(x))
 #define vga_writeb(x, y) (*(y) = (x))
+
+#ifdef CONFIG_FB_EFI
+#define __ARCH_HAS_VGA_DEFAULT_DEVICE
+extern struct pci_dev *vga_default_device(void);
+extern void vga_set_default_device(struct pci_dev *pdev);
+#endif
 
 #endif /* _ASM_X86_VGA_H */

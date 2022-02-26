@@ -1,15 +1,13 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  *  Copyright (C) 1991, 1992  Linus Torvalds
  *  Copyright (C) 2000, 2001, 2002 Andi Kleen, SuSE Labs
  */
-#include <linux/sched/debug.h>
 #include <linux/kallsyms.h>
 #include <linux/kprobes.h>
 #include <linux/uaccess.h>
 #include <linux/hardirq.h>
 #include <linux/kdebug.h>
-#include <linux/export.h>
+#include <linux/module.h>
 #include <linux/ptrace.h>
 #include <linux/kexec.h>
 #include <linux/sysfs.h>
@@ -30,26 +28,23 @@ static unsigned long exception_stack_sizes[N_EXCEPTION_STACKS] = {
 	[DEBUG_STACK - 1]			= DEBUG_STKSZ
 };
 
-const char *stack_type_name(enum stack_type type)
+void stack_type_str(enum stack_type type, const char **begin, const char **end)
 {
-	BUILD_BUG_ON(N_EXCEPTION_STACKS != 4);
+	BUILD_BUG_ON(N_EXCEPTION_STACKS != 5);
 
-	if (type == STACK_TYPE_IRQ)
-		return "IRQ";
-
-	if (type == STACK_TYPE_ENTRY) {
-		/*
-		 * On 64-bit, we have a generic entry stack that we
-		 * use for all the kernel entry points, including
-		 * SYSENTER.
-		 */
-		return "ENTRY_TRAMPOLINE";
+	switch (type) {
+	case STACK_TYPE_IRQ:
+		*begin = "IRQ";
+		*end   = "EOI";
+		break;
+	case STACK_TYPE_EXCEPTION ... STACK_TYPE_EXCEPTION_LAST:
+		*begin = exception_stack_names[type - STACK_TYPE_EXCEPTION];
+		*end   = "EOE";
+		break;
+	default:
+		*begin = NULL;
+		*end   = NULL;
 	}
-
-	if (type >= STACK_TYPE_EXCEPTION && type <= STACK_TYPE_EXCEPTION_LAST)
-		return exception_stack_names[type - STACK_TYPE_EXCEPTION];
-
-	return NULL;
 }
 
 static bool in_exception_stack(unsigned long *stack, struct stack_info *info)
@@ -58,10 +53,10 @@ static bool in_exception_stack(unsigned long *stack, struct stack_info *info)
 	struct pt_regs *regs;
 	unsigned k;
 
-	BUILD_BUG_ON(N_EXCEPTION_STACKS != 4);
+	BUILD_BUG_ON(N_EXCEPTION_STACKS != 5);
 
 	for (k = 0; k < N_EXCEPTION_STACKS; k++) {
-		end   = (unsigned long *)raw_cpu_ptr(&orig_ist)->ist[k];
+		end   = (unsigned long *)__this_cpu_ptr(&orig_ist)->ist[k];
 		begin = end - (exception_stack_sizes[k] / sizeof(long));
 		regs  = (struct pt_regs *)end - 1;
 
@@ -124,9 +119,6 @@ int get_stack_info(unsigned long *stack, struct task_struct *task,
 	if (in_irq_stack(stack, info))
 		goto recursion_check;
 
-	if (in_entry_stack(stack, info))
-		goto recursion_check;
-
 	goto unknown;
 
 recursion_check:
@@ -136,10 +128,8 @@ recursion_check:
 	 * just break out and report an unknown stack type.
 	 */
 	if (visit_mask) {
-		if (*visit_mask & (1UL << info->type)) {
-			printk_deferred_once(KERN_WARNING "WARNING: stack recursion on stack type %d\n", info->type);
+		if (*visit_mask & (1UL << info->type))
 			goto unknown;
-		}
 		*visit_mask |= 1UL << info->type;
 	}
 
@@ -190,4 +180,14 @@ void show_regs(struct pt_regs *regs)
 		}
 	}
 	pr_cont("\n");
+}
+
+int is_valid_bugaddr(unsigned long ip)
+{
+	unsigned short ud2;
+
+	if (__copy_from_user(&ud2, (const void __user *) ip, sizeof(ud2)))
+		return 0;
+
+	return ud2 == 0x0b0f;
 }

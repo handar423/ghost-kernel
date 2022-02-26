@@ -242,7 +242,7 @@ static void artop6210_set_dmamode (struct ata_port *ap, struct ata_device *adev)
 
 static void artop6260_set_dmamode (struct ata_port *ap, struct ata_device *adev)
 {
-	unsigned int pio;
+	unsigned int pio	= adev->pio_mode - XFER_PIO_0;
 	struct pci_dev *pdev	= to_pci_dev(ap->host->dev);
 	u8 ultra;
 
@@ -422,10 +422,10 @@ static const struct pci_device_id artop_pci_tbl[] = {
 	{ }	/* terminate list */
 };
 
-#ifdef CONFIG_PM_SLEEP
+#ifdef CONFIG_PM
 static int atp8xx_reinit_one(struct pci_dev *pdev)
 {
-	struct ata_host *host = pci_get_drvdata(pdev);
+	struct ata_host *host = dev_get_drvdata(&pdev->dev);
 	int rc;
 
 	rc = ata_pci_device_do_resume(pdev);
@@ -444,7 +444,7 @@ static struct pci_driver artop_pci_driver = {
 	.id_table		= artop_pci_tbl,
 	.probe			= artop_init_one,
 	.remove			= ata_pci_remove_one,
-#ifdef CONFIG_PM_SLEEP
+#ifdef CONFIG_PM
 	.suspend		= ata_pci_device_suspend,
 	.resume			= atp8xx_reinit_one,
 #endif

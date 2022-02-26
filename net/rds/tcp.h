@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _RDS_TCP_H
 #define _RDS_TCP_H
 
@@ -54,7 +53,7 @@ void rds_tcp_set_callbacks(struct socket *sock, struct rds_conn_path *cp);
 void rds_tcp_reset_callbacks(struct socket *sock, struct rds_conn_path *cp);
 void rds_tcp_restore_callbacks(struct socket *sock,
 			       struct rds_tcp_connection *tc);
-u32 rds_tcp_write_seq(struct rds_tcp_connection *tc);
+u32 rds_tcp_snd_nxt(struct rds_tcp_connection *tc);
 u32 rds_tcp_snd_una(struct rds_tcp_connection *tc);
 u64 rds_tcp_map_seq(struct rds_tcp_connection *tc, u32 seq);
 extern struct rds_transport rds_tcp_transport;
@@ -67,20 +66,20 @@ void rds_tcp_state_change(struct sock *sk);
 
 /* tcp_listen.c */
 struct socket *rds_tcp_listen_init(struct net *);
-void rds_tcp_listen_stop(struct socket *sock, struct work_struct *acceptor);
-void rds_tcp_listen_data_ready(struct sock *sk);
+void rds_tcp_listen_stop(struct socket *);
+void rds_tcp_listen_data_ready(struct sock *sk, int bytes);
 int rds_tcp_accept_one(struct socket *sock);
 int rds_tcp_keepalive(struct socket *sock);
 void *rds_tcp_listen_sock_def_readable(struct net *net);
-void rds_tcp_set_linger(struct socket *sock);
 
 /* tcp_recv.c */
 int rds_tcp_recv_init(void);
 void rds_tcp_recv_exit(void);
-void rds_tcp_data_ready(struct sock *sk);
+void rds_tcp_data_ready(struct sock *sk, int bytes);
 int rds_tcp_recv_path(struct rds_conn_path *cp);
 void rds_tcp_inc_free(struct rds_incoming *inc);
-int rds_tcp_inc_copy_to_user(struct rds_incoming *inc, struct iov_iter *to);
+int rds_tcp_inc_copy_to_user(struct rds_incoming *inc, struct iovec *iov,
+			     size_t size);
 
 /* tcp_send.c */
 void rds_tcp_xmit_path_prepare(struct rds_conn_path *cp);

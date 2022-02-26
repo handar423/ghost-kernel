@@ -44,15 +44,6 @@ static const u32 req_flags[NCAPINTS] =
 	0, /* REQUIRED_MASK5 not implemented in this file */
 	REQUIRED_MASK6,
 	0, /* REQUIRED_MASK7 not implemented in this file */
-	0, /* REQUIRED_MASK8 not implemented in this file */
-	0, /* REQUIRED_MASK9 not implemented in this file */
-	0, /* REQUIRED_MASK10 not implemented in this file */
-	0, /* REQUIRED_MASK11 not implemented in this file */
-	0, /* REQUIRED_MASK12 not implemented in this file */
-	0, /* REQUIRED_MASK13 not implemented in this file */
-	0, /* REQUIRED_MASK14 not implemented in this file */
-	0, /* REQUIRED_MASK15 not implemented in this file */
-	REQUIRED_MASK16,
 };
 
 #define A32(a, b, c, d) (((d) << 24)+((c) << 16)+((b) << 8)+(a))
@@ -81,8 +72,8 @@ static int is_transmeta(void)
 static int is_intel(void)
 {
 	return cpu_vendor[0] == A32('G', 'e', 'n', 'u') &&
-	       cpu_vendor[1] == A32('i', 'n', 'e', 'I') &&
-	       cpu_vendor[2] == A32('n', 't', 'e', 'l');
+		cpu_vendor[1] == A32('i', 'n', 'e', 'I') &&
+		cpu_vendor[2] == A32('n', 't', 'e', 'l');
 }
 
 /* Returns a bitmask of which words we have error bits in */
@@ -97,6 +88,8 @@ static int check_cpuflags(void)
 		if (err_flags[i])
 			err |= 1 << i;
 	}
+	if (!err)
+		err = check_knl_erratum();
 
 	return err;
 }
@@ -171,22 +164,7 @@ int check_cpu(int *cpu_level_ptr, int *req_level_ptr, u32 **err_flags_ptr)
 		asm("wrmsr" : : "a" (eax), "d" (edx), "c" (ecx));
 
 		err = check_cpuflags();
-	} else if (err == 0x01 &&
-		   !(err_flags[0] & ~(1 << X86_FEATURE_PAE)) &&
-		   is_intel() && cpu.level == 6 &&
-		   (cpu.model == 9 || cpu.model == 13)) {
-		/* PAE is disabled on this Pentium M but can be forced */
-		if (cmdline_find_option_bool("forcepae")) {
-			puts("WARNING: Forcing PAE in CPU flags\n");
-			set_bit(X86_FEATURE_PAE, cpu.flags);
-			err = check_cpuflags();
-		}
-		else {
-			puts("WARNING: PAE disabled. Use parameter 'forcepae' to enable at your own risk!\n");
-		}
 	}
-	if (!err)
-		err = check_knl_erratum();
 
 	if (err_flags_ptr)
 		*err_flags_ptr = err ? err_flags : NULL;

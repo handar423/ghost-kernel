@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef LINUX_BCMA_H_
 #define LINUX_BCMA_H_
 
@@ -160,7 +159,6 @@ struct bcma_host_ops {
 #define BCMA_CORE_DEFAULT		0xFFF
 
 #define BCMA_MAX_NR_CORES		16
-#define BCMA_CORE_SIZE			0x1000
 
 /* Chip IDs of PCIe devices */
 #define BCMA_CHIP_ID_BCM4313	0x4313
@@ -206,9 +204,6 @@ struct bcma_host_ops {
 #define  BCMA_PKG_ID_BCM4709	0
 #define BCMA_CHIP_ID_BCM47094	53030
 #define BCMA_CHIP_ID_BCM53018	53018
-#define BCMA_CHIP_ID_BCM53573	53573
-#define  BCMA_PKG_ID_BCM53573	0
-#define  BCMA_PKG_ID_BCM47189	1
 
 /* Board types (on PCI usually equals to the subsystem dev id) */
 /* BCM4313 */

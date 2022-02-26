@@ -1,7 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
-#ifndef GHES_H
-#define GHES_H
-
 #include <acpi/apei.h>
 #include <acpi/hed.h>
 
@@ -17,10 +13,7 @@
 #define GHES_EXITING		0x0002
 
 struct ghes {
-	union {
-		struct acpi_hest_generic *generic;
-		struct acpi_hest_generic_v2 *generic_v2;
-	};
+	struct acpi_hest_generic *generic;
 	struct acpi_hest_generic_status *estatus;
 	u64 buffer_paddr;
 	unsigned long flags;
@@ -113,12 +106,3 @@ static inline void *acpi_hest_get_next(struct acpi_hest_generic_data *gdata)
 {
 	return (void *)(gdata) + acpi_hest_get_record_size(gdata);
 }
-
-#define apei_estatus_for_each_section(estatus, section)			\
-	for (section = (struct acpi_hest_generic_data *)(estatus + 1);	\
-	     (void *)section - (void *)(estatus + 1) < estatus->data_length; \
-	     section = acpi_hest_get_next(section))
-
-int ghes_notify_sea(void);
-
-#endif /* GHES_H */

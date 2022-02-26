@@ -20,7 +20,6 @@
 #include <linux/of.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
-#include <linux/delay.h>
 
 #include <asm/prom.h>
 #include <asm/io.h>
@@ -132,7 +131,7 @@ static void xics_request_ipi(void)
 	unsigned int ipi;
 
 	ipi = irq_create_mapping(xics_host, XICS_IPI);
-	BUG_ON(!ipi);
+	BUG_ON(ipi == NO_IRQ);
 
 	/*
 	 * IPIs are marked IRQF_PERCPU. The handler was set in map.
@@ -141,20 +140,22 @@ static void xics_request_ipi(void)
 			   IRQF_PERCPU | IRQF_NO_THREAD, "IPI", NULL));
 }
 
-void __init xics_smp_probe(void)
+int __init xics_smp_probe(void)
 {
+	/* Setup cause_ipi callback  based on which ICP is used */
+	smp_ops->cause_ipi = icp_ops->cause_ipi;
+
 	/* Register all the IPIs */
 	xics_request_ipi();
 
-	/* Setup cause_ipi callback based on which ICP is used */
-	smp_ops->cause_ipi = icp_ops->cause_ipi;
+	return cpumask_weight(cpu_possible_mask);
 }
 
 #endif /* CONFIG_SMP */
 
 void xics_teardown_cpu(void)
 {
-	struct xics_cppr *os_cppr = this_cpu_ptr(&xics_cppr);
+	struct xics_cppr *os_cppr = &__get_cpu_var(xics_cppr);
 
 	/*
 	 * we have to reset the cppr index to 0 because we're
@@ -199,6 +200,9 @@ void xics_migrate_irqs_away(void)
 	/* Remove ourselves from the global interrupt queue */
 	xics_set_cpu_giq(xics_default_distrib_server, 0);
 
+	/* Allow IPIs again... */
+	icp_ops->set_priority(DEFAULT_PRIORITY);
+
 	for_each_irq_desc(virq, desc) {
 		struct irq_chip *chip;
 		long server;
@@ -225,7 +229,7 @@ void xics_migrate_irqs_away(void)
 
 		/* Locate interrupt server */
 		server = -1;
-		ics = irq_desc_get_chip_data(desc);
+		ics = irq_get_chip_data(virq);
 		if (ics)
 			server = ics->get_server(ics, irq);
 		if (server < 0) {
@@ -253,19 +257,6 @@ void xics_migrate_irqs_away(void)
 unlock:
 		raw_spin_unlock_irqrestore(&desc->lock, flags);
 	}
-
-	/* Allow "sufficient" time to drop any inflight IRQ's */
-	mdelay(5);
-
-	/*
-	 * Allow IPIs again. This is done at the very end, after migrating all
-	 * interrupts, the expectation is that we'll only get woken up by an IPI
-	 * interrupt beyond this point, but leave externals masked just to be
-	 * safe. If we're using icp-opal this may actually allow all
-	 * interrupts anyway, but that should be OK.
-	 */
-	icp_ops->set_priority(DEFAULT_PRIORITY);
-
 }
 #endif /* CONFIG_HOTPLUG_CPU */
 
@@ -309,8 +300,7 @@ int xics_get_irq_server(unsigned int virq, const struct cpumask *cpumask,
 }
 #endif /* CONFIG_SMP */
 
-static int xics_host_match(struct irq_domain *h, struct device_node *node,
-			   enum irq_domain_bus_token bus_token)
+static int xics_host_match(struct irq_domain *h, struct device_node *node)
 {
 	struct ics *ics;
 
@@ -417,7 +407,7 @@ int xics_retrigger(struct irq_data *data)
 	return 0;
 }
 
-static const struct irq_domain_ops xics_host_ops = {
+static struct irq_domain_ops xics_host_ops = {
 	.match = xics_host_match,
 	.map = xics_host_map,
 	.xlate = xics_host_xlate,
@@ -460,11 +450,8 @@ void __init xics_init(void)
 	/* Fist locate ICP */
 	if (firmware_has_feature(FW_FEATURE_LPAR))
 		rc = icp_hv_init();
-	if (rc < 0) {
+	if (rc < 0)
 		rc = icp_native_init();
-		if (rc == -ENODEV)
-		    rc = icp_opal_init();
-	}
 	if (rc < 0) {
 		pr_warning("XICS: Cannot find a Presentation Controller !\n");
 		return;

@@ -1026,8 +1026,10 @@ struct qlcnic_ipaddr {
 #define QLCNIC_HAS_PHYS_PORT_ID		0x40000
 #define QLCNIC_TSS_RSS			0x80000
 
+#ifdef CONFIG_QLCNIC_VXLAN
 #define QLCNIC_ADD_VXLAN_PORT		0x100000
 #define QLCNIC_DEL_VXLAN_PORT		0x200000
+#endif
 
 #define QLCNIC_VLAN_FILTERING		0x800000
 
@@ -1800,7 +1802,8 @@ struct qlcnic_hardware_ops {
 	int (*config_loopback) (struct qlcnic_adapter *, u8);
 	int (*clear_loopback) (struct qlcnic_adapter *, u8);
 	int (*config_promisc_mode) (struct qlcnic_adapter *, u32);
-	void (*change_l2_filter) (struct qlcnic_adapter *, u64 *, u16);
+	void (*change_l2_filter)(struct qlcnic_adapter *adapter, u64 *addr,
+				 u16 vlan, struct qlcnic_host_tx_ring *tx_ring);
 	int (*get_board_info) (struct qlcnic_adapter *);
 	void (*set_mac_filter_count) (struct qlcnic_adapter *);
 	void (*free_mac_list) (struct qlcnic_adapter *);
@@ -1849,17 +1852,17 @@ static inline bool qlcnic_82xx_encap_tx_offload(struct qlcnic_adapter *adapter)
 
 static inline bool qlcnic_82xx_encap_rx_offload(struct qlcnic_adapter *adapter)
 {
-        return false;
+	return false;
 }
 
 static inline bool qlcnic_encap_rx_offload(struct qlcnic_adapter *adapter)
 {
-        return adapter->ahw->hw_ops->encap_rx_offload(adapter);
+	return adapter->ahw->hw_ops->encap_rx_offload(adapter);
 }
 
 static inline bool qlcnic_encap_tx_offload(struct qlcnic_adapter *adapter)
 {
-        return adapter->ahw->hw_ops->encap_tx_offload(adapter);
+	return adapter->ahw->hw_ops->encap_tx_offload(adapter);
 }
 
 static inline int qlcnic_start_firmware(struct qlcnic_adapter *adapter)
@@ -2064,9 +2067,10 @@ static inline int qlcnic_nic_set_promisc(struct qlcnic_adapter *adapter,
 }
 
 static inline void qlcnic_change_filter(struct qlcnic_adapter *adapter,
-					u64 *addr, u16 id)
+					u64 *addr, u16 vlan,
+					struct qlcnic_host_tx_ring *tx_ring)
 {
-	adapter->ahw->hw_ops->change_l2_filter(adapter, addr, id);
+	adapter->ahw->hw_ops->change_l2_filter(adapter, addr, vlan, tx_ring);
 }
 
 static inline int qlcnic_get_board_info(struct qlcnic_adapter *adapter)
@@ -2083,11 +2087,6 @@ static inline void qlcnic_set_mac_filter_count(struct qlcnic_adapter *adapter)
 {
 	if (adapter->ahw->hw_ops->set_mac_filter_count)
 		adapter->ahw->hw_ops->set_mac_filter_count(adapter);
-}
-
-static inline void qlcnic_get_beacon_state(struct qlcnic_adapter *adapter)
-{
-	adapter->ahw->hw_ops->get_beacon_state(adapter);
 }
 
 static inline void qlcnic_read_phys_port_id(struct qlcnic_adapter *adapter)
@@ -2130,6 +2129,11 @@ static inline void qlcnic_store_cap_mask(struct qlcnic_adapter *adapter,
 					 void *tmpl_hdr, u32 mask)
 {
 	adapter->ahw->hw_ops->store_cap_mask(tmpl_hdr, mask);
+}
+
+static inline void qlcnic_get_beacon_state(struct qlcnic_adapter *adapter)
+{
+	adapter->ahw->hw_ops->get_beacon_state(adapter);
 }
 
 static inline void qlcnic_dev_request_reset(struct qlcnic_adapter *adapter,

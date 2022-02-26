@@ -5,7 +5,7 @@
  *
  * Copyright (c) 2007-2008 Joern Engel <joern@logfs.org>
  * Bits and pieces stolen from Peter Zijlstra's code, which is
- * Copyright 2007, Red Hat Inc. Peter Zijlstra
+ * Copyright 2007, Red Hat Inc. Peter Zijlstra <pzijlstr@redhat.com>
  * GPLv2
  *
  * see http://programming.kicks-ass.net/kernel-patches/vma_lookup/btree.patch
@@ -198,7 +198,6 @@ EXPORT_SYMBOL_GPL(btree_init);
 
 void btree_destroy(struct btree_head *head)
 {
-	mempool_free(head->node, head->mempool);
 	mempool_destroy(head->mempool);
 	head->mempool = NULL;
 }

@@ -74,7 +74,7 @@
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
 #include <linux/spinlock.h>
-#include <linux/sched/signal.h>
+#include <linux/sched.h>
 #include <linux/sysctl.h>
 #include <linux/wait.h>
 #include <linux/bcd.h>
@@ -135,9 +135,9 @@ static struct fasync_struct *rtc_async_queue;
 static DECLARE_WAIT_QUEUE_HEAD(rtc_wait);
 
 #ifdef RTC_IRQ
-static void rtc_dropped_irq(struct timer_list *unused);
+static void rtc_dropped_irq(unsigned long data);
 
-static DEFINE_TIMER(rtc_irq_timer, rtc_dropped_irq);
+static DEFINE_TIMER(rtc_irq_timer, rtc_dropped_irq, 0, 0);
 #endif
 
 static ssize_t rtc_read(struct file *file, char __user *buf,
@@ -227,7 +227,7 @@ static inline unsigned char rtc_is_updating(void)
 
 #ifdef RTC_IRQ
 /*
- *	A very tiny interrupt handler. It runs with interrupts disabled,
+ *	A very tiny interrupt handler. It runs with IRQF_DISABLED set,
  *	but there is possibility of conflicting with the set_rtc_mmss()
  *	call (the rtc irq and the timer irq can easily run at the same
  *	time in two different CPUs). So we need to serialize
@@ -280,7 +280,7 @@ static irqreturn_t rtc_interrupt(int irq, void *dev_id)
 /*
  * sysctl-tuning infrastructure.
  */
-static struct ctl_table rtc_table[] = {
+static ctl_table rtc_table[] = {
 	{
 		.procname	= "max-user-freq",
 		.data		= &rtc_max_user_freq,
@@ -291,7 +291,7 @@ static struct ctl_table rtc_table[] = {
 	{ }
 };
 
-static struct ctl_table rtc_root[] = {
+static ctl_table rtc_root[] = {
 	{
 		.procname	= "rtc",
 		.mode		= 0555,
@@ -300,7 +300,7 @@ static struct ctl_table rtc_root[] = {
 	{ }
 };
 
-static struct ctl_table dev_root[] = {
+static ctl_table dev_root[] = {
 	{
 		.procname	= "dev",
 		.mode		= 0555,
@@ -1040,7 +1040,8 @@ no_irq:
 		rtc_int_handler_ptr = rtc_interrupt;
 	}
 
-	if (request_irq(RTC_IRQ, rtc_int_handler_ptr, 0, "rtc", NULL)) {
+	if (request_irq(RTC_IRQ, rtc_int_handler_ptr, IRQF_DISABLED,
+			"rtc", NULL)) {
 		/* Yeah right, seeing as irq 8 doesn't even hit the bus. */
 		rtc_has_irq = 0;
 		printk(KERN_ERR "rtc: IRQ %d is not free.\n", RTC_IRQ);
@@ -1171,7 +1172,7 @@ module_exit(rtc_exit);
  *	for something that requires a steady > 1KHz signal anyways.)
  */
 
-static void rtc_dropped_irq(struct timer_list *unused)
+static void rtc_dropped_irq(unsigned long data)
 {
 	unsigned long freq;
 

@@ -13,7 +13,9 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; if not, see <http://www.gnu.org/licenses/>.
+ * along with this program; if not, write to the
+ * Free Software Foundation, Inc.,
+ * 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  */
 
 #include <linux/module.h>
@@ -43,7 +45,7 @@ static int pn544_mei_probe(struct mei_cl_device *cldev,
 
 	r = pn544_hci_probe(phy, &mei_phy_ops, LLC_NOP_NAME,
 			    MEI_NFC_HEADER_SIZE, 0, MEI_NFC_MAX_HCI_PAYLOAD,
-			    NULL, &phy->hdev);
+			    &phy->hdev);
 	if (r < 0) {
 		nfc_mei_phy_free(phy);
 
@@ -82,7 +84,28 @@ static struct mei_cl_driver pn544_driver = {
 	.remove = pn544_mei_remove,
 };
 
-module_mei_cl_driver(pn544_driver);
+static int pn544_mei_init(void)
+{
+	int r;
+
+	pr_debug(DRIVER_DESC ": %s\n", __func__);
+
+	r = mei_cldev_driver_register(&pn544_driver);
+	if (r) {
+		pr_err(PN544_DRIVER_NAME ": driver registration failed\n");
+		return r;
+	}
+
+	return 0;
+}
+
+static void pn544_mei_exit(void)
+{
+	mei_cldev_driver_unregister(&pn544_driver);
+}
+
+module_init(pn544_mei_init);
+module_exit(pn544_mei_exit);
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION(DRIVER_DESC);

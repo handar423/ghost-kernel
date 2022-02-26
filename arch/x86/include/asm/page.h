@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_X86_PAGE_H
 #define _ASM_X86_PAGE_H
 
@@ -76,7 +75,7 @@ extern bool __virt_addr_valid(unsigned long kaddr);
 #include <asm-generic/memory_model.h>
 #include <asm-generic/getorder.h>
 
-#define HAVE_ARCH_HUGETLB_UNMAPPED_AREA
+#define __HAVE_ARCH_GATE_AREA 1
 
 #endif	/* __KERNEL__ */
 #endif /* _ASM_X86_PAGE_H */

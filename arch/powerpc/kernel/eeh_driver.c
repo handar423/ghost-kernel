@@ -139,7 +139,7 @@ static void eeh_enable_irq(struct pci_dev *dev)
 		 * into it.
 		 *
 		 * That's just wrong.The warning in the core code is
-		 * there to tell people to fix their asymmetries in
+		 * there to tell people to fix their assymetries in
 		 * their own code, not by abusing the core information
 		 * to avoid it.
 		 *
@@ -428,7 +428,7 @@ static void *eeh_add_virt_device(void *data, void *userdata)
 
 	if (!(edev->physfn)) {
 		pr_warn("%s: EEH dev %04x:%02x:%02x.%01x not for VF\n",
-			__func__, pdn->phb->global_number, pdn->busno,
+			__func__, edev->phb->global_number, pdn->busno,
 			PCI_SLOT(pdn->devfn), PCI_FUNC(pdn->devfn));
 		return NULL;
 	}
@@ -441,7 +441,7 @@ static void *eeh_add_virt_device(void *data, void *userdata)
 	}
 
 #ifdef CONFIG_PPC_POWERNV
-	pci_iov_add_virtfn(edev->physfn, pdn->vf_index);
+	pci_iov_add_virtfn(edev->physfn, pdn->vf_index, 0);
 #endif
 	return NULL;
 }
@@ -499,7 +499,7 @@ static void *eeh_rmv_device(void *data, void *userdata)
 #ifdef CONFIG_PPC_POWERNV
 		struct pci_dn *pdn = eeh_dev_to_pdn(edev);
 
-		pci_iov_remove_virtfn(edev->physfn, pdn->vf_index);
+		pci_iov_remove_virtfn(edev->physfn, pdn->vf_index, 0);
 		edev->pdev = NULL;
 
 		/*
@@ -545,7 +545,7 @@ static void *eeh_pe_detach_dev(void *data, void *userdata)
 static void *__eeh_clear_pe_frozen_state(void *data, void *flag)
 {
 	struct eeh_pe *pe = (struct eeh_pe *)data;
-	bool clear_sw_state = *(bool *)flag;
+	bool *clear_sw_state = flag;
 	int i, rc = 1;
 
 	for (i = 0; rc && i < 3; i++)
@@ -575,7 +575,7 @@ static int eeh_clear_pe_frozen_state(struct eeh_pe *pe,
 
 int eeh_pe_reset_and_recover(struct eeh_pe *pe)
 {
-	int ret;
+	int result, ret;
 
 	/* Bail if the PE is being recovered */
 	if (pe->state & EEH_PE_RECOVERING)
@@ -601,8 +601,14 @@ int eeh_pe_reset_and_recover(struct eeh_pe *pe)
 		return ret;
 	}
 
+	/* Notify completion of reset */
+	eeh_pe_dev_traverse(pe, eeh_report_reset, &result);
+
 	/* Restore device state */
 	eeh_pe_dev_traverse(pe, eeh_dev_restore_state, NULL);
+
+	/* Resume */
+	eeh_pe_dev_traverse(pe, eeh_report_resume, NULL);
 
 	/* Clear recovery mode */
 	eeh_pe_state_clear(pe, EEH_PE_RECOVERING);
@@ -623,7 +629,7 @@ static int eeh_reset_device(struct eeh_pe *pe, struct pci_bus *bus,
 				struct eeh_rmv_data *rmv_data)
 {
 	struct pci_bus *frozen_bus = eeh_pe_bus_get(pe);
-	time64_t tstamp;
+	struct timeval tstamp;
 	int cnt, rc;
 	struct eeh_dev *edev;
 
@@ -635,15 +641,16 @@ static int eeh_reset_device(struct eeh_pe *pe, struct pci_bus *bus,
 	 * We don't remove the corresponding PE instances because
 	 * we need the information afterwords. The attached EEH
 	 * devices are expected to be attached soon when calling
-	 * into pci_hp_add_devices().
+	 * into pcibios_add_pci_devices().
 	 */
 	eeh_pe_state_mark(pe, EEH_PE_KEEP);
 	if (bus) {
 		if (pe->type & EEH_PE_VF) {
 			eeh_pe_dev_traverse(pe, eeh_rmv_device, NULL);
 		} else {
+			eeh_pe_state_clear(pe, EEH_PE_PRI_BUS);
 			pci_lock_rescan_remove();
-			pci_hp_remove_devices(bus);
+			pcibios_remove_pci_devices(bus);
 			pci_unlock_rescan_remove();
 		}
 	} else if (frozen_bus) {
@@ -671,10 +678,8 @@ static int eeh_reset_device(struct eeh_pe *pe, struct pci_bus *bus,
 
 	/* Clear frozen state */
 	rc = eeh_clear_pe_frozen_state(pe, false);
-	if (rc) {
-		pci_unlock_rescan_remove();
+	if (rc)
 		return rc;
-	}
 
 	/* Give the system 5 seconds to finish running the user-space
 	 * hotplug shutdown scripts, e.g. ifdown for ethernet.  Yes,
@@ -693,12 +698,10 @@ static int eeh_reset_device(struct eeh_pe *pe, struct pci_bus *bus,
 		 */
 		edev = list_first_entry(&pe->edevs, struct eeh_dev, list);
 		eeh_pe_traverse(pe, eeh_pe_detach_dev, NULL);
-		if (pe->type & EEH_PE_VF) {
+		if (pe->type & EEH_PE_VF)
 			eeh_add_virt_device(edev, NULL);
-		} else {
-			eeh_pe_state_clear(pe, EEH_PE_PRI_BUS);
-			pci_hp_add_devices(bus);
-		}
+		else
+			pcibios_add_pci_devices(bus);
 	} else if (frozen_bus && rmv_data->removed) {
 		pr_info("EEH: Sleep 5s ahead of partial hotplug\n");
 		ssleep(5);
@@ -708,7 +711,7 @@ static int eeh_reset_device(struct eeh_pe *pe, struct pci_bus *bus,
 		if (pe->type & EEH_PE_VF)
 			eeh_add_virt_device(edev, NULL);
 		else
-			pci_hp_add_devices(frozen_bus);
+			pcibios_add_pci_devices(frozen_bus);
 	}
 	eeh_pe_state_clear(pe, EEH_PE_KEEP);
 
@@ -724,16 +727,7 @@ static int eeh_reset_device(struct eeh_pe *pe, struct pci_bus *bus,
  */
 #define MAX_WAIT_FOR_RECOVERY 300
 
-/**
- * eeh_handle_normal_event - Handle EEH events on a specific PE
- * @pe: EEH PE
- *
- * Attempts to recover the given PE.  If recovery fails or the PE has failed
- * too many times, remove the PE.
- *
- * Returns true if @pe should no longer be used, else false.
- */
-static bool eeh_handle_normal_event(struct eeh_pe *pe)
+static void eeh_handle_normal_event(struct eeh_pe *pe)
 {
 	struct pci_bus *frozen_bus;
 	struct eeh_dev *edev, *tmp;
@@ -743,20 +737,15 @@ static bool eeh_handle_normal_event(struct eeh_pe *pe)
 
 	frozen_bus = eeh_pe_bus_get(pe);
 	if (!frozen_bus) {
-		pr_err("%s: Cannot find PCI bus for PHB#%x-PE#%x\n",
+		pr_err("%s: Cannot find PCI bus for PHB#%d-PE#%x\n",
 			__func__, pe->phb->global_number, pe->addr);
-		return false;
+		return;
 	}
 
 	eeh_pe_update_time_stamp(pe);
 	pe->freeze_count++;
-	if (pe->freeze_count > eeh_max_freezes) {
-		pr_err("EEH: PHB#%x-PE#%x has failed %d times in the\n"
-		       "last hour and has been permanently disabled.\n",
-		       pe->phb->global_number, pe->addr,
-		       pe->freeze_count);
-		goto hard_fail;
-	}
+	if (pe->freeze_count > eeh_max_freezes)
+		goto excess_failures;
 	pr_warn("EEH: This PCI device has failed %d times in the last hour\n",
 		pe->freeze_count);
 
@@ -765,17 +754,9 @@ static bool eeh_handle_normal_event(struct eeh_pe *pe)
 	 * to accomplish the reset.  Each child gets a report of the
 	 * status ... if any child can't handle the reset, then the entire
 	 * slot is dlpar removed and added.
-	 *
-	 * When the PHB is fenced, we have to issue a reset to recover from
-	 * the error. Override the result if necessary to have partially
-	 * hotplug for this case.
 	 */
 	pr_info("EEH: Notify device drivers to shutdown\n");
 	eeh_pe_dev_traverse(pe, eeh_report_error, &result);
-	if ((pe->type & EEH_PE_PHB) &&
-	    result != PCI_ERS_RESULT_NONE &&
-	    result != PCI_ERS_RESULT_NEED_RESET)
-		result = PCI_ERS_RESULT_NEED_RESET;
 
 	/* Get the current PCI slot state. This can take a long time,
 	 * sometimes over 300 seconds for certain systems.
@@ -884,18 +865,27 @@ static bool eeh_handle_normal_event(struct eeh_pe *pe)
 	pr_info("EEH: Notify device driver to resume\n");
 	eeh_pe_dev_traverse(pe, eeh_report_resume, NULL);
 
-	return false;
+	return;
 
-hard_fail:
+excess_failures:
 	/*
 	 * About 90% of all real-life EEH failures in the field
 	 * are due to poorly seated PCI cards. Only 10% or so are
 	 * due to actual, failed cards.
 	 */
-	pr_err("EEH: Unable to recover from failure from PHB#%x-PE#%x.\n"
+	pr_err("EEH: PHB#%d-PE#%x has failed %d times in the\n"
+	       "last hour and has been permanently disabled.\n"
+	       "Please try reseating or replacing it.\n",
+		pe->phb->global_number, pe->addr,
+		pe->freeze_count);
+	goto perm_error;
+
+hard_fail:
+	pr_err("EEH: Unable to recover from failure from PHB#%d-PE#%x.\n"
 	       "Please try reseating or replacing it\n",
 		pe->phb->global_number, pe->addr);
 
+perm_error:
 	eeh_slot_error_detail(pe, EEH_LOG_PERM);
 
 	/* Notify all devices that they're about to go down. */
@@ -918,23 +908,12 @@ hard_fail:
 			eeh_pe_dev_mode_mark(pe, EEH_DEV_REMOVED);
 
 			pci_lock_rescan_remove();
-			pci_hp_remove_devices(frozen_bus);
+			pcibios_remove_pci_devices(frozen_bus);
 			pci_unlock_rescan_remove();
-
-			/* The passed PE should no longer be used */
-			return true;
 		}
 	}
-	return false;
 }
 
-/**
- * eeh_handle_special_event - Handle EEH events without a specific failing PE
- *
- * Called when an EEH event is detected but can't be narrowed down to a
- * specific PE.  Iterates through possible failures and handles them as
- * necessary.
- */
 static void eeh_handle_special_event(void)
 {
 	struct eeh_pe *pe, *phb_pe;
@@ -998,14 +977,7 @@ static void eeh_handle_special_event(void)
 		 */
 		if (rc == EEH_NEXT_ERR_FROZEN_PE ||
 		    rc == EEH_NEXT_ERR_FENCED_PHB) {
-			/*
-			 * eeh_handle_normal_event() can make the PE stale if it
-			 * determines that the PE cannot possibly be recovered.
-			 * Don't modify the PE state if that's the case.
-			 */
-			if (eeh_handle_normal_event(pe))
-				continue;
-
+			eeh_handle_normal_event(pe);
 			eeh_pe_state_clear(pe, EEH_PE_RECOVERING);
 		} else {
 			pci_lock_rescan_remove();
@@ -1018,18 +990,18 @@ static void eeh_handle_special_event(void)
 
 				/* Notify all devices to be down */
 				eeh_pe_state_clear(pe, EEH_PE_PRI_BUS);
-				eeh_pe_dev_traverse(pe,
-					eeh_report_failure, NULL);
 				bus = eeh_pe_bus_get(phb_pe);
 				if (!bus) {
 					pr_err("%s: Cannot find PCI bus for "
-					       "PHB#%x-PE#%x\n",
+					       "PHB#%d-PE#%x\n",
 					       __func__,
 					       pe->phb->global_number,
 					       pe->addr);
 					break;
 				}
-				pci_hp_remove_devices(bus);
+				eeh_pe_dev_traverse(pe,
+					eeh_report_failure, NULL);
+				pcibios_remove_pci_devices(bus);
 			}
 			pci_unlock_rescan_remove();
 		}

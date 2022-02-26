@@ -98,7 +98,7 @@ static void ax88172a_status(struct usbnet *dev, struct urb *urb)
 static int ax88172a_init_mdio(struct usbnet *dev)
 {
 	struct ax88172a_private *priv = dev->driver_priv;
-	int ret;
+	int ret, i;
 
 	priv->mdio = mdiobus_alloc();
 	if (!priv->mdio) {
@@ -114,15 +114,25 @@ static int ax88172a_init_mdio(struct usbnet *dev)
 	snprintf(priv->mdio->id, MII_BUS_ID_SIZE, "usb-%03d:%03d",
 		 dev->udev->bus->busnum, dev->udev->devnum);
 
+	priv->mdio->irq = kzalloc(sizeof(int) * PHY_MAX_ADDR, GFP_KERNEL);
+	if (!priv->mdio->irq) {
+		ret = -ENOMEM;
+		goto mfree;
+	}
+	for (i = 0; i < PHY_MAX_ADDR; i++)
+		priv->mdio->irq[i] = PHY_POLL;
+
 	ret = mdiobus_register(priv->mdio);
 	if (ret) {
 		netdev_err(dev->net, "Could not register MDIO bus\n");
-		goto mfree;
+		goto ifree;
 	}
 
 	netdev_info(dev->net, "registered mdio bus %s\n", priv->mdio->id);
 	return 0;
 
+ifree:
+	kfree(priv->mdio->irq);
 mfree:
 	mdiobus_free(priv->mdio);
 	return ret;
@@ -142,13 +152,39 @@ static const struct net_device_ops ax88172a_netdev_ops = {
 	.ndo_stop		= usbnet_stop,
 	.ndo_start_xmit		= usbnet_start_xmit,
 	.ndo_tx_timeout		= usbnet_tx_timeout,
-	.ndo_change_mtu		= usbnet_change_mtu,
+	.ndo_change_mtu_rh74	= usbnet_change_mtu,
 	.ndo_get_stats64	= usbnet_get_stats64,
 	.ndo_set_mac_address	= asix_set_mac_address,
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_do_ioctl		= ax88172a_ioctl,
 	.ndo_set_rx_mode        = asix_set_multicast,
 };
+
+static int ax88172a_get_settings(struct net_device *net,
+				 struct ethtool_cmd *cmd)
+{
+	if (!net->phydev)
+		return -ENODEV;
+
+	return phy_ethtool_gset(net->phydev, cmd);
+}
+
+static int ax88172a_set_settings(struct net_device *net,
+				 struct ethtool_cmd *cmd)
+{
+	if (!net->phydev)
+		return -ENODEV;
+
+	return phy_ethtool_sset(net->phydev, cmd);
+}
+
+static int ax88172a_nway_reset(struct net_device *net)
+{
+	if (!net->phydev)
+		return -ENODEV;
+
+	return phy_start_aneg(net->phydev);
+}
 
 static const struct ethtool_ops ax88172a_ethtool_ops = {
 	.get_drvinfo		= asix_get_drvinfo,
@@ -160,9 +196,9 @@ static const struct ethtool_ops ax88172a_ethtool_ops = {
 	.get_eeprom_len		= asix_get_eeprom_len,
 	.get_eeprom		= asix_get_eeprom,
 	.set_eeprom		= asix_set_eeprom,
-	.nway_reset		= phy_ethtool_nway_reset,
-	.get_link_ksettings	= phy_ethtool_get_link_ksettings,
-	.set_link_ksettings	= phy_ethtool_set_link_ksettings,
+	.get_settings		= ax88172a_get_settings,
+	.set_settings		= ax88172a_set_settings,
+	.nway_reset		= ax88172a_nway_reset,
 };
 
 static int ax88172a_reset_phy(struct usbnet *dev, int embd_phy)

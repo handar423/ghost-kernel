@@ -98,23 +98,23 @@ MODULE_PARM_DESC(enable, "Enable " IDENT " soundcard.");
 module_param_array(isapnp, bool, NULL, 0444);
 MODULE_PARM_DESC(isapnp, "ISA PnP detection for specified soundcard.");
 #endif
-module_param_hw_array(port, long, ioport, NULL, 0444);
+module_param_array(port, long, NULL, 0444);
 MODULE_PARM_DESC(port, "Port # for " IDENT " driver.");
-module_param_hw_array(cport, long, ioport, NULL, 0444);
+module_param_array(cport, long, NULL, 0444);
 MODULE_PARM_DESC(cport, "Control port # for " IDENT " driver.");
-module_param_hw_array(mpu_port, long, ioport, NULL, 0444);
+module_param_array(mpu_port, long, NULL, 0444);
 MODULE_PARM_DESC(mpu_port, "MPU-401 port # for " IDENT " driver.");
-module_param_hw_array(fm_port, long, ioport, NULL, 0444);
+module_param_array(fm_port, long, NULL, 0444);
 MODULE_PARM_DESC(fm_port, "FM port # for " IDENT " driver.");
-module_param_hw_array(sb_port, long, ioport, NULL, 0444);
+module_param_array(sb_port, long, NULL, 0444);
 MODULE_PARM_DESC(sb_port, "SB port # for " IDENT " driver (optional).");
-module_param_hw_array(irq, int, irq, NULL, 0444);
+module_param_array(irq, int, NULL, 0444);
 MODULE_PARM_DESC(irq, "IRQ # for " IDENT " driver.");
-module_param_hw_array(mpu_irq, int, irq, NULL, 0444);
+module_param_array(mpu_irq, int, NULL, 0444);
 MODULE_PARM_DESC(mpu_irq, "MPU-401 IRQ # for " IDENT " driver.");
-module_param_hw_array(dma1, int, dma, NULL, 0444);
+module_param_array(dma1, int, NULL, 0444);
 MODULE_PARM_DESC(dma1, "DMA1 # for " IDENT " driver.");
-module_param_hw_array(dma2, int, dma, NULL, 0444);
+module_param_array(dma2, int, NULL, 0444);
 MODULE_PARM_DESC(dma2, "DMA2 # for " IDENT " driver.");
 
 #ifdef CONFIG_PNP
@@ -149,7 +149,7 @@ static const struct pnp_device_id snd_cs423x_pnpbiosids[] = {
 MODULE_DEVICE_TABLE(pnp, snd_cs423x_pnpbiosids);
 
 #define CS423X_ISAPNP_DRIVER	"cs4232_isapnp"
-static const struct pnp_card_device_id snd_cs423x_pnpids[] = {
+static struct pnp_card_device_id snd_cs423x_pnpids[] = {
 	/* Philips PCA70PS */
 	{ .id = "CSC0d32", .devs = { { "CSC0000" }, { "CSC0010" }, { "PNPb006" } } },
 	/* TerraTec Maestro 32/96 (CS4232) */
@@ -382,6 +382,7 @@ static int snd_cs423x_card_new(struct device *pdev, int dev,
 static int snd_cs423x_probe(struct snd_card *card, int dev)
 {
 	struct snd_card_cs4236 *acard;
+	struct snd_pcm *pcm;
 	struct snd_wss *chip;
 	struct snd_opl3 *opl3;
 	int err;
@@ -403,7 +404,7 @@ static int snd_cs423x_probe(struct snd_card *card, int dev)
 	acard->chip = chip;
 	if (chip->hardware & WSS_HW_CS4236B_MASK) {
 
-		err = snd_cs4236_pcm(chip, 0);
+		err = snd_cs4236_pcm(chip, 0, &pcm);
 		if (err < 0)
 			return err;
 
@@ -411,7 +412,7 @@ static int snd_cs423x_probe(struct snd_card *card, int dev)
 		if (err < 0)
 			return err;
 	} else {
-		err = snd_wss_pcm(chip, 0);
+		err = snd_wss_pcm(chip, 0, &pcm);
 		if (err < 0)
 			return err;
 
@@ -419,19 +420,17 @@ static int snd_cs423x_probe(struct snd_card *card, int dev)
 		if (err < 0)
 			return err;
 	}
-	strlcpy(card->driver, chip->pcm->name, sizeof(card->driver));
-	strlcpy(card->shortname, chip->pcm->name, sizeof(card->shortname));
-	if (dma2[dev] < 0)
-		snprintf(card->longname, sizeof(card->longname),
-			 "%s at 0x%lx, irq %i, dma %i",
-			 chip->pcm->name, chip->port, irq[dev], dma1[dev]);
-	else
-		snprintf(card->longname, sizeof(card->longname),
-			 "%s at 0x%lx, irq %i, dma %i&%d",
-			 chip->pcm->name, chip->port, irq[dev], dma1[dev],
-			 dma2[dev]);
+	strcpy(card->driver, pcm->name);
+	strcpy(card->shortname, pcm->name);
+	sprintf(card->longname, "%s at 0x%lx, irq %i, dma %i",
+		pcm->name,
+		chip->port,
+		irq[dev],
+		dma1[dev]);
+	if (dma2[dev] >= 0)
+		sprintf(card->longname + strlen(card->longname), "&%d", dma2[dev]);
 
-	err = snd_wss_timer(chip, 0);
+	err = snd_wss_timer(chip, 0, NULL);
 	if (err < 0)
 		return err;
 
@@ -505,6 +504,7 @@ static int snd_cs423x_isa_remove(struct device *pdev,
 				 unsigned int dev)
 {
 	snd_card_free(dev_get_drvdata(pdev));
+	dev_set_drvdata(pdev, NULL);
 	return 0;
 }
 
@@ -599,6 +599,7 @@ static int snd_cs423x_pnpbios_detect(struct pnp_dev *pdev,
 static void snd_cs423x_pnp_remove(struct pnp_dev *pdev)
 {
 	snd_card_free(pnp_get_drvdata(pdev));
+	pnp_set_drvdata(pdev, NULL);
 }
 
 #ifdef CONFIG_PM

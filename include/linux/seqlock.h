@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __LINUX_SEQLOCK_H
 #define __LINUX_SEQLOCK_H
 /*
@@ -36,8 +35,8 @@
 #include <linux/spinlock.h>
 #include <linux/preempt.h>
 #include <linux/lockdep.h>
-#include <linux/compiler.h>
 #include <asm/processor.h>
+#include <linux/compiler.h>
 
 /*
  * Version using sequence counter only.
@@ -90,7 +89,6 @@ static inline void seqcount_lockdep_reader_access(const seqcount_t *s)
 #endif
 
 #define SEQCNT_ZERO(lockname) { .sequence = 0, SEQCOUNT_DEP_MAP_INIT(lockname)}
-
 
 /**
  * __read_seqcount_begin - begin a seq-read critical section (without barrier)
@@ -182,6 +180,7 @@ static inline unsigned read_seqcount_begin(const seqcount_t *s)
 static inline unsigned raw_seqcount_begin(const seqcount_t *s)
 {
 	unsigned ret = READ_ONCE(s->sequence);
+
 	smp_rmb();
 	return ret & ~1;
 }
@@ -222,66 +221,9 @@ static inline int read_seqcount_retry(const seqcount_t *s, unsigned start)
 }
 
 
-
-static inline void raw_write_seqcount_begin(seqcount_t *s)
-{
-	s->sequence++;
-	smp_wmb();
-}
-
-static inline void raw_write_seqcount_end(seqcount_t *s)
-{
-	smp_wmb();
-	s->sequence++;
-}
-
-/**
- * raw_write_seqcount_barrier - do a seq write barrier
- * @s: pointer to seqcount_t
- *
- * This can be used to provide an ordering guarantee instead of the
- * usual consistency guarantee. It is one wmb cheaper, because we can
- * collapse the two back-to-back wmb()s.
- *
- *      seqcount_t seq;
- *      bool X = true, Y = false;
- *
- *      void read(void)
- *      {
- *              bool x, y;
- *
- *              do {
- *                      int s = read_seqcount_begin(&seq);
- *
- *                      x = X; y = Y;
- *
- *              } while (read_seqcount_retry(&seq, s));
- *
- *              BUG_ON(!x && !y);
- *      }
- *
- *      void write(void)
- *      {
- *              Y = true;
- *
- *              raw_write_seqcount_barrier(seq);
- *
- *              X = false;
- *      }
- */
-static inline void raw_write_seqcount_barrier(seqcount_t *s)
-{
-	s->sequence++;
-	smp_wmb();
-	s->sequence++;
-}
-
 static inline int raw_read_seqcount_latch(seqcount_t *s)
 {
-	int seq = READ_ONCE(s->sequence);
-	/* Pairs with the first smp_wmb() in raw_write_seqcount_latch() */
-	smp_read_barrier_depends();
-	return seq;
+       return lockless_dereference(s->sequence);
 }
 
 /**
@@ -335,7 +277,8 @@ static inline int raw_read_seqcount_latch(seqcount_t *s)
  *	unsigned seq, idx;
  *
  *	do {
- *		seq = raw_read_seqcount_latch(&latch->seq);
+ *		seq = latch->seq;
+ *		smp_rmb();
  *
  *		idx = seq & 0x01;
  *		entry = data_query(latch->data[idx], ...);
@@ -368,26 +311,83 @@ static inline void raw_write_seqcount_latch(seqcount_t *s)
        smp_wmb();      /* increment "sequence" before following stores */
 }
 
+/**
+ * raw_write_seqcount_barrier - do a seq write barrier
+ * @s: pointer to seqcount_t
+ *
+ * This can be used to provide an ordering guarantee instead of the
+ * usual consistency guarantee. It is one wmb cheaper, because we can
+ * collapse the two back-to-back wmb()s.
+ *
+ *      seqcount_t seq;
+ *      bool X = true, Y = false;
+ *
+ *      void read(void)
+ *      {
+ *              bool x, y;
+ *
+ *              do {
+ *                      int s = read_seqcount_begin(&seq);
+ *
+ *                      x = X; y = Y;
+ *
+ *              } while (read_seqcount_retry(&seq, s));
+ *
+ *              BUG_ON(!x && !y);
+ *      }
+ *
+ *      void write(void)
+ *      {
+ *              Y = true;
+ *
+ *              raw_write_seqcount_barrier(seq);
+ *
+ *              X = false;
+ *      }
+ */
+static inline void raw_write_seqcount_barrier(seqcount_t *s)
+{
+	s->sequence++;
+	smp_wmb();
+	s->sequence++;
+}
+
 /*
  * Sequence counter only version assumes that callers are using their
  * own mutexing.
  */
-static inline void write_seqcount_begin_nested(seqcount_t *s, int subclass)
+static inline void __write_seqcount_begin(seqcount_t *s)
 {
-	raw_write_seqcount_begin(s);
-	seqcount_acquire(&s->dep_map, subclass, 0, _RET_IP_);
+	s->sequence++;
+	smp_wmb();
 }
 
 static inline void write_seqcount_begin(seqcount_t *s)
 {
-	write_seqcount_begin_nested(s, 0);
+	preempt_disable_rt();
+	__write_seqcount_begin(s);
+}
+
+static inline void __write_seqcount_end(seqcount_t *s)
+{
+	smp_wmb();
+	s->sequence++;
 }
 
 static inline void write_seqcount_end(seqcount_t *s)
 {
-	seqcount_release(&s->dep_map, 1, _RET_IP_);
-	raw_write_seqcount_end(s);
+	__write_seqcount_end(s);
+	preempt_enable_rt();
 }
+
+static inline void write_seqcount_begin_nested(seqcount_t *s, int subclass)
+{
+	__write_seqcount_begin(s);
+	seqcount_acquire(&s->dep_map, subclass, 0, _RET_IP_);
+}
+
+#define raw_write_seqcount_begin(s) write_seqcount_begin(s)
+#define raw_write_seqcount_end(s) write_seqcount_end(s)
 
 /**
  * write_seqcount_invalidate - invalidate in-progress read-side seq operations
@@ -429,10 +429,33 @@ typedef struct {
 /*
  * Read side functions for starting and finalizing a read side section.
  */
+#ifndef CONFIG_PREEMPT_RT_FULL
 static inline unsigned read_seqbegin(const seqlock_t *sl)
 {
 	return read_seqcount_begin(&sl->seqcount);
 }
+#else
+/*
+ * Starvation safe read side for RT
+ */
+static inline unsigned read_seqbegin(seqlock_t *sl)
+{
+	unsigned ret;
+
+repeat:
+	ret = ACCESS_ONCE(sl->seqcount.sequence);
+	if (unlikely(ret & 1)) {
+		/*
+		 * Take the lock and let the writer proceed (i.e. evtl
+		 * boost it), otherwise we could loop here forever.
+		 */
+		spin_lock(&sl->lock);
+		spin_unlock(&sl->lock);
+		goto repeat;
+	}
+	return ret;
+}
+#endif
 
 static inline unsigned read_seqretry(const seqlock_t *sl, unsigned start)
 {
@@ -447,36 +470,45 @@ static inline unsigned read_seqretry(const seqlock_t *sl, unsigned start)
 static inline void write_seqlock(seqlock_t *sl)
 {
 	spin_lock(&sl->lock);
-	write_seqcount_begin(&sl->seqcount);
+	__write_seqcount_begin(&sl->seqcount);
+}
+
+static inline int try_write_seqlock(seqlock_t *sl)
+{
+	if (spin_trylock(&sl->lock)) {
+		__write_seqcount_begin(&sl->seqcount);
+		return 1;
+	}
+	return 0;
 }
 
 static inline void write_sequnlock(seqlock_t *sl)
 {
-	write_seqcount_end(&sl->seqcount);
+	__write_seqcount_end(&sl->seqcount);
 	spin_unlock(&sl->lock);
 }
 
 static inline void write_seqlock_bh(seqlock_t *sl)
 {
 	spin_lock_bh(&sl->lock);
-	write_seqcount_begin(&sl->seqcount);
+	__write_seqcount_begin(&sl->seqcount);
 }
 
 static inline void write_sequnlock_bh(seqlock_t *sl)
 {
-	write_seqcount_end(&sl->seqcount);
+	__write_seqcount_end(&sl->seqcount);
 	spin_unlock_bh(&sl->lock);
 }
 
 static inline void write_seqlock_irq(seqlock_t *sl)
 {
 	spin_lock_irq(&sl->lock);
-	write_seqcount_begin(&sl->seqcount);
+	__write_seqcount_begin(&sl->seqcount);
 }
 
 static inline void write_sequnlock_irq(seqlock_t *sl)
 {
-	write_seqcount_end(&sl->seqcount);
+	__write_seqcount_end(&sl->seqcount);
 	spin_unlock_irq(&sl->lock);
 }
 
@@ -485,7 +517,7 @@ static inline unsigned long __write_seqlock_irqsave(seqlock_t *sl)
 	unsigned long flags;
 
 	spin_lock_irqsave(&sl->lock, flags);
-	write_seqcount_begin(&sl->seqcount);
+	__write_seqcount_begin(&sl->seqcount);
 	return flags;
 }
 
@@ -495,7 +527,7 @@ static inline unsigned long __write_seqlock_irqsave(seqlock_t *sl)
 static inline void
 write_sequnlock_irqrestore(seqlock_t *sl, unsigned long flags)
 {
-	write_seqcount_end(&sl->seqcount);
+	__write_seqcount_end(&sl->seqcount);
 	spin_unlock_irqrestore(&sl->lock, flags);
 }
 
@@ -580,21 +612,19 @@ read_sequnlock_excl_irqrestore(seqlock_t *sl, unsigned long flags)
 	spin_unlock_irqrestore(&sl->lock, flags);
 }
 
-static inline unsigned long
-read_seqbegin_or_lock_irqsave(seqlock_t *lock, int *seq)
+static inline unsigned long read_seqbegin_or_lock_irqsave(seqlock_t *lock,
+							  int *seq)
 {
 	unsigned long flags = 0;
-
 	if (!(*seq & 1))	/* Even */
 		*seq = read_seqbegin(lock);
 	else			/* Odd */
 		read_seqlock_excl_irqsave(lock, flags);
-
 	return flags;
 }
 
-static inline void
-done_seqretry_irqrestore(seqlock_t *lock, int seq, unsigned long flags)
+static inline void done_seqretry_irqrestore(seqlock_t *lock, int seq,
+					    unsigned long flags)
 {
 	if (seq & 1)
 		read_sequnlock_excl_irqrestore(lock, flags);

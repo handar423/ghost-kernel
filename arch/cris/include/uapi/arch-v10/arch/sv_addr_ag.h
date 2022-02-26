@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 /*!**************************************************************************
 *!                                                            
 *! MACROS:
@@ -62,7 +61,7 @@
 #define IO_WIDTH(reg, field) IO_WIDTH_ (reg##_, field##_)
 #define IO_WIDTH_(reg_, field_) (reg_##_##field_##_WIDTH)
 
-/*--- Obsolete. Kept for backward compatibility. ---*/
+/*--- Obsolete. Kept for backw compatibility. ---*/
 /* Reads (or writes) a byte/uword/udword from the specified mode
    register. */
 #define IO_RD(reg) (*(volatile u32*)(reg))

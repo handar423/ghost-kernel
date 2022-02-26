@@ -241,7 +241,7 @@ int hvutil_transport_send(struct hvutil_transport *hvt, void *msg, int len,
 		cn_msg->id.val = hvt->cn_id.val;
 		cn_msg->len = len;
 		memcpy(cn_msg->data, msg, len);
-		ret = cn_netlink_send(cn_msg, 0, 0, GFP_ATOMIC);
+		ret = cn_netlink_send(cn_msg, 0, GFP_ATOMIC);
 		kfree(cn_msg);
 		/*
 		 * We don't know when netlink messages are delivered but unlike

@@ -20,12 +20,11 @@
 #include <linux/sched.h>
 #include <linux/mount.h>
 #include <linux/namei.h>
+#include <linux/delay.h>
 #include <linux/uaccess.h>
 #include <linux/mutex.h>
 #include <linux/spinlock.h>
 #include <linux/list.h>
-#include <linux/completion.h>
-#include <asm/current.h>
 
 /* This is the range of ioctl() numbers we claim as ours */
 #define AUTOFS_IOC_FIRST     AUTOFS_IOC_READY
@@ -35,10 +34,24 @@
 #define AUTOFS_DEV_IOCTL_IOC_COUNT \
 	(AUTOFS_DEV_IOCTL_ISMOUNTPOINT_CMD - AUTOFS_DEV_IOCTL_VERSION_CMD)
 
+#include <linux/kernel.h>
+#include <linux/slab.h>
+#include <linux/time.h>
+#include <linux/string.h>
+#include <linux/wait.h>
+#include <linux/sched.h>
+#include <linux/mount.h>
+#include <linux/namei.h>
+#include <linux/delay.h>
+#include <asm/current.h>
+#include <linux/uaccess.h>
+
 #ifdef pr_fmt
 #undef pr_fmt
 #endif
 #define pr_fmt(fmt) KBUILD_MODNAME ":pid:%d:%s: " fmt, current->pid, __func__
+
+extern struct file_system_type autofs_fs_type;
 
 /*
  * Unified info structure.  This is pointed to by both the dentry and
@@ -99,16 +112,20 @@ struct autofs_wait_queue {
 
 #define AUTOFS_SBI_MAGIC 0x6d4a556d
 
+#define AUTOFS_SBI_CATATONIC	0x0001
+#define AUTOFS_SBI_STRICTEXPIRE 0x0002
+#define AUTOFS_SBI_IGNORE	0x0004
+
 struct autofs_sb_info {
 	u32 magic;
 	int pipefd;
 	struct file *pipe;
 	struct pid *oz_pgrp;
-	int catatonic;
 	int version;
 	int sub_version;
 	int min_proto;
 	int max_proto;
+	unsigned int flags;
 	unsigned long exp_timeout;
 	unsigned int type;
 	struct super_block *sb;
@@ -138,7 +155,8 @@ static inline struct autofs_info *autofs4_dentry_ino(struct dentry *dentry)
  */
 static inline int autofs4_oz_mode(struct autofs_sb_info *sbi)
 {
-	return sbi->catatonic || task_pgrp(current) == sbi->oz_pgrp;
+	return ((sbi->flags & AUTOFS_SBI_CATATONIC) ||
+		 task_pgrp(current) == sbi->oz_pgrp);
 }
 
 struct inode *autofs4_get_inode(struct super_block *, umode_t);
@@ -151,15 +169,9 @@ int autofs4_expire_run(struct super_block *, struct vfsmount *,
 		       struct autofs_sb_info *,
 		       struct autofs_packet_expire __user *);
 int autofs4_do_expire_multi(struct super_block *sb, struct vfsmount *mnt,
-			    struct autofs_sb_info *sbi, int when);
+			    struct autofs_sb_info *sbi, unsigned int how);
 int autofs4_expire_multi(struct super_block *, struct vfsmount *,
 			 struct autofs_sb_info *, int __user *);
-struct dentry *autofs4_expire_direct(struct super_block *sb,
-				     struct vfsmount *mnt,
-				     struct autofs_sb_info *sbi, int how);
-struct dentry *autofs4_expire_indirect(struct super_block *sb,
-				       struct vfsmount *mnt,
-				       struct autofs_sb_info *sbi, int how);
 
 /* Device node initialization */
 
@@ -207,7 +219,7 @@ void autofs4_clean_ino(struct autofs_info *);
 
 static inline int autofs_prepare_pipe(struct file *pipe)
 {
-	if (!(pipe->f_mode & FMODE_CAN_WRITE))
+	if (!pipe->f_op || !pipe->f_op->write)
 		return -EINVAL;
 	if (!S_ISFIFO(file_inode(pipe)->i_mode))
 		return -EINVAL;
@@ -231,6 +243,11 @@ static inline u32 autofs4_get_dev(struct autofs_sb_info *sbi)
 static inline u64 autofs4_get_ino(struct autofs_sb_info *sbi)
 {
 	return d_inode(sbi->sb->s_root)->i_ino;
+}
+
+static inline int simple_positive(struct dentry *dentry)
+{
+	return d_really_is_positive(dentry) && !d_unhashed(dentry);
 }
 
 static inline void __autofs4_add_expiring(struct dentry *dentry)

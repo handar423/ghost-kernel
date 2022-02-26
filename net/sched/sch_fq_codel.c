@@ -105,7 +105,6 @@ static unsigned int fq_codel_classify(struct sk_buff *skb, struct Qdisc *sch,
 		case TC_ACT_QUEUED:
 		case TC_ACT_TRAP:
 			*qerr = NET_XMIT_SUCCESS | __NET_XMIT_STOLEN;
-			/* fall through */
 		case TC_ACT_SHOT:
 			return 0;
 		}
@@ -386,8 +385,7 @@ static int fq_codel_change(struct Qdisc *sch, struct nlattr *opt)
 	if (!opt)
 		return -EINVAL;
 
-	err = nla_parse_nested(tb, TCA_FQ_CODEL_MAX, opt, fq_codel_policy,
-			       NULL);
+	err = nla_parse_nested(tb, TCA_FQ_CODEL_MAX, opt, fq_codel_policy);
 	if (err < 0)
 		return err;
 	if (tb[TCA_FQ_CODEL_FLOWS]) {
@@ -492,8 +490,10 @@ static int fq_codel_init(struct Qdisc *sch, struct nlattr *opt)
 		if (!q->flows)
 			return -ENOMEM;
 		q->backlogs = kvzalloc(q->flows_cnt * sizeof(u32), GFP_KERNEL);
-		if (!q->backlogs)
+		if (!q->backlogs) {
+			kvfree(q->flows);
 			return -ENOMEM;
+		}
 		for (i = 0; i < q->flows_cnt; i++) {
 			struct fq_codel_flow *flow = q->flows + i;
 
@@ -620,9 +620,12 @@ static int fq_codel_dump_class_stats(struct Qdisc *sch, unsigned long cl,
 	struct tc_fq_codel_xstats xstats;
 
 	if (idx < q->flows_cnt) {
-		const struct fq_codel_flow *flow = &q->flows[idx];
+		const struct fq_codel_flow *flow;
 		const struct sk_buff *skb;
 
+		gmb();
+		flow = &q->flows[idx];
+		skb = flow->head;
 		memset(&xstats, 0, sizeof(xstats));
 		xstats.type = TCA_FQ_CODEL_XSTATS_CLASS;
 		xstats.class_stats.deficit = flow->deficit;

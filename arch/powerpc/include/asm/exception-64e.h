@@ -46,8 +46,9 @@
 #define EX_CR		(1 * 8)
 #define EX_R10		(2 * 8)
 #define EX_R11		(3 * 8)
-#define EX_R14		(4 * 8)
-#define EX_R15		(5 * 8)
+#define EX_R13		(4 * 8)
+#define EX_R14		(5 * 8)
+#define EX_R15		(6 * 8)
 
 /*
  * The TLB miss exception uses different slots.
@@ -69,14 +70,13 @@
 #define EX_TLB_ESR	( 9 * 8) /* Level 0 and 2 only */
 #define EX_TLB_SRR0	(10 * 8)
 #define EX_TLB_SRR1	(11 * 8)
-#define EX_TLB_R7	(12 * 8)
 #ifdef CONFIG_BOOK3E_MMU_TLB_STATS
-#define EX_TLB_R8	(13 * 8)
-#define EX_TLB_R9	(14 * 8)
-#define EX_TLB_LR	(15 * 8)
-#define EX_TLB_SIZE	(16 * 8)
+#define EX_TLB_R8	(12 * 8)
+#define EX_TLB_R9	(13 * 8)
+#define EX_TLB_LR	(14 * 8)
+#define EX_TLB_SIZE	(15 * 8)
 #else
-#define EX_TLB_SIZE	(13 * 8)
+#define EX_TLB_SIZE	(12 * 8)
 #endif
 
 #define	START_EXCEPTION(label)						\
@@ -173,6 +173,16 @@ exc_##label##_book3e:
 	ld	r9,EX_TLB_R9(r12);					    \
 	ld	r8,EX_TLB_R8(r12);					    \
 	mtlr	r16;
+#define TLB_MISS_PROLOG_STATS_BOLTED						    \
+	mflr	r10;							    \
+	std	r8,PACA_EXTLB+EX_TLB_R8(r13);				    \
+	std	r9,PACA_EXTLB+EX_TLB_R9(r13);				    \
+	std	r10,PACA_EXTLB+EX_TLB_LR(r13);
+#define TLB_MISS_RESTORE_STATS_BOLTED					            \
+	ld	r16,PACA_EXTLB+EX_TLB_LR(r13);				    \
+	ld	r9,PACA_EXTLB+EX_TLB_R9(r13);				    \
+	ld	r8,PACA_EXTLB+EX_TLB_R8(r13);				    \
+	mtlr	r16;
 #define TLB_MISS_STATS_D(name)						    \
 	addi	r9,r13,MMSTAT_DSTATS+name;				    \
 	bl	tlb_stat_inc;
@@ -205,8 +215,8 @@ exc_##label##_book3e:
 #endif
 
 #define SET_IVOR(vector_number, vector_offset)	\
-	LOAD_REG_ADDR(r3,interrupt_base_book3e);\
-	ori	r3,r3,vector_offset@l;		\
+	li	r3,vector_offset@l; 		\
+	ori	r3,r3,interrupt_base_book3e@l;	\
 	mtspr	SPRN_IVOR##vector_number,r3;
 
 #define RFI_TO_KERNEL							\

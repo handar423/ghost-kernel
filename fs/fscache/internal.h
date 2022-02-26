@@ -48,7 +48,9 @@ extern struct fscache_cache *fscache_select_cache_for_object(
  */
 extern struct kmem_cache *fscache_cookie_jar;
 
-extern void fscache_cookie_init_once(void *);
+extern struct fscache_cookie *fscache_alloc_cookie(struct fscache_cookie *,
+						   const struct fscache_cookie_def *,
+						   void *);
 extern void __fscache_cookie_put(struct fscache_cookie *);
 
 /*
@@ -96,6 +98,8 @@ static inline bool fscache_object_congested(void)
 {
 	return workqueue_congested(WORK_CPU_UNBOUND, fscache_object_wq);
 }
+
+extern int fscache_wait_atomic_t(atomic_t *);
 
 /*
  * object.c

@@ -19,6 +19,9 @@
 #include <linux/pm_runtime.h>
 #include <scsi/scsi_device.h>
 #include "libata.h"
+#include "libata-transport.h"
+
+#include <acpi/acpi_bus.h>
 
 unsigned int ata_acpi_gtf_filter = ATA_ACPI_FILTER_DEFAULT;
 module_param_named(acpi_gtf_filter, ata_acpi_gtf_filter, int, 0644);
@@ -267,6 +270,7 @@ void ata_acpi_dissociate(struct ata_host *host)
 
 		if (ACPI_HANDLE(&ap->tdev) && gtm)
 			ata_acpi_stm(ap, gtm);
+		ata_tport_delete(ap);
 	}
 }
 
@@ -853,7 +857,6 @@ void ata_acpi_on_resume(struct ata_port *ap)
 		ata_for_each_dev(dev, &ap->link, ALL) {
 			ata_acpi_clear_gtf(dev);
 			if (ata_dev_enabled(dev) &&
-			    ata_dev_acpi_handle(dev) &&
 			    ata_dev_get_GTF(dev, NULL) >= 0)
 				dev->flags |= ATA_DFLAG_ACPI_PENDING;
 		}

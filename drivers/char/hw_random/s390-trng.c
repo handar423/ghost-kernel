@@ -19,12 +19,11 @@
 #include <linux/hw_random.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/cpufeature.h>
 #include <linux/miscdevice.h>
 #include <linux/debugfs.h>
 #include <linux/atomic.h>
 #include <linux/random.h>
-#include <linux/sched/signal.h>
+#include <linux/sched.h>
 #include <asm/debug.h>
 #include <asm/cpacf.h>
 
@@ -142,11 +141,6 @@ static const struct attribute_group trng_dev_attr_group = {
 	.attrs = trng_dev_attrs
 };
 
-static const struct attribute_group *trng_dev_attr_groups[] = {
-	&trng_dev_attr_group,
-	NULL
-};
-
 static const struct file_operations trng_fops = {
 	.owner		= THIS_MODULE,
 	.open		= &trng_open,
@@ -160,7 +154,6 @@ static struct miscdevice trng_dev = {
 	.minor	= MISC_DYNAMIC_MINOR,
 	.mode	= 0444,
 	.fops	= &trng_fops,
-	.groups = trng_dev_attr_groups,
 };
 
 
@@ -239,17 +232,26 @@ static int __init trng_init(void)
 		DEBUG_WARN("trng_init misc_register() failed rc=%d\n", ret);
 		goto out_dbg;
 	}
+	ret = sysfs_create_group(&trng_dev.this_device->kobj,
+				 &trng_dev_attr_group);
+	if (ret) {
+		DEBUG_WARN("trng_init sysfs_create_group() failed rc=%d\n", ret);
+		goto out_misc;
+	}
 
 	ret = hwrng_register(&trng_hwrng_dev);
 	if (ret) {
 		DEBUG_WARN("trng_init hwrng_register() failed rc=%d\n", ret);
-		goto out_misc;
+		goto out_sysfs;
 	}
 
 	DEBUG_DBG("trng_init successful\n");
 
 	return 0;
 
+out_sysfs:
+	sysfs_remove_group(&trng_dev.this_device->kobj,
+			   &trng_dev_attr_group);
 out_misc:
 	misc_deregister(&trng_dev);
 out_dbg:
@@ -260,9 +262,11 @@ out_dbg:
 static void __exit trng_exit(void)
 {
 	hwrng_unregister(&trng_hwrng_dev);
+	sysfs_remove_group(&trng_dev.this_device->kobj,
+			   &trng_dev_attr_group);
 	misc_deregister(&trng_dev);
 	trng_debug_exit();
 }
 
-module_cpu_feature_match(MSA, trng_init);
+module_init(trng_init);
 module_exit(trng_exit);

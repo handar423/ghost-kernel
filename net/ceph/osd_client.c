@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 
 #include <linux/ceph/ceph_debug.h>
 
@@ -103,13 +102,12 @@ static int calc_layout(struct ceph_file_layout *layout, u64 off, u64 *plen,
 			u64 *objnum, u64 *objoff, u64 *objlen)
 {
 	u64 orig_len = *plen;
-	int r;
+	u32 xlen;
 
 	/* object extent? */
-	r = ceph_calc_file_object_mapping(layout, off, orig_len, objnum,
-					  objoff, objlen);
-	if (r < 0)
-		return r;
+	ceph_calc_file_object_mapping(layout, off, orig_len, objnum,
+					  objoff, &xlen);
+	*objlen = xlen;
 	if (*objlen < orig_len) {
 		*plen = *objlen;
 		dout(" skipping last %llu, final file extent %llu~%llu\n",
@@ -117,7 +115,6 @@ static int calc_layout(struct ceph_file_layout *layout, u64 off, u64 *plen,
 	}
 
 	dout("calc_layout objnum=%llx %llu~%llu\n", *objnum, *objoff, *objlen);
-
 	return 0;
 }
 
@@ -1012,7 +1009,7 @@ static bool osd_registered(struct ceph_osd *osd)
  */
 static void osd_init(struct ceph_osd *osd)
 {
-	refcount_set(&osd->o_ref, 1);
+	atomic_set(&osd->o_ref, 1);
 	RB_CLEAR_NODE(&osd->o_node);
 	osd->o_requests = RB_ROOT;
 	osd->o_linger_requests = RB_ROOT;
@@ -1061,9 +1058,9 @@ static struct ceph_osd *create_osd(struct ceph_osd_client *osdc, int onum)
 
 static struct ceph_osd *get_osd(struct ceph_osd *osd)
 {
-	if (refcount_inc_not_zero(&osd->o_ref)) {
-		dout("get_osd %p %d -> %d\n", osd, refcount_read(&osd->o_ref)-1,
-		     refcount_read(&osd->o_ref));
+	if (atomic_inc_not_zero(&osd->o_ref)) {
+		dout("get_osd %p %d -> %d\n", osd, atomic_read(&osd->o_ref)-1,
+		     atomic_read(&osd->o_ref));
 		return osd;
 	} else {
 		dout("get_osd %p FAIL\n", osd);
@@ -1073,9 +1070,9 @@ static struct ceph_osd *get_osd(struct ceph_osd *osd)
 
 static void put_osd(struct ceph_osd *osd)
 {
-	dout("put_osd %p %d -> %d\n", osd, refcount_read(&osd->o_ref),
-	     refcount_read(&osd->o_ref) - 1);
-	if (refcount_dec_and_test(&osd->o_ref)) {
+	dout("put_osd %p %d -> %d\n", osd, atomic_read(&osd->o_ref),
+	     atomic_read(&osd->o_ref) - 1);
+	if (atomic_dec_and_test(&osd->o_ref)) {
 		osd_cleanup(osd);
 		kfree(osd);
 	}
@@ -1330,7 +1327,7 @@ static enum calc_target_result calc_target(struct ceph_osd_client *osdc,
 	struct ceph_osds up, acting;
 	bool force_resend = false;
 	bool unpaused = false;
-	bool legacy_change;
+	bool legacy_change = false;
 	bool split = false;
 	bool sort_bitwise = ceph_osdmap_flag(osdc, CEPH_OSDMAP_SORTBITWISE);
 	bool recovery_deletes = ceph_osdmap_flag(osdc,
@@ -1426,15 +1423,14 @@ static enum calc_target_result calc_target(struct ceph_osd_client *osdc,
 		t->osd = acting.primary;
 	}
 
-	if (unpaused || legacy_change || force_resend ||
-	    (split && con && CEPH_HAVE_FEATURE(con->peer_features,
-					       RESEND_ON_SPLIT)))
+	if (unpaused || legacy_change || force_resend || split)
 		ct_res = CALC_TARGET_NEED_RESEND;
 	else
 		ct_res = CALC_TARGET_NO_ACTION;
 
 out:
-	dout("%s t %p -> ct_res %d osd %d\n", __func__, t, ct_res, t->osd);
+	dout("%s t %p -> %d%d%d%d ct_res %d osd%d\n", __func__, t, unpaused,
+	     legacy_change, force_resend, split, ct_res, t->osd);
 	return ct_res;
 }
 
@@ -4266,6 +4262,7 @@ out_unlock_osdc:
 
 bad:
 	pr_err("osdc handle_watch_notify corrupt msg\n");
+	return;
 }
 
 /*
@@ -4418,7 +4415,7 @@ ceph_osdc_watch(struct ceph_osd_client *osdc,
 	ceph_oid_copy(&lreq->t.base_oid, oid);
 	ceph_oloc_copy(&lreq->t.base_oloc, oloc);
 	lreq->t.flags = CEPH_OSD_FLAG_WRITE;
-	ktime_get_real_ts(&lreq->mtime);
+	lreq->mtime = CURRENT_TIME;
 
 	lreq->reg_req = alloc_linger_request(lreq);
 	if (!lreq->reg_req) {
@@ -4476,7 +4473,7 @@ int ceph_osdc_unwatch(struct ceph_osd_client *osdc,
 	ceph_oid_copy(&req->r_base_oid, &lreq->t.base_oid);
 	ceph_oloc_copy(&req->r_base_oloc, &lreq->t.base_oloc);
 	req->r_flags = CEPH_OSD_FLAG_WRITE;
-	ktime_get_real_ts(&req->r_mtime);
+	req->r_mtime = CURRENT_TIME;
 	osd_req_op_watch_init(req, 0, lreq->linger_id,
 			      CEPH_OSD_WATCH_OP_UNWATCH);
 
@@ -4970,7 +4967,7 @@ void ceph_osdc_stop(struct ceph_osd_client *osdc)
 		close_osd(osd);
 	}
 	up_write(&osdc->lock);
-	WARN_ON(refcount_read(&osdc->homeless_osd.o_ref) != 1);
+	WARN_ON(atomic_read(&osdc->homeless_osd.o_ref) != 1);
 	osd_cleanup(&osdc->homeless_osd);
 
 	WARN_ON(!list_empty(&osdc->osd_lru));
@@ -5065,7 +5062,7 @@ int ceph_osdc_writepages(struct ceph_osd_client *osdc, struct ceph_vino vino,
 }
 EXPORT_SYMBOL(ceph_osdc_writepages);
 
-int ceph_osdc_setup(void)
+int __init ceph_osdc_setup(void)
 {
 	size_t size = sizeof(struct ceph_osd_request) +
 	    CEPH_OSD_SLAB_OPS * sizeof(struct ceph_osd_req_op);
@@ -5076,7 +5073,6 @@ int ceph_osdc_setup(void)
 
 	return ceph_osd_request_cache ? 0 : -ENOMEM;
 }
-EXPORT_SYMBOL(ceph_osdc_setup);
 
 void ceph_osdc_cleanup(void)
 {
@@ -5084,7 +5080,6 @@ void ceph_osdc_cleanup(void)
 	kmem_cache_destroy(ceph_osd_request_cache);
 	ceph_osd_request_cache = NULL;
 }
-EXPORT_SYMBOL(ceph_osdc_cleanup);
 
 /*
  * handle incoming message
@@ -5292,6 +5287,16 @@ static struct ceph_auth_handshake *get_authorizer(struct ceph_connection *con,
 	return auth;
 }
 
+static int add_authorizer_challenge(struct ceph_connection *con,
+				    void *challenge_buf, int challenge_buf_len)
+{
+	struct ceph_osd *o = con->private;
+	struct ceph_osd_client *osdc = o->o_osdc;
+	struct ceph_auth_client *ac = osdc->client->monc.auth;
+
+	return ceph_auth_add_authorizer_challenge(ac, o->o_auth.authorizer,
+					    challenge_buf, challenge_buf_len);
+}
 
 static int verify_authorizer_reply(struct ceph_connection *con)
 {
@@ -5341,6 +5346,7 @@ static const struct ceph_connection_operations osd_con_ops = {
 	.put = put_osd_con,
 	.dispatch = dispatch,
 	.get_authorizer = get_authorizer,
+	.add_authorizer_challenge = add_authorizer_challenge,
 	.verify_authorizer_reply = verify_authorizer_reply,
 	.invalidate_authorizer = invalidate_authorizer,
 	.alloc_msg = alloc_msg,

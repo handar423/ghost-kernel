@@ -958,9 +958,9 @@ static enum sci_status sci_controller_start_next_phy(struct isci_host *ihost)
 	return status;
 }
 
-static void phy_startup_timeout(struct timer_list *t)
+static void phy_startup_timeout(unsigned long data)
 {
-	struct sci_timer *tmr = from_timer(tmr, t, timer);
+	struct sci_timer *tmr = (struct sci_timer *)data;
 	struct isci_host *ihost = container_of(tmr, typeof(*ihost), phy_timer);
 	unsigned long flags;
 	enum sci_status status;
@@ -1592,9 +1592,9 @@ static const struct sci_base_state sci_controller_state_table[] = {
 	[SCIC_FAILED] = {}
 };
 
-static void controller_timeout(struct timer_list *t)
+static void controller_timeout(unsigned long data)
 {
-	struct sci_timer *tmr = from_timer(tmr, t, timer);
+	struct sci_timer *tmr = (struct sci_timer *)data;
 	struct isci_host *ihost = container_of(tmr, typeof(*ihost), timer);
 	struct sci_base_state_machine *sm = &ihost->sm;
 	unsigned long flags;
@@ -1737,9 +1737,9 @@ static u8 max_spin_up(struct isci_host *ihost)
 			     MAX_CONCURRENT_DEVICE_SPIN_UP_COUNT);
 }
 
-static void power_control_timeout(struct timer_list *t)
+static void power_control_timeout(unsigned long data)
 {
-	struct sci_timer *tmr = from_timer(tmr, t, timer);
+	struct sci_timer *tmr = (struct sci_timer *)data;
 	struct isci_host *ihost = container_of(tmr, typeof(*ihost), power_control.timer);
 	struct isci_phy *iphy;
 	unsigned long flags;
@@ -2465,8 +2465,10 @@ struct isci_request *sci_request_by_tag(struct isci_host *ihost, u16 io_tag)
 	task_index = ISCI_TAG_TCI(io_tag);
 
 	if (task_index < ihost->task_context_entries) {
-		struct isci_request *ireq = ihost->reqs[task_index];
+		struct isci_request *ireq;
 
+		gmb();
+		ireq = ihost->reqs[task_index];
 		if (test_bit(IREQ_ACTIVE, &ireq->flags)) {
 			task_sequence = ISCI_TAG_SEQ(io_tag);
 

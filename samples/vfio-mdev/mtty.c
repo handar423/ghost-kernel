@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Mediated virtual PCI serial host device driver
  *
@@ -5,13 +6,8 @@
  *     Author: Neo Jia <cjia@nvidia.com>
  *             Kirti Wankhede <kwankhede@nvidia.com>
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
  * Sample driver that creates mdev device that simulates serial port over PCI
  * card.
- *
  */
 
 #include <linux/init.h>
@@ -1073,7 +1069,7 @@ int mtty_get_region_info(struct mdev_device *mdev,
 {
 	unsigned int size = 0;
 	struct mdev_state *mdev_state;
-	u32 bar_index;
+	int bar_index;
 
 	if (!mdev)
 		return -EINVAL;
@@ -1082,11 +1078,8 @@ int mtty_get_region_info(struct mdev_device *mdev,
 	if (!mdev_state)
 		return -EINVAL;
 
-	bar_index = region_info->index;
-	if (bar_index >= VFIO_PCI_NUM_REGIONS)
-		return -EINVAL;
-
 	mutex_lock(&mdev_state->ops_lock);
+	bar_index = region_info->index;
 
 	switch (bar_index) {
 	case VFIO_PCI_CONFIG_REGION_INDEX:
@@ -1183,10 +1176,7 @@ static long mtty_ioctl(struct mdev_device *mdev, unsigned int cmd,
 
 		memcpy(&mdev_state->dev_info, &info, sizeof(info));
 
-		if (copy_to_user((void __user *)arg, &info, minsz))
-			return -EFAULT;
-
-		return 0;
+		return copy_to_user((void __user *)arg, &info, minsz);
 	}
 	case VFIO_DEVICE_GET_REGION_INFO:
 	{
@@ -1207,10 +1197,7 @@ static long mtty_ioctl(struct mdev_device *mdev, unsigned int cmd,
 		if (ret)
 			return ret;
 
-		if (copy_to_user((void __user *)arg, &info, minsz))
-			return -EFAULT;
-
-		return 0;
+		return copy_to_user((void __user *)arg, &info, minsz);
 	}
 
 	case VFIO_DEVICE_GET_IRQ_INFO:
@@ -1230,10 +1217,10 @@ static long mtty_ioctl(struct mdev_device *mdev, unsigned int cmd,
 		if (ret)
 			return ret;
 
-		if (copy_to_user((void __user *)arg, &info, minsz))
-			return -EFAULT;
+		if (info.count == -1)
+			return -EINVAL;
 
-		return 0;
+		return copy_to_user((void __user *)arg, &info, minsz);
 	}
 	case VFIO_DEVICE_SET_IRQS:
 	{
@@ -1413,7 +1400,7 @@ struct attribute_group *mdev_type_groups[] = {
 	NULL,
 };
 
-static const struct mdev_parent_ops mdev_fops = {
+struct mdev_parent_ops mdev_fops = {
 	.owner                  = THIS_MODULE,
 	.dev_attr_groups        = mtty_dev_groups,
 	.mdev_attr_groups       = mdev_dev_groups,
@@ -1458,7 +1445,6 @@ static int __init mtty_dev_init(void)
 
 	if (IS_ERR(mtty_dev.vd_class)) {
 		pr_err("Error: failed to register mtty_dev class\n");
-		ret = PTR_ERR(mtty_dev.vd_class);
 		goto failed1;
 	}
 
@@ -1470,8 +1456,7 @@ static int __init mtty_dev_init(void)
 	if (ret)
 		goto failed2;
 
-	ret = mdev_register_device(&mtty_dev.dev, &mdev_fops);
-	if (ret)
+	if (mdev_register_device(&mtty_dev.dev, &mdev_fops) != 0)
 		goto failed3;
 
 	mutex_init(&mdev_list_lock);

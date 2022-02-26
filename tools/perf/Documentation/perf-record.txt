@@ -57,6 +57,9 @@ OPTIONS
 			 FP mode, "dwarf" for DWARF mode, "lbr" for LBR mode and
 			 "no" for disable callgraph.
 	  - 'stack-size': user stack size for dwarf mode
+	  - 'name' : User defined event name. Single quotes (') may be used to
+		    escape symbols in the name from parsing by shell and tool
+		    like this: name=\'CPU_CLK_UNHALTED.THREAD:cmask=0x1\'.
 
           See the linkperf:perf-list[1] man page for more parameters.
 
@@ -91,7 +94,7 @@ OPTIONS
 	  "perf report" to view group events together.
 
 --filter=<filter>::
-        Event filter. This option should follow a event selector (-e) which
+        Event filter. This option should follow an event selector (-e) which
 	selects either tracepoint event(s) or a hardware trace PMU
 	(e.g. Intel PT or CoreSight).
 
@@ -150,7 +153,7 @@ OPTIONS
 
 --exclude-perf::
 	Don't record events issued by perf itself. This option should follow
-	a event selector (-e) which selects tracepoint event(s). It adds a
+	an event selector (-e) which selects tracepoint event(s). It adds a
 	filter expression 'common_pid != $PERFPID' to filters. If other
 	'--filter' exists, the new filter expression will be combined with
 	them by '&&'.
@@ -191,9 +194,16 @@ OPTIONS
 -i::
 --no-inherit::
 	Child tasks do not inherit counters.
+
 -F::
 --freq=::
-	Profile at this frequency.
+	Profile at this frequency. Use 'max' to use the currently maximum
+	allowed frequency, i.e. the value in the kernel.perf_event_max_sample_rate
+	sysctl. Will throttle down to the currently maximum allowed frequency.
+	See --strict-freq.
+
+--strict-freq::
+	Fail if the specified frequency can't be used.
 
 -m::
 --mmap-pages=::
@@ -308,7 +318,11 @@ can be provided. Each cgroup is applied to the corresponding event, i.e., first 
 to first event, second cgroup to second event and so on. It is possible to provide
 an empty cgroup (monitor all the time) using, e.g., -G foo,,bar. Cgroups must have
 corresponding events, i.e., they always refer to events defined earlier on the command
-line.
+line. If the user wants to track multiple events for a specific cgroup, the user can
+use '-e e1 -e e2 -G foo,foo' or just use '-e e1 -e e2 -G foo'.
+
+If wanting to monitor, say, 'cycles' for a cgroup and also for system wide, this
+command line can be used: 'perf stat -e cycles -G cgroup_name -a -e cycles'.
 
 -b::
 --branch-any::
@@ -350,9 +364,6 @@ Note that this feature may not be available on all processors.
 Enable weightened sampling. An additional weight is recorded per sample and can be
 displayed with the weight and local_weight sort keys.  This currently works for TSX
 abort events and some memory events in precise mode on modern Intel CPUs.
-
---namespaces::
-Record events of type PERF_RECORD_NAMESPACES.
 
 --transaction::
 Record transaction flags for transaction related events.
@@ -406,18 +417,6 @@ This option sets the time out limit. The default value is 500 ms.
 Record context switch events i.e. events of type PERF_RECORD_SWITCH or
 PERF_RECORD_SWITCH_CPU_WIDE.
 
---clang-path=PATH::
-Path to clang binary to use for compiling BPF scriptlets.
-(enabled when BPF support is on)
-
---clang-opt=OPTIONS::
-Options passed to clang when compiling BPF scriptlets.
-(enabled when BPF support is on)
-
---vmlinux=PATH::
-Specify vmlinux path which has debuginfo.
-(enabled when BPF prologue is on)
-
 --buildid-all::
 Record build-id of all DSOs regardless whether it's actually hit or not.
 
@@ -429,6 +428,9 @@ Configure all used events to run in user space.
 
 --timestamp-filename
 Append timestamp to output file name.
+
+--timestamp-boundary::
+Record timestamp boundary (time of first/last samples).
 
 --switch-output[=mode]::
 Generate multiple perf.data files, timestamp prefixed, switching to a new one

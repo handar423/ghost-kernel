@@ -40,7 +40,6 @@ struct ieee802154_llsec_key;
 struct cfg802154_ops {
 	struct net_device * (*add_virtual_intf_deprecated)(struct wpan_phy *wpan_phy,
 							   const char *name,
-							   unsigned char name_assign_type,
 							   int type);
 	void	(*del_virtual_intf_deprecated)(struct wpan_phy *wpan_phy,
 					       struct net_device *dev);
@@ -48,7 +47,6 @@ struct cfg802154_ops {
 	int	(*resume)(struct wpan_phy *wpan_phy);
 	int	(*add_virtual_intf)(struct wpan_phy *wpan_phy,
 				    const char *name,
-				    unsigned char name_assign_type,
 				    enum nl802154_iftype type,
 				    __le64 extended_addr);
 	int	(*del_virtual_intf)(struct wpan_phy *wpan_phy,

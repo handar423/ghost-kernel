@@ -1,4 +1,4 @@
-/* Copyright (c) 2013 Coraid, Inc.  See COPYING for GPL terms. */
+/* Copyright (c) 2012 Coraid, Inc.  See COPYING for GPL terms. */
 /*
  * aoedev.c
  * AoE device utility functions; maintains device list.
@@ -12,9 +12,9 @@
 #include <linux/bitmap.h>
 #include <linux/kdev_t.h>
 #include <linux/moduleparam.h>
-#include <linux/string.h>
 #include "aoe.h"
 
+static void dummy_timer(ulong);
 static void freetgt(struct aoedev *d, struct aoetgt *t);
 static void skbpoolfree(struct aoedev *d);
 
@@ -145,11 +145,11 @@ aoedev_put(struct aoedev *d)
 }
 
 static void
-dummy_timer(struct timer_list *t)
+dummy_timer(ulong vp)
 {
 	struct aoedev *d;
 
-	d = from_timer(d, t, timer);
+	d = (struct aoedev *)vp;
 	if (d->flags & DEVFL_TKILL)
 		return;
 	d->timer.expires = jiffies + HZ;
@@ -169,7 +169,7 @@ aoe_failip(struct aoedev *d)
 	if (rq == NULL)
 		return;
 	while ((bio = d->ip.nxbio)) {
-		bio->bi_status = BLK_STS_IOERR;
+		clear_bit(BIO_UPTODATE, &bio->bi_flags);
 		d->ip.nxbio = bio->bi_next;
 		n = (unsigned long) rq->special;
 		rq->special = (void *) --n;
@@ -241,12 +241,16 @@ aoedev_downdev(struct aoedev *d)
 static int
 user_req(char *s, size_t slen, struct aoedev *d)
 {
-	const char *p;
+	char *p;
 	size_t lim;
 
 	if (!d->gd)
 		return 0;
-	p = kbasename(d->gd->disk_name);
+	p = strrchr(d->gd->disk_name, '/');
+	if (!p)
+		p = d->gd->disk_name;
+	else
+		p += 1;
 	lim = sizeof(d->gd->disk_name);
 	lim -= p - d->gd->disk_name;
 	if (slen < lim)
@@ -274,8 +278,6 @@ freedev(struct aoedev *d)
 
 	del_timer_sync(&d->timer);
 	if (d->gd) {
-		aoedisk_rm_debugfs(d);
-		aoedisk_rm_sysfs(d);
 		del_gendisk(d->gd);
 		put_disk(d->gd);
 		blk_cleanup_queue(d->blkq);
@@ -465,7 +467,9 @@ aoedev_by_aoeaddr(ulong maj, int min, int do_alloc)
 	INIT_WORK(&d->work, aoecmd_sleepwork);
 	spin_lock_init(&d->lock);
 	skb_queue_head_init(&d->skbpool);
-	timer_setup(&d->timer, dummy_timer, 0);
+	init_timer(&d->timer);
+	d->timer.data = (ulong) d;
+	d->timer.function = dummy_timer;
 	d->timer.expires = jiffies + HZ;
 	add_timer(&d->timer);
 	d->bufpool = NULL;	/* defer to aoeblk_gdalloc */
@@ -513,6 +517,7 @@ void
 aoedev_exit(void)
 {
 	flush_scheduled_work();
+	aoe_flush_iocq();
 	flush(NULL, 0, EXITING);
 }
 

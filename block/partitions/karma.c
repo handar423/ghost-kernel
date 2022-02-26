@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  *  fs/partitions/karma.c
  *  Rio Karma partition info.
@@ -9,7 +8,6 @@
 
 #include "check.h"
 #include "karma.h"
-#include <linux/compiler.h>
 
 int karma_partition(struct parsed_partitions *state)
 {
@@ -28,7 +26,7 @@ int karma_partition(struct parsed_partitions *state)
 		} d_partitions[2];
 		u8 d_blank[208];
 		__le16 d_magic;
-	} __packed *label;
+	} __attribute__((packed)) *label;
 	struct d_partition *p;
 
 	data = read_part_sector(state, 0, &sect);

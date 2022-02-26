@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __TOOLS_LINUX_KERNEL_H
 #define __TOOLS_LINUX_KERNEL_H
 
@@ -113,8 +112,5 @@ int scnprintf(char * buf, size_t size, const char * fmt, ...);
 #define __round_mask(x, y) ((__typeof__(x))((y)-1))
 #define round_up(x, y) ((((x)-1) | __round_mask(x, y))+1)
 #define round_down(x, y) ((x) & ~__round_mask(x, y))
-
-#define current_gfp_context(k) 0
-#define synchronize_sched()
 
 #endif

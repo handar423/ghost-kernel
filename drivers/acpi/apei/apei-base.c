@@ -24,6 +24,10 @@
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #include <linux/kernel.h>
@@ -762,19 +766,6 @@ struct dentry *apei_get_debugfs_dir(void)
 	return dapei;
 }
 EXPORT_SYMBOL_GPL(apei_get_debugfs_dir);
-
-int __weak arch_apei_enable_cmcff(struct acpi_hest_header *hest_hdr,
-				  void *data)
-{
-	return 1;
-}
-EXPORT_SYMBOL_GPL(arch_apei_enable_cmcff);
-
-void __weak arch_apei_report_mem_error(int sev,
-				       struct cper_sec_mem_err *mem_err)
-{
-}
-EXPORT_SYMBOL_GPL(arch_apei_report_mem_error);
 
 int apei_osc_setup(void)
 {

@@ -28,10 +28,10 @@
 #include <linux/netfilter_ipv4/ip_tables.h>
 
 
-static unsigned int ipt_net_id;
+static int ipt_net_id;
 static struct tc_action_ops act_ipt_ops;
 
-static unsigned int xt_net_id;
+static int xt_net_id;
 static struct tc_action_ops act_xt_ops;
 
 static int ipt_init_target(struct net *net, struct xt_entry_target *t,
@@ -80,9 +80,12 @@ static void ipt_destroy_target(struct xt_entry_target *t)
 static void tcf_ipt_release(struct tc_action *a, int bind)
 {
 	struct tcf_ipt *ipt = to_ipt(a);
-	ipt_destroy_target(ipt->tcfi_t);
+
+	if (ipt->tcfi_t) {
+		ipt_destroy_target(ipt->tcfi_t);
+		kfree(ipt->tcfi_t);
+	}
 	kfree(ipt->tcfi_tname);
-	kfree(ipt->tcfi_t);
 }
 
 static const struct nla_policy ipt_policy[TCA_IPT_MAX + 1] = {
@@ -109,7 +112,7 @@ static int __tcf_ipt_init(struct net *net, unsigned int id, struct nlattr *nla,
 	if (nla == NULL)
 		return -EINVAL;
 
-	err = nla_parse_nested(tb, TCA_IPT_MAX, nla, ipt_policy, NULL);
+	err = nla_parse_nested(tb, TCA_IPT_MAX, nla, ipt_policy);
 	if (err < 0)
 		return err;
 
@@ -127,7 +130,7 @@ static int __tcf_ipt_init(struct net *net, unsigned int id, struct nlattr *nla,
 	}
 
 	td = (struct xt_entry_target *)nla_data(tb[TCA_IPT_TARG]);
-	if (nla_len(tb[TCA_IPT_TARG]) < td->u.target_size) {
+	if (nla_len(tb[TCA_IPT_TARG]) != td->u.target_size) {
 		if (exists)
 			tcf_idr_release(*a, bind);
 		return -EINVAL;
@@ -142,10 +145,11 @@ static int __tcf_ipt_init(struct net *net, unsigned int id, struct nlattr *nla,
 	} else {
 		if (bind)/* dont override defaults */
 			return 0;
-		tcf_idr_release(*a, bind);
 
-		if (!ovr)
+		if (!ovr) {
+			tcf_idr_release(*a, bind);
 			return -EEXIST;
+		}
 	}
 	hook = nla_get_u32(tb[TCA_IPT_HOOK]);
 
@@ -186,8 +190,7 @@ err3:
 err2:
 	kfree(tname);
 err1:
-	if (ret == ACT_P_CREATED)
-		tcf_idr_cleanup(*a, est);
+	tcf_idr_release(*a, bind);
 	return err;
 }
 
@@ -213,12 +216,6 @@ static int tcf_ipt(struct sk_buff *skb, const struct tc_action *a,
 	int ret = 0, result = 0;
 	struct tcf_ipt *ipt = to_ipt(a);
 	struct xt_action_param par;
-	struct nf_hook_state state = {
-		.net	= dev_net(skb->dev),
-		.in	= skb->dev,
-		.hook	= ipt->tcfi_hook,
-		.pf	= NFPROTO_IPV4,
-	};
 
 	if (skb_unclone(skb, GFP_ATOMIC))
 		return TC_ACT_UNSPEC;
@@ -232,9 +229,13 @@ static int tcf_ipt(struct sk_buff *skb, const struct tc_action *a,
 	 * worry later - danger - this API seems to have changed
 	 * from earlier kernels
 	 */
-	par.state    = &state;
+	par.net	     = dev_net(skb->dev);
+	par.in       = skb->dev;
+	par.out      = NULL;
+	par.hooknum  = ipt->tcfi_hook;
 	par.target   = ipt->tcfi_t->u.kernel.target;
 	par.targinfo = ipt->tcfi_t->data;
+	par.family   = NFPROTO_IPV4;
 	ret = par.target->target(skb, &par);
 
 	switch (ret) {

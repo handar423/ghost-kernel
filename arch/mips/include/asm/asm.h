@@ -18,7 +18,6 @@
 #define __ASM_ASM_H
 
 #include <asm/sgidefs.h>
-#include <asm/asm-eva.h>
 
 #ifndef CAT
 #ifdef __STDC__
@@ -54,9 +53,7 @@
 		.align	2;				\
 		.type	symbol, @function;		\
 		.ent	symbol, 0;			\
-symbol:		.frame	sp, 0, ra;			\
-		.cfi_startproc;				\
-		.insn
+symbol:		.frame	sp, 0, ra
 
 /*
  * NESTED - declare nested routine entry point
@@ -65,16 +62,13 @@ symbol:		.frame	sp, 0, ra;			\
 		.globl	symbol;				\
 		.align	2;				\
 		.type	symbol, @function;		\
-		.ent	symbol, 0;			\
-symbol:		.frame	sp, framesize, rpc;		\
-		.cfi_startproc;				\
-		.insn
+		.ent	symbol, 0;			 \
+symbol:		.frame	sp, framesize, rpc
 
 /*
  * END - mark end of function
  */
 #define END(function)					\
-		.cfi_endproc;				\
 		.end	function;			\
 		.size	function, .-function
 
@@ -91,7 +85,7 @@ symbol:
 #define FEXPORT(symbol)					\
 		.globl	symbol;				\
 		.type	symbol, @function;		\
-symbol:		.insn
+symbol:
 
 /*
  * ABS - export absolute symbol
@@ -151,27 +145,19 @@ symbol		=	value
 
 #define PREF(hint,addr)					\
 		.set	push;				\
-		.set	arch=r5000;			\
+		.set	mips4;				\
 		pref	hint, addr;			\
-		.set	pop
-
-#define PREFE(hint, addr)				\
-		.set	push;				\
-		.set	mips0;				\
-		.set	eva;				\
-		prefe	hint, addr;			\
 		.set	pop
 
 #define PREFX(hint,addr)				\
 		.set	push;				\
-		.set	arch=r5000;			\
+		.set	mips4;				\
 		prefx	hint, addr;			\
 		.set	pop
 
 #else /* !CONFIG_CPU_HAS_PREFETCH */
 
 #define PREF(hint, addr)
-#define PREFE(hint, addr)
 #define PREFX(hint, addr)
 
 #endif /* !CONFIG_CPU_HAS_PREFETCH */

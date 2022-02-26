@@ -14,7 +14,6 @@
 #define __ND_CORE_H__
 #include <linux/libnvdimm.h>
 #include <linux/device.h>
-#include <linux/libnvdimm.h>
 #include <linux/sizes.h>
 #include <linux/mutex.h>
 #include <linux/nd.h>
@@ -22,6 +21,7 @@
 extern struct list_head nvdimm_bus_list;
 extern struct mutex nvdimm_bus_list_mutex;
 extern int nvdimm_major;
+extern struct workqueue_struct *nvdimm_wq;
 
 struct nvdimm_bus {
 	struct nvdimm_bus_descriptor *nd_desc;
@@ -42,7 +42,50 @@ struct nvdimm {
 	atomic_t busy;
 	int id, num_flush;
 	struct resource *flush_wpq;
+	const char *dimm_id;
+	struct {
+		const struct nvdimm_security_ops *ops;
+		unsigned long flags;
+		unsigned long ext_flags;
+		unsigned int overwrite_tmo;
+		struct kernfs_node *overwrite_state;
+	} sec;
+	struct delayed_work dwork;
 };
+
+static inline unsigned long nvdimm_security_flags(
+		struct nvdimm *nvdimm, enum nvdimm_passphrase_type ptype)
+{
+	u64 flags;
+	const u64 state_flags = 1UL << NVDIMM_SECURITY_DISABLED
+		| 1UL << NVDIMM_SECURITY_LOCKED
+		| 1UL << NVDIMM_SECURITY_UNLOCKED
+		| 1UL << NVDIMM_SECURITY_OVERWRITE;
+
+	if (!nvdimm->sec.ops)
+		return 0;
+
+	flags = nvdimm->sec.ops->get_flags(nvdimm, ptype);
+	/* disabled, locked, unlocked, and overwrite are mutually exclusive */
+	dev_WARN_ONCE(&nvdimm->dev, hweight64(flags & state_flags) > 1,
+			"reported invalid security state: %#llx\n",
+			(unsigned long long) flags);
+	return flags;
+}
+int nvdimm_security_freeze(struct nvdimm *nvdimm);
+#if IS_ENABLED(CONFIG_NVDIMM_KEYS)
+ssize_t nvdimm_security_store(struct device *dev, const char *buf, size_t len);
+void nvdimm_security_overwrite_query(struct work_struct *work);
+#else
+static inline ssize_t nvdimm_security_store(struct device *dev,
+		const char *buf, size_t len)
+{
+	return -EOPNOTSUPP;
+}
+static inline void nvdimm_security_overwrite_query(struct work_struct *work)
+{
+}
+#endif
 
 /**
  * struct blk_alloc_info - tracking info for BLK dpa scanning
@@ -100,10 +143,20 @@ struct nd_region;
 struct nvdimm_drvdata;
 struct nd_mapping;
 void nd_mapping_free_labels(struct nd_mapping *nd_mapping);
+
+int __reserve_free_pmem(struct device *dev, void *data);
+void release_free_pmem(struct nvdimm_bus *nvdimm_bus,
+		       struct nd_mapping *nd_mapping);
+
+resource_size_t nd_pmem_max_contiguous_dpa(struct nd_region *nd_region,
+					   struct nd_mapping *nd_mapping);
+resource_size_t nd_region_allocatable_dpa(struct nd_region *nd_region);
 resource_size_t nd_pmem_available_dpa(struct nd_region *nd_region,
 		struct nd_mapping *nd_mapping, resource_size_t *overlap);
 resource_size_t nd_blk_available_dpa(struct nd_region *nd_region);
 resource_size_t nd_region_available_dpa(struct nd_region *nd_region);
+int nd_region_conflict(struct nd_region *nd_region, resource_size_t start,
+		resource_size_t size);
 resource_size_t nvdimm_allocated_dpa(struct nvdimm_drvdata *ndd,
 		struct nd_label_id *label_id);
 int alias_dpa_busy(struct device *dev, void *data);

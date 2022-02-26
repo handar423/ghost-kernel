@@ -23,8 +23,6 @@
 #define _ASM_MMU_CONTEXT_H
 
 #include <linux/atomic.h>
-#include <linux/mm_types.h>
-
 #include <asm/pgalloc.h>
 #include <asm/tlbflush.h>
 #include <asm-generic/mm_hooks.h>
@@ -73,7 +71,7 @@ static inline unsigned long allocate_mmu_context(struct mm_struct *mm)
 		local_flush_tlb_all();
 
 		/* fix the TLB version if needed (we avoid version #0 so as to
-		 * distinguish MMU_NO_CONTEXT) */
+		 * distingush MMU_NO_CONTEXT) */
 		if (!mc)
 			*pmc = mc = MMU_CONTEXT_FIRST_VERSION;
 	}

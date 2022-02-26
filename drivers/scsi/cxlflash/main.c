@@ -23,6 +23,7 @@
 
 #include <scsi/scsi_cmnd.h>
 #include <scsi/scsi_host.h>
+#include <scsi/scsi_tcq.h>
 #include <uapi/scsi/cxlflash_ioctl.h>
 
 #include "main.h"
@@ -565,7 +566,7 @@ static int cxlflash_queuecommand(struct Scsi_Host *host, struct scsi_cmnd *scp)
 	struct cxlflash_cfg *cfg = shost_priv(host);
 	struct afu *afu = cfg->afu;
 	struct device *dev = &cfg->dev->dev;
-	struct afu_cmd *cmd = sc_to_afuci(scp);
+	struct afu_cmd *cmd = sc_to_afucz(scp);
 	struct scatterlist *sg = scsi_sglist(scp);
 	int hwq_index = cmd_to_target_hwq(host, scp, afu);
 	struct hwq *hwq = get_hwq(afu, hwq_index);
@@ -573,7 +574,7 @@ static int cxlflash_queuecommand(struct Scsi_Host *host, struct scsi_cmnd *scp)
 	ulong lock_flags;
 	int rc = 0;
 
-	dev_dbg_ratelimited(dev, "%s: (scp=%p) %d/%d/%d/%llu "
+	dev_dbg_ratelimited(dev, "%s: (scp=%p) %d/%d/%d/%d "
 			    "cdb=(%08x-%08x-%08x-%08x)\n",
 			    __func__, scp, host->host_no, scp->device->channel,
 			    scp->device->id, scp->device->lun,
@@ -1634,10 +1635,7 @@ static int read_vpd(struct cxlflash_cfg *cfg, u64 wwpn[])
 	ssize_t vpd_size;
 	char vpd_data[CXLFLASH_VPD_LEN];
 	char tmp_buf[WWPN_BUF_LEN] = { 0 };
-	const struct dev_dependent_vals *ddv = (struct dev_dependent_vals *)
-						cfg->dev_id->driver_data;
-	const bool wwpn_vpd_required = ddv->flags & CXLFLASH_WWPN_VPD_REQUIRED;
-	const char *wwpn_vpd_tags[MAX_FC_PORTS] = { "V5", "V6", "V7", "V8" };
+	char *wwpn_vpd_tags[MAX_FC_PORTS] = { "V5", "V6", "V7", "V8" };
 
 	/* Get the VPD data from the device */
 	vpd_size = cxl_read_adapter_vpd(pdev, vpd_data, sizeof(vpd_data));
@@ -1674,24 +1672,17 @@ static int read_vpd(struct cxlflash_cfg *cfg, u64 wwpn[])
 	 * value. Note that we must copy to a temporary buffer
 	 * because the conversion service requires that the ASCII
 	 * string be terminated.
-	 *
-	 * Allow for WWPN not being found for all devices, setting
-	 * the returned WWPN to zero when not found. Notify with a
-	 * log error for cards that should have had WWPN keywords
-	 * in the VPD - cards requiring WWPN will not have their
-	 * ports programmed and operate in an undefined state.
 	 */
 	for (k = 0; k < cfg->num_fc_ports; k++) {
 		j = ro_size;
 		i = ro_start + PCI_VPD_LRDT_TAG_SIZE;
 
 		i = pci_vpd_find_info_keyword(vpd_data, i, j, wwpn_vpd_tags[k]);
-		if (i < 0) {
-			if (wwpn_vpd_required)
-				dev_err(dev, "%s: Port %d WWPN not found\n",
-					__func__, k);
-			wwpn[k] = 0ULL;
-			continue;
+		if (unlikely(i < 0)) {
+			dev_err(dev, "%s: Port %d WWPN not found in VPD\n",
+				__func__, k);
+			rc = -ENODEV;
+			goto out;
 		}
 
 		j = pci_vpd_info_field_size(&vpd_data[i]);
@@ -2399,7 +2390,7 @@ static int cxlflash_eh_abort_handler(struct scsi_cmnd *scp)
 	struct afu *afu = cfg->afu;
 	struct hwq *hwq = get_hwq(afu, cmd->hwq_index);
 
-	dev_dbg(dev, "%s: (scp=%p) %d/%d/%d/%llu "
+	dev_dbg(dev, "%s: (scp=%p) %d/%d/%d/%d "
 		"cdb=(%08x-%08x-%08x-%08x)\n", __func__, scp, host->host_no,
 		scp->device->channel, scp->device->id, scp->device->lun,
 		get_unaligned_be32(&((u32 *)scp->cmnd)[0]),
@@ -2444,7 +2435,7 @@ static int cxlflash_eh_device_reset_handler(struct scsi_cmnd *scp)
 	struct device *dev = &cfg->dev->dev;
 	int rcr = 0;
 
-	dev_dbg(dev, "%s: %d/%d/%d/%llu\n", __func__,
+	dev_dbg(dev, "%s: %d/%d/%d/%d\n", __func__,
 		host->host_no, sdev->channel, sdev->id, sdev->lun);
 retry:
 	switch (cfg->state) {
@@ -2520,18 +2511,23 @@ static int cxlflash_eh_host_reset_handler(struct scsi_cmnd *scp)
  * cxlflash_change_queue_depth() - change the queue depth for the device
  * @sdev:	SCSI device destined for queue depth change.
  * @qdepth:	Requested queue depth value to set.
+ * @reason:	Reason why queue depth is changed.
  *
  * The requested queue depth is capped to the maximum supported value.
  *
  * Return: The actual queue depth set.
  */
-static int cxlflash_change_queue_depth(struct scsi_device *sdev, int qdepth)
+static int cxlflash_change_queue_depth(struct scsi_device *sdev, int qdepth,
+					int reason)
 {
+	/* Support only default path for change */
+	if (reason != SCSI_QDEPTH_DEFAULT)
+		return -EOPNOTSUPP;
 
 	if (qdepth > CXLFLASH_MAX_CMDS_PER_LUN)
 		qdepth = CXLFLASH_MAX_CMDS_PER_LUN;
 
-	scsi_change_queue_depth(sdev, qdepth);
+	scsi_adjust_queue_depth(sdev, MSG_SIMPLE_TAG, qdepth);
 	return sdev->queue_depth;
 }
 
@@ -3155,7 +3151,7 @@ static struct scsi_host_template driver_template = {
  * Device dependent values
  */
 static struct dev_dependent_vals dev_corsa_vals = { CXLFLASH_MAX_SECTORS,
-					CXLFLASH_WWPN_VPD_REQUIRED };
+					0ULL };
 static struct dev_dependent_vals dev_flash_gt_vals = { CXLFLASH_MAX_SECTORS,
 					CXLFLASH_NOTIFY_SHUTDOWN };
 static struct dev_dependent_vals dev_briard_vals = { CXLFLASH_MAX_SECTORS,
@@ -3390,6 +3386,12 @@ static int cxlflash_afu_debug(struct cxlflash_cfg *cfg,
 
 		if (ulen > HT_CXLFLASH_AFU_DEBUG_MAX_DATA_LEN) {
 			rc = -EINVAL;
+			goto out;
+		}
+
+		if (unlikely(!access_ok(is_write ? VERIFY_READ : VERIFY_WRITE,
+					ubuf, ulen))) {
+			rc = -EFAULT;
 			goto out;
 		}
 
@@ -3711,7 +3713,7 @@ static int cxlflash_probe(struct pci_dev *pdev,
 	cfg->init_state = INIT_STATE_PCI;
 
 	rc = init_afu(cfg);
-	if (rc && !wq_has_sleeper(&cfg->reset_waitq)) {
+	if (rc && !waitqueue_active(&cfg->reset_waitq)) {
 		dev_err(dev, "%s: init_afu failed rc=%d\n", __func__, rc);
 		goto out_remove;
 	}
@@ -3731,7 +3733,7 @@ static int cxlflash_probe(struct pci_dev *pdev,
 	}
 	cfg->init_state = INIT_STATE_CDEV;
 
-	if (wq_has_sleeper(&cfg->reset_waitq)) {
+	if (waitqueue_active(&cfg->reset_waitq)) {
 		cfg->state = STATE_PROBED;
 		wake_up_all(&cfg->reset_waitq);
 	} else

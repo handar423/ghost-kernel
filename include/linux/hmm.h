@@ -11,7 +11,7 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  *
- * Authors: JÃ©rÃ´me Glisse <jglisse@redhat.com>
+ * Authors: Jérôme Glisse <jglisse@redhat.com>
  */
 /*
  * Heterogeneous Memory Management (HMM)
@@ -105,6 +105,7 @@ typedef unsigned long hmm_pfn_t;
 #define HMM_PFN_DEVICE_UNADDRESSABLE (1 << 6)
 #define HMM_PFN_SHIFT 7
 
+
 /*
  * hmm_pfn_t_to_page() - return struct page pointed to by a valid hmm_pfn_t
  * @pfn: hmm_pfn_t to convert to struct page
@@ -151,7 +152,6 @@ static inline hmm_pfn_t hmm_pfn_t_from_pfn(unsigned long pfn)
 {
 	return (pfn << HMM_PFN_SHIFT) | HMM_PFN_VALID;
 }
-
 
 #if IS_ENABLED(CONFIG_HMM_MIRROR)
 /*
@@ -326,8 +326,6 @@ int hmm_vma_fault(struct vm_area_struct *vma,
 		  bool block);
 #endif /* IS_ENABLED(CONFIG_HMM_MIRROR) */
 
-
-#if IS_ENABLED(CONFIG_DEVICE_PRIVATE) ||  IS_ENABLED(CONFIG_DEVICE_PUBLIC)
 struct hmm_devmem;
 
 struct page *hmm_vma_alloc_locked_page(struct vm_area_struct *vma,
@@ -395,7 +393,7 @@ struct hmm_devmem_ops {
 	int (*fault)(struct hmm_devmem *devmem,
 		     struct vm_area_struct *vma,
 		     unsigned long addr,
-		     const struct page *page,
+		     struct page *page,
 		     unsigned int flags,
 		     pmd_t *pmdp);
 };
@@ -443,10 +441,17 @@ struct hmm_devmem {
 struct hmm_devmem *hmm_devmem_add(const struct hmm_devmem_ops *ops,
 				  struct device *device,
 				  unsigned long size);
-struct hmm_devmem *hmm_devmem_add_resource(const struct hmm_devmem_ops *ops,
-					   struct device *device,
-					   struct resource *res);
 void hmm_devmem_remove(struct hmm_devmem *devmem);
+
+int hmm_devmem_fault_range(struct hmm_devmem *devmem,
+			   struct vm_area_struct *vma,
+			   const struct migrate_vma_ops *ops,
+			   unsigned long *src,
+			   unsigned long *dst,
+			   unsigned long start,
+			   unsigned long addr,
+			   unsigned long end,
+			   void *private);
 
 /*
  * hmm_devmem_page_set_drvdata - set per-page driver data field
@@ -471,9 +476,9 @@ static inline void hmm_devmem_page_set_drvdata(struct page *page,
  * @page: pointer to struct page
  * Return: driver data value
  */
-static inline unsigned long hmm_devmem_page_get_drvdata(const struct page *page)
+static inline unsigned long hmm_devmem_page_get_drvdata(struct page *page)
 {
-	const unsigned long *drvdata = (const unsigned long *)&page->pgmap;
+	unsigned long *drvdata = (unsigned long *)&page->pgmap;
 
 	return drvdata[1];
 }
@@ -497,24 +502,14 @@ struct hmm_device {
  */
 struct hmm_device *hmm_device_new(void *drvdata);
 void hmm_device_put(struct hmm_device *hmm_device);
-#endif /* CONFIG_DEVICE_PRIVATE || CONFIG_DEVICE_PUBLIC */
-#endif /* IS_ENABLED(CONFIG_HMM) */
 
 /* Below are for HMM internal use only! Not to be used by device driver! */
-#if IS_ENABLED(CONFIG_HMM_MIRROR)
 void hmm_mm_destroy(struct mm_struct *mm);
 
-static inline void hmm_mm_init(struct mm_struct *mm)
-{
-	mm->hmm = NULL;
-}
-#else /* IS_ENABLED(CONFIG_HMM_MIRROR) */
-static inline void hmm_mm_destroy(struct mm_struct *mm) {}
-static inline void hmm_mm_init(struct mm_struct *mm) {}
-#endif /* IS_ENABLED(CONFIG_HMM_MIRROR) */
-
-
 #else /* IS_ENABLED(CONFIG_HMM) */
+
+/* Below are for HMM internal use only! Not to be used by device driver! */
 static inline void hmm_mm_destroy(struct mm_struct *mm) {}
-static inline void hmm_mm_init(struct mm_struct *mm) {}
+
+#endif /* IS_ENABLED(CONFIG_HMM) */
 #endif /* LINUX_HMM_H */

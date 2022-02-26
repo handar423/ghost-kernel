@@ -74,7 +74,7 @@
 #include <asm/processor.h>      /* Processor type for cache alignment. */
 #include <asm/io.h>
 #include <asm/irq.h>
-#include <linux/uaccess.h>	/* User space memory access functions */
+#include <asm/uaccess.h>	/* User space memory access functions */
 
 #include "sis900.h"
 
@@ -176,7 +176,7 @@ struct sis900_private {
 
 	u32 msg_enable;
 
-	unsigned int cur_rx, dirty_rx; /* producer/consumer pointers for Tx/Rx ring */
+	unsigned int cur_rx, dirty_rx; /* producer/comsumer pointers for Tx/Rx ring */
 	unsigned int cur_tx, dirty_tx;
 
 	/* The saved address of a sent/receive-in-place packet buffer */
@@ -218,7 +218,7 @@ static void sis900_init_rxfilter (struct net_device * net_dev);
 static u16 read_eeprom(void __iomem *ioaddr, int location);
 static int mdio_read(struct net_device *net_dev, int phy_id, int location);
 static void mdio_write(struct net_device *net_dev, int phy_id, int location, int val);
-static void sis900_timer(struct timer_list *t);
+static void sis900_timer(unsigned long data);
 static void sis900_check_mode (struct net_device *net_dev, struct mii_phy *mii_phy);
 static void sis900_tx_timeout(struct net_device *net_dev);
 static void sis900_init_tx_ring(struct net_device *net_dev);
@@ -400,6 +400,7 @@ static const struct net_device_ops sis900_netdev_ops = {
 	.ndo_start_xmit		= sis900_start_xmit,
 	.ndo_set_config		= sis900_set_config,
 	.ndo_set_rx_mode	= set_rx_mode,
+	.ndo_change_mtu		= eth_change_mtu,
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_set_mac_address 	= eth_mac_addr,
 	.ndo_do_ioctl		= mii_ioctl,
@@ -576,6 +577,7 @@ err_unmap_tx:
 err_out_unmap:
 	pci_iounmap(pci_dev, ioaddr);
 err_out_cleardev:
+	pci_set_drvdata(pci_dev, NULL);
 	pci_release_regions(pci_dev);
  err_out:
 	free_netdev(net_dev);
@@ -1065,8 +1067,10 @@ sis900_open(struct net_device *net_dev)
 
 	/* Set the timer to switch to check for link beat and perhaps switch
 	   to an alternate media type. */
-	timer_setup(&sis_priv->timer, sis900_timer, 0);
+	init_timer(&sis_priv->timer);
 	sis_priv->timer.expires = jiffies + HZ;
+	sis_priv->timer.data = (unsigned long)net_dev;
+	sis_priv->timer.function = sis900_timer;
 	add_timer(&sis_priv->timer);
 
 	return 0;
@@ -1300,14 +1304,28 @@ static void sis630_set_eq(struct net_device *net_dev, u8 revision)
  *	link status (ON/OFF) and link mode (10/100/Full/Half)
  */
 
-static void sis900_timer(struct timer_list *t)
+static void sis900_timer(unsigned long data)
 {
-	struct sis900_private *sis_priv = from_timer(sis_priv, t, timer);
-	struct net_device *net_dev = sis_priv->mii_info.dev;
+	struct net_device *net_dev = (struct net_device *)data;
+	struct sis900_private *sis_priv = netdev_priv(net_dev);
 	struct mii_phy *mii_phy = sis_priv->mii;
 	static const int next_tick = 5*HZ;
-	int speed = 0, duplex = 0;
 	u16 status;
+
+	if (!sis_priv->autong_complete){
+		int uninitialized_var(speed), duplex = 0;
+
+		sis900_read_mode(net_dev, &speed, &duplex);
+		if (duplex){
+			sis900_set_mode(sis_priv, speed, duplex);
+			sis630_set_eq(net_dev, sis_priv->chipset_rev);
+			netif_start_queue(net_dev);
+		}
+
+		sis_priv->timer.expires = jiffies + HZ;
+		add_timer(&sis_priv->timer);
+		return;
+	}
 
 	status = mdio_read(net_dev, sis_priv->cur_phy, MII_STATUS);
 	status = mdio_read(net_dev, sis_priv->cur_phy, MII_STATUS);
@@ -1319,15 +1337,9 @@ static void sis900_timer(struct timer_list *t)
 		status = sis900_default_phy(net_dev);
 		mii_phy = sis_priv->mii;
 
-		if (status & MII_STAT_LINK) {
-			WARN_ON(!(status & MII_STAT_AUTO_DONE));
-
-			sis900_read_mode(net_dev, &speed, &duplex);
-			if (duplex) {
-				sis900_set_mode(sis_priv, speed, duplex);
-				sis630_set_eq(net_dev, sis_priv->chipset_rev);
-				netif_carrier_on(net_dev);
-			}
+		if (status & MII_STAT_LINK){
+			sis900_check_mode(net_dev, mii_phy);
+			netif_carrier_on(net_dev);
 		}
 	} else {
 	/* Link ON -> OFF */
@@ -1423,7 +1435,7 @@ static void sis900_set_mode(struct sis900_private *sp, int speed, int duplex)
 		rx_flags |= RxATX;
 	}
 
-#if IS_ENABLED(CONFIG_VLAN_8021Q)
+#if defined(CONFIG_VLAN_8021Q) || defined(CONFIG_VLAN_8021Q_MODULE)
 	/* Can accept Jumbo packet */
 	rx_flags |= RxAJAB;
 #endif
@@ -1601,6 +1613,12 @@ sis900_start_xmit(struct sk_buff *skb, struct net_device *net_dev)
 	unsigned int  index_cur_tx, index_dirty_tx;
 	unsigned int  count_dirty_tx;
 
+	/* Don't transmit data before the complete of auto-negotiation */
+	if(!sis_priv->autong_complete){
+		netif_stop_queue(net_dev);
+		return NETDEV_TX_BUSY;
+	}
+
 	spin_lock_irqsave(&sis_priv->lock, flags);
 
 	/* Calculate the next Tx descriptor entry. */
@@ -1612,7 +1630,7 @@ sis900_start_xmit(struct sk_buff *skb, struct net_device *net_dev)
 		skb->data, skb->len, PCI_DMA_TODEVICE);
 	if (unlikely(pci_dma_mapping_error(sis_priv->pci_dev,
 		sis_priv->tx_ring[entry].bufptr))) {
-			dev_kfree_skb_any(skb);
+			dev_kfree_skb(skb);
 			sis_priv->tx_skbuff[entry] = NULL;
 			net_dev->stats.tx_dropped++;
 			spin_unlock_irqrestore(&sis_priv->lock, flags);
@@ -1706,7 +1724,7 @@ static irqreturn_t sis900_interrupt(int irq, void *dev_instance)
 
 	if(netif_msg_intr(sis_priv))
 		printk(KERN_DEBUG "%s: exiting interrupt, "
-		       "interrupt status = %#8.8x\n",
+		       "interrupt status = 0x%#8.8x.\n",
 		       net_dev->name, sr32(isr));
 
 	spin_unlock (&sis_priv->lock);
@@ -1747,7 +1765,7 @@ static int sis900_rx(struct net_device *net_dev)
 		data_size = rx_status & DSIZE;
 		rx_size = data_size - CRC_SIZE;
 
-#if IS_ENABLED(CONFIG_VLAN_8021Q)
+#if defined(CONFIG_VLAN_8021Q) || defined(CONFIG_VLAN_8021Q_MODULE)
 		/* ``TOOLONG'' flag means jumbo packet received. */
 		if ((rx_status & TOOLONG) && data_size <= MAX_FRAME_SIZE)
 			rx_status &= (~ ((unsigned int)TOOLONG));
@@ -2033,23 +2051,23 @@ static u32 sis900_get_link(struct net_device *net_dev)
 	return mii_link_ok(&sis_priv->mii_info);
 }
 
-static int sis900_get_link_ksettings(struct net_device *net_dev,
-				     struct ethtool_link_ksettings *cmd)
+static int sis900_get_settings(struct net_device *net_dev,
+				struct ethtool_cmd *cmd)
 {
 	struct sis900_private *sis_priv = netdev_priv(net_dev);
 	spin_lock_irq(&sis_priv->lock);
-	mii_ethtool_get_link_ksettings(&sis_priv->mii_info, cmd);
+	mii_ethtool_gset(&sis_priv->mii_info, cmd);
 	spin_unlock_irq(&sis_priv->lock);
 	return 0;
 }
 
-static int sis900_set_link_ksettings(struct net_device *net_dev,
-				     const struct ethtool_link_ksettings *cmd)
+static int sis900_set_settings(struct net_device *net_dev,
+				struct ethtool_cmd *cmd)
 {
 	struct sis900_private *sis_priv = netdev_priv(net_dev);
 	int rt;
 	spin_lock_irq(&sis_priv->lock);
-	rt = mii_ethtool_set_link_ksettings(&sis_priv->mii_info, cmd);
+	rt = mii_ethtool_sset(&sis_priv->mii_info, cmd);
 	spin_unlock_irq(&sis_priv->lock);
 	return rt;
 }
@@ -2127,11 +2145,11 @@ static const struct ethtool_ops sis900_ethtool_ops = {
 	.get_msglevel	= sis900_get_msglevel,
 	.set_msglevel	= sis900_set_msglevel,
 	.get_link	= sis900_get_link,
+	.get_settings	= sis900_get_settings,
+	.set_settings	= sis900_set_settings,
 	.nway_reset	= sis900_nway_reset,
 	.get_wol	= sis900_get_wol,
-	.set_wol	= sis900_set_wol,
-	.get_link_ksettings = sis900_get_link_ksettings,
-	.set_link_ksettings = sis900_set_link_ksettings,
+	.set_wol	= sis900_set_wol
 };
 
 /**
@@ -2256,6 +2274,7 @@ static int sis900_set_config(struct net_device *dev, struct ifmap *map)
 		case IF_PORT_100BASEFX: /* 100BaseFx */
                 	/* These Modes are not supported (are they?)*/
 			return -EOPNOTSUPP;
+			break;
 
 		default:
 			return -EINVAL;
@@ -2423,6 +2442,7 @@ static void sis900_remove(struct pci_dev *pci_dev)
 	pci_iounmap(pci_dev, sis_priv->ioaddr);
 	free_netdev(net_dev);
 	pci_release_regions(pci_dev);
+	pci_set_drvdata(pci_dev, NULL);
 }
 
 #ifdef CONFIG_PM

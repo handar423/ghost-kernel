@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  *    Copyright IBM Corp. 1999, 2010
  *    Author(s): Cornelia Huck (cornelia.huck@de.ibm.com)
@@ -38,7 +37,8 @@ enum cfg_task_t {
 
 /* Map for pending configure tasks. */
 static enum cfg_task_t chp_cfg_task[__MAX_CSSID + 1][__MAX_CHPID + 1];
-static DEFINE_SPINLOCK(cfg_lock);
+static DEFINE_MUTEX(cfg_lock);
+static int cfg_busy;
 
 /* Map for channel-path status. */
 static struct sclp_chp_info chp_info;
@@ -47,6 +47,8 @@ static DEFINE_MUTEX(info_lock);
 /* Time after which channel-path status may be outdated. */
 static unsigned long chp_info_expires;
 
+/* Workqueue to perform pending configure tasks. */
+static struct workqueue_struct *chp_wq;
 static struct work_struct cfg_work;
 
 /* Wait queue for configure completion events. */
@@ -144,7 +146,7 @@ static ssize_t chp_measurement_chars_read(struct file *filp,
 				       sizeof(chp->cmg_chars));
 }
 
-static const struct bin_attribute chp_measurement_chars_attr = {
+static struct bin_attribute chp_measurement_chars_attr = {
 	.attr = {
 		.name = "measurement_chars",
 		.mode = S_IRUSR,
@@ -198,7 +200,7 @@ static ssize_t chp_measurement_read(struct file *filp, struct kobject *kobj,
 	return count;
 }
 
-static const struct bin_attribute chp_measurement_attr = {
+static struct bin_attribute chp_measurement_attr = {
 	.attr = {
 		.name = "measurement",
 		.mode = S_IRUSR,
@@ -255,11 +257,11 @@ static ssize_t chp_status_write(struct device *dev,
 	if (!num_args)
 		return count;
 
-	if (!strncasecmp(cmd, "on", 2) || !strcmp(cmd, "1")) {
+	if (!strnicmp(cmd, "on", 2) || !strcmp(cmd, "1")) {
 		mutex_lock(&cp->lock);
 		error = s390_vary_chpid(cp->chpid, 1);
 		mutex_unlock(&cp->lock);
-	} else if (!strncasecmp(cmd, "off", 3) || !strcmp(cmd, "0")) {
+	} else if (!strnicmp(cmd, "off", 3) || !strcmp(cmd, "0")) {
 		mutex_lock(&cp->lock);
 		error = s390_vary_chpid(cp->chpid, 0);
 		mutex_unlock(&cp->lock);
@@ -426,14 +428,11 @@ int chp_update_desc(struct channel_path *chp)
 	if (rc)
 		return rc;
 
-	/*
-	 * Fetching the following data is optional. Not all machines or
-	 * hypervisors implement the required chsc commands.
-	 */
-	chsc_determine_fmt1_channel_path_desc(chp->chpid, &chp->desc_fmt1);
-	chsc_get_channel_measurement_chars(chp);
+	rc = chsc_determine_fmt1_channel_path_desc(chp->chpid, &chp->desc_fmt1);
+	if (rc)
+		return rc;
 
-	return 0;
+	return chsc_get_channel_measurement_chars(chp);
 }
 
 /**
@@ -445,7 +444,6 @@ int chp_update_desc(struct channel_path *chp)
  */
 int chp_new(struct chp_id chpid)
 {
-	struct channel_subsystem *css = css_by_id(chpid.cssid);
 	struct channel_path *chp;
 	int ret;
 
@@ -458,7 +456,7 @@ int chp_new(struct chp_id chpid)
 	/* fill in status, etc. */
 	chp->chpid = chpid;
 	chp->state = 1;
-	chp->dev.parent = &css->device;
+	chp->dev.parent = &channel_subsystems[chpid.cssid]->device;
 	chp->dev.groups = chp_attr_groups;
 	chp->dev.release = chp_release;
 	mutex_init(&chp->lock);
@@ -481,17 +479,17 @@ int chp_new(struct chp_id chpid)
 		put_device(&chp->dev);
 		goto out;
 	}
-	mutex_lock(&css->mutex);
-	if (css->cm_enabled) {
+	mutex_lock(&channel_subsystems[chpid.cssid]->mutex);
+	if (channel_subsystems[chpid.cssid]->cm_enabled) {
 		ret = chp_add_cmg_attr(chp);
 		if (ret) {
 			device_unregister(&chp->dev);
-			mutex_unlock(&css->mutex);
+			mutex_unlock(&channel_subsystems[chpid.cssid]->mutex);
 			goto out;
 		}
 	}
-	css->chps[chpid.id] = chp;
-	mutex_unlock(&css->mutex);
+	channel_subsystems[chpid.cssid]->chps[chpid.id] = chp;
+	mutex_unlock(&channel_subsystems[chpid.cssid]->mutex);
 	goto out;
 out_free:
 	kfree(chp);
@@ -560,7 +558,6 @@ static void chp_process_crw(struct crw *crw0, struct crw *crw1,
 	chpid.id = crw0->rsid;
 	switch (crw0->erc) {
 	case CRW_ERC_IPARM: /* Path has come. */
-	case CRW_ERC_INIT:
 		if (!chp_is_registered(chpid))
 			chp_new(chpid);
 		chsc_chp_online(chpid);
@@ -668,20 +665,6 @@ static void cfg_set_task(struct chp_id chpid, enum cfg_task_t cfg)
 	chp_cfg_task[chpid.cssid][chpid.id] = cfg;
 }
 
-/* Fetch the first configure task. Set chpid accordingly. */
-static enum cfg_task_t chp_cfg_fetch_task(struct chp_id *chpid)
-{
-	enum cfg_task_t t = cfg_none;
-
-	chp_id_for_each(chpid) {
-		t = cfg_get_task(*chpid);
-		if (t != cfg_none)
-			break;
-	}
-
-	return t;
-}
-
 /* Perform one configure/deconfigure request. Reschedule work function until
  * last request. */
 static void cfg_func(struct work_struct *work)
@@ -690,9 +673,16 @@ static void cfg_func(struct work_struct *work)
 	enum cfg_task_t t;
 	int rc;
 
-	spin_lock(&cfg_lock);
-	t = chp_cfg_fetch_task(&chpid);
-	spin_unlock(&cfg_lock);
+	mutex_lock(&cfg_lock);
+	t = cfg_none;
+	chp_id_for_each(&chpid) {
+		t = cfg_get_task(chpid);
+		if (t != cfg_none) {
+			cfg_set_task(chpid, cfg_none);
+			break;
+		}
+	}
+	mutex_unlock(&cfg_lock);
 
 	switch (t) {
 	case cfg_configure:
@@ -718,14 +708,13 @@ static void cfg_func(struct work_struct *work)
 	case cfg_none:
 		/* Get updated information after last change. */
 		info_update();
+		mutex_lock(&cfg_lock);
+		cfg_busy = 0;
+		mutex_unlock(&cfg_lock);
 		wake_up_interruptible(&cfg_wait_queue);
 		return;
 	}
-	spin_lock(&cfg_lock);
-	if (t == cfg_get_task(chpid))
-		cfg_set_task(chpid, cfg_none);
-	spin_unlock(&cfg_lock);
-	schedule_work(&cfg_work);
+	queue_work(chp_wq, &cfg_work);
 }
 
 /**
@@ -739,10 +728,11 @@ void chp_cfg_schedule(struct chp_id chpid, int configure)
 {
 	CIO_MSG_EVENT(2, "chp_cfg_sched%x.%02x=%d\n", chpid.cssid, chpid.id,
 		      configure);
-	spin_lock(&cfg_lock);
+	mutex_lock(&cfg_lock);
 	cfg_set_task(chpid, configure ? cfg_configure : cfg_deconfigure);
-	spin_unlock(&cfg_lock);
-	schedule_work(&cfg_work);
+	cfg_busy = 1;
+	mutex_unlock(&cfg_lock);
+	queue_work(chp_wq, &cfg_work);
 }
 
 /**
@@ -755,27 +745,15 @@ void chp_cfg_schedule(struct chp_id chpid, int configure)
 void chp_cfg_cancel_deconfigure(struct chp_id chpid)
 {
 	CIO_MSG_EVENT(2, "chp_cfg_cancel:%x.%02x\n", chpid.cssid, chpid.id);
-	spin_lock(&cfg_lock);
+	mutex_lock(&cfg_lock);
 	if (cfg_get_task(chpid) == cfg_deconfigure)
 		cfg_set_task(chpid, cfg_none);
-	spin_unlock(&cfg_lock);
-}
-
-static bool cfg_idle(void)
-{
-	struct chp_id chpid;
-	enum cfg_task_t t;
-
-	spin_lock(&cfg_lock);
-	t = chp_cfg_fetch_task(&chpid);
-	spin_unlock(&cfg_lock);
-
-	return t == cfg_none;
+	mutex_unlock(&cfg_lock);
 }
 
 static int cfg_wait_idle(void)
 {
-	if (wait_event_interruptible(cfg_wait_queue, cfg_idle()))
+	if (wait_event_interruptible(cfg_wait_queue, !cfg_busy))
 		return -ERESTARTSYS;
 	return 0;
 }
@@ -783,20 +761,23 @@ static int cfg_wait_idle(void)
 static int __init chp_init(void)
 {
 	struct chp_id chpid;
-	int state, ret;
+	int ret;
 
 	ret = crw_register_handler(CRW_RSC_CPATH, chp_process_crw);
 	if (ret)
 		return ret;
+	chp_wq = create_singlethread_workqueue("cio_chp");
+	if (!chp_wq) {
+		crw_unregister_handler(CRW_RSC_CPATH);
+		return -ENOMEM;
+	}
 	INIT_WORK(&cfg_work, cfg_func);
 	init_waitqueue_head(&cfg_wait_queue);
 	if (info_update())
 		return 0;
 	/* Register available channel-paths. */
 	chp_id_for_each(&chpid) {
-		state = chp_info_get_status(chpid);
-		if (state == CHP_STATUS_CONFIGURED ||
-		    state == CHP_STATUS_STANDBY)
+		if (chp_info_get_status(chpid) != CHP_STATUS_NOT_RECOGNIZED)
 			chp_new(chpid);
 	}
 

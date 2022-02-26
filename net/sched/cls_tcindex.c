@@ -28,20 +28,14 @@
 struct tcindex_filter_result {
 	struct tcf_exts		exts;
 	struct tcf_result	res;
-	union {
-		struct work_struct	work;
-		struct rcu_head		rcu;
-	};
+	struct rcu_work		rwork;
 };
 
 struct tcindex_filter {
 	u16 key;
 	struct tcindex_filter_result result;
 	struct tcindex_filter __rcu *next;
-	union {
-		struct work_struct work;
-		struct rcu_head rcu;
-	};
+	struct rcu_work rwork;
 };
 
 
@@ -54,7 +48,7 @@ struct tcindex_data {
 	u32 hash;		/* hash table size; 0 if undefined */
 	u32 alloc_hash;		/* allocated size */
 	u32 fall_through;	/* 0: only classify if explicit match */
-	struct rcu_head rcu;
+	struct rcu_work rwork;
 };
 
 static inline int tcindex_filter_is_set(struct tcindex_filter_result *r)
@@ -152,19 +146,12 @@ static void tcindex_destroy_rexts_work(struct work_struct *work)
 {
 	struct tcindex_filter_result *r;
 
-	r = container_of(work, struct tcindex_filter_result, work);
+	r = container_of(to_rcu_work(work),
+			 struct tcindex_filter_result,
+			 rwork);
 	rtnl_lock();
 	__tcindex_destroy_rexts(r);
 	rtnl_unlock();
-}
-
-static void tcindex_destroy_rexts(struct rcu_head *head)
-{
-	struct tcindex_filter_result *r;
-
-	r = container_of(head, struct tcindex_filter_result, rcu);
-	INIT_WORK(&r->work, tcindex_destroy_rexts_work);
-	tcf_queue_work(&r->work);
 }
 
 static void __tcindex_destroy_fexts(struct tcindex_filter *f)
@@ -176,21 +163,13 @@ static void __tcindex_destroy_fexts(struct tcindex_filter *f)
 
 static void tcindex_destroy_fexts_work(struct work_struct *work)
 {
-	struct tcindex_filter *f = container_of(work, struct tcindex_filter,
-						work);
+	struct tcindex_filter *f = container_of(to_rcu_work(work),
+						struct tcindex_filter,
+						rwork);
 
 	rtnl_lock();
 	__tcindex_destroy_fexts(f);
 	rtnl_unlock();
-}
-
-static void tcindex_destroy_fexts(struct rcu_head *head)
-{
-	struct tcindex_filter *f = container_of(head, struct tcindex_filter,
-						rcu);
-
-	INIT_WORK(&f->work, tcindex_destroy_fexts_work);
-	tcf_queue_work(&f->work);
 }
 
 static int tcindex_delete(struct tcf_proto *tp, void *arg, bool *last)
@@ -227,12 +206,12 @@ found:
 	 */
 	if (f) {
 		if (tcf_exts_get_net(&f->result.exts))
-			call_rcu(&f->rcu, tcindex_destroy_fexts);
+			tcf_queue_work(&f->rwork, tcindex_destroy_fexts_work);
 		else
 			__tcindex_destroy_fexts(f);
 	} else {
 		if (tcf_exts_get_net(&r->exts))
-			call_rcu(&r->rcu, tcindex_destroy_rexts);
+			tcf_queue_work(&r->rwork, tcindex_destroy_rexts_work);
 		else
 			__tcindex_destroy_rexts(r);
 	}
@@ -249,9 +228,11 @@ static int tcindex_destroy_element(struct tcf_proto *tp,
 	return tcindex_delete(tp, arg, &last);
 }
 
-static void __tcindex_destroy(struct rcu_head *head)
+static void tcindex_destroy_work(struct work_struct *work)
 {
-	struct tcindex_data *p = container_of(head, struct tcindex_data, rcu);
+	struct tcindex_data *p = container_of(to_rcu_work(work),
+					      struct tcindex_data,
+					      rwork);
 
 	kfree(p->perfect);
 	kfree(p->h);
@@ -278,9 +259,11 @@ static int tcindex_filter_result_init(struct tcindex_filter_result *r)
 	return tcf_exts_init(&r->exts, TCA_TCINDEX_ACT, TCA_TCINDEX_POLICE);
 }
 
-static void __tcindex_partial_destroy(struct rcu_head *head)
+static void tcindex_partial_destroy_work(struct work_struct *work)
 {
-	struct tcindex_data *p = container_of(head, struct tcindex_data, rcu);
+	struct tcindex_data *p = container_of(to_rcu_work(work),
+					      struct tcindex_data,
+					      rwork);
 
 	kfree(p->perfect);
 	kfree(p);
@@ -467,11 +450,6 @@ tcindex_set_parms(struct net *net, struct tcf_proto *tp, unsigned long base,
 		tcf_bind_filter(tp, &cr.res, base);
 	}
 
-	if (old_r)
-		tcf_exts_change(&r->exts, &e);
-	else
-		tcf_exts_change(&cr.exts, &e);
-
 	if (old_r && old_r != r) {
 		err = tcindex_filter_result_init(old_r);
 		if (err < 0) {
@@ -482,12 +460,15 @@ tcindex_set_parms(struct net *net, struct tcf_proto *tp, unsigned long base,
 
 	oldp = p;
 	r->res = cr.res;
+	tcf_exts_change(&r->exts, &e);
+
 	rcu_assign_pointer(tp->root, cp);
 
 	if (r == &new_filter_result) {
 		struct tcindex_filter *nfp;
 		struct tcindex_filter __rcu **fp;
 
+		f->result.res = r->res;
 		tcf_exts_change(&f->result.exts, &r->exts);
 
 		fp = cp->h + (handle % cp->hash);
@@ -500,7 +481,7 @@ tcindex_set_parms(struct net *net, struct tcf_proto *tp, unsigned long base,
 	}
 
 	if (oldp)
-		call_rcu(&oldp->rcu, __tcindex_partial_destroy);
+		tcf_queue_work(&oldp->rwork, tcindex_partial_destroy_work);
 	return 0;
 
 errout_alloc:
@@ -535,7 +516,7 @@ tcindex_change(struct net *net, struct sk_buff *in_skb,
 	if (!opt)
 		return 0;
 
-	err = nla_parse_nested(tb, TCA_TCINDEX_MAX, opt, tcindex_policy, NULL);
+	err = nla_parse_nested(tb, TCA_TCINDEX_MAX, opt, tcindex_policy);
 	if (err < 0)
 		return err;
 
@@ -590,7 +571,7 @@ static void tcindex_destroy(struct tcf_proto *tp)
 	walker.fn = tcindex_destroy_element;
 	tcindex_walk(tp, &walker);
 
-	call_rcu(&p->rcu, __tcindex_destroy);
+	tcf_queue_work(&p->rwork, tcindex_destroy_work);
 }
 
 

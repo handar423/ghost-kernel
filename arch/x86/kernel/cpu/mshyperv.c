@@ -13,21 +13,21 @@
 #include <linux/types.h>
 #include <linux/time.h>
 #include <linux/clocksource.h>
-#include <linux/init.h>
-#include <linux/export.h>
+#include <linux/module.h>
 #include <linux/hardirq.h>
 #include <linux/efi.h>
 #include <linux/interrupt.h>
 #include <linux/irq.h>
 #include <linux/kexec.h>
+#include <linux/ftrace.h>
 #include <asm/processor.h>
 #include <asm/hypervisor.h>
 #include <asm/hyperv.h>
 #include <asm/mshyperv.h>
 #include <asm/desc.h>
+#include <asm/idle.h>
 #include <asm/irq_regs.h>
 #include <asm/i8259.h>
-#include <asm/apic.h>
 #include <asm/timer.h>
 #include <asm/reboot.h>
 #include <asm/nmi.h>
@@ -35,30 +35,41 @@
 struct ms_hyperv_info ms_hyperv;
 EXPORT_SYMBOL_GPL(ms_hyperv);
 
-#if IS_ENABLED(CONFIG_HYPERV)
-static void (*vmbus_handler)(void);
 static void (*hv_kexec_handler)(void);
 static void (*hv_crash_handler)(struct pt_regs *regs);
+
+#if IS_ENABLED(CONFIG_HYPERV)
+static void (*vmbus_handler)(void);
+static void (*hv_stimer0_handler)(void);
 
 void hyperv_vector_handler(struct pt_regs *regs)
 {
 	struct pt_regs *old_regs = set_irq_regs(regs);
 
-	entering_irq();
-	inc_irq_stat(irq_hv_callback_count);
+	irq_enter();
+	exit_idle();
+
+	rh_inc_irq_stat(irq_hv_callback_count);
 	if (vmbus_handler)
 		vmbus_handler();
 
 	if (ms_hyperv.hints & HV_X64_DEPRECATING_AEOI_RECOMMENDED)
 		ack_APIC_irq();
 
-	exiting_irq();
+	irq_exit();
 	set_irq_regs(old_regs);
 }
 
 void hv_setup_vmbus_irq(void (*handler)(void))
 {
 	vmbus_handler = handler;
+	/*
+	 * Setup the IDT for hypervisor callback. Prevent reallocation
+	 * at module reload.
+	 */
+	if (!test_bit(HYPERVISOR_CALLBACK_VECTOR, used_vectors))
+		alloc_intr_gate(HYPERVISOR_CALLBACK_VECTOR,
+				hyperv_callback_vector);
 }
 
 void hv_remove_vmbus_irq(void)
@@ -68,6 +79,41 @@ void hv_remove_vmbus_irq(void)
 }
 EXPORT_SYMBOL_GPL(hv_setup_vmbus_irq);
 EXPORT_SYMBOL_GPL(hv_remove_vmbus_irq);
+
+/*
+ * Routines to do per-architecture handling of stimer0
+ * interrupts when in Direct Mode
+ */
+
+__visible void __irq_entry hv_stimer0_vector_handler(struct pt_regs *regs)
+{
+	struct pt_regs *old_regs = set_irq_regs(regs);
+
+	entering_irq();
+	rh_inc_irq_stat(hyperv_stimer0_count);
+	if (hv_stimer0_handler)
+		hv_stimer0_handler();
+	ack_APIC_irq();
+
+	exiting_irq();
+	set_irq_regs(old_regs);
+}
+
+int hv_setup_stimer0_irq(int *irq, int *vector, void (*handler)(void))
+{
+	*vector = HYPERV_STIMER0_VECTOR;
+	*irq = 0;   /* Unused on x86/x64 */
+	hv_stimer0_handler = handler;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(hv_setup_stimer0_irq);
+
+void hv_remove_stimer0_irq(int irq)
+{
+	/* We have no way to deallocate the interrupt gate */
+	hv_stimer0_handler = NULL;
+}
+EXPORT_SYMBOL_GPL(hv_remove_stimer0_irq);
 
 void hv_setup_kexec_handler(void (*handler)(void))
 {
@@ -92,8 +138,8 @@ void hv_remove_crash_handler(void)
 	hv_crash_handler = NULL;
 }
 EXPORT_SYMBOL_GPL(hv_remove_crash_handler);
+#endif
 
-#ifdef CONFIG_KEXEC_CORE
 static void hv_machine_shutdown(void)
 {
 	if (kexec_in_progress && hv_kexec_handler)
@@ -107,8 +153,7 @@ static void hv_machine_crash_shutdown(struct pt_regs *regs)
 		hv_crash_handler(regs);
 	native_machine_crash_shutdown(regs);
 }
-#endif /* CONFIG_KEXEC_CORE */
-#endif /* CONFIG_HYPERV */
+
 
 static uint32_t  __init ms_hyperv_platform(void)
 {
@@ -177,14 +222,8 @@ static void __init ms_hyperv_init_platform(void)
 	ms_hyperv.misc_features = cpuid_edx(HYPERV_CPUID_FEATURES);
 	ms_hyperv.hints    = cpuid_eax(HYPERV_CPUID_ENLIGHTMENT_INFO);
 
-	pr_info("Hyper-V: features 0x%x, hints 0x%x\n",
-		ms_hyperv.features, ms_hyperv.hints);
-
-	ms_hyperv.max_vp_index = cpuid_eax(HVCPUID_IMPLEMENTATION_LIMITS);
-	ms_hyperv.max_lp_index = cpuid_ebx(HVCPUID_IMPLEMENTATION_LIMITS);
-
-	pr_debug("Hyper-V: max %u virtual processors, %u logical processors\n",
-		 ms_hyperv.max_vp_index, ms_hyperv.max_lp_index);
+	printk(KERN_INFO "HyperV: features 0x%x, hints 0x%x\n",
+	       ms_hyperv.features, ms_hyperv.hints);
 
 	/*
 	 * Extract host information.
@@ -207,6 +246,16 @@ static void __init ms_hyperv_init_platform(void)
 		x86_platform.calibrate_cpu = hv_get_tsc_khz;
 	}
 
+	/*
+	 * Hyper-V expects to get crash register data or kmsg when
+	 * crash enlightment is available and system crashes. Set
+	 * crash_kexec_post_notifiers to be true to make sure that
+	 * calling crash enlightment interface before running kdump
+	 * kernel.
+	 */
+	if (ms_hyperv.misc_features & HV_FEATURE_GUEST_CRASH_MSR_AVAILABLE)
+		crash_kexec_post_notifiers = true;
+
 #ifdef CONFIG_X86_LOCAL_APIC
 	if (ms_hyperv.features & HV_X64_ACCESS_FREQUENCY_MSRS &&
 	    ms_hyperv.misc_features & HV_FEATURE_FREQUENCY_MSRS_AVAILABLE) {
@@ -218,8 +267,8 @@ static void __init ms_hyperv_init_platform(void)
 		rdmsrl(HV_X64_MSR_APIC_FREQUENCY, hv_lapic_frequency);
 		hv_lapic_frequency = div_u64(hv_lapic_frequency, HZ);
 		lapic_timer_frequency = hv_lapic_frequency;
-		pr_info("Hyper-V: LAPIC Timer Frequency: %#x\n",
-			lapic_timer_frequency);
+		printk(KERN_INFO "HyperV: LAPIC Timer Frequency: %#x\n",
+				lapic_timer_frequency);
 	}
 
 	register_nmi_handler(NMI_UNKNOWN, hv_nmi_unknown, NMI_FLAG_FIRST,
@@ -230,10 +279,8 @@ static void __init ms_hyperv_init_platform(void)
 	no_timer_check = 1;
 #endif
 
-#if IS_ENABLED(CONFIG_HYPERV) && defined(CONFIG_KEXEC_CORE)
 	machine_ops.shutdown = hv_machine_shutdown;
 	machine_ops.crash_shutdown = hv_machine_crash_shutdown;
-#endif
 	mark_tsc_unstable("running on Hyper-V");
 
 	/*
@@ -249,14 +296,28 @@ static void __init ms_hyperv_init_platform(void)
 	 */
 	x86_platform.apic_post_init = hyperv_init;
 	hyperv_setup_mmu_ops();
-	/* Setup the IDT for hypervisor callback */
-	alloc_intr_gate(HYPERVISOR_CALLBACK_VECTOR, hyperv_callback_vector);
+
+	/*
+	 * Hyper-V doesn't provide irq remapping for IO-APIC. To enable x2apic,
+	 * set x2apic destination mode to physcial mode when x2apic is available
+	 * and Hyper-V IOMMU driver makes sure cpus assigned with IO-APIC irqs
+	 * have 8-bit APIC id.
+	 */
+# ifdef CONFIG_X86_X2APIC
+	if (x2apic_supported())
+		x2apic_phys = 1;
+# endif
+
+	/* Setup the IDT for stimer0 */
+	if (ms_hyperv.misc_features & HV_X64_STIMER_DIRECT_MODE_AVAILABLE)
+		alloc_intr_gate(HYPERV_STIMER0_VECTOR,
+				hv_stimer0_callback_vector);
 #endif
 }
 
-const __initconst struct hypervisor_x86 x86_hyper_ms_hyperv = {
-	.name			= "Microsoft Hyper-V",
+const __refconst struct hypervisor_x86 x86_hyper_ms_hyperv = {
+	.name			= "Microsoft HyperV",
 	.detect			= ms_hyperv_platform,
-	.type			= X86_HYPER_MS_HYPERV,
-	.init.init_platform	= ms_hyperv_init_platform,
+	.init_platform		= ms_hyperv_init_platform,
 };
+EXPORT_SYMBOL(x86_hyper_ms_hyperv);

@@ -25,14 +25,13 @@
 #include <linux/hardirq.h>
 #include <linux/memblock.h>
 #include <linux/sched.h>
-#include <linux/sched/clock.h>
 
 #include <asm/mem_encrypt.h>
 #include <asm/x86_init.h>
 #include <asm/reboot.h>
 #include <asm/kvmclock.h>
 
-static int kvmclock __ro_after_init = 1;
+static int kvmclock = 1;
 static int msr_kvm_system_time = MSR_KVM_SYSTEM_TIME;
 static int msr_kvm_wall_clock = MSR_KVM_WALL_CLOCK;
 static u64 kvm_sched_clock_offset;
@@ -47,6 +46,12 @@ early_param("no-kvmclock", parse_no_kvmclock);
 /* The hypervisor will put information about time periodically here */
 static struct pvclock_vsyscall_time_info *hv_clock;
 static struct pvclock_wall_clock *wall_clock;
+
+struct pvclock_vsyscall_time_info *pvclock_pvti_cpu0_va(void)
+{
+	return hv_clock;
+}
+EXPORT_SYMBOL_GPL(pvclock_pvti_cpu0_va);
 
 /*
  * The wallclock is the time of day when we booted. Since then, some time may
@@ -64,17 +69,18 @@ static void kvm_get_wallclock(struct timespec *now)
 
 	native_write_msr(msr_kvm_wall_clock, low, high);
 
-	cpu = get_cpu();
+	preempt_disable();
+	cpu = smp_processor_id();
 
 	vcpu_time = &hv_clock[cpu].pvti;
 	pvclock_read_wallclock(wall_clock, vcpu_time, now);
 
-	put_cpu();
+	preempt_enable();
 }
 
 static int kvm_set_wallclock(const struct timespec *now)
 {
-	return -ENODEV;
+	return -1;
 }
 
 static u64 kvm_clock_read(void)
@@ -105,12 +111,12 @@ static inline void kvm_sched_clock_init(bool stable)
 {
 	if (!stable) {
 		pv_time_ops.sched_clock = kvm_clock_read;
-		clear_sched_clock_stable();
 		return;
 	}
 
 	kvm_sched_clock_offset = kvm_clock_read();
 	pv_time_ops.sched_clock = kvm_sched_clock_read;
+	set_sched_clock_stable();
 
 	printk(KERN_INFO "kvm-clock: using sched offset of %llu cycles\n",
 			kvm_sched_clock_offset);
@@ -134,10 +140,11 @@ static unsigned long kvm_get_tsc_khz(void)
 	int cpu;
 	unsigned long tsc_khz;
 
-	cpu = get_cpu();
+	preempt_disable();
+	cpu = smp_processor_id();
 	src = &hv_clock[cpu].pvti;
 	tsc_khz = pvclock_tsc_khz(src);
-	put_cpu();
+	preempt_enable();
 	return tsc_khz;
 }
 
@@ -225,7 +232,7 @@ static void kvm_setup_secondary_clock(void)
  * registered memory location. If the guest happens to shutdown, this memory
  * won't be valid. In cases like kexec, in which you install a new kernel, this
  * means a random memory location will be kept being written. So before any
- * kind of shutdown from our side, we unregister the clock by writing anything
+ * kind of shutdown from our side, we unregister the clock by writting anything
  * that does not have the 'enable' bit set in the msr
  */
 #ifdef CONFIG_KEXEC_CORE
@@ -317,7 +324,7 @@ void __init kvmclock_init(void)
 	}
 
 	printk(KERN_INFO "kvm-clock: Using msrs %x and %x",
-		msr_kvm_system_time, msr_kvm_wall_clock);
+	       msr_kvm_system_time, msr_kvm_wall_clock);
 
 	if (kvm_para_has_feature(KVM_FEATURE_CLOCKSOURCE_STABLE_BIT))
 		pvclock_set_flags(PVCLOCK_TSC_STABLE_BIT);
@@ -345,6 +352,7 @@ void __init kvmclock_init(void)
 #endif
 	kvm_get_preset_lpj();
 	clocksource_register_hz(&kvm_clock, NSEC_PER_SEC);
+	pv_info.paravirt_enabled = 1;
 	pv_info.name = "KVM";
 }
 
@@ -352,6 +360,7 @@ int __init kvm_setup_vsyscall_timeinfo(void)
 {
 #ifdef CONFIG_X86_64
 	int cpu;
+	int ret;
 	u8 flags;
 	struct pvclock_vcpu_time_info *vcpu_time;
 	unsigned int size;
@@ -361,18 +370,23 @@ int __init kvm_setup_vsyscall_timeinfo(void)
 
 	size = PAGE_ALIGN(sizeof(struct pvclock_vsyscall_time_info)*NR_CPUS);
 
-	cpu = get_cpu();
+	preempt_disable();
+	cpu = smp_processor_id();
 
 	vcpu_time = &hv_clock[cpu].pvti;
 	flags = pvclock_read_flags(vcpu_time);
 
 	if (!(flags & PVCLOCK_TSC_STABLE_BIT)) {
-		put_cpu();
+		preempt_enable();
 		return 1;
 	}
 
-	pvclock_set_pvti_cpu0_va(hv_clock);
-	put_cpu();
+	if ((ret = pvclock_init_vsyscall(hv_clock, size))) {
+		preempt_enable();
+		return ret;
+	}
+
+	preempt_enable();
 
 	kvm_clock.archdata.vclock_mode = VCLOCK_PVCLOCK;
 #endif

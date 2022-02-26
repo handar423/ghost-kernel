@@ -9,6 +9,7 @@
  * (at your option) any later version.
  */
 
+#include <linux/bug.h>
 #include <linux/kernel.h>
 #include <linux/export.h>
 #include <linux/bitops.h>

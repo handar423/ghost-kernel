@@ -1,10 +1,11 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __LINUX_UDF_SB_H
 #define __LINUX_UDF_SB_H
 
 #include <linux/mutex.h>
 #include <linux/bitops.h>
-#include <linux/magic.h>
+
+/* Since UDF 2.01 is ISO 13346 based... */
+#define UDF_SUPER_MAGIC			0x15013346
 
 #define UDF_MAX_READ_VERSION		0x0250
 #define UDF_MAX_WRITE_VERSION		0x0201
@@ -166,7 +167,7 @@ static inline struct udf_sb_info *UDF_SB(struct super_block *sb)
 	return sb->s_fs_info;
 }
 
-struct logicalVolIntegrityDescImpUse *udf_sb_lvidiu(struct super_block *sb);
+struct logicalVolIntegrityDescImpUse *udf_sb_lvidiu(struct udf_sb_info *sbi);
 
 int udf_compute_nr_groups(struct super_block *sb, u32 partition);
 

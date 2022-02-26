@@ -26,6 +26,7 @@
 #include <linux/init.h>
 #include <linux/types.h>
 #include <linux/spinlock.h>
+#include <linux/miscdevice.h>
 #include <linux/watchdog.h>
 #include <linux/pm_runtime.h>
 #include <linux/fs.h>
@@ -175,9 +176,9 @@ static int sh_wdt_set_heartbeat(struct watchdog_device *wdt_dev, unsigned t)
 	return 0;
 }
 
-static void sh_wdt_ping(struct timer_list *t)
+static void sh_wdt_ping(unsigned long data)
 {
-	struct sh_wdt *wdt = from_timer(wdt, t, timer);
+	struct sh_wdt *wdt = (struct sh_wdt *)data;
 	unsigned long flags;
 
 	spin_lock_irqsave(&wdt->lock, flags);
@@ -230,13 +231,17 @@ static int sh_wdt_probe(struct platform_device *pdev)
 	if (pdev->id != -1)
 		return -EINVAL;
 
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	if (unlikely(!res))
+		return -EINVAL;
+
 	wdt = devm_kzalloc(&pdev->dev, sizeof(struct sh_wdt), GFP_KERNEL);
 	if (unlikely(!wdt))
 		return -ENOMEM;
 
 	wdt->dev = &pdev->dev;
 
-	wdt->clk = devm_clk_get(&pdev->dev, NULL);
+	wdt->clk = clk_get(&pdev->dev, NULL);
 	if (IS_ERR(wdt->clk)) {
 		/*
 		 * Clock framework support is optional, continue on
@@ -245,10 +250,11 @@ static int sh_wdt_probe(struct platform_device *pdev)
 		wdt->clk = NULL;
 	}
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	wdt->base = devm_ioremap_resource(wdt->dev, res);
-	if (IS_ERR(wdt->base))
-		return PTR_ERR(wdt->base);
+	if (IS_ERR(wdt->base)) {
+		rc = PTR_ERR(wdt->base);
+		goto err;
+	}
 
 	watchdog_set_nowayout(&sh_wdt_dev, nowayout);
 	watchdog_set_drvdata(&sh_wdt_dev, wdt);
@@ -272,24 +278,38 @@ static int sh_wdt_probe(struct platform_device *pdev)
 	rc = watchdog_register_device(&sh_wdt_dev);
 	if (unlikely(rc)) {
 		dev_err(&pdev->dev, "Can't register watchdog (err=%d)\n", rc);
-		return rc;
+		goto err;
 	}
 
-	timer_setup(&wdt->timer, sh_wdt_ping, 0);
+	init_timer(&wdt->timer);
+	wdt->timer.function	= sh_wdt_ping;
+	wdt->timer.data		= (unsigned long)wdt;
 	wdt->timer.expires	= next_ping_period(clock_division_ratio);
+
+	platform_set_drvdata(pdev, wdt);
 
 	dev_info(&pdev->dev, "initialized.\n");
 
 	pm_runtime_enable(&pdev->dev);
 
 	return 0;
+
+err:
+	clk_put(wdt->clk);
+
+	return rc;
 }
 
 static int sh_wdt_remove(struct platform_device *pdev)
 {
+	struct sh_wdt *wdt = platform_get_drvdata(pdev);
+
+	platform_set_drvdata(pdev, NULL);
+
 	watchdog_unregister_device(&sh_wdt_dev);
 
 	pm_runtime_disable(&pdev->dev);
+	clk_put(wdt->clk);
 
 	return 0;
 }
@@ -302,6 +322,7 @@ static void sh_wdt_shutdown(struct platform_device *pdev)
 static struct platform_driver sh_wdt_driver = {
 	.driver		= {
 		.name	= DRV_NAME,
+		.owner	= THIS_MODULE,
 	},
 
 	.probe		= sh_wdt_probe,
@@ -333,6 +354,7 @@ MODULE_AUTHOR("Paul Mundt <lethal@linux-sh.org>");
 MODULE_DESCRIPTION("SuperH watchdog driver");
 MODULE_LICENSE("GPL");
 MODULE_ALIAS("platform:" DRV_NAME);
+MODULE_ALIAS_MISCDEV(WATCHDOG_MINOR);
 
 module_param(clock_division_ratio, int, 0);
 MODULE_PARM_DESC(clock_division_ratio,

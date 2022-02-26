@@ -18,11 +18,6 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110,
- * USA
- *
  * The full GNU General Public License is included in this distribution
  * in the file called COPYING.
  *
@@ -621,7 +616,11 @@ send:
 }
 
 static int iwl_mvm_tzone_get_temp(struct thermal_zone_device *device,
+#if 0 /* Not in RHEL */
 				  int *temperature)
+#else
+				  unsigned long *temperature)
+#endif
 {
 	struct iwl_mvm *mvm = (struct iwl_mvm *)device->devdata;
 	int ret;
@@ -647,7 +646,11 @@ out:
 }
 
 static int iwl_mvm_tzone_get_trip_temp(struct thermal_zone_device *device,
+#if 0 /* Not in RHEL */
 				       int trip, int *temp)
+#else
+				       int trip, unsigned long *temp)
+#endif
 {
 	struct iwl_mvm *mvm = (struct iwl_mvm *)device->devdata;
 
@@ -671,7 +674,11 @@ static int iwl_mvm_tzone_get_trip_type(struct thermal_zone_device *device,
 }
 
 static int iwl_mvm_tzone_set_trip_temp(struct thermal_zone_device *device,
+#if 0 /* Not in RHEL */
 				       int trip, int temp)
+#else
+				       int trip, unsigned long temp)
+#endif
 {
 	struct iwl_mvm *mvm = (struct iwl_mvm *)device->devdata;
 	struct iwl_mvm_thermal_device *tzone;

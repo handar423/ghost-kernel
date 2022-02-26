@@ -30,8 +30,6 @@
 
 #include "6lowpan_i.h"
 
-static const char lowpan_frags_cache_name[] = "lowpan-frags";
-
 static struct inet_frags lowpan_frags;
 
 static int lowpan_frag_reasm(struct lowpan_frag_queue *fq,
@@ -41,25 +39,29 @@ static unsigned int lowpan_hash_frag(u16 tag, u16 d_size,
 				     const struct ieee802154_addr *saddr,
 				     const struct ieee802154_addr *daddr)
 {
+	u32 c;
+
 	net_get_random_once(&lowpan_frags.rnd, sizeof(lowpan_frags.rnd));
-	return jhash_3words(ieee802154_addr_hash(saddr),
-			    ieee802154_addr_hash(daddr),
-			    (__force u32)(tag + (d_size << 16)),
-			    lowpan_frags.rnd);
+	c = jhash_3words(ieee802154_addr_hash(saddr),
+			 ieee802154_addr_hash(daddr),
+			 (__force u32)(tag + (d_size << 16)),
+			 lowpan_frags.rnd);
+
+	return c & (INETFRAGS_HASHSZ - 1);
 }
 
-static unsigned int lowpan_hashfn(const struct inet_frag_queue *q)
+static unsigned int lowpan_hashfn(struct inet_frag_queue *q)
 {
-	const struct lowpan_frag_queue *fq;
+	struct lowpan_frag_queue *fq;
 
 	fq = container_of(q, struct lowpan_frag_queue, q);
 	return lowpan_hash_frag(fq->tag, fq->d_size, &fq->saddr, &fq->daddr);
 }
 
-static bool lowpan_frag_match(const struct inet_frag_queue *q, const void *a)
+static bool lowpan_frag_match(struct inet_frag_queue *q, void *a)
 {
-	const struct lowpan_frag_queue *fq;
-	const struct lowpan_create_arg *arg = a;
+	struct lowpan_frag_queue *fq;
+	struct lowpan_create_arg *arg = a;
 
 	fq = container_of(q, struct lowpan_frag_queue, q);
 	return	fq->tag == arg->tag && fq->d_size == arg->d_size &&
@@ -67,10 +69,10 @@ static bool lowpan_frag_match(const struct inet_frag_queue *q, const void *a)
 		ieee802154_addr_equal(&fq->daddr, arg->dst);
 }
 
-static void lowpan_frag_init(struct inet_frag_queue *q, const void *a)
+static void lowpan_frag_init(struct inet_frag_queue *q, void *a)
 {
-	const struct lowpan_create_arg *arg = a;
 	struct lowpan_frag_queue *fq;
+	struct lowpan_create_arg *arg = a;
 
 	fq = container_of(q, struct lowpan_frag_queue, q);
 
@@ -80,18 +82,17 @@ static void lowpan_frag_init(struct inet_frag_queue *q, const void *a)
 	fq->daddr = *arg->dst;
 }
 
-static void lowpan_frag_expire(struct timer_list *t)
+static void lowpan_frag_expire(unsigned long data)
 {
-	struct inet_frag_queue *frag = from_timer(frag, t, timer);
 	struct frag_queue *fq;
 	struct net *net;
 
-	fq = container_of(frag, struct frag_queue, q);
+	fq = container_of((struct inet_frag_queue *)data, struct frag_queue, q);
 	net = container_of(fq->q.net, struct net, ieee802154_lowpan.frags);
 
 	spin_lock(&fq->q.lock);
 
-	if (fq->q.flags & INET_FRAG_COMPLETE)
+	if (fq->q.last_in & INET_FRAG_COMPLETE)
 		goto out;
 
 	inet_frag_kill(&fq->q, &lowpan_frags);
@@ -116,6 +117,7 @@ fq_find(struct net *net, const struct lowpan_802154_cb *cb,
 	arg.src = src;
 	arg.dst = dst;
 
+	read_lock(&lowpan_frags.lock);
 	hash = lowpan_hash_frag(cb->d_tag, cb->d_size, src, dst);
 
 	q = inet_frag_find(&ieee802154_lowpan->frags,
@@ -134,7 +136,7 @@ static int lowpan_frag_queue(struct lowpan_frag_queue *fq,
 	struct net_device *ldev;
 	int end, offset;
 
-	if (fq->q.flags & INET_FRAG_COMPLETE)
+	if (fq->q.last_in & INET_FRAG_COMPLETE)
 		goto err;
 
 	offset = lowpan_802154_cb(skb)->d_offset << 3;
@@ -146,14 +148,14 @@ static int lowpan_frag_queue(struct lowpan_frag_queue *fq,
 		 * or have different end, the segment is corrupted.
 		 */
 		if (end < fq->q.len ||
-		    ((fq->q.flags & INET_FRAG_LAST_IN) && end != fq->q.len))
+		    ((fq->q.last_in & INET_FRAG_LAST_IN) && end != fq->q.len))
 			goto err;
-		fq->q.flags |= INET_FRAG_LAST_IN;
+		fq->q.last_in |= INET_FRAG_LAST_IN;
 		fq->q.len = end;
 	} else {
 		if (end > fq->q.len) {
 			/* Some bits beyond end -> corruption. */
-			if (fq->q.flags & INET_FRAG_LAST_IN)
+			if (fq->q.last_in & INET_FRAG_LAST_IN)
 				goto err;
 			fq->q.len = end;
 		}
@@ -194,12 +196,12 @@ found:
 
 	fq->q.stamp = skb->tstamp;
 	if (frag_type == LOWPAN_DISPATCH_FRAG1)
-		fq->q.flags |= INET_FRAG_FIRST_IN;
+		fq->q.last_in |= INET_FRAG_FIRST_IN;
 
 	fq->q.meat += skb->len;
-	add_frag_mem_limit(fq->q.net, skb->truesize);
+	add_frag_mem_limit(&fq->q, skb->truesize);
 
-	if (fq->q.flags == (INET_FRAG_FIRST_IN | INET_FRAG_LAST_IN) &&
+	if (fq->q.last_in == (INET_FRAG_FIRST_IN | INET_FRAG_LAST_IN) &&
 	    fq->q.meat == fq->q.len) {
 		int res;
 		unsigned long orefdst = skb->_skb_refdst;
@@ -277,7 +279,7 @@ static int lowpan_frag_reasm(struct lowpan_frag_queue *fq, struct sk_buff *prev,
 		clone->data_len = clone->len;
 		head->data_len -= clone->len;
 		head->len -= clone->len;
-		add_frag_mem_limit(fq->q.net, clone->truesize);
+		add_frag_mem_limit(&fq->q, clone->truesize);
 	}
 
 	WARN_ON(head == NULL);
@@ -300,7 +302,7 @@ static int lowpan_frag_reasm(struct lowpan_frag_queue *fq, struct sk_buff *prev,
 		}
 		fp = next;
 	}
-	sub_frag_mem_limit(fq->q.net, sum_truesize);
+	sub_frag_mem_limit(&fq->q, sum_truesize);
 
 	head->next = NULL;
 	head->dev = ldev;
@@ -478,12 +480,10 @@ static struct ctl_table lowpan_frags_ns_ctl_table[] = {
 	{ }
 };
 
-/* secret interval has been deprecated */
-static int lowpan_frags_secret_interval_unused;
 static struct ctl_table lowpan_frags_ctl_table[] = {
 	{
 		.procname	= "6lowpanfrag_secret_interval",
-		.data		= &lowpan_frags_secret_interval_unused,
+		.data		= &lowpan_frags.secret_interval,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_jiffies,
@@ -585,7 +585,7 @@ static int __net_init lowpan_frags_init_net(struct net *net)
 	ieee802154_lowpan->frags.high_thresh = IPV6_FRAG_HIGH_THRESH;
 	ieee802154_lowpan->frags.low_thresh = IPV6_FRAG_LOW_THRESH;
 	ieee802154_lowpan->frags.timeout = IPV6_FRAG_TIMEOUT;
-
+	lowpan_frags.secret_interval = 10 * 60 * HZ;
 	inet_frags_init_net(&ieee802154_lowpan->frags);
 
 	return lowpan_frags_ns_sysctl_register(net);
@@ -623,10 +623,7 @@ int __init lowpan_net_frag_init(void)
 	lowpan_frags.qsize = sizeof(struct frag_queue);
 	lowpan_frags.match = lowpan_frag_match;
 	lowpan_frags.frag_expire = lowpan_frag_expire;
-	lowpan_frags.frags_cache_name = lowpan_frags_cache_name;
-	ret = inet_frags_init(&lowpan_frags);
-	if (ret)
-		goto err_pernet;
+	inet_frags_init(&lowpan_frags);
 
 	return ret;
 err_pernet:

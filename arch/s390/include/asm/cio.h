@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Common interface for I/O on S/390
  */
@@ -7,6 +6,7 @@
 
 #include <linux/spinlock.h>
 #include <linux/bitops.h>
+#include <linux/genalloc.h>
 #include <asm/types.h>
 
 #define LPM_ANYPATH 0xff
@@ -33,24 +33,6 @@ struct ccw1 {
 	__u16 count;
 	__u32 cda;
 } __attribute__ ((packed,aligned(8)));
-
-/**
- * struct ccw0 - channel command word
- * @cmd_code: command code
- * @cda: data address
- * @flags: flags, like IDA addressing, etc.
- * @reserved: will be ignored
- * @count: byte count
- *
- * The format-0 ccw structure.
- */
-struct ccw0 {
-	__u8 cmd_code;
-	__u32 cda : 24;
-	__u8  flags;
-	__u8  reserved;
-	__u16 count;
-} __packed __aligned(8);
 
 #define CCW_FLAG_DC		0x80
 #define CCW_FLAG_CC		0x40
@@ -219,7 +201,7 @@ struct esw_eadm {
 /**
  * struct irb - interruption response block
  * @scsw: subchannel status word
- * @esw: extended status word
+ * @esw: extened status word
  * @ecw: extended control word
  *
  * The irb that is handed to the device driver when an interrupt occurs. For
@@ -338,8 +320,18 @@ struct cio_iplinfo {
 
 extern int cio_get_iplinfo(struct cio_iplinfo *iplinfo);
 
+extern void *cio_dma_zalloc(size_t size);
+extern void cio_dma_free(void *cpu_addr, size_t size);
+extern struct device *cio_get_dma_css_dev(void);
+
+void *cio_gp_dma_zalloc(struct gen_pool *gp_dma, struct device *dma_dev,
+			size_t size);
+void cio_gp_dma_free(struct gen_pool *gp_dma, void *cpu_addr, size_t size);
+void cio_gp_dma_destroy(struct gen_pool *gp_dma, struct device *dma_dev);
+struct gen_pool *cio_gp_dma_create(struct device *dma_dev, int nr_pages);
+
 /* Function from drivers/s390/cio/chsc.c */
-int chsc_sstpc(void *page, unsigned int op, u16 ctrl, u64 *clock_delta);
+int chsc_sstpc(void *page, unsigned int op, u16 ctrl);
 int chsc_sstpi(void *page, void *result, size_t size);
 
 #endif

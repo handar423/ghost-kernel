@@ -102,6 +102,9 @@ struct alx_napi {
 
 #define ALX_MAX_NAPIS 8
 
+#define ALX_FLAG_USING_MSIX	BIT(0)
+#define ALX_FLAG_USING_MSI	BIT(1)
+
 struct alx_priv {
 	struct net_device *dev;
 
@@ -109,6 +112,7 @@ struct alx_priv {
 
 	/* msi-x vectors */
 	int num_vec;
+	struct msix_entry *msix_entries;
 
 	/* all descriptor memory */
 	struct {
@@ -134,6 +138,8 @@ struct alx_priv {
 	struct work_struct reset_wk;
 
 	u16 msg_enable;
+
+	int flags;
 
 	/* protects hw.stats */
 	spinlock_t stats_lock;

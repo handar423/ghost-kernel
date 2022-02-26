@@ -18,8 +18,7 @@
 
 #include <linux/fscache-cache.h>
 #include <linux/timer.h>
-#include <linux/wait_bit.h>
-#include <linux/cred.h>
+#include <linux/wait.h>
 #include <linux/workqueue.h>
 #include <linux/security.h>
 
@@ -31,7 +30,7 @@ extern unsigned cachefiles_debug;
 #define CACHEFILES_DEBUG_KLEAVE	2
 #define CACHEFILES_DEBUG_KDEBUG	4
 
-#define cachefiles_gfp (__GFP_RECLAIM | __GFP_NORETRY | __GFP_NOMEMALLOC)
+#define cachefiles_gfp (__GFP_WAIT | __GFP_NORETRY | __GFP_NOMEMALLOC)
 
 /*
  * node records
@@ -97,7 +96,7 @@ struct cachefiles_cache {
  * backing file read tracking
  */
 struct cachefiles_one_read {
-	wait_queue_entry_t			monitor;	/* link into monitored waitqueue */
+	wait_queue_t			monitor;	/* link into monitored waitqueue */
 	struct page			*back_page;	/* backing file page we're waiting for */
 	struct page			*netfs_page;	/* netfs page we're going to fill */
 	struct fscache_retrieval	*op;		/* retrieval op covering this */

@@ -19,6 +19,7 @@
 #include <linux/moduleparam.h>
 #include <linux/delay.h>
 #include <linux/jiffies.h>
+#include <linux/init.h>
 #include <linux/errno.h>
 #include <linux/i2c.h>
 #include <linux/i2c-algo-pca.h>
@@ -521,7 +522,7 @@ static int pca_init(struct i2c_adapter *adap)
 
 		pca_set_con(pca_data, I2C_PCA_CON_ENSIO);
 	}
-	udelay(500); /* 500 us for oscillator to stabilise */
+	udelay(500); /* 500 us for oscilator to stabilise */
 
 	return 0;
 }

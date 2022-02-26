@@ -11,8 +11,6 @@
 *******************************************************************************
 ******************************************************************************/
 
-#include <linux/module.h>
-
 #include "dlm_internal.h"
 #include "lockspace.h"
 #include "member.h"
@@ -37,11 +35,8 @@ static struct task_struct *	scand_task;
 static ssize_t dlm_control_store(struct dlm_ls *ls, const char *buf, size_t len)
 {
 	ssize_t ret = len;
-	int n;
-	int rc = kstrtoint(buf, 0, &n);
+	int n = simple_strtol(buf, NULL, 0);
 
-	if (rc)
-		return rc;
 	ls = dlm_find_lockspace_local(ls->ls_local_handle);
 	if (!ls)
 		return -EINVAL;
@@ -62,10 +57,7 @@ static ssize_t dlm_control_store(struct dlm_ls *ls, const char *buf, size_t len)
 
 static ssize_t dlm_event_store(struct dlm_ls *ls, const char *buf, size_t len)
 {
-	int rc = kstrtoint(buf, 0, &ls->ls_uevent_result);
-
-	if (rc)
-		return rc;
+	ls->ls_uevent_result = simple_strtol(buf, NULL, 0);
 	set_bit(LSFL_UEVENT_WAIT, &ls->ls_flags);
 	wake_up(&ls->ls_uevent_wait);
 	return len;
@@ -78,10 +70,7 @@ static ssize_t dlm_id_show(struct dlm_ls *ls, char *buf)
 
 static ssize_t dlm_id_store(struct dlm_ls *ls, const char *buf, size_t len)
 {
-	int rc = kstrtouint(buf, 0, &ls->ls_global_id);
-
-	if (rc)
-		return rc;
+	ls->ls_global_id = simple_strtoul(buf, NULL, 0);
 	return len;
 }
 
@@ -92,11 +81,7 @@ static ssize_t dlm_nodir_show(struct dlm_ls *ls, char *buf)
 
 static ssize_t dlm_nodir_store(struct dlm_ls *ls, const char *buf, size_t len)
 {
-	int val;
-	int rc = kstrtoint(buf, 0, &val);
-
-	if (rc)
-		return rc;
+	int val = simple_strtoul(buf, NULL, 0);
 	if (val == 1)
 		set_bit(LSFL_NODIR, &ls->ls_flags);
 	return len;
@@ -205,7 +190,7 @@ static int do_uevent(struct dlm_ls *ls, int in)
 	else
 		kobject_uevent(&ls->ls_kobj, KOBJ_OFFLINE);
 
-	log_rinfo(ls, "%s the lockspace group...", in ? "joining" : "leaving");
+	log_debug(ls, "%s the lockspace group...", in ? "joining" : "leaving");
 
 	/* dlm_controld will see the uevent, do the necessary group management
 	   and then write to sysfs to wake us */
@@ -213,7 +198,7 @@ static int do_uevent(struct dlm_ls *ls, int in)
 	error = wait_event_interruptible(ls->ls_uevent_wait,
 			test_and_clear_bit(LSFL_UEVENT_WAIT, &ls->ls_flags));
 
-	log_rinfo(ls, "group event done %d %d", error, ls->ls_uevent_result);
+	log_debug(ls, "group event done %d %d", error, ls->ls_uevent_result);
 
 	if (error)
 		goto out;
@@ -235,7 +220,7 @@ static int dlm_uevent(struct kset *kset, struct kobject *kobj,
 	return 0;
 }
 
-static const struct kset_uevent_ops dlm_uevent_ops = {
+static struct kset_uevent_ops dlm_uevent_ops = {
 	.uevent = dlm_uevent,
 };
 
@@ -453,14 +438,9 @@ static int new_lockspace(const char *name, const char *cluster,
 			*ops_result = 0;
 	}
 
-	if (!cluster)
-		log_print("dlm cluster name '%s' is being used without an application provided cluster name",
-			  dlm_config.ci_cluster_name);
-
 	if (dlm_config.ci_recover_callbacks && cluster &&
 	    strncmp(cluster, dlm_config.ci_cluster_name, DLM_LOCKSPACE_LEN)) {
-		log_print("dlm cluster name '%s' does not match "
-			  "the application cluster name '%s'",
+		log_print("dlm cluster name %s mismatch %s",
 			  dlm_config.ci_cluster_name, cluster);
 		error = -EBADR;
 		goto out;
@@ -660,7 +640,7 @@ static int new_lockspace(const char *name, const char *cluster,
 
 	dlm_create_debug_file(ls);
 
-	log_rinfo(ls, "join complete");
+	log_debug(ls, "join complete");
 	*lockspace = ls;
 	return 0;
 
@@ -726,7 +706,9 @@ static int lkb_idr_is_local(int id, void *p, void *data)
 {
 	struct dlm_lkb *lkb = p;
 
-	return lkb->lkb_nodeid == 0 && lkb->lkb_grmode != DLM_LOCK_IV;
+	if (!lkb->lkb_nodeid)
+		return 1;
+	return 0;
 }
 
 static int lkb_idr_is_any(int id, void *p, void *data)
@@ -855,7 +837,7 @@ static int release_lockspace(struct dlm_ls *ls, int force)
 	dlm_clear_members(ls);
 	dlm_clear_members_gone(ls);
 	kfree(ls->ls_node_array);
-	log_rinfo(ls, "release_lockspace final free");
+	log_debug(ls, "release_lockspace final free");
 	kobject_put(&ls->ls_kobj);
 	/* The ls structure will be freed when the kobject is done with */
 

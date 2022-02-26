@@ -45,11 +45,10 @@ kmem_zone_t	*xfs_btree_cur_zone;
  * Btree magic numbers.
  */
 static const uint32_t xfs_magics[2][XFS_BTNUM_MAX] = {
-	{ XFS_ABTB_MAGIC, XFS_ABTC_MAGIC, 0, XFS_BMAP_MAGIC, XFS_IBT_MAGIC,
-	  XFS_FIBT_MAGIC, 0 },
-	{ XFS_ABTB_CRC_MAGIC, XFS_ABTC_CRC_MAGIC, XFS_RMAP_CRC_MAGIC,
-	  XFS_BMAP_CRC_MAGIC, XFS_IBT_CRC_MAGIC, XFS_FIBT_CRC_MAGIC,
-	  XFS_REFC_CRC_MAGIC }
+	{ XFS_ABTB_MAGIC, XFS_ABTC_MAGIC, XFS_BMAP_MAGIC, XFS_IBT_MAGIC,
+	  XFS_FIBT_MAGIC },
+	{ XFS_ABTB_CRC_MAGIC, XFS_ABTC_CRC_MAGIC,
+	  XFS_BMAP_CRC_MAGIC, XFS_IBT_CRC_MAGIC, XFS_FIBT_CRC_MAGIC }
 };
 
 uint32_t
@@ -63,6 +62,7 @@ xfs_btree_magic(
 	ASSERT(magic != 0);
 	return magic;
 }
+
 
 /*
  * Check a long btree block header.  Return the address of the failing check,
@@ -234,7 +234,6 @@ xfs_btree_check_sptr(
 	return xfs_verify_agbno(cur->bc_mp, cur->bc_private.a.agno, agbno);
 }
 
-#ifdef DEBUG
 /*
  * Check that a given (indexed) btree pointer at a certain level of a
  * btree is valid and doesn't point past where it should.
@@ -247,17 +246,31 @@ xfs_btree_check_ptr(
 	int			level)
 {
 	if (cur->bc_flags & XFS_BTREE_LONG_PTRS) {
-		XFS_WANT_CORRUPTED_RETURN(cur->bc_mp,
-				xfs_btree_check_lptr(cur,
-					be64_to_cpu((&ptr->l)[index]), level));
+		if (xfs_btree_check_lptr(cur, be64_to_cpu((&ptr->l)[index]),
+				level))
+			return 0;
+		xfs_err(cur->bc_mp,
+"Inode %llu fork %d: Corrupt btree %d pointer at level %d index %d.",
+				cur->bc_private.b.ip->i_ino,
+				cur->bc_private.b.whichfork, cur->bc_btnum,
+				level, index);
 	} else {
-		XFS_WANT_CORRUPTED_RETURN(cur->bc_mp,
-				xfs_btree_check_sptr(cur,
-					be32_to_cpu((&ptr->s)[index]), level));
+		if (xfs_btree_check_sptr(cur, be32_to_cpu((&ptr->s)[index]),
+				level))
+			return 0;
+		xfs_err(cur->bc_mp,
+"AG %u: Corrupt btree %d pointer at level %d index %d.",
+				cur->bc_private.a.agno, cur->bc_btnum,
+				level, index);
 	}
 
-	return 0;
+	return -EFSCORRUPTED;
 }
+
+#ifdef DEBUG
+# define xfs_btree_debug_check_ptr	xfs_btree_check_ptr
+#else
+# define xfs_btree_debug_check_ptr(...)	(0)
 #endif
 
 /*
@@ -329,7 +342,7 @@ xfs_btree_sblock_verify_crc(
 
 	if (xfs_sb_version_hascrc(&mp->m_sb)) {
 		if (!xfs_log_check_lsn(mp, be64_to_cpu(block->bb_u.s.bb_lsn)))
-			return false;
+			return __this_address;
 		return xfs_buf_verify_cksum(bp, XFS_BTREE_SBLOCK_CRC_OFF);
 	}
 
@@ -470,50 +483,6 @@ xfs_btree_dup_cursor(
  * into a btree block (xfs_btree_*_offset) or return a pointer to the given
  * record, key or pointer (xfs_btree_*_addr).  Note that all addressing
  * inside the btree block is done using indices starting at one, not zero!
- *
- * If XFS_BTREE_OVERLAPPING is set, then this btree supports keys containing
- * overlapping intervals.  In such a tree, records are still sorted lowest to
- * highest and indexed by the smallest key value that refers to the record.
- * However, nodes are different: each pointer has two associated keys -- one
- * indexing the lowest key available in the block(s) below (the same behavior
- * as the key in a regular btree) and another indexing the highest key
- * available in the block(s) below.  Because records are /not/ sorted by the
- * highest key, all leaf block updates require us to compute the highest key
- * that matches any record in the leaf and to recursively update the high keys
- * in the nodes going further up in the tree, if necessary.  Nodes look like
- * this:
- *
- *		+--------+-----+-----+-----+-----+-----+-------+-------+-----+
- * Non-Leaf:	| header | lo1 | hi1 | lo2 | hi2 | ... | ptr 1 | ptr 2 | ... |
- *		+--------+-----+-----+-----+-----+-----+-------+-------+-----+
- *
- * To perform an interval query on an overlapped tree, perform the usual
- * depth-first search and use the low and high keys to decide if we can skip
- * that particular node.  If a leaf node is reached, return the records that
- * intersect the interval.  Note that an interval query may return numerous
- * entries.  For a non-overlapped tree, simply search for the record associated
- * with the lowest key and iterate forward until a non-matching record is
- * found.  Section 14.3 ("Interval Trees") of _Introduction to Algorithms_ by
- * Cormen, Leiserson, Rivest, and Stein (2nd or 3rd ed. only) discuss this in
- * more detail.
- *
- * Why do we care about overlapping intervals?  Let's say you have a bunch of
- * reverse mapping records on a reflink filesystem:
- *
- * 1: +- file A startblock B offset C length D -----------+
- * 2:      +- file E startblock F offset G length H --------------+
- * 3:      +- file I startblock F offset J length K --+
- * 4:                                                        +- file L... --+
- *
- * Now say we want to map block (B+D) into file A at offset (C+D).  Ideally,
- * we'd simply increment the length of record 1.  But how do we find the record
- * that ends at (B+D-1) (i.e. record 1)?  A LE lookup of (B+D-1) would return
- * record 3 because the keys are ordered first by startblock.  An interval
- * query would return records 1 and 2 because they both overlap (B+D-1), and
- * from that we can pick out record 1 as the appropriate left neighbor.
- *
- * In the non-overlapped case you can do a LE lookup and decrement the cursor
- * because a record's interval must end before the next record.
  */
 
 /*
@@ -565,18 +534,6 @@ xfs_btree_key_offset(
 }
 
 /*
- * Calculate offset of the n-th high key in a btree block.
- */
-STATIC size_t
-xfs_btree_high_key_offset(
-	struct xfs_btree_cur	*cur,
-	int			n)
-{
-	return xfs_btree_block_len(cur) +
-		(n - 1) * cur->bc_ops->key_len + (cur->bc_ops->key_len / 2);
-}
-
-/*
  * Calculate offset of the n-th block pointer in a btree block.
  */
 STATIC size_t
@@ -614,19 +571,6 @@ xfs_btree_key_addr(
 {
 	return (union xfs_btree_key *)
 		((char *)block + xfs_btree_key_offset(cur, n));
-}
-
-/*
- * Return a pointer to the n-th high key in the btree block.
- */
-union xfs_btree_key *
-xfs_btree_high_key_addr(
-	struct xfs_btree_cur	*cur,
-	int			n,
-	struct xfs_btree_block	*block)
-{
-	return (union xfs_btree_key *)
-		((char *)block + xfs_btree_high_key_offset(cur, n));
 }
 
 /*
@@ -853,7 +797,7 @@ xfs_btree_read_bufl(
 	xfs_daddr_t		d;		/* real disk block address */
 	int			error;
 
-	if (!XFS_FSB_SANITY_CHECK(mp, fsbno))
+	if (!xfs_verify_fsbno(mp, fsbno))
 		return -EFSCORRUPTED;
 	d = XFS_FSB_TO_DADDR(mp, fsbno);
 	error = xfs_trans_read_buf(mp, tp, mp->m_ddev_targp, d,
@@ -988,22 +932,30 @@ xfs_btree_readahead(
 	return xfs_btree_readahead_sblock(cur, lr, block);
 }
 
-STATIC xfs_daddr_t
+STATIC int
 xfs_btree_ptr_to_daddr(
 	struct xfs_btree_cur	*cur,
-	union xfs_btree_ptr	*ptr)
+	union xfs_btree_ptr	*ptr,
+	xfs_daddr_t		*daddr)
 {
+	xfs_fsblock_t		fsbno;
+	xfs_agblock_t		agbno;
+	int			error;
+
+	error = xfs_btree_check_ptr(cur, ptr, 0, 1);
+	if (error)
+		return error;
+
 	if (cur->bc_flags & XFS_BTREE_LONG_PTRS) {
-		ASSERT(ptr->l != cpu_to_be64(NULLFSBLOCK));
-
-		return XFS_FSB_TO_DADDR(cur->bc_mp, be64_to_cpu(ptr->l));
+		fsbno = be64_to_cpu(ptr->l);
+		*daddr = XFS_FSB_TO_DADDR(cur->bc_mp, fsbno);
 	} else {
-		ASSERT(cur->bc_private.a.agno != NULLAGNUMBER);
-		ASSERT(ptr->s != cpu_to_be32(NULLAGBLOCK));
-
-		return XFS_AGB_TO_DADDR(cur->bc_mp, cur->bc_private.a.agno,
-					be32_to_cpu(ptr->s));
+		agbno = be32_to_cpu(ptr->s);
+		*daddr = XFS_AGB_TO_DADDR(cur->bc_mp, cur->bc_private.a.agno,
+				agbno);
 	}
+
+	return 0;
 }
 
 /*
@@ -1018,8 +970,11 @@ xfs_btree_readahead_ptr(
 	union xfs_btree_ptr	*ptr,
 	xfs_extlen_t		count)
 {
-	xfs_buf_readahead(cur->bc_mp->m_ddev_targp,
-			  xfs_btree_ptr_to_daddr(cur, ptr),
+	xfs_daddr_t		daddr;
+
+	if (xfs_btree_ptr_to_daddr(cur, ptr, &daddr))
+		return;
+	xfs_buf_readahead(cur->bc_mp->m_ddev_targp, daddr,
 			  cur->bc_mp->m_bsize * count, cur->bc_ops->buf_ops);
 }
 
@@ -1054,7 +1009,7 @@ xfs_btree_setbuf(
 	}
 }
 
-bool
+STATIC int
 xfs_btree_ptr_is_null(
 	struct xfs_btree_cur	*cur,
 	union xfs_btree_ptr	*ptr)
@@ -1079,7 +1034,7 @@ xfs_btree_set_ptr_null(
 /*
  * Get/set/init sibling pointers
  */
-void
+STATIC void
 xfs_btree_get_sibling(
 	struct xfs_btree_cur	*cur,
 	struct xfs_btree_block	*block,
@@ -1261,12 +1216,6 @@ xfs_btree_set_refs(
 	case XFS_BTNUM_BMAP:
 		xfs_buf_set_ref(bp, XFS_BMAP_BTREE_REF);
 		break;
-	case XFS_BTNUM_RMAP:
-		xfs_buf_set_ref(bp, XFS_RMAP_BTREE_REF);
-		break;
-	case XFS_BTNUM_REFC:
-		xfs_buf_set_ref(bp, XFS_REFC_BTREE_REF);
-		break;
 	default:
 		ASSERT(0);
 	}
@@ -1282,11 +1231,14 @@ xfs_btree_get_buf_block(
 {
 	struct xfs_mount	*mp = cur->bc_mp;
 	xfs_daddr_t		d;
+	int			error;
 
 	/* need to sort out how callers deal with failures first */
 	ASSERT(!(flags & XBF_TRYLOCK));
 
-	d = xfs_btree_ptr_to_daddr(cur, ptr);
+	error = xfs_btree_ptr_to_daddr(cur, ptr, &d);
+	if (error)
+		return error;
 	*bpp = xfs_trans_get_buf(cur->bc_tp, mp->m_ddev_targp, d,
 				 mp->m_bsize, flags);
 
@@ -1317,7 +1269,9 @@ xfs_btree_read_buf_block(
 	/* need to sort out how callers deal with failures first */
 	ASSERT(!(flags & XBF_TRYLOCK));
 
-	d = xfs_btree_ptr_to_daddr(cur, ptr);
+	error = xfs_btree_ptr_to_daddr(cur, ptr, &d);
+	if (error)
+		return error;
 	error = xfs_trans_read_buf(mp, cur->bc_tp, mp->m_ddev_targp, d,
 				   mp->m_bsize, flags, bpp,
 				   cur->bc_ops->buf_ops);
@@ -1791,6 +1745,7 @@ xfs_btree_lookup_get_block(
 	struct xfs_btree_block	**blkp) /* return btree block */
 {
 	struct xfs_buf		*bp;	/* buffer pointer for btree block */
+	xfs_daddr_t		daddr;
 	int			error = 0;
 
 	/* special case the root block if in an inode */
@@ -1807,7 +1762,10 @@ xfs_btree_lookup_get_block(
 	 * Otherwise throw it away and get a new one.
 	 */
 	bp = cur->bc_bufs[level];
-	if (bp && XFS_BUF_ADDR(bp) == xfs_btree_ptr_to_daddr(cur, pp)) {
+	error = xfs_btree_ptr_to_daddr(cur, pp, &daddr);
+	if (error)
+		return error;
+	if (bp && XFS_BUF_ADDR(bp) == daddr) {
 		*blkp = XFS_BUF_TO_BLOCK(bp);
 		return 0;
 	}
@@ -1926,7 +1884,13 @@ xfs_btree_lookup(
 			high = xfs_btree_get_numrecs(block);
 			if (!high) {
 				/* Block is empty, must be an empty leaf. */
-				ASSERT(level == 0 && cur->bc_nlevels == 1);
+				if (level != 0 || cur->bc_nlevels != 1) {
+					XFS_CORRUPTION_ERROR(__func__,
+							XFS_ERRLEVEL_LOW,
+							cur->bc_mp, block,
+							sizeof(*block));
+					return -EFSCORRUPTED;
+				}
 
 				cur->bc_ptrs[0] = dir != XFS_LOOKUP_LE;
 				XFS_BTREE_TRACE_CURSOR(cur, XBT_EXIT);
@@ -1977,11 +1941,10 @@ xfs_btree_lookup(
 				keyno = 1;
 			pp = xfs_btree_ptr_addr(cur, keyno, block);
 
-#ifdef DEBUG
-			error = xfs_btree_check_ptr(cur, pp, 0, level);
+			error = xfs_btree_debug_check_ptr(cur, pp, 0, level);
 			if (error)
 				goto error0;
-#endif
+
 			cur->bc_ptrs[level] = keyno;
 		}
 	}
@@ -2027,187 +1990,59 @@ error0:
 	return error;
 }
 
-/* Find the high key storage area from a regular key. */
-union xfs_btree_key *
-xfs_btree_high_key_from_key(
-	struct xfs_btree_cur	*cur,
-	union xfs_btree_key	*key)
-{
-	ASSERT(cur->bc_flags & XFS_BTREE_OVERLAPPING);
-	return (union xfs_btree_key *)((char *)key +
-			(cur->bc_ops->key_len / 2));
-}
-
-/* Determine the low (and high if overlapped) keys of a leaf block */
-STATIC void
+/* Determine the low key of a leaf block (simple) */
+void
 xfs_btree_get_leaf_keys(
 	struct xfs_btree_cur	*cur,
 	struct xfs_btree_block	*block,
 	union xfs_btree_key	*key)
 {
-	union xfs_btree_key	max_hkey;
-	union xfs_btree_key	hkey;
 	union xfs_btree_rec	*rec;
-	union xfs_btree_key	*high;
-	int			n;
 
 	rec = xfs_btree_rec_addr(cur, 1, block);
 	cur->bc_ops->init_key_from_rec(key, rec);
-
-	if (cur->bc_flags & XFS_BTREE_OVERLAPPING) {
-
-		cur->bc_ops->init_high_key_from_rec(&max_hkey, rec);
-		for (n = 2; n <= xfs_btree_get_numrecs(block); n++) {
-			rec = xfs_btree_rec_addr(cur, n, block);
-			cur->bc_ops->init_high_key_from_rec(&hkey, rec);
-			if (cur->bc_ops->diff_two_keys(cur, &hkey, &max_hkey)
-					> 0)
-				max_hkey = hkey;
-		}
-
-		high = xfs_btree_high_key_from_key(cur, key);
-		memcpy(high, &max_hkey, cur->bc_ops->key_len / 2);
-	}
 }
 
-/* Determine the low (and high if overlapped) keys of a node block */
-STATIC void
+/* Determine the low key of a node block (simple) */
+void
 xfs_btree_get_node_keys(
 	struct xfs_btree_cur	*cur,
 	struct xfs_btree_block	*block,
 	union xfs_btree_key	*key)
 {
-	union xfs_btree_key	*hkey;
-	union xfs_btree_key	*max_hkey;
-	union xfs_btree_key	*high;
-	int			n;
-
-	if (cur->bc_flags & XFS_BTREE_OVERLAPPING) {
-		memcpy(key, xfs_btree_key_addr(cur, 1, block),
-				cur->bc_ops->key_len / 2);
-
-		max_hkey = xfs_btree_high_key_addr(cur, 1, block);
-		for (n = 2; n <= xfs_btree_get_numrecs(block); n++) {
-			hkey = xfs_btree_high_key_addr(cur, n, block);
-			if (cur->bc_ops->diff_two_keys(cur, hkey, max_hkey) > 0)
-				max_hkey = hkey;
-		}
-
-		high = xfs_btree_high_key_from_key(cur, key);
-		memcpy(high, max_hkey, cur->bc_ops->key_len / 2);
-	} else {
-		memcpy(key, xfs_btree_key_addr(cur, 1, block),
-				cur->bc_ops->key_len);
-	}
+	memcpy(key, xfs_btree_key_addr(cur, 1, block), cur->bc_ops->key_len);
 }
 
 /* Derive the keys for any btree block. */
-void
+STATIC void
 xfs_btree_get_keys(
 	struct xfs_btree_cur	*cur,
 	struct xfs_btree_block	*block,
 	union xfs_btree_key	*key)
 {
 	if (be16_to_cpu(block->bb_level) == 0)
-		xfs_btree_get_leaf_keys(cur, block, key);
+		cur->bc_ops->get_leaf_keys(cur, block, key);
 	else
-		xfs_btree_get_node_keys(cur, block, key);
+		cur->bc_ops->get_node_keys(cur, block, key);
 }
 
 /*
  * Decide if we need to update the parent keys of a btree block.  For
  * a standard btree this is only necessary if we're updating the first
- * record/key.  For an overlapping btree, we must always update the
- * keys because the highest key can be in any of the records or keys
- * in the block.
+ * record/key.
  */
 static inline bool
 xfs_btree_needs_key_update(
 	struct xfs_btree_cur	*cur,
 	int			ptr)
 {
-	return (cur->bc_flags & XFS_BTREE_OVERLAPPING) || ptr == 1;
-}
-
-/*
- * Update the low and high parent keys of the given level, progressing
- * towards the root.  If force_all is false, stop if the keys for a given
- * level do not need updating.
- */
-STATIC int
-__xfs_btree_updkeys(
-	struct xfs_btree_cur	*cur,
-	int			level,
-	struct xfs_btree_block	*block,
-	struct xfs_buf		*bp0,
-	bool			force_all)
-{
-	union xfs_btree_key	key;	/* keys from current level */
-	union xfs_btree_key	*lkey;	/* keys from the next level up */
-	union xfs_btree_key	*hkey;
-	union xfs_btree_key	*nlkey;	/* keys from the next level up */
-	union xfs_btree_key	*nhkey;
-	struct xfs_buf		*bp;
-	int			ptr;
-
-	ASSERT(cur->bc_flags & XFS_BTREE_OVERLAPPING);
-
-	/* Exit if there aren't any parent levels to update. */
-	if (level + 1 >= cur->bc_nlevels)
-		return 0;
-
-	trace_xfs_btree_updkeys(cur, level, bp0);
-
-	lkey = &key;
-	hkey = xfs_btree_high_key_from_key(cur, lkey);
-	xfs_btree_get_keys(cur, block, lkey);
-	for (level++; level < cur->bc_nlevels; level++) {
-#ifdef DEBUG
-		int		error;
-#endif
-		block = xfs_btree_get_block(cur, level, &bp);
-		trace_xfs_btree_updkeys(cur, level, bp);
-#ifdef DEBUG
-		error = xfs_btree_check_block(cur, block, level, bp);
-		if (error) {
-			XFS_BTREE_TRACE_CURSOR(cur, XBT_ERROR);
-			return error;
-		}
-#endif
-		ptr = cur->bc_ptrs[level];
-		nlkey = xfs_btree_key_addr(cur, ptr, block);
-		nhkey = xfs_btree_high_key_addr(cur, ptr, block);
-		if (!force_all &&
-		    !(cur->bc_ops->diff_two_keys(cur, nlkey, lkey) != 0 ||
-		      cur->bc_ops->diff_two_keys(cur, nhkey, hkey) != 0))
-			break;
-		xfs_btree_copy_keys(cur, nlkey, lkey, 1);
-		xfs_btree_log_keys(cur, bp, ptr, ptr);
-		if (level + 1 >= cur->bc_nlevels)
-			break;
-		xfs_btree_get_node_keys(cur, block, lkey);
-	}
-
-	return 0;
-}
-
-/* Update all the keys from some level in cursor back to the root. */
-STATIC int
-xfs_btree_updkeys_force(
-	struct xfs_btree_cur	*cur,
-	int			level)
-{
-	struct xfs_buf		*bp;
-	struct xfs_btree_block	*block;
-
-	block = xfs_btree_get_block(cur, level, &bp);
-	return __xfs_btree_updkeys(cur, level, block, bp, true);
+	return ptr == 1;
 }
 
 /*
  * Update the parent keys of the given level, progressing towards the root.
  */
-STATIC int
+int
 xfs_btree_update_keys(
 	struct xfs_btree_cur	*cur,
 	int			level)
@@ -2218,14 +2053,10 @@ xfs_btree_update_keys(
 	union xfs_btree_key	key;
 	int			ptr;
 
-	ASSERT(level >= 0);
-
-	block = xfs_btree_get_block(cur, level, &bp);
-	if (cur->bc_flags & XFS_BTREE_OVERLAPPING)
-		return __xfs_btree_updkeys(cur, level, block, bp, false);
-
 	XFS_BTREE_TRACE_CURSOR(cur, XBT_ENTRY);
 	XFS_BTREE_TRACE_ARGIK(cur, level, keyp);
+
+	ASSERT(level >= 0);
 
 	/*
 	 * Go up the tree from this level toward the root.
@@ -2233,6 +2064,7 @@ xfs_btree_update_keys(
 	 * Stop when we reach a level where the cursor isn't pointing
 	 * at the first entry in the block.
 	 */
+	block = xfs_btree_get_block(cur, level, &bp);
 	xfs_btree_get_keys(cur, block, &key);
 	for (level++, ptr = 1; ptr == 1 && level < cur->bc_nlevels; level++) {
 #ifdef DEBUG
@@ -2300,9 +2132,9 @@ xfs_btree_update(
 					    ptr, LASTREC_UPDATE);
 	}
 
-	/* Pass new key value up to our parent. */
+	/* Updating first rec in leaf. Pass new key value up to our parent. */
 	if (xfs_btree_needs_key_update(cur, ptr)) {
-		error = xfs_btree_update_keys(cur, 0);
+		error = cur->bc_ops->update_keys(cur, 0);
 		if (error)
 			goto error0;
 	}
@@ -2330,14 +2162,12 @@ xfs_btree_lshift(
 	int			lrecs;		/* left record count */
 	struct xfs_buf		*rbp;		/* right buffer pointer */
 	struct xfs_btree_block	*right;		/* right btree block */
-	struct xfs_btree_cur	*tcur;		/* temporary btree cursor */
 	int			rrecs;		/* right record count */
 	union xfs_btree_ptr	lptr;		/* left btree pointer */
 	union xfs_btree_key	*rkp = NULL;	/* right btree key */
 	union xfs_btree_ptr	*rpp = NULL;	/* right address pointer */
 	union xfs_btree_rec	*rrp = NULL;	/* right record pointer */
 	int			error;		/* error return value */
-	int			i;
 
 	XFS_BTREE_TRACE_CURSOR(cur, XBT_ENTRY);
 	XFS_BTREE_TRACE_ARGI(cur, level);
@@ -2404,11 +2234,11 @@ xfs_btree_lshift(
 
 		lpp = xfs_btree_ptr_addr(cur, lrecs, left);
 		rpp = xfs_btree_ptr_addr(cur, 1, right);
-#ifdef DEBUG
-		error = xfs_btree_check_ptr(cur, rpp, 0, level);
+
+		error = xfs_btree_debug_check_ptr(cur, rpp, 0, level);
 		if (error)
 			goto error0;
-#endif
+
 		xfs_btree_copy_keys(cur, lkp, rkp, 1);
 		xfs_btree_copy_ptrs(cur, lpp, rpp, 1);
 
@@ -2443,15 +2273,14 @@ xfs_btree_lshift(
 	XFS_BTREE_STATS_ADD(cur, moves, rrecs - 1);
 	if (level > 0) {
 		/* It's a nonleaf. operate on keys and ptrs */
-#ifdef DEBUG
 		int			i;		/* loop index */
 
 		for (i = 0; i < rrecs; i++) {
-			error = xfs_btree_check_ptr(cur, rpp, i + 1, level);
+			error = xfs_btree_debug_check_ptr(cur, rpp, i + 1, level);
 			if (error)
 				goto error0;
 		}
-#endif
+
 		xfs_btree_shift_keys(cur,
 				xfs_btree_key_addr(cur, 2, right),
 				-1, rrecs);
@@ -2469,31 +2298,8 @@ xfs_btree_lshift(
 		xfs_btree_log_recs(cur, rbp, 1, rrecs);
 	}
 
-	/*
-	 * Using a temporary cursor, update the parent key values of the
-	 * block on the left.
-	 */
-	if (cur->bc_flags & XFS_BTREE_OVERLAPPING) {
-		error = xfs_btree_dup_cursor(cur, &tcur);
-		if (error)
-			goto error0;
-		i = xfs_btree_firstrec(tcur, level);
-		XFS_WANT_CORRUPTED_GOTO(tcur->bc_mp, i == 1, error0);
-
-		error = xfs_btree_decrement(tcur, level, &i);
-		if (error)
-			goto error1;
-
-		/* Update the parent high keys of the left block, if needed. */
-		error = xfs_btree_update_keys(tcur, level);
-		if (error)
-			goto error1;
-
-		xfs_btree_del_cursor(tcur, XFS_BTREE_NOERROR);
-	}
-
 	/* Update the parent keys of the right block. */
-	error = xfs_btree_update_keys(cur, level);
+	error = cur->bc_ops->update_keys(cur, level);
 	if (error)
 		goto error0;
 
@@ -2511,11 +2317,6 @@ out0:
 
 error0:
 	XFS_BTREE_TRACE_CURSOR(cur, XBT_ERROR);
-	return error;
-
-error1:
-	XFS_BTREE_TRACE_CURSOR(tcur, XBT_ERROR);
-	xfs_btree_del_cursor(tcur, XFS_BTREE_ERROR);
 	return error;
 }
 
@@ -2598,22 +2399,18 @@ xfs_btree_rshift(
 		rkp = xfs_btree_key_addr(cur, 1, right);
 		rpp = xfs_btree_ptr_addr(cur, 1, right);
 
-#ifdef DEBUG
 		for (i = rrecs - 1; i >= 0; i--) {
-			error = xfs_btree_check_ptr(cur, rpp, i, level);
+			error = xfs_btree_debug_check_ptr(cur, rpp, i, level);
 			if (error)
 				goto error0;
 		}
-#endif
 
 		xfs_btree_shift_keys(cur, rkp, 1, rrecs);
 		xfs_btree_shift_ptrs(cur, rpp, 1, rrecs);
 
-#ifdef DEBUG
-		error = xfs_btree_check_ptr(cur, lpp, 0, level);
+		error = xfs_btree_debug_check_ptr(cur, lpp, 0, level);
 		if (error)
 			goto error0;
-#endif
 
 		/* Now put the new data in, and log it. */
 		xfs_btree_copy_keys(cur, rkp, lkp, 1);
@@ -2656,21 +2453,14 @@ xfs_btree_rshift(
 	if (error)
 		goto error0;
 	i = xfs_btree_lastrec(tcur, level);
-	XFS_WANT_CORRUPTED_GOTO(tcur->bc_mp, i == 1, error0);
+	XFS_WANT_CORRUPTED_GOTO(cur->bc_mp, i == 1, error0);
 
 	error = xfs_btree_increment(tcur, level, &i);
 	if (error)
 		goto error1;
 
-	/* Update the parent high keys of the left block, if needed. */
-	if (cur->bc_flags & XFS_BTREE_OVERLAPPING) {
-		error = xfs_btree_update_keys(cur, level);
-		if (error)
-			goto error1;
-	}
-
 	/* Update the parent keys of the right block. */
-	error = xfs_btree_update_keys(tcur, level);
+	error = cur->bc_ops->update_keys(tcur, level);
 	if (error)
 		goto error1;
 
@@ -2722,9 +2512,7 @@ __xfs_btree_split(
 	int			rrecs;
 	int			src_index;
 	int			error;		/* error return value */
-#ifdef DEBUG
 	int			i;
-#endif
 
 	XFS_BTREE_TRACE_CURSOR(cur, XBT_ENTRY);
 	XFS_BTREE_TRACE_ARGIPK(cur, level, *ptrp, key);
@@ -2793,13 +2581,11 @@ __xfs_btree_split(
 		rkp = xfs_btree_key_addr(cur, 1, right);
 		rpp = xfs_btree_ptr_addr(cur, 1, right);
 
-#ifdef DEBUG
 		for (i = src_index; i < rrecs; i++) {
-			error = xfs_btree_check_ptr(cur, lpp, i, level);
+			error = xfs_btree_debug_check_ptr(cur, lpp, i, level);
 			if (error)
 				goto error0;
 		}
-#endif
 
 		/* Copy the keys & pointers to the new block. */
 		xfs_btree_copy_keys(cur, rkp, lkp, rrecs);
@@ -2809,7 +2595,7 @@ __xfs_btree_split(
 		xfs_btree_log_ptrs(cur, rbp, 1, rrecs);
 
 		/* Stash the keys of the new block for later insertion. */
-		xfs_btree_get_node_keys(cur, right, key);
+		cur->bc_ops->get_node_keys(cur, right, key);
 	} else {
 		/* It's a leaf.  Move records.  */
 		union xfs_btree_rec	*lrp;	/* left record pointer */
@@ -2823,7 +2609,7 @@ __xfs_btree_split(
 		xfs_btree_log_recs(cur, rbp, 1, rrecs);
 
 		/* Stash the keys of the new block for later insertion. */
-		xfs_btree_get_leaf_keys(cur, right, key);
+		cur->bc_ops->get_leaf_keys(cur, right, key);
 	}
 
 	/*
@@ -2850,14 +2636,6 @@ __xfs_btree_split(
 		xfs_btree_set_sibling(cur, rrblock, &rptr, XFS_BB_LEFTSIB);
 		xfs_btree_log_block(cur, rrbp, XFS_BB_LEFTSIB);
 	}
-
-	/* Update the parent high keys of the left block, if needed. */
-	if (cur->bc_flags & XFS_BTREE_OVERLAPPING) {
-		error = xfs_btree_update_keys(cur, level);
-		if (error)
-			goto error0;
-	}
-
 	/*
 	 * If the cursor is really in the right block, move it there.
 	 * If it's just pointing past the last entry in left, then we'll
@@ -2914,7 +2692,7 @@ xfs_btree_split_worker(
 	struct xfs_btree_split_args	*args = container_of(work,
 						struct xfs_btree_split_args, work);
 	unsigned long		pflags;
-	unsigned long		new_pflags = PF_MEMALLOC_NOFS;
+	unsigned long		new_pflags = PF_FSTRANS;
 
 	/*
 	 * we are in a transaction context here, but may also be doing work
@@ -2990,9 +2768,7 @@ xfs_btree_new_iroot(
 	union xfs_btree_ptr	nptr;		/* new block addr */
 	int			level;		/* btree level */
 	int			error;		/* error return code */
-#ifdef DEBUG
 	int			i;		/* loop counter */
-#endif
 
 	XFS_BTREE_TRACE_CURSOR(cur, XBT_ENTRY);
 	XFS_BTREE_STATS_INC(cur, newroot);
@@ -3041,20 +2817,18 @@ xfs_btree_new_iroot(
 	xfs_btree_copy_keys(cur, ckp, kp, xfs_btree_get_numrecs(cblock));
 
 	cpp = xfs_btree_ptr_addr(cur, 1, cblock);
-#ifdef DEBUG
 	for (i = 0; i < be16_to_cpu(cblock->bb_numrecs); i++) {
-		error = xfs_btree_check_ptr(cur, pp, i, level);
+		error = xfs_btree_debug_check_ptr(cur, pp, i, level);
 		if (error)
 			goto error0;
 	}
-#endif
+
 	xfs_btree_copy_ptrs(cur, cpp, pp, xfs_btree_get_numrecs(cblock));
 
-#ifdef DEBUG
-	error = xfs_btree_check_ptr(cur, &nptr, 0, level);
+	error = xfs_btree_debug_check_ptr(cur, &nptr, 0, level);
 	if (error)
 		goto error0;
-#endif
+
 	xfs_btree_copy_ptrs(cur, pp, &nptr, 1);
 
 	xfs_iroot_realloc(cur->bc_private.b.ip,
@@ -3174,9 +2948,9 @@ xfs_btree_new_root(
 		 * Get the keys for the left block's keys and put them directly
 		 * in the parent block.  Do the same for the right block.
 		 */
-		xfs_btree_get_node_keys(cur, left,
+		cur->bc_ops->get_node_keys(cur, left,
 				xfs_btree_key_addr(cur, 1, new));
-		xfs_btree_get_node_keys(cur, right,
+		cur->bc_ops->get_node_keys(cur, right,
 				xfs_btree_key_addr(cur, 2, new));
 	} else {
 		/*
@@ -3184,9 +2958,9 @@ xfs_btree_new_root(
 		 * directly in the parent block.  Do the same for the right
 		 * block.
 		 */
-		xfs_btree_get_leaf_keys(cur, left,
+		cur->bc_ops->get_leaf_keys(cur, left,
 			xfs_btree_key_addr(cur, 1, new));
-		xfs_btree_get_leaf_keys(cur, right,
+		cur->bc_ops->get_leaf_keys(cur, right,
 			xfs_btree_key_addr(cur, 2, new));
 	}
 	xfs_btree_log_keys(cur, nbp, 1, 2);
@@ -3299,21 +3073,16 @@ xfs_btree_insrec(
 	union xfs_btree_ptr	nptr;	/* new block ptr */
 	struct xfs_btree_cur	*ncur;	/* new btree cursor */
 	union xfs_btree_key	nkey;	/* new block key */
-	union xfs_btree_key	*lkey;
 	int			optr;	/* old key/record index */
 	int			ptr;	/* key/record index */
 	int			numrecs;/* number of records */
 	int			error;	/* error return value */
-#ifdef DEBUG
 	int			i;
-#endif
-	xfs_daddr_t		old_bn;
 
 	XFS_BTREE_TRACE_CURSOR(cur, XBT_ENTRY);
 	XFS_BTREE_TRACE_ARGIPR(cur, level, *ptrp, &rec);
 
 	ncur = NULL;
-	lkey = &nkey;
 
 	/*
 	 * If we have an external root pointer, and we've made it to the
@@ -3342,7 +3111,6 @@ xfs_btree_insrec(
 
 	/* Get pointers to the btree buffer and block. */
 	block = xfs_btree_get_block(cur, level, &bp);
-	old_bn = bp ? bp->b_bn : XFS_BUF_DADDR_NULL;
 	numrecs = xfs_btree_get_numrecs(block);
 
 #ifdef DEBUG
@@ -3369,7 +3137,7 @@ xfs_btree_insrec(
 	xfs_btree_set_ptr_null(cur, &nptr);
 	if (numrecs == cur->bc_ops->get_maxrecs(cur, level)) {
 		error = xfs_btree_make_block_unfull(cur, level, numrecs,
-					&optr, &ptr, &nptr, &ncur, lkey, stat);
+					&optr, &ptr, &nptr, &ncur, &nkey, stat);
 		if (error || *stat == 0)
 			goto error0;
 	}
@@ -3401,22 +3169,18 @@ xfs_btree_insrec(
 		kp = xfs_btree_key_addr(cur, ptr, block);
 		pp = xfs_btree_ptr_addr(cur, ptr, block);
 
-#ifdef DEBUG
 		for (i = numrecs - ptr; i >= 0; i--) {
-			error = xfs_btree_check_ptr(cur, pp, i, level);
+			error = xfs_btree_debug_check_ptr(cur, pp, i, level);
 			if (error)
 				return error;
 		}
-#endif
 
 		xfs_btree_shift_keys(cur, kp, 1, numrecs - ptr + 1);
 		xfs_btree_shift_ptrs(cur, pp, 1, numrecs - ptr + 1);
 
-#ifdef DEBUG
-		error = xfs_btree_check_ptr(cur, ptrp, 0, level);
+		error = xfs_btree_debug_check_ptr(cur, ptrp, 0, level);
 		if (error)
 			goto error0;
-#endif
 
 		/* Now put the new data in, bump numrecs and log it. */
 		xfs_btree_copy_keys(cur, kp, key, 1);
@@ -3454,18 +3218,9 @@ xfs_btree_insrec(
 	/* Log the new number of records in the btree header. */
 	xfs_btree_log_block(cur, bp, XFS_BB_NUMRECS);
 
-	/*
-	 * If we just inserted into a new tree block, we have to
-	 * recalculate nkey here because nkey is out of date.
-	 *
-	 * Otherwise we're just updating an existing block (having shoved
-	 * some records into the new tree block), so use the regular key
-	 * update mechanism.
-	 */
-	if (bp && bp->b_bn != old_bn) {
-		xfs_btree_get_keys(cur, block, lkey);
-	} else if (xfs_btree_needs_key_update(cur, optr)) {
-		error = xfs_btree_update_keys(cur, level);
+	/* If we inserted at the start of a block, update the parents' keys. */
+	if (xfs_btree_needs_key_update(cur, optr)) {
+		error = cur->bc_ops->update_keys(cur, level);
 		if (error)
 			goto error0;
 	}
@@ -3485,7 +3240,7 @@ xfs_btree_insrec(
 	 */
 	*ptrp = nptr;
 	if (!xfs_btree_ptr_is_null(cur, &nptr)) {
-		xfs_btree_copy_keys(cur, key, lkey, 1);
+		xfs_btree_copy_keys(cur, key, &nkey, 1);
 		*curp = ncur;
 	}
 
@@ -3516,20 +3271,18 @@ xfs_btree_insert(
 	union xfs_btree_ptr	nptr;	/* new block number (split result) */
 	struct xfs_btree_cur	*ncur;	/* new cursor (split result) */
 	struct xfs_btree_cur	*pcur;	/* previous level's cursor */
-	union xfs_btree_key	bkey;	/* key of block to insert */
-	union xfs_btree_key	*key;
+	union xfs_btree_key	key;	/* key of block to insert */
 	union xfs_btree_rec	rec;	/* record to insert */
 
 	level = 0;
 	ncur = NULL;
 	pcur = cur;
-	key = &bkey;
 
 	xfs_btree_set_ptr_null(cur, &nptr);
 
 	/* Make a key out of the record data to be inserted, and save it. */
 	cur->bc_ops->init_rec_from_cur(cur, &rec);
-	cur->bc_ops->init_key_from_rec(key, &rec);
+	cur->bc_ops->init_key_from_rec(&key, &rec);
 
 	/*
 	 * Loop going up the tree, starting at the leaf level.
@@ -3541,7 +3294,7 @@ xfs_btree_insert(
 		 * Insert nrec/nptr into this level of the tree.
 		 * Note if we fail, nptr will be null.
 		 */
-		error = xfs_btree_insrec(pcur, level, &nptr, &rec, key,
+		error = xfs_btree_insrec(pcur, level, &nptr, &rec, &key,
 				&ncur, &i);
 		if (error) {
 			if (pcur != cur)
@@ -3608,8 +3361,8 @@ xfs_btree_kill_iroot(
 	int			error;
 #ifdef DEBUG
 	union xfs_btree_ptr	ptr;
-	int			i;
 #endif
+	int			i;
 
 	XFS_BTREE_TRACE_CURSOR(cur, XBT_ENTRY);
 
@@ -3667,15 +3420,15 @@ xfs_btree_kill_iroot(
 
 	pp = xfs_btree_ptr_addr(cur, 1, block);
 	cpp = xfs_btree_ptr_addr(cur, 1, cblock);
-#ifdef DEBUG
+
 	for (i = 0; i < numrecs; i++) {
-		error = xfs_btree_check_ptr(cur, cpp, i, level - 1);
+		error = xfs_btree_debug_check_ptr(cur, cpp, i, level - 1);
 		if (error) {
 			XFS_BTREE_TRACE_CURSOR(cur, XBT_ERROR);
 			return error;
 		}
 	}
-#endif
+
 	xfs_btree_copy_ptrs(cur, pp, cpp, numrecs);
 
 	error = xfs_btree_free_block(cur, cbp);
@@ -3822,13 +3575,11 @@ xfs_btree_delrec(
 		lkp = xfs_btree_key_addr(cur, ptr + 1, block);
 		lpp = xfs_btree_ptr_addr(cur, ptr + 1, block);
 
-#ifdef DEBUG
 		for (i = 0; i < numrecs - ptr; i++) {
-			error = xfs_btree_check_ptr(cur, lpp, i, level);
+			error = xfs_btree_debug_check_ptr(cur, lpp, i, level);
 			if (error)
 				goto error0;
 		}
-#endif
 
 		if (ptr < numrecs) {
 			xfs_btree_shift_keys(cur, lkp, -1, numrecs - ptr);
@@ -3911,7 +3662,7 @@ xfs_btree_delrec(
 	 * key values above us in the tree.
 	 */
 	if (xfs_btree_needs_key_update(cur, ptr)) {
-		error = xfs_btree_update_keys(cur, level);
+		error = cur->bc_ops->update_keys(cur, level);
 		if (error)
 			goto error0;
 	}
@@ -4161,13 +3912,13 @@ xfs_btree_delrec(
 		lpp = xfs_btree_ptr_addr(cur, lrecs + 1, left);
 		rkp = xfs_btree_key_addr(cur, 1, right);
 		rpp = xfs_btree_ptr_addr(cur, 1, right);
-#ifdef DEBUG
+
 		for (i = 1; i < rrecs; i++) {
-			error = xfs_btree_check_ptr(cur, rpp, i, level);
+			error = xfs_btree_debug_check_ptr(cur, rpp, i, level);
 			if (error)
 				goto error0;
 		}
-#endif
+
 		xfs_btree_copy_keys(cur, lkp, rkp, rrecs);
 		xfs_btree_copy_ptrs(cur, lpp, rpp, rrecs);
 
@@ -4240,16 +3991,6 @@ xfs_btree_delrec(
 	if (level > 0)
 		cur->bc_ptrs[level]--;
 
-	/*
-	 * We combined blocks, so we have to update the parent keys if the
-	 * btree supports overlapped intervals.  However, bc_ptrs[level + 1]
-	 * points to the old block so that the caller knows which record to
-	 * delete.  Therefore, the caller must be savvy enough to call updkeys
-	 * for us if we return stat == 2.  The other exit points from this
-	 * function don't require deletions further up the tree, so they can
-	 * call updkeys directly.
-	 */
-
 	XFS_BTREE_TRACE_CURSOR(cur, XBT_EXIT);
 	/* Return value means the next level up has something to do. */
 	*stat = 2;
@@ -4275,7 +4016,6 @@ xfs_btree_delete(
 	int			error;	/* error return value */
 	int			level;
 	int			i;
-	bool			joined = false;
 
 	XFS_BTREE_TRACE_CURSOR(cur, XBT_ENTRY);
 
@@ -4287,18 +4027,6 @@ xfs_btree_delete(
 	 */
 	for (level = 0, i = 2; i == 2; level++) {
 		error = xfs_btree_delrec(cur, level, &i);
-		if (error)
-			goto error0;
-		if (i == 2)
-			joined = true;
-	}
-
-	/*
-	 * If we combined blocks as part of deleting the record, delrec won't
-	 * have updated the parent high keys so we have to do that here.
-	 */
-	if (joined && (cur->bc_flags & XFS_BTREE_OVERLAPPING)) {
-		error = xfs_btree_updkeys_force(cur, 0);
 		if (error)
 			goto error0;
 	}
@@ -4537,7 +4265,7 @@ xfs_btree_change_owner(
  * @max_recs: pointer to the m_*_mxr max records field in the xfs mount
  * @pag_max_level: pointer to the per-ag max level field
  */
-bool
+xfs_failaddr_t
 xfs_btree_sblock_v5hdr_verify(
 	struct xfs_buf		*bp)
 {
@@ -4546,14 +4274,14 @@ xfs_btree_sblock_v5hdr_verify(
 	struct xfs_perag	*pag = bp->b_pag;
 
 	if (!xfs_sb_version_hascrc(&mp->m_sb))
-		return false;
+		return __this_address;
 	if (!uuid_equal(&block->bb_u.s.bb_uuid, &mp->m_sb.sb_meta_uuid))
-		return false;
+		return __this_address;
 	if (block->bb_u.s.bb_blkno != cpu_to_be64(bp->b_bn))
-		return false;
+		return __this_address;
 	if (pag && be32_to_cpu(block->bb_u.s.bb_owner) != pag->pag_agno)
-		return false;
-	return true;
+		return __this_address;
+	return NULL;
 }
 
 /**
@@ -4562,7 +4290,7 @@ xfs_btree_sblock_v5hdr_verify(
  * @bp: buffer containing the btree block
  * @max_recs: maximum records allowed in this btree node
  */
-bool
+xfs_failaddr_t
 xfs_btree_sblock_verify(
 	struct xfs_buf		*bp,
 	unsigned int		max_recs)
@@ -4572,19 +4300,19 @@ xfs_btree_sblock_verify(
 
 	/* numrecs verification */
 	if (be16_to_cpu(block->bb_numrecs) > max_recs)
-		return false;
+		return __this_address;
 
 	/* sibling pointer verification */
 	if (!block->bb_u.s.bb_leftsib ||
 	    (be32_to_cpu(block->bb_u.s.bb_leftsib) >= mp->m_sb.sb_agblocks &&
 	     block->bb_u.s.bb_leftsib != cpu_to_be32(NULLAGBLOCK)))
-		return false;
+		return __this_address;
 	if (!block->bb_u.s.bb_rightsib ||
 	    (be32_to_cpu(block->bb_u.s.bb_rightsib) >= mp->m_sb.sb_agblocks &&
 	     block->bb_u.s.bb_rightsib != cpu_to_be32(NULLAGBLOCK)))
-		return false;
+		return __this_address;
 
-	return true;
+	return NULL;
 }
 
 /*
@@ -4604,295 +4332,6 @@ xfs_btree_compute_maxlevels(
 	for (level = 1; maxblocks > 1; level++)
 		maxblocks = (maxblocks + limits[1] - 1) / limits[1];
 	return level;
-}
-
-/*
- * Query a regular btree for all records overlapping a given interval.
- * Start with a LE lookup of the key of low_rec and return all records
- * until we find a record with a key greater than the key of high_rec.
- */
-STATIC int
-xfs_btree_simple_query_range(
-	struct xfs_btree_cur		*cur,
-	union xfs_btree_key		*low_key,
-	union xfs_btree_key		*high_key,
-	xfs_btree_query_range_fn	fn,
-	void				*priv)
-{
-	union xfs_btree_rec		*recp;
-	union xfs_btree_key		rec_key;
-	int64_t				diff;
-	int				stat;
-	bool				firstrec = true;
-	int				error;
-
-	ASSERT(cur->bc_ops->init_high_key_from_rec);
-	ASSERT(cur->bc_ops->diff_two_keys);
-
-	/*
-	 * Find the leftmost record.  The btree cursor must be set
-	 * to the low record used to generate low_key.
-	 */
-	stat = 0;
-	error = xfs_btree_lookup(cur, XFS_LOOKUP_LE, &stat);
-	if (error)
-		goto out;
-
-	/* Nothing?  See if there's anything to the right. */
-	if (!stat) {
-		error = xfs_btree_increment(cur, 0, &stat);
-		if (error)
-			goto out;
-	}
-
-	while (stat) {
-		/* Find the record. */
-		error = xfs_btree_get_rec(cur, &recp, &stat);
-		if (error || !stat)
-			break;
-
-		/* Skip if high_key(rec) < low_key. */
-		if (firstrec) {
-			cur->bc_ops->init_high_key_from_rec(&rec_key, recp);
-			firstrec = false;
-			diff = cur->bc_ops->diff_two_keys(cur, low_key,
-					&rec_key);
-			if (diff > 0)
-				goto advloop;
-		}
-
-		/* Stop if high_key < low_key(rec). */
-		cur->bc_ops->init_key_from_rec(&rec_key, recp);
-		diff = cur->bc_ops->diff_two_keys(cur, &rec_key, high_key);
-		if (diff > 0)
-			break;
-
-		/* Callback */
-		error = fn(cur, recp, priv);
-		if (error < 0 || error == XFS_BTREE_QUERY_RANGE_ABORT)
-			break;
-
-advloop:
-		/* Move on to the next record. */
-		error = xfs_btree_increment(cur, 0, &stat);
-		if (error)
-			break;
-	}
-
-out:
-	return error;
-}
-
-/*
- * Query an overlapped interval btree for all records overlapping a given
- * interval.  This function roughly follows the algorithm given in
- * "Interval Trees" of _Introduction to Algorithms_, which is section
- * 14.3 in the 2nd and 3rd editions.
- *
- * First, generate keys for the low and high records passed in.
- *
- * For any leaf node, generate the high and low keys for the record.
- * If the record keys overlap with the query low/high keys, pass the
- * record to the function iterator.
- *
- * For any internal node, compare the low and high keys of each
- * pointer against the query low/high keys.  If there's an overlap,
- * follow the pointer.
- *
- * As an optimization, we stop scanning a block when we find a low key
- * that is greater than the query's high key.
- */
-STATIC int
-xfs_btree_overlapped_query_range(
-	struct xfs_btree_cur		*cur,
-	union xfs_btree_key		*low_key,
-	union xfs_btree_key		*high_key,
-	xfs_btree_query_range_fn	fn,
-	void				*priv)
-{
-	union xfs_btree_ptr		ptr;
-	union xfs_btree_ptr		*pp;
-	union xfs_btree_key		rec_key;
-	union xfs_btree_key		rec_hkey;
-	union xfs_btree_key		*lkp;
-	union xfs_btree_key		*hkp;
-	union xfs_btree_rec		*recp;
-	struct xfs_btree_block		*block;
-	int64_t				ldiff;
-	int64_t				hdiff;
-	int				level;
-	struct xfs_buf			*bp;
-	int				i;
-	int				error;
-
-	/* Load the root of the btree. */
-	level = cur->bc_nlevels - 1;
-	cur->bc_ops->init_ptr_from_cur(cur, &ptr);
-	error = xfs_btree_lookup_get_block(cur, level, &ptr, &block);
-	if (error)
-		return error;
-	xfs_btree_get_block(cur, level, &bp);
-	trace_xfs_btree_overlapped_query_range(cur, level, bp);
-#ifdef DEBUG
-	error = xfs_btree_check_block(cur, block, level, bp);
-	if (error)
-		goto out;
-#endif
-	cur->bc_ptrs[level] = 1;
-
-	while (level < cur->bc_nlevels) {
-		block = xfs_btree_get_block(cur, level, &bp);
-
-		/* End of node, pop back towards the root. */
-		if (cur->bc_ptrs[level] > be16_to_cpu(block->bb_numrecs)) {
-pop_up:
-			if (level < cur->bc_nlevels - 1)
-				cur->bc_ptrs[level + 1]++;
-			level++;
-			continue;
-		}
-
-		if (level == 0) {
-			/* Handle a leaf node. */
-			recp = xfs_btree_rec_addr(cur, cur->bc_ptrs[0], block);
-
-			cur->bc_ops->init_high_key_from_rec(&rec_hkey, recp);
-			ldiff = cur->bc_ops->diff_two_keys(cur, &rec_hkey,
-					low_key);
-
-			cur->bc_ops->init_key_from_rec(&rec_key, recp);
-			hdiff = cur->bc_ops->diff_two_keys(cur, high_key,
-					&rec_key);
-
-			/*
-			 * If (record's high key >= query's low key) and
-			 *    (query's high key >= record's low key), then
-			 * this record overlaps the query range; callback.
-			 */
-			if (ldiff >= 0 && hdiff >= 0) {
-				error = fn(cur, recp, priv);
-				if (error < 0 ||
-				    error == XFS_BTREE_QUERY_RANGE_ABORT)
-					break;
-			} else if (hdiff < 0) {
-				/* Record is larger than high key; pop. */
-				goto pop_up;
-			}
-			cur->bc_ptrs[level]++;
-			continue;
-		}
-
-		/* Handle an internal node. */
-		lkp = xfs_btree_key_addr(cur, cur->bc_ptrs[level], block);
-		hkp = xfs_btree_high_key_addr(cur, cur->bc_ptrs[level], block);
-		pp = xfs_btree_ptr_addr(cur, cur->bc_ptrs[level], block);
-
-		ldiff = cur->bc_ops->diff_two_keys(cur, hkp, low_key);
-		hdiff = cur->bc_ops->diff_two_keys(cur, high_key, lkp);
-
-		/*
-		 * If (pointer's high key >= query's low key) and
-		 *    (query's high key >= pointer's low key), then
-		 * this record overlaps the query range; follow pointer.
-		 */
-		if (ldiff >= 0 && hdiff >= 0) {
-			level--;
-			error = xfs_btree_lookup_get_block(cur, level, pp,
-					&block);
-			if (error)
-				goto out;
-			xfs_btree_get_block(cur, level, &bp);
-			trace_xfs_btree_overlapped_query_range(cur, level, bp);
-#ifdef DEBUG
-			error = xfs_btree_check_block(cur, block, level, bp);
-			if (error)
-				goto out;
-#endif
-			cur->bc_ptrs[level] = 1;
-			continue;
-		} else if (hdiff < 0) {
-			/* The low key is larger than the upper range; pop. */
-			goto pop_up;
-		}
-		cur->bc_ptrs[level]++;
-	}
-
-out:
-	/*
-	 * If we don't end this function with the cursor pointing at a record
-	 * block, a subsequent non-error cursor deletion will not release
-	 * node-level buffers, causing a buffer leak.  This is quite possible
-	 * with a zero-results range query, so release the buffers if we
-	 * failed to return any results.
-	 */
-	if (cur->bc_bufs[0] == NULL) {
-		for (i = 0; i < cur->bc_nlevels; i++) {
-			if (cur->bc_bufs[i]) {
-				xfs_trans_brelse(cur->bc_tp, cur->bc_bufs[i]);
-				cur->bc_bufs[i] = NULL;
-				cur->bc_ptrs[i] = 0;
-				cur->bc_ra[i] = 0;
-			}
-		}
-	}
-
-	return error;
-}
-
-/*
- * Query a btree for all records overlapping a given interval of keys.  The
- * supplied function will be called with each record found; return one of the
- * XFS_BTREE_QUERY_RANGE_{CONTINUE,ABORT} values or the usual negative error
- * code.  This function returns XFS_BTREE_QUERY_RANGE_ABORT, zero, or a
- * negative error code.
- */
-int
-xfs_btree_query_range(
-	struct xfs_btree_cur		*cur,
-	union xfs_btree_irec		*low_rec,
-	union xfs_btree_irec		*high_rec,
-	xfs_btree_query_range_fn	fn,
-	void				*priv)
-{
-	union xfs_btree_rec		rec;
-	union xfs_btree_key		low_key;
-	union xfs_btree_key		high_key;
-
-	/* Find the keys of both ends of the interval. */
-	cur->bc_rec = *high_rec;
-	cur->bc_ops->init_rec_from_cur(cur, &rec);
-	cur->bc_ops->init_key_from_rec(&high_key, &rec);
-
-	cur->bc_rec = *low_rec;
-	cur->bc_ops->init_rec_from_cur(cur, &rec);
-	cur->bc_ops->init_key_from_rec(&low_key, &rec);
-
-	/* Enforce low key < high key. */
-	if (cur->bc_ops->diff_two_keys(cur, &low_key, &high_key) > 0)
-		return -EINVAL;
-
-	if (!(cur->bc_flags & XFS_BTREE_OVERLAPPING))
-		return xfs_btree_simple_query_range(cur, &low_key,
-				&high_key, fn, priv);
-	return xfs_btree_overlapped_query_range(cur, &low_key, &high_key,
-			fn, priv);
-}
-
-/* Query a btree for all records. */
-int
-xfs_btree_query_all(
-	struct xfs_btree_cur		*cur,
-	xfs_btree_query_range_fn	fn,
-	void				*priv)
-{
-	union xfs_btree_key		low_key;
-	union xfs_btree_key		high_key;
-
-	memset(&cur->bc_rec, 0, sizeof(cur->bc_rec));
-	memset(&low_key, 0, sizeof(low_key));
-	memset(&high_key, 0xFF, sizeof(high_key));
-
-	return xfs_btree_simple_query_range(cur, &low_key, &high_key, fn, priv);
 }
 
 /*
@@ -4940,16 +4379,4 @@ xfs_btree_count_blocks(
 	*blocks = 0;
 	return xfs_btree_visit_blocks(cur, xfs_btree_count_blocks_helper,
 			blocks);
-}
-
-/* Compare two btree pointers. */
-int64_t
-xfs_btree_diff_two_ptrs(
-	struct xfs_btree_cur		*cur,
-	const union xfs_btree_ptr	*a,
-	const union xfs_btree_ptr	*b)
-{
-	if (cur->bc_flags & XFS_BTREE_LONG_PTRS)
-		return (int64_t)be64_to_cpu(a->l) - be64_to_cpu(b->l);
-	return (int64_t)be32_to_cpu(a->s) - be32_to_cpu(b->s);
 }

@@ -95,7 +95,7 @@ static void	mptscsih_freeChainBuffers(MPT_ADAPTER *ioc, int req_idx);
 static void	mptscsih_copy_sense_data(struct scsi_cmnd *sc, MPT_SCSI_HOST *hd, MPT_FRAME_HDR *mf, SCSIIOReply_t *pScsiReply);
 
 int	mptscsih_IssueTaskMgmt(MPT_SCSI_HOST *hd, u8 type, u8 channel, u8 id,
-		u64 lun, int ctx2abort, ulong timeout);
+		int lun, int ctx2abort, ulong timeout);
 
 int		mptscsih_ioc_reset(MPT_ADAPTER *ioc, int post_reset);
 int		mptscsih_event_process(MPT_ADAPTER *ioc, EventNotificationReply_t *pEvReply);
@@ -117,8 +117,6 @@ void 		mptscsih_shutdown(struct pci_dev *);
 int 		mptscsih_suspend(struct pci_dev *pdev, pm_message_t state);
 int 		mptscsih_resume(struct pci_dev *pdev);
 #endif
-
-#define SNS_LEN(scp)	SCSI_SENSE_BUFFERSIZE
 
 
 /*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=*/
@@ -536,7 +534,7 @@ mptscsih_info_scsiio(MPT_ADAPTER *ioc, struct scsi_cmnd *sc, SCSIIOReply_t * pSc
 	}
 
 	scsi_print_command(sc);
-	printk(MYIOC_s_DEBUG_FMT "\tfw_channel = %d, fw_id = %d, lun = %llu\n",
+	printk(MYIOC_s_DEBUG_FMT "\tfw_channel = %d, fw_id = %d, lun = %d\n",
 	    ioc->name, pScsiReply->Bus, pScsiReply->TargetID, sc->device->lun);
 	printk(MYIOC_s_DEBUG_FMT "\trequest_len = %d, underflow = %d, "
 	    "resid = %d\n", ioc->name, scsi_bufflen(sc), sc->underflow,
@@ -692,7 +690,7 @@ mptscsih_io_done(MPT_ADAPTER *ioc, MPT_FRAME_HDR *mf, MPT_FRAME_HDR *mr)
 		 */
 		if (scsi_state & MPI_SCSI_STATE_RESPONSE_INFO_VALID &&
 		    pScsiReply->ResponseInfo) {
-			printk(MYIOC_s_NOTE_FMT "[%d:%d:%d:%llu] "
+			printk(MYIOC_s_NOTE_FMT "[%d:%d:%d:%d] "
 			"FCP_ResponseInfo=%08xh\n", ioc->name,
 			sc->device->host->host_no, sc->device->channel,
 			sc->device->id, sc->device->lun,
@@ -1155,7 +1153,7 @@ mptscsih_report_queue_full(struct scsi_cmnd *sc, SCSIIOReply_t *pScsiReply, SCSI
 		return;
 	ioc = hd->ioc;
 	if (time - hd->last_queue_full > 10 * HZ) {
-		dprintk(ioc, printk(MYIOC_s_WARN_FMT "Device (%d:%d:%llu) reported QUEUE_FULL!\n",
+		dprintk(ioc, printk(MYIOC_s_WARN_FMT "Device (%d:%d:%d) reported QUEUE_FULL!\n",
 				ioc->name, 0, sc->device->id, sc->device->lun));
 		hd->last_queue_full = time;
 	}
@@ -1269,13 +1267,15 @@ mptscsih_info(struct Scsi_Host *SChost)
 
 	h = shost_priv(SChost);
 
-	if (h->info_kbuf == NULL)
-		if ((h->info_kbuf = kmalloc(0x1000 /* 4Kb */, GFP_KERNEL)) == NULL)
-			return h->info_kbuf;
-	h->info_kbuf[0] = '\0';
+	if (h) {
+		if (h->info_kbuf == NULL)
+			if ((h->info_kbuf = kmalloc(0x1000 /* 4Kb */, GFP_KERNEL)) == NULL)
+				return h->info_kbuf;
+		h->info_kbuf[0] = '\0';
 
-	mpt_print_ioc_summary(h->ioc, h->info_kbuf, &size, 0, 0);
-	h->info_kbuf[size-1] = '\0';
+		mpt_print_ioc_summary(h->ioc, h->info_kbuf, &size, 0, 0);
+		h->info_kbuf[size-1] = '\0';
+	}
 
 	return h->info_kbuf;
 }
@@ -1364,10 +1364,16 @@ mptscsih_qcmd(struct scsi_cmnd *SCpnt)
 	/* Default to untagged. Once a target structure has been allocated,
 	 * use the Inquiry data to determine if device supports tagged.
 	 */
-	if ((vdevice->vtarget->tflags & MPT_TARGET_FLAGS_Q_YES) &&
-	    SCpnt->device->tagged_supported)
+	if (vdevice
+	    && (vdevice->vtarget->tflags & MPT_TARGET_FLAGS_Q_YES)
+	    && (SCpnt->device->tagged_supported)) {
 		scsictl = scsidir | MPI_SCSIIO_CONTROL_SIMPLEQ;
-	else
+		if (SCpnt->request && SCpnt->request->ioprio) {
+			if (((SCpnt->request->ioprio & 0x7) == 1) ||
+				!(SCpnt->request->ioprio & 0x7))
+				scsictl |= MPI_SCSIIO_CONTROL_HEADOFQ;
+		}
+	} else
 		scsictl = scsidir | MPI_SCSIIO_CONTROL_UNTAGGED;
 
 
@@ -1508,7 +1514,7 @@ mptscsih_freeChainBuffers(MPT_ADAPTER *ioc, int req_idx)
  *
  **/
 int
-mptscsih_IssueTaskMgmt(MPT_SCSI_HOST *hd, u8 type, u8 channel, u8 id, u64 lun,
+mptscsih_IssueTaskMgmt(MPT_SCSI_HOST *hd, u8 type, u8 channel, u8 id, int lun,
 	int ctx2abort, ulong timeout)
 {
 	MPT_FRAME_HDR	*mf;
@@ -2304,20 +2310,25 @@ mptscsih_slave_destroy(struct scsi_device *sdev)
  *	mptscsih_change_queue_depth - This function will set a devices queue depth
  *	@sdev: per scsi_device pointer
  *	@qdepth: requested queue depth
+ *	@reason: calling context
  *
  *	Adding support for new 'change_queue_depth' api.
 */
 int
-mptscsih_change_queue_depth(struct scsi_device *sdev, int qdepth)
+mptscsih_change_queue_depth(struct scsi_device *sdev, int qdepth, int reason)
 {
 	MPT_SCSI_HOST		*hd = shost_priv(sdev->host);
 	VirtTarget 		*vtarget;
 	struct scsi_target 	*starget;
 	int			max_depth;
+	int			tagged;
 	MPT_ADAPTER		*ioc = hd->ioc;
 
 	starget = scsi_target(sdev);
 	vtarget = starget->hostdata;
+
+	if (reason != SCSI_QDEPTH_DEFAULT)
+		return -EOPNOTSUPP;
 
 	if (ioc->bus_type == SPI) {
 		if (!(vtarget->tflags & MPT_TARGET_FLAGS_Q_YES))
@@ -2335,8 +2346,13 @@ mptscsih_change_queue_depth(struct scsi_device *sdev, int qdepth)
 
 	if (qdepth > max_depth)
 		qdepth = max_depth;
+	if (qdepth == 1)
+		tagged = 0;
+	else
+		tagged = MSG_SIMPLE_TAG;
 
-	return scsi_change_queue_depth(sdev, qdepth);
+	scsi_adjust_queue_depth(sdev, tagged, qdepth);
+	return sdev->queue_depth;
 }
 
 /*
@@ -2360,7 +2376,7 @@ mptscsih_slave_configure(struct scsi_device *sdev)
 	vdevice = sdev->hostdata;
 
 	dsprintk(ioc, printk(MYIOC_s_DEBUG_FMT
-		"device @ %p, channel=%d, id=%d, lun=%llu\n",
+		"device @ %p, channel=%d, id=%d, lun=%d\n",
 		ioc->name, sdev, sdev->channel, sdev->id, sdev->lun));
 	if (ioc->bus_type == SPI)
 		dsprintk(ioc, printk(MYIOC_s_DEBUG_FMT
@@ -2380,10 +2396,12 @@ mptscsih_slave_configure(struct scsi_device *sdev)
 		    ioc->name, vtarget->negoFlags, vtarget->maxOffset,
 		    vtarget->minSyncFactor));
 
-	mptscsih_change_queue_depth(sdev, MPT_SCSI_CMD_PER_DEV_HIGH);
+	mptscsih_change_queue_depth(sdev, MPT_SCSI_CMD_PER_DEV_HIGH,
+				    SCSI_QDEPTH_DEFAULT);
 	dsprintk(ioc, printk(MYIOC_s_DEBUG_FMT
-		"tagged %d, simple %d\n",
-		ioc->name,sdev->tagged_supported, sdev->simple_tags));
+		"tagged %d, simple %d, ordered %d\n",
+		ioc->name,sdev->tagged_supported, sdev->simple_tags,
+		sdev->ordered_tags));
 
 	blk_queue_dma_alignment (sdev->request_queue, 512 - 1);
 
@@ -2420,7 +2438,7 @@ mptscsih_copy_sense_data(struct scsi_cmnd *sc, MPT_SCSI_HOST *hd, MPT_FRAME_HDR 
 		/* Copy the sense received into the scsi command block. */
 		req_index = le16_to_cpu(mf->u.frame.hwhdr.msgctxu.fld.req_idx);
 		sense_data = ((u8 *)ioc->sense_buf_pool + (req_index * MPT_SENSE_BUFFER_ALLOC));
-		memcpy(sc->sense_buffer, sense_data, SNS_LEN(sc));
+		memcpy(sc->sense_buffer, sense_data, MPT_SENSE_BUFFER_ALLOC);
 
 		/* Log SMART data (asc = 0x5D, non-IM case only) if required.
 		 */
@@ -2949,7 +2967,7 @@ mptscsih_do_cmd(MPT_SCSI_HOST *hd, INTERNAL_CMD *io)
 					   + (my_idx * MPT_SENSE_BUFFER_ALLOC));
 
 	devtprintk(ioc, printk(MYIOC_s_DEBUG_FMT
-	    "%s: Sending Command 0x%02x for fw_channel=%d fw_id=%d lun=%llu\n",
+	    "%s: Sending Command 0x%02x for fw_channel=%d fw_id=%d lun=%d\n",
 	    ioc->name, __func__, cmd, io->channel, io->id, io->lun));
 
 	if (dir == MPI_SCSIIO_CONTROL_READ)

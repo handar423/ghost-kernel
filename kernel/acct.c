@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  *  linux/kernel/acct.c
  *
@@ -56,9 +55,7 @@
 #include <linux/times.h>
 #include <linux/syscalls.h>
 #include <linux/mount.h>
-#include <linux/uaccess.h>
-#include <linux/sched/cputime.h>
-
+#include <asm/uaccess.h>
 #include <asm/div64.h>
 #include <linux/blkdev.h> /* sector_div */
 #include <linux/pid_namespace.h>
@@ -114,14 +111,14 @@ static int check_free_space(struct bsd_acct_struct *acct)
 		do_div(suspend, 100);
 		if (sbuf.f_bavail <= suspend) {
 			acct->active = 0;
-			pr_info("Process accounting paused\n");
+			printk(KERN_INFO "Process accounting paused\n");
 		}
 	} else {
 		u64 resume = sbuf.f_blocks * RESUME;
 		do_div(resume, 100);
 		if (sbuf.f_bavail >= resume) {
 			acct->active = 1;
-			pr_info("Process accounting resumed\n");
+			printk(KERN_INFO "Process accounting resumed\n");
 		}
 	}
 
@@ -147,7 +144,7 @@ static struct bsd_acct_struct *acct_get(struct pid_namespace *ns)
 again:
 	smp_rmb();
 	rcu_read_lock();
-	res = to_acct(READ_ONCE(ns->bacct));
+	res = to_acct(ACCESS_ONCE(ns->bacct));
 	if (!res) {
 		rcu_read_unlock();
 		return NULL;
@@ -159,7 +156,7 @@ again:
 	}
 	rcu_read_unlock();
 	mutex_lock(&res->lock);
-	if (res != to_acct(READ_ONCE(ns->bacct))) {
+	if (res != to_acct(ACCESS_ONCE(ns->bacct))) {
 		mutex_unlock(&res->lock);
 		acct_put(res);
 		goto again;
@@ -216,7 +213,7 @@ static int acct_on(struct filename *pathname)
 		return -EACCES;
 	}
 
-	if (!(file->f_mode & FMODE_CAN_WRITE)) {
+	if (!file->f_op->write) {
 		kfree(acct);
 		filp_close(file, NULL);
 		return -EIO;
@@ -279,7 +276,6 @@ SYSCALL_DEFINE1(acct, const char __user *, name)
 
 	if (name) {
 		struct filename *tmp = getname(name);
-
 		if (IS_ERR(tmp))
 			return PTR_ERR(tmp);
 		mutex_lock(&acct_on_mutex);
@@ -339,7 +335,7 @@ static comp_t encode_comp_t(unsigned long value)
 	return exp;
 }
 
-#if ACCT_VERSION == 1 || ACCT_VERSION == 2
+#if ACCT_VERSION==1 || ACCT_VERSION==2
 /*
  * encode an u64 into a comp2_t (24 bits)
  *
@@ -352,7 +348,7 @@ static comp_t encode_comp_t(unsigned long value)
 #define MANTSIZE2       20                      /* 20 bit mantissa. */
 #define EXPSIZE2        5                       /* 5 bit base 2 exponent. */
 #define MAXFRACT2       ((1ul << MANTSIZE2) - 1) /* Maximum fractional value. */
-#define MAXEXP2         ((1 << EXPSIZE2) - 1)    /* Maximum exponent. */
+#define MAXEXP2         ((1 <<EXPSIZE2) - 1)    /* Maximum exponent. */
 
 static comp2_t encode_comp2_t(u64 value)
 {
@@ -383,7 +379,7 @@ static comp2_t encode_comp2_t(u64 value)
 }
 #endif
 
-#if ACCT_VERSION == 3
+#if ACCT_VERSION==3
 /*
  * encode an u64 into a 32 bit IEEE float
  */
@@ -392,9 +388,8 @@ static u32 encode_float(u64 value)
 	unsigned exp = 190;
 	unsigned u;
 
-	if (value == 0)
-		return 0;
-	while ((s64)value > 0) {
+	if (value==0) return 0;
+	while ((s64)value > 0){
 		value <<= 1;
 		exp--;
 	}
@@ -415,7 +410,9 @@ static u32 encode_float(u64 value)
 static void fill_ac(acct_t *ac)
 {
 	struct pacct_struct *pacct = &current->signal->pacct;
-	u64 elapsed, run_time;
+	u64 elapsed;
+	u64 run_time;
+	struct timespec uptime;
 	struct tty_struct *tty;
 
 	/*
@@ -428,21 +425,22 @@ static void fill_ac(acct_t *ac)
 	strlcpy(ac->ac_comm, current->comm, sizeof(ac->ac_comm));
 
 	/* calculate run_time in nsec*/
-	run_time = ktime_get_ns();
-	run_time -= current->group_leader->start_time;
+	do_posix_clock_monotonic_gettime(&uptime);
+	run_time = (u64)uptime.tv_sec*NSEC_PER_SEC + uptime.tv_nsec;
+	run_time -= (u64)current->group_leader->start_time.tv_sec * NSEC_PER_SEC
+		       + current->group_leader->start_time.tv_nsec;
 	/* convert nsec -> AHZ */
 	elapsed = nsec_to_AHZ(run_time);
-#if ACCT_VERSION == 3
+#if ACCT_VERSION==3
 	ac->ac_etime = encode_float(elapsed);
 #else
 	ac->ac_etime = encode_comp_t(elapsed < (unsigned long) -1l ?
-				(unsigned long) elapsed : (unsigned long) -1l);
+	                       (unsigned long) elapsed : (unsigned long) -1l);
 #endif
-#if ACCT_VERSION == 1 || ACCT_VERSION == 2
+#if ACCT_VERSION==1 || ACCT_VERSION==2
 	{
 		/* new enlarged etime field */
 		comp2_t etime = encode_comp2_t(elapsed);
-
 		ac->ac_etime_hi = etime >> 16;
 		ac->ac_etime_lo = (u16) etime;
 	}
@@ -456,8 +454,8 @@ static void fill_ac(acct_t *ac)
 	spin_lock_irq(&current->sighand->siglock);
 	tty = current->signal->tty;	/* Safe as we hold the siglock */
 	ac->ac_tty = tty ? old_encode_dev(tty_devnum(tty)) : 0;
-	ac->ac_utime = encode_comp_t(nsec_to_AHZ(pacct->ac_utime));
-	ac->ac_stime = encode_comp_t(nsec_to_AHZ(pacct->ac_stime));
+	ac->ac_utime = encode_comp_t(jiffies_to_AHZ(cputime_to_jiffies(pacct->ac_utime)));
+	ac->ac_stime = encode_comp_t(jiffies_to_AHZ(cputime_to_jiffies(pacct->ac_stime)));
 	ac->ac_flag = pacct->ac_flag;
 	ac->ac_mem = encode_comp_t(pacct->ac_mem);
 	ac->ac_minflt = encode_comp_t(pacct->ac_minflt);
@@ -473,6 +471,7 @@ static void do_acct_process(struct bsd_acct_struct *acct)
 	acct_t ac;
 	unsigned long flim;
 	const struct cred *orig_cred;
+	struct pid_namespace *ns = acct->ns;
 	struct file *file = acct->file;
 
 	/*
@@ -494,21 +493,16 @@ static void do_acct_process(struct bsd_acct_struct *acct)
 	/* we really need to bite the bullet and change layout */
 	ac.ac_uid = from_kuid_munged(file->f_cred->user_ns, orig_cred->uid);
 	ac.ac_gid = from_kgid_munged(file->f_cred->user_ns, orig_cred->gid);
-#if ACCT_VERSION == 1 || ACCT_VERSION == 2
+#if ACCT_VERSION==1 || ACCT_VERSION==2
 	/* backward-compatible 16 bit fields */
 	ac.ac_uid16 = ac.ac_uid;
 	ac.ac_gid16 = ac.ac_gid;
 #endif
-#if ACCT_VERSION == 3
-	{
-		struct pid_namespace *ns = acct->ns;
-
-		ac.ac_pid = task_tgid_nr_ns(current, ns);
-		rcu_read_lock();
-		ac.ac_ppid = task_tgid_nr_ns(rcu_dereference(current->real_parent),
-					     ns);
-		rcu_read_unlock();
-	}
+#if ACCT_VERSION==3
+	ac.ac_pid = task_tgid_nr_ns(current, ns);
+	rcu_read_lock();
+	ac.ac_ppid = task_tgid_nr_ns(rcu_dereference(current->real_parent), ns);
+	rcu_read_unlock();
 #endif
 	/*
 	 * Get freeze protection. If the fs is frozen, just skip the write
@@ -517,7 +511,7 @@ static void do_acct_process(struct bsd_acct_struct *acct)
 	if (file_start_write_trylock(file)) {
 		/* it's been opened O_APPEND, so position is irrelevant */
 		loff_t pos = 0;
-		__kernel_write(file, &ac, sizeof(acct_t), &pos);
+		__kernel_write(file, (char *)&ac, sizeof(acct_t), &pos);
 		file_end_write(file);
 	}
 out:
@@ -533,12 +527,11 @@ out:
 void acct_collect(long exitcode, int group_dead)
 {
 	struct pacct_struct *pacct = &current->signal->pacct;
-	u64 utime, stime;
+	cputime_t utime, stime;
 	unsigned long vsize = 0;
 
 	if (group_dead && current->mm) {
 		struct vm_area_struct *vma;
-
 		down_read(&current->mm->mmap_sem);
 		vma = current->mm->mmap;
 		while (vma) {
@@ -562,7 +555,6 @@ void acct_collect(long exitcode, int group_dead)
 		pacct->ac_flag |= ACORE;
 	if (current->flags & PF_SIGNALED)
 		pacct->ac_flag |= AXSIG;
-
 	task_cputime(current, &utime, &stime);
 	pacct->ac_utime += utime;
 	pacct->ac_stime += stime;

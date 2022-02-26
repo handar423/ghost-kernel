@@ -80,8 +80,6 @@
  *					for noise.
  * 2	0x08	image sensor		image sensor tracks 5 fingers, but only
  *					reports 2.
- * 2	0x01	uniform clickpad	whole clickpad moves instead of being
- *					hinged at the top.
  * 2	0x20	report min		query 0x0f gives min coord reported
  */
 #define SYN_CAP_CLICKPAD(ex0c)		((ex0c) & BIT(20)) /* 1-button ClickPad */
@@ -137,15 +135,23 @@
 #define SYN_PS_SET_MODE2		0x14
 #define SYN_PS_CLIENT_CMD		0x28
 
+/* synaptics packet types */
+#define SYN_NEWABS			0
+#define SYN_NEWABS_STRICT		1
+#define SYN_NEWABS_RELAXED		2
+#define SYN_OLDABS			3
+
 /* amount to fuzz position data when touchpad reports reduced filtering */
 #define SYN_REDUCED_FILTER_FUZZ		8
 
-/* synaptics packet types */
-enum synaptics_pkt_type {
-	SYN_NEWABS,
-	SYN_NEWABS_STRICT,
-	SYN_NEWABS_RELAXED,
-	SYN_OLDABS,
+/*
+ * A structure to describe which internal touchpad finger slots are being
+ * reported in raw packets.
+ */
+struct synaptics_mt_state {
+	int count;			/* num fingers being tracked */
+	int sgm;			/* which slot is reported by sgm pkt */
+	int agm;			/* which slot is reported by agm pkt*/
 };
 
 /*
@@ -161,8 +167,11 @@ struct synaptics_hw_state {
 	unsigned int middle:1;
 	unsigned int up:1;
 	unsigned int down:1;
-	u8 ext_buttons;
-	s8 scroll;
+	unsigned char ext_buttons;
+	signed char scroll;
+
+	/* As reported in last AGM-CONTACT packets */
+	struct synaptics_mt_state mt_state;
 };
 
 /* Data read from the touchpad */
@@ -183,8 +192,8 @@ struct synaptics_device_info {
 struct synaptics_data {
 	struct synaptics_device_info info;
 
-	enum synaptics_pkt_type pkt_type;	/* packet type - old, new, etc */
-	u8 mode;				/* current mode byte */
+	unsigned char pkt_type;			/* packet type - old, new, etc */
+	unsigned char mode;			/* current mode byte */
 	int scroll;
 
 	bool absolute_mode;			/* run in Absolute mode */
@@ -192,18 +201,15 @@ struct synaptics_data {
 
 	struct serio *pt_port;			/* Pass-through serio port */
 
+	struct synaptics_mt_state mt_state;	/* Current mt finger state */
+	bool mt_state_lost;			/* mt_state may be incorrect */
+
 	/*
 	 * Last received Advanced Gesture Mode (AGM) packet. An AGM packet
 	 * contains position data for a second contact, at half resolution.
 	 */
 	struct synaptics_hw_state agm;
-	unsigned int agm_count;			/* finger count reported by agm */
-
-	/* ForcePad handling */
-	unsigned long				press_start;
-	bool					press;
-	bool					report_press;
-	bool					is_forcepad;
+	bool agm_pending;			/* new AGM packet received */
 };
 
 void synaptics_module_init(void);

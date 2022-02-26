@@ -186,6 +186,7 @@ static const struct net_device_ops mace_netdev_ops = {
 	.ndo_tx_timeout		= mace_tx_timeout,
 	.ndo_set_rx_mode	= mace_set_multicast,
 	.ndo_set_mac_address	= mace_set_address,
+	.ndo_change_mtu		= eth_change_mtu,
 	.ndo_validate_addr	= eth_validate_addr,
 };
 
@@ -210,7 +211,6 @@ static int mace_probe(struct platform_device *pdev)
 	mp = netdev_priv(dev);
 
 	mp->device = &pdev->dev;
-	platform_set_drvdata(pdev, dev);
 	SET_NETDEV_DEV(dev, &pdev->dev);
 
 	dev->base_addr = (u32)MACE_BASE;
@@ -574,7 +574,7 @@ static irqreturn_t mace_interrupt(int irq, void *dev_id)
 			mace_reset(dev);
 			/*
 			 * XXX mace likes to hang the machine after a xmtfs error.
-			 * This is hard to reproduce, resetting *may* help
+			 * This is hard to reproduce, reseting *may* help
 			 */
 		}
 		/* dma should have finished */
@@ -663,7 +663,7 @@ static void mace_dma_rx_frame(struct net_device *dev, struct mace_frame *mf)
 			return;
 		}
 		skb_reserve(skb, 2);
-		skb_put_data(skb, mf->data, frame_length);
+		memcpy(skb_put(skb, frame_length), mf->data, frame_length);
 
 		skb->protocol = eth_type_trans(skb, dev);
 		netif_rx(skb);
@@ -767,6 +767,7 @@ static struct platform_driver mac_mace_driver = {
 	.remove = mac_mace_device_remove,
 	.driver	= {
 		.name	= mac_mace_string,
+		.owner	= THIS_MODULE,
 	},
 };
 

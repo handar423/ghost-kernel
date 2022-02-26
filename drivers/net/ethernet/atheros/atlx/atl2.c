@@ -55,7 +55,6 @@ static const char atl2_driver_name[] = "atl2";
 static const char atl2_driver_string[] = "Atheros(R) L2 Ethernet Driver";
 static const char atl2_copyright[] = "Copyright (c) 2007 Atheros Corporation.";
 static const char atl2_driver_version[] = ATL2_DRV_VERSION;
-static const struct ethtool_ops atl2_ethtool_ops;
 
 MODULE_AUTHOR("Atheros Corporation <xiong.huang@atheros.com>, Chris Snook <csnook@redhat.com>");
 MODULE_DESCRIPTION("Atheros Fast Ethernet Network Driver");
@@ -71,6 +70,8 @@ static const struct pci_device_id atl2_pci_tbl[] = {
 	{0,}
 };
 MODULE_DEVICE_TABLE(pci, atl2_pci_tbl);
+
+static void atl2_set_ethtool_ops(struct net_device *netdev);
 
 static void atl2_check_options(struct atl2_adapter *adapter);
 
@@ -253,7 +254,7 @@ static int atl2_configure(struct atl2_adapter *adapter)
 
 	/* set MTU */
 	ATL2_WRITE_REG(hw, REG_MTU, adapter->netdev->mtu +
-		ETH_HLEN + VLAN_HLEN + ETH_FCS_LEN);
+		ENET_HEADER_SIZE + VLAN_SIZE + ETHERNET_FCS_SIZE);
 
 	/* 1590 */
 	ATL2_WRITE_REG(hw, REG_TX_CUT_THRESH, 0x177);
@@ -925,11 +926,15 @@ static int atl2_change_mtu(struct net_device *netdev, int new_mtu)
 	struct atl2_adapter *adapter = netdev_priv(netdev);
 	struct atl2_hw *hw = &adapter->hw;
 
+	if ((new_mtu < 40) || (new_mtu > (ETH_DATA_LEN + VLAN_SIZE)))
+		return -EINVAL;
+
 	/* set MTU */
-	netdev->mtu = new_mtu;
-	hw->max_frame_size = new_mtu;
-	ATL2_WRITE_REG(hw, REG_MTU, new_mtu + ETH_HLEN +
-		       VLAN_HLEN + ETH_FCS_LEN);
+	if (hw->max_frame_size != new_mtu) {
+		netdev->mtu = new_mtu;
+		ATL2_WRITE_REG(hw, REG_MTU, new_mtu + ENET_HEADER_SIZE +
+			VLAN_SIZE + ETHERNET_FCS_SIZE);
+	}
 
 	return 0;
 }
@@ -1028,9 +1033,9 @@ static void atl2_tx_timeout(struct net_device *netdev)
  * atl2_watchdog - Timer Call-back
  * @data: pointer to netdev cast into an unsigned long
  */
-static void atl2_watchdog(struct timer_list *t)
+static void atl2_watchdog(unsigned long data)
 {
-	struct atl2_adapter *adapter = from_timer(adapter, t, watchdog_timer);
+	struct atl2_adapter *adapter = (struct atl2_adapter *) data;
 
 	if (!test_bit(__ATL2_DOWN, &adapter->flags)) {
 		u32 drop_rxd, drop_rxs;
@@ -1053,10 +1058,9 @@ static void atl2_watchdog(struct timer_list *t)
  * atl2_phy_config - Timer Call-back
  * @data: pointer to netdev cast into an unsigned long
  */
-static void atl2_phy_config(struct timer_list *t)
+static void atl2_phy_config(unsigned long data)
 {
-	struct atl2_adapter *adapter = from_timer(adapter, t,
-						  phy_config_timer);
+	struct atl2_adapter *adapter = (struct atl2_adapter *) data;
 	struct atl2_hw *hw = &adapter->hw;
 	unsigned long flags;
 
@@ -1310,7 +1314,7 @@ static const struct net_device_ops atl2_netdev_ops = {
 	.ndo_set_rx_mode	= atl2_set_multi,
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_set_mac_address	= atl2_set_mac,
-	.ndo_change_mtu		= atl2_change_mtu,
+	.ndo_change_mtu_rh74	= atl2_change_mtu,
 	.ndo_fix_features	= atl2_fix_features,
 	.ndo_set_features	= atl2_set_features,
 	.ndo_do_ioctl		= atl2_ioctl,
@@ -1354,7 +1358,6 @@ static int atl2_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	if (pci_set_dma_mask(pdev, DMA_BIT_MASK(32)) &&
 		pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(32))) {
 		printk(KERN_ERR "atl2: No usable DMA configuration, aborting\n");
-		err = -EIO;
 		goto err_dma;
 	}
 
@@ -1368,11 +1371,10 @@ static int atl2_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	 * pcibios_set_master to do the needed arch specific settings */
 	pci_set_master(pdev);
 
+	err = -ENOMEM;
 	netdev = alloc_etherdev(sizeof(struct atl2_adapter));
-	if (!netdev) {
-		err = -ENOMEM;
+	if (!netdev)
 		goto err_alloc_etherdev;
-	}
 
 	SET_NETDEV_DEV(netdev, &pdev->dev);
 
@@ -1395,10 +1397,8 @@ static int atl2_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	atl2_setup_pcicmd(pdev);
 
 	netdev->netdev_ops = &atl2_netdev_ops;
-	netdev->ethtool_ops = &atl2_ethtool_ops;
+	atl2_set_ethtool_ops(netdev);
 	netdev->watchdog_timeo = 5 * HZ;
-	netdev->min_mtu = 40;
-	netdev->max_mtu = ETH_DATA_LEN + VLAN_HLEN;
 	strncpy(netdev->name, pci_name(pdev), sizeof(netdev->name) - 1);
 
 	netdev->mem_start = mmio_start;
@@ -1410,6 +1410,8 @@ static int atl2_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	err = atl2_sw_init(adapter);
 	if (err)
 		goto err_sw_init;
+
+	err = -EIO;
 
 	netdev->hw_features = NETIF_F_HW_VLAN_CTAG_RX;
 	netdev->features |= (NETIF_F_HW_VLAN_CTAG_TX | NETIF_F_HW_VLAN_CTAG_RX);
@@ -1435,9 +1437,13 @@ static int atl2_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	atl2_check_options(adapter);
 
-	timer_setup(&adapter->watchdog_timer, atl2_watchdog, 0);
+	init_timer(&adapter->watchdog_timer);
+	adapter->watchdog_timer.function = atl2_watchdog;
+	adapter->watchdog_timer.data = (unsigned long) adapter;
 
-	timer_setup(&adapter->phy_config_timer, atl2_phy_config, 0);
+	init_timer(&adapter->phy_config_timer);
+	adapter->phy_config_timer.function = atl2_phy_config;
+	adapter->phy_config_timer.data = (unsigned long) adapter;
 
 	INIT_WORK(&adapter->reset_task, atl2_reset_task);
 	INIT_WORK(&adapter->link_chg_task, atl2_link_chg_task);
@@ -1736,87 +1742,81 @@ static void atl2_write_pci_cfg(struct atl2_hw *hw, u32 reg, u16 *value)
 	pci_write_config_word(adapter->pdev, reg, *value);
 }
 
-static int atl2_get_link_ksettings(struct net_device *netdev,
-				   struct ethtool_link_ksettings *cmd)
+static int atl2_get_settings(struct net_device *netdev,
+	struct ethtool_cmd *ecmd)
 {
 	struct atl2_adapter *adapter = netdev_priv(netdev);
 	struct atl2_hw *hw = &adapter->hw;
-	u32 supported, advertising;
 
-	supported = (SUPPORTED_10baseT_Half |
+	ecmd->supported = (SUPPORTED_10baseT_Half |
 		SUPPORTED_10baseT_Full |
 		SUPPORTED_100baseT_Half |
 		SUPPORTED_100baseT_Full |
 		SUPPORTED_Autoneg |
 		SUPPORTED_TP);
-	advertising = ADVERTISED_TP;
+	ecmd->advertising = ADVERTISED_TP;
 
-	advertising |= ADVERTISED_Autoneg;
-	advertising |= hw->autoneg_advertised;
+	ecmd->advertising |= ADVERTISED_Autoneg;
+	ecmd->advertising |= hw->autoneg_advertised;
 
-	cmd->base.port = PORT_TP;
-	cmd->base.phy_address = 0;
+	ecmd->port = PORT_TP;
+	ecmd->phy_address = 0;
+	ecmd->transceiver = XCVR_INTERNAL;
 
 	if (adapter->link_speed != SPEED_0) {
-		cmd->base.speed = adapter->link_speed;
+		ethtool_cmd_speed_set(ecmd, adapter->link_speed);
 		if (adapter->link_duplex == FULL_DUPLEX)
-			cmd->base.duplex = DUPLEX_FULL;
+			ecmd->duplex = DUPLEX_FULL;
 		else
-			cmd->base.duplex = DUPLEX_HALF;
+			ecmd->duplex = DUPLEX_HALF;
 	} else {
-		cmd->base.speed = SPEED_UNKNOWN;
-		cmd->base.duplex = DUPLEX_UNKNOWN;
+		ethtool_cmd_speed_set(ecmd, -1);
+		ecmd->duplex = -1;
 	}
 
-	cmd->base.autoneg = AUTONEG_ENABLE;
-
-	ethtool_convert_legacy_u32_to_link_mode(cmd->link_modes.supported,
-						supported);
-	ethtool_convert_legacy_u32_to_link_mode(cmd->link_modes.advertising,
-						advertising);
-
+	ecmd->autoneg = AUTONEG_ENABLE;
 	return 0;
 }
 
-static int atl2_set_link_ksettings(struct net_device *netdev,
-				   const struct ethtool_link_ksettings *cmd)
+static int atl2_set_settings(struct net_device *netdev,
+	struct ethtool_cmd *ecmd)
 {
 	struct atl2_adapter *adapter = netdev_priv(netdev);
 	struct atl2_hw *hw = &adapter->hw;
-	u32 advertising;
-
-	ethtool_convert_link_mode_to_legacy_u32(&advertising,
-						cmd->link_modes.advertising);
 
 	while (test_and_set_bit(__ATL2_RESETTING, &adapter->flags))
 		msleep(1);
 
-	if (cmd->base.autoneg == AUTONEG_ENABLE) {
+	if (ecmd->autoneg == AUTONEG_ENABLE) {
 #define MY_ADV_MASK	(ADVERTISE_10_HALF | \
 			 ADVERTISE_10_FULL | \
 			 ADVERTISE_100_HALF| \
 			 ADVERTISE_100_FULL)
 
-		if ((advertising & MY_ADV_MASK) == MY_ADV_MASK) {
+		if ((ecmd->advertising & MY_ADV_MASK) == MY_ADV_MASK) {
 			hw->MediaType = MEDIA_TYPE_AUTO_SENSOR;
 			hw->autoneg_advertised =  MY_ADV_MASK;
-		} else if ((advertising & MY_ADV_MASK) == ADVERTISE_100_FULL) {
+		} else if ((ecmd->advertising & MY_ADV_MASK) ==
+				ADVERTISE_100_FULL) {
 			hw->MediaType = MEDIA_TYPE_100M_FULL;
 			hw->autoneg_advertised = ADVERTISE_100_FULL;
-		} else if ((advertising & MY_ADV_MASK) == ADVERTISE_100_HALF) {
+		} else if ((ecmd->advertising & MY_ADV_MASK) ==
+				ADVERTISE_100_HALF) {
 			hw->MediaType = MEDIA_TYPE_100M_HALF;
 			hw->autoneg_advertised = ADVERTISE_100_HALF;
-		} else if ((advertising & MY_ADV_MASK) == ADVERTISE_10_FULL) {
+		} else if ((ecmd->advertising & MY_ADV_MASK) ==
+				ADVERTISE_10_FULL) {
 			hw->MediaType = MEDIA_TYPE_10M_FULL;
 			hw->autoneg_advertised = ADVERTISE_10_FULL;
-		}  else if ((advertising & MY_ADV_MASK) == ADVERTISE_10_HALF) {
+		}  else if ((ecmd->advertising & MY_ADV_MASK) ==
+				ADVERTISE_10_HALF) {
 			hw->MediaType = MEDIA_TYPE_10M_HALF;
 			hw->autoneg_advertised = ADVERTISE_10_HALF;
 		} else {
 			clear_bit(__ATL2_RESETTING, &adapter->flags);
 			return -EINVAL;
 		}
-		advertising = hw->autoneg_advertised |
+		ecmd->advertising = hw->autoneg_advertised |
 			ADVERTISED_TP | ADVERTISED_Autoneg;
 	} else {
 		clear_bit(__ATL2_RESETTING, &adapter->flags);
@@ -2085,6 +2085,8 @@ static int atl2_nway_reset(struct net_device *netdev)
 }
 
 static const struct ethtool_ops atl2_ethtool_ops = {
+	.get_settings		= atl2_get_settings,
+	.set_settings		= atl2_set_settings,
 	.get_drvinfo		= atl2_get_drvinfo,
 	.get_regs_len		= atl2_get_regs_len,
 	.get_regs		= atl2_get_regs,
@@ -2097,9 +2099,12 @@ static const struct ethtool_ops atl2_ethtool_ops = {
 	.get_eeprom_len		= atl2_get_eeprom_len,
 	.get_eeprom		= atl2_get_eeprom,
 	.set_eeprom		= atl2_set_eeprom,
-	.get_link_ksettings	= atl2_get_link_ksettings,
-	.set_link_ksettings	= atl2_set_link_ksettings,
 };
+
+static void atl2_set_ethtool_ops(struct net_device *netdev)
+{
+	SET_ETHTOOL_OPS(netdev, &atl2_ethtool_ops);
+}
 
 #define LBYTESWAP(a)  ((((a) & 0x00ff00ff) << 8) | \
 	(((a) & 0xff00ff00) >> 8))
@@ -2490,6 +2495,7 @@ static s32 atl2_get_speed_and_duplex(struct atl2_hw *hw, u16 *speed,
 		break;
 	default:
 		return ATLX_ERR_PHY_SPEED;
+		break;
 	}
 
 	if (phy_data & MII_ATLX_PSSR_DPLX)
@@ -2929,9 +2935,11 @@ static int atl2_validate_option(int *value, struct atl2_option *opt)
 		case OPTION_ENABLED:
 			printk(KERN_INFO "%s Enabled\n", opt->name);
 			return 0;
+			break;
 		case OPTION_DISABLED:
 			printk(KERN_INFO "%s Disabled\n", opt->name);
 			return 0;
+			break;
 		}
 		break;
 	case range_option:

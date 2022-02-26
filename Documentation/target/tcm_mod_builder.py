@@ -199,8 +199,7 @@ def tcm_mod_build_configfs(proto_ident, fabric_mod_dir_var, fabric_mod_name):
 	buf += "#include <linux/string.h>\n"
 	buf += "#include <linux/configfs.h>\n"
 	buf += "#include <linux/ctype.h>\n"
-	buf += "#include <asm/unaligned.h>\n"
-	buf += "#include <scsi/scsi_proto.h>\n\n"
+	buf += "#include <asm/unaligned.h>\n\n"
 	buf += "#include <target/target_core_base.h>\n"
 	buf += "#include <target/target_core_fabric.h>\n"
 	buf += "#include \"" + fabric_mod_name + "_base.h\"\n"
@@ -229,14 +228,8 @@ def tcm_mod_build_configfs(proto_ident, fabric_mod_dir_var, fabric_mod_name):
 	buf += "	}\n"
 	buf += "	tpg->" + fabric_mod_port + " = " + fabric_mod_port + ";\n"
 	buf += "	tpg->" + fabric_mod_port + "_tpgt = tpgt;\n\n"
-
-	if proto_ident == "FC":
-		buf += "	ret = core_tpg_register(wwn, &tpg->se_tpg, SCSI_PROTOCOL_FCP);\n"
-	elif proto_ident == "SAS":
-		buf += "	ret = core_tpg_register(wwn, &tpg->se_tpg, SCSI_PROTOCOL_SAS);\n"
-	elif proto_ident == "iSCSI":
-		buf += "	ret = core_tpg_register(wwn, &tpg->se_tpg, SCSI_PROTOCOL_ISCSI);\n"
-
+	buf += "	ret = core_tpg_register(&" + fabric_mod_name + "_ops, wwn,\n"
+	buf += "				&tpg->se_tpg, SCSI_PROTOCOL_SAS);\n"
 	buf += "	if (ret < 0) {\n"
 	buf += "		kfree(tpg);\n"
 	buf += "		return NULL;\n"
@@ -283,8 +276,8 @@ def tcm_mod_build_configfs(proto_ident, fabric_mod_dir_var, fabric_mod_name):
 	buf += "}\n\n"
 
 	buf += "static const struct target_core_fabric_ops " + fabric_mod_name + "_ops = {\n"
-	buf += "	.module				= THIS_MODULE,\n"
-	buf += "	.name				= \"" + fabric_mod_name + "\",\n"
+	buf += "	.module				= THIS_MODULE\n",
+	buf += "	.name				= " + fabric_mod_name + ",\n"
 	buf += "	.get_fabric_name		= " + fabric_mod_name + "_get_fabric_name,\n"
 	buf += "	.tpg_get_wwn			= " + fabric_mod_name + "_get_fabric_wwn,\n"
 	buf += "	.tpg_get_tag			= " + fabric_mod_name + "_get_tag,\n"
@@ -315,12 +308,12 @@ def tcm_mod_build_configfs(proto_ident, fabric_mod_dir_var, fabric_mod_name):
 
 	buf += "static int __init " + fabric_mod_name + "_init(void)\n"
 	buf += "{\n"
-	buf += "	return target_register_template(&" + fabric_mod_name + "_ops);\n"
+	buf += "	return target_register_template(" + fabric_mod_name + "_ops);\n"
 	buf += "};\n\n"
 
 	buf += "static void __exit " + fabric_mod_name + "_exit(void)\n"
 	buf += "{\n"
-	buf += "	target_unregister_template(&" + fabric_mod_name + "_ops);\n"
+	buf += "	target_unregister_template(" + fabric_mod_name + "_ops);\n"
 	buf += "};\n\n"
 
 	buf += "MODULE_DESCRIPTION(\"" + fabric_mod_name.upper() + " series fabric driver\");\n"
@@ -397,8 +390,11 @@ def tcm_mod_dump_fabric_ops(proto_ident, fabric_mod_dir_var, fabric_mod_name):
 	buf += "#include <linux/string.h>\n"
 	buf += "#include <linux/ctype.h>\n"
 	buf += "#include <asm/unaligned.h>\n"
-	buf += "#include <scsi/scsi_common.h>\n"
-	buf += "#include <scsi/scsi_proto.h>\n"
+	buf += "#include <scsi/scsi.h>\n"
+	buf += "#include <scsi/scsi_host.h>\n"
+	buf += "#include <scsi/scsi_device.h>\n"
+	buf += "#include <scsi/scsi_cmnd.h>\n"
+	buf += "#include <scsi/libfc.h>\n\n"
 	buf += "#include <target/target_core_base.h>\n"
 	buf += "#include <target/target_core_fabric.h>\n"
 	buf += "#include \"" + fabric_mod_name + "_base.h\"\n"

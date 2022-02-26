@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 /* TILEPro opcode information.
  *
  * Copyright 2011 Tilera Corporation. All Rights Reserved.
@@ -72,7 +71,6 @@ typedef tilepro_bundle_bits tile_bundle_bits;
 #define TILE_BUNDLE_ALIGNMENT_IN_BYTES TILEPRO_BUNDLE_ALIGNMENT_IN_BYTES
 #define TILE_LOG2_BUNDLE_ALIGNMENT_IN_BYTES \
   TILEPRO_LOG2_BUNDLE_ALIGNMENT_IN_BYTES
-#define TILE_BPT_BUNDLE TILEPRO_BPT_BUNDLE
 
 /* 64-bit pattern for a { bpt ; nop } bundle. */
 #define TILEPRO_BPT_BUNDLE 0x400b3cae70166000ULL

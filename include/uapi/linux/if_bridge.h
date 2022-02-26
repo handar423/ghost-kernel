@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0+ WITH Linux-syscall-note */
 /*
  *	Linux ethernet bridge
  *
@@ -15,7 +14,6 @@
 #define _UAPI_LINUX_IF_BRIDGE_H
 
 #include <linux/types.h>
-#include <linux/if_ether.h>
 #include <linux/in6.h>
 
 #define SYSFS_BRIDGE_ATTR	"bridge"
@@ -91,7 +89,7 @@ struct __port_info {
 };
 
 struct __fdb_entry {
-	__u8 mac_addr[ETH_ALEN];
+	__u8 mac_addr[6];
 	__u8 port_no;
 	__u8 is_local;
 	__u32 ageing_timer_value;

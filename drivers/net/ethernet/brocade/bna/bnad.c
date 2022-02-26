@@ -1693,9 +1693,9 @@ err_return:
 /* Timer callbacks */
 /* a) IOC timer */
 static void
-bnad_ioc_timeout(struct timer_list *t)
+bnad_ioc_timeout(unsigned long data)
 {
-	struct bnad *bnad = from_timer(bnad, t, bna.ioceth.ioc.ioc_timer);
+	struct bnad *bnad = (struct bnad *)data;
 	unsigned long flags;
 
 	spin_lock_irqsave(&bnad->bna_lock, flags);
@@ -1704,9 +1704,9 @@ bnad_ioc_timeout(struct timer_list *t)
 }
 
 static void
-bnad_ioc_hb_check(struct timer_list *t)
+bnad_ioc_hb_check(unsigned long data)
 {
-	struct bnad *bnad = from_timer(bnad, t, bna.ioceth.ioc.hb_timer);
+	struct bnad *bnad = (struct bnad *)data;
 	unsigned long flags;
 
 	spin_lock_irqsave(&bnad->bna_lock, flags);
@@ -1715,9 +1715,9 @@ bnad_ioc_hb_check(struct timer_list *t)
 }
 
 static void
-bnad_iocpf_timeout(struct timer_list *t)
+bnad_iocpf_timeout(unsigned long data)
 {
-	struct bnad *bnad = from_timer(bnad, t, bna.ioceth.ioc.iocpf_timer);
+	struct bnad *bnad = (struct bnad *)data;
 	unsigned long flags;
 
 	spin_lock_irqsave(&bnad->bna_lock, flags);
@@ -1726,9 +1726,9 @@ bnad_iocpf_timeout(struct timer_list *t)
 }
 
 static void
-bnad_iocpf_sem_timeout(struct timer_list *t)
+bnad_iocpf_sem_timeout(unsigned long data)
 {
-	struct bnad *bnad = from_timer(bnad, t, bna.ioceth.ioc.sem_timer);
+	struct bnad *bnad = (struct bnad *)data;
 	unsigned long flags;
 
 	spin_lock_irqsave(&bnad->bna_lock, flags);
@@ -1748,9 +1748,9 @@ bnad_iocpf_sem_timeout(struct timer_list *t)
 
 /* b) Dynamic Interrupt Moderation Timer */
 static void
-bnad_dim_timeout(struct timer_list *t)
+bnad_dim_timeout(unsigned long data)
 {
-	struct bnad *bnad = from_timer(bnad, t, dim_timer);
+	struct bnad *bnad = (struct bnad *)data;
 	struct bnad_rx_info *rx_info;
 	struct bnad_rx_ctrl *rx_ctrl;
 	int i, j;
@@ -1781,9 +1781,9 @@ bnad_dim_timeout(struct timer_list *t)
 
 /* c)  Statistics Timer */
 static void
-bnad_stats_timeout(struct timer_list *t)
+bnad_stats_timeout(unsigned long data)
 {
-	struct bnad *bnad = from_timer(bnad, t, stats_timer);
+	struct bnad *bnad = (struct bnad *)data;
 	unsigned long flags;
 
 	if (!netif_running(bnad->netdev) ||
@@ -1804,7 +1804,8 @@ bnad_dim_timer_start(struct bnad *bnad)
 {
 	if (bnad->cfg_flags & BNAD_CF_DIM_ENABLED &&
 	    !test_bit(BNAD_RF_DIM_TIMER_RUNNING, &bnad->run_flags)) {
-		timer_setup(&bnad->dim_timer, bnad_dim_timeout, 0);
+		setup_timer(&bnad->dim_timer, bnad_dim_timeout,
+			    (unsigned long)bnad);
 		set_bit(BNAD_RF_DIM_TIMER_RUNNING, &bnad->run_flags);
 		mod_timer(&bnad->dim_timer,
 			  jiffies + msecs_to_jiffies(BNAD_DIM_TIMER_FREQ));
@@ -1822,7 +1823,8 @@ bnad_stats_timer_start(struct bnad *bnad)
 
 	spin_lock_irqsave(&bnad->bna_lock, flags);
 	if (!test_and_set_bit(BNAD_RF_STATS_TIMER_RUNNING, &bnad->run_flags)) {
-		timer_setup(&bnad->stats_timer, bnad_stats_timeout, 0);
+		setup_timer(&bnad->stats_timer, bnad_stats_timeout,
+			    (unsigned long)bnad);
 		mod_timer(&bnad->stats_timer,
 			  jiffies + msecs_to_jiffies(BNAD_STATS_TIMER_FREQ));
 	}
@@ -1879,7 +1881,7 @@ bnad_napi_poll_rx(struct napi_struct *napi, int budget)
 		return rcvd;
 
 poll_exit:
-	napi_complete_done(napi, rcvd);
+	napi_complete(napi);
 
 	rx_ctrl->rx_complete++;
 
@@ -3292,6 +3294,9 @@ bnad_change_mtu(struct net_device *netdev, int new_mtu)
 	struct bnad *bnad = netdev_priv(netdev);
 	u32 rx_count = 0, frame, new_frame;
 
+	if (new_mtu + ETH_HLEN < ETH_ZLEN || new_mtu > BNAD_JUMBO_MTU)
+		return -EINVAL;
+
 	mutex_lock(&bnad->conf_mutex);
 
 	mtu = netdev->mtu;
@@ -3427,7 +3432,7 @@ static const struct net_device_ops bnad_netdev_ops = {
 	.ndo_set_rx_mode	= bnad_set_rx_mode,
 	.ndo_validate_addr      = eth_validate_addr,
 	.ndo_set_mac_address    = bnad_set_mac_address,
-	.ndo_change_mtu		= bnad_change_mtu,
+	.ndo_change_mtu_rh74	= bnad_change_mtu,
 	.ndo_vlan_rx_add_vid    = bnad_vlan_rx_add_vid,
 	.ndo_vlan_rx_kill_vid   = bnad_vlan_rx_kill_vid,
 	.ndo_set_features	= bnad_set_features,
@@ -3457,10 +3462,6 @@ bnad_netdev_init(struct bnad *bnad, bool using_dac)
 
 	netdev->mem_start = bnad->mmio_start;
 	netdev->mem_end = bnad->mmio_start + bnad->mmio_len - 1;
-
-	/* MTU range: 46 - 9000 */
-	netdev->min_mtu = ETH_ZLEN - ETH_HLEN;
-	netdev->max_mtu = BNAD_JUMBO_MTU;
 
 	netdev->netdev_ops = &bnad_netdev_ops;
 	bnad_set_ethtool_ops(netdev);
@@ -3690,11 +3691,14 @@ bnad_pci_probe(struct pci_dev *pdev,
 		goto res_free;
 
 	/* Set up timers */
-	timer_setup(&bnad->bna.ioceth.ioc.ioc_timer, bnad_ioc_timeout, 0);
-	timer_setup(&bnad->bna.ioceth.ioc.hb_timer, bnad_ioc_hb_check, 0);
-	timer_setup(&bnad->bna.ioceth.ioc.iocpf_timer, bnad_iocpf_timeout, 0);
-	timer_setup(&bnad->bna.ioceth.ioc.sem_timer, bnad_iocpf_sem_timeout,
-		    0);
+	setup_timer(&bnad->bna.ioceth.ioc.ioc_timer, bnad_ioc_timeout,
+		    (unsigned long)bnad);
+	setup_timer(&bnad->bna.ioceth.ioc.hb_timer, bnad_ioc_hb_check,
+		    (unsigned long)bnad);
+	setup_timer(&bnad->bna.ioceth.ioc.iocpf_timer, bnad_iocpf_timeout,
+		    (unsigned long)bnad);
+	setup_timer(&bnad->bna.ioceth.ioc.sem_timer, bnad_iocpf_sem_timeout,
+		    (unsigned long)bnad);
 
 	/*
 	 * Start the chip

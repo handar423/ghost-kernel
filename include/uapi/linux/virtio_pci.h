@@ -77,9 +77,7 @@
 
 /* The remaining space is defined by each driver as the per-driver
  * configuration space */
-#define VIRTIO_PCI_CONFIG_OFF(msix_enabled)	((msix_enabled) ? 24 : 20)
-/* Deprecated: please use VIRTIO_PCI_CONFIG_OFF instead */
-#define VIRTIO_PCI_CONFIG(dev)	VIRTIO_PCI_CONFIG_OFF((dev)->msix_enabled)
+#define VIRTIO_PCI_CONFIG(dev)		((dev)->msix_enabled ? 24 : 20)
 
 /* Virtio ABI version, this must match exactly */
 #define VIRTIO_PCI_ABI_VERSION		0
@@ -155,12 +153,6 @@ struct virtio_pci_common_cfg {
 	__le32 queue_avail_hi;		/* read-write */
 	__le32 queue_used_lo;		/* read-write */
 	__le32 queue_used_hi;		/* read-write */
-};
-
-/* Fields in VIRTIO_PCI_CAP_PCI_CFG: */
-struct virtio_pci_cfg_cap {
-	struct virtio_pci_cap cap;
-	__u8 pci_cfg_data[4]; /* Data for BAR access. */
 };
 
 /* Macro versions of offsets for the Old Timers! */

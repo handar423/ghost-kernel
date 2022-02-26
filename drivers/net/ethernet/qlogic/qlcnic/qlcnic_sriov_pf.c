@@ -82,17 +82,13 @@ static int qlcnic_sriov_pf_cal_res_limit(struct qlcnic_adapter *adapter,
 	num_vfs = sriov->num_vfs;
 	max = num_vfs + 1;
 	info->bit_offsets = 0xffff;
-	info->max_tx_ques = res->num_tx_queues / max;
 
 	if (qlcnic_83xx_pf_check(adapter))
 		num_macs = QLCNIC_83XX_SRIOV_VF_MAX_MAC;
 
-	info->max_rx_mcast_mac_filters = res->num_rx_mcast_mac_filters;
-
 	if (adapter->ahw->pci_func == func) {
 		info->min_tx_bw = 0;
 		info->max_tx_bw = MAX_BW;
-
 		temp = res->num_rx_ucast_mac_filters - num_macs * num_vfs;
 		info->max_rx_ucast_mac_filters = temp;
 		temp = res->num_tx_mac_filters - num_macs * num_vfs;
@@ -100,7 +96,6 @@ static int qlcnic_sriov_pf_cal_res_limit(struct qlcnic_adapter *adapter,
 		temp = num_macs * num_vfs * QLCNIC_SRIOV_VF_MAX_MAC;
 		temp = res->num_rx_mcast_mac_filters - temp;
 		info->max_rx_mcast_mac_filters = temp;
-
 		info->max_tx_ques = res->num_tx_queues - sriov->num_vfs;
 	} else {
 		id = qlcnic_sriov_func_to_index(adapter, func);
@@ -109,12 +104,10 @@ static int qlcnic_sriov_pf_cal_res_limit(struct qlcnic_adapter *adapter,
 		vp = sriov->vf_info[id].vp;
 		info->min_tx_bw = vp->min_tx_bw;
 		info->max_tx_bw = vp->max_tx_bw;
-
 		info->max_rx_ucast_mac_filters = num_macs;
 		info->max_tx_mac_filters = num_macs;
 		temp = num_macs * QLCNIC_SRIOV_VF_MAX_MAC;
 		info->max_rx_mcast_mac_filters = temp;
-
 		info->max_tx_ques = QLCNIC_SINGLE_RING;
 	}
 

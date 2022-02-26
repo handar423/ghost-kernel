@@ -286,6 +286,14 @@ static void dedotify_versions(struct modversion_info *vers,
 	for (end = (void *)vers + size; vers < end; vers++)
 		if (vers->name[0] == '.') {
 			memmove(vers->name, vers->name+1, strlen(vers->name));
+#ifdef ARCH_RELOCATES_KCRCTAB
+			/* The TOC symbol has no CRC computed. To avoid CRC
+			 * check failing, we must force it to the expected
+			 * value (see CRC check in module.c).
+			 */
+			if (!strcmp(vers->name, "TOC."))
+				vers->crc = -(unsigned long)reloc_start;
+#endif
 		}
 }
 
@@ -429,8 +437,7 @@ static unsigned long stub_for_addr(const Elf64_Shdr *sechdrs,
 	/* Find this stub, or if that fails, the next avail. entry */
 	stubs = (void *)sechdrs[me->arch.stubs_section].sh_addr;
 	for (i = 0; stub_func_addr(stubs[i].funcdata); i++) {
-		if (WARN_ON(i >= num_stubs))
-			return 0;
+		BUG_ON(i >= num_stubs);
 
 		if (stub_func_addr(stubs[i].funcdata) == func_addr(addr))
 			return (unsigned long)&stubs[i];
@@ -487,12 +494,22 @@ static bool is_early_mcount_callsite(u32 *instruction)
    restore r2. */
 static int restore_r2(u32 *instruction, struct module *me)
 {
-	if (is_early_mcount_callsite(instruction - 1))
+	u32 *prev_insn = instruction - 1;
+
+	if (is_early_mcount_callsite(prev_insn))
+		return 1;
+
+	/*
+	 * Make sure the branch isn't a sibling call.  Sibling calls aren't
+	 * "link" branches and they don't return, so they don't need the r2
+	 * restore afterwards.
+	 */
+	if (!instr_is_relative_link_branch(*prev_insn))
 		return 1;
 
 	if (*instruction != PPC_INST_NOP) {
-		pr_err("%s: Expect noop after relocate, got %08x\n",
-		       me->name, *instruction);
+		pr_err("%s: Expected nop after call, got %08x at %pS\n",
+			me->name, *instruction, instruction);
 		return 0;
 	}
 	/* ld r2,R2_STACK_OFFSET(r1) */
@@ -614,7 +631,8 @@ int apply_relocate_add(Elf64_Shdr *sechdrs,
 
 		case R_PPC_REL24:
 			/* FIXME: Handle weak symbols here --RR */
-			if (sym->st_shndx == SHN_UNDEF) {
+			if (sym->st_shndx == SHN_UNDEF ||
+			    sym->st_shndx == SHN_LIVEPATCH) {
 				/* External: go via stub */
 				value = stub_for_addr(sechdrs, value, me);
 				if (!value)
@@ -643,11 +661,6 @@ int apply_relocate_add(Elf64_Shdr *sechdrs,
 		case R_PPC64_REL64:
 			/* 64 bits relative (used by features fixups) */
 			*location = value - (unsigned long)location;
-			break;
-
-		case R_PPC64_REL32:
-			/* 32 bits relative (used by relative exception tables) */
-			*(u32 *)location = value - (unsigned long)location;
 			break;
 
 		case R_PPC64_TOCSAVE:
@@ -782,10 +795,16 @@ static unsigned long create_ftrace_stub(const Elf64_Shdr *sechdrs, struct module
 
 int module_finalize_ftrace(struct module *mod, const Elf_Shdr *sechdrs)
 {
-	mod->arch.toc = my_r2(sechdrs, mod);
-	mod->arch.tramp = create_ftrace_stub(sechdrs, mod);
+	struct module_ext *mod_ext;
 
-	if (!mod->arch.tramp)
+	mutex_lock(&module_ext_mutex);
+	mod_ext = find_module_ext(mod);
+	mutex_unlock(&module_ext_mutex);
+
+	mod_ext->toc = my_r2(sechdrs, mod);
+	mod_ext->tramp = create_ftrace_stub(sechdrs, mod);
+
+	if (!mod_ext->tramp)
 		return -ENOENT;
 
 	return 0;

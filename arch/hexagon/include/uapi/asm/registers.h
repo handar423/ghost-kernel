@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 /*
  * Register definitions for the Hexagon architecture
  */
@@ -6,6 +5,8 @@
 
 #ifndef _ASM_REGISTERS_H
 #define _ASM_REGISTERS_H
+
+#define SP r29
 
 #ifndef __ASSEMBLY__
 
@@ -214,7 +215,7 @@ struct pt_regs {
 #define pt_clr_singlestep(regs) ((regs)->hvmer.vmest &= ~(1<<HVM_VMEST_SS_SFT))
 
 #define pt_set_rte_sp(regs, sp) do {\
-	pt_psp(regs) = (regs)->r29 = (sp);\
+	pt_psp(regs) = (regs)->SP = (sp);\
 	} while (0)
 
 #define pt_set_kmode(regs) \

@@ -95,7 +95,7 @@ static netdev_tx_t mpc_send_packet(struct sk_buff *skb,
 static int mpoa_event_listener(struct notifier_block *mpoa_notifier,
 			       unsigned long event, void *dev);
 static void mpc_timer_refresh(void);
-static void mpc_cache_check(struct timer_list *unused);
+static void mpc_cache_check(unsigned long checking_time);
 
 static struct llc_snap_hdr llc_snap_mpoa_ctrl = {
 	0xaa, 0xaa, 0x03,
@@ -121,7 +121,7 @@ static struct notifier_block mpoa_notifier = {
 
 struct mpoa_client *mpcs = NULL; /* FIXME */
 static struct atm_mpoa_qos *qos_head = NULL;
-static DEFINE_TIMER(mpc_timer, mpc_cache_check);
+static DEFINE_TIMER(mpc_timer, NULL, 0, 0);
 
 
 static struct mpoa_client *find_mpc_by_itfnum(int itf)
@@ -451,7 +451,7 @@ static void lane2_assoc_ind(struct net_device *dev, const u8 *mac_addr,
 			return;
 	}
 	if (end_of_tlvs - tlvs != 0)
-		pr_info("(%s) ignoring %zd bytes of trailing TLV garbage\n",
+		pr_info("(%s) ignoring %Zd bytes of trailing TLV garbage\n",
 			dev->name, end_of_tlvs - tlvs);
 }
 
@@ -478,7 +478,7 @@ static const uint8_t *copy_macs(struct mpoa_client *mpc,
 			return NULL;
 		}
 	}
-	ether_addr_copy(mpc->mps_macs, router_mac);
+	memcpy(mpc->mps_macs, router_mac, ETH_ALEN);
 	tlvs += 20; if (device_type == MPS_AND_MPC) tlvs += 20;
 	if (mps_macs > 0)
 		memcpy(mpc->mps_macs, tlvs, mps_macs*ETH_ALEN);
@@ -555,7 +555,7 @@ static int send_via_shortcut(struct sk_buff *skb, struct mpoa_client *mpc)
 					sizeof(struct llc_snap_hdr));
 	}
 
-	refcount_add(skb->truesize, &sk_atm(entry->shortcut)->sk_wmem_alloc);
+	atomic_add(skb->truesize, &sk_atm(entry->shortcut)->sk_wmem_alloc);
 	ATM_SKB(skb)->atm_options = entry->shortcut->atm_options;
 	entry->shortcut->send(entry->shortcut, skb);
 	entry->packets_fwded++;
@@ -706,7 +706,7 @@ static void mpc_push(struct atm_vcc *vcc, struct sk_buff *skb)
 		dprintk("(%s) control packet arrived\n", dev->name);
 		/* Pass control packets to daemon */
 		skb_queue_tail(&sk->sk_receive_queue, skb);
-		sk->sk_data_ready(sk);
+		sk->sk_data_ready(sk, skb->len);
 		return;
 	}
 
@@ -779,7 +779,7 @@ static void mpc_push(struct atm_vcc *vcc, struct sk_buff *skb)
 	netif_rx(new_skb);
 }
 
-static const struct atmdev_ops mpc_ops = { /* only send is required */
+static struct atmdev_ops mpc_ops = { /* only send is required */
 	.close	= mpoad_close,
 	.send	= msg_from_mpoad
 };
@@ -799,10 +799,11 @@ static int atm_mpoa_mpoad_attach(struct atm_vcc *vcc, int arg)
 	int err;
 
 	if (mpcs == NULL) {
+		init_timer(&mpc_timer);
 		mpc_timer_refresh();
 
 		/* This lets us now how our LECs are doing */
-		err = register_netdevice_notifier(&mpoa_notifier);
+		err = register_netdevice_notifier_rh(&mpoa_notifier);
 		if (err < 0) {
 			del_timer(&mpc_timer);
 			return err;
@@ -910,7 +911,7 @@ static int msg_from_mpoad(struct atm_vcc *vcc, struct sk_buff *skb)
 
 	struct mpoa_client *mpc = find_mpc_by_vcc(vcc);
 	struct k_message *mesg = (struct k_message *)skb->data;
-	WARN_ON(refcount_sub_and_test(skb->truesize, &sk_atm(vcc)->sk_wmem_alloc));
+	atomic_sub(skb->truesize, &sk_atm(vcc)->sk_wmem_alloc);
 
 	if (mpc == NULL) {
 		pr_info("no mpc found\n");
@@ -991,7 +992,7 @@ int msg_to_mpoad(struct k_message *mesg, struct mpoa_client *mpc)
 
 	sk = sk_atm(mpc->mpoad_vcc);
 	skb_queue_tail(&sk->sk_receive_queue, skb);
-	sk->sk_data_ready(sk);
+	sk->sk_data_ready(sk, skb->len);
 
 	return 0;
 }
@@ -1006,7 +1007,7 @@ static int mpoa_event_listener(struct notifier_block *mpoa_notifier,
 	if (!net_eq(dev_net(dev), &init_net))
 		return NOTIFY_DONE;
 
-	if (strncmp(dev->name, "lec", 3))
+	if (dev->name == NULL || strncmp(dev->name, "lec", 3))
 		return NOTIFY_DONE; /* we are only interested in lec:s */
 
 	switch (event) {
@@ -1272,7 +1273,7 @@ static void purge_egress_shortcut(struct atm_vcc *vcc, eg_cache_entry *entry)
 
 	sk = sk_atm(vcc);
 	skb_queue_tail(&sk->sk_receive_queue, skb);
-	sk->sk_data_ready(sk);
+	sk->sk_data_ready(sk, skb->len);
 	dprintk("exiting\n");
 }
 
@@ -1407,16 +1408,15 @@ static void clean_up(struct k_message *msg, struct mpoa_client *mpc, int action)
 	msg_to_mpoad(msg, mpc);
 }
 
-static unsigned long checking_time;
-
 static void mpc_timer_refresh(void)
 {
 	mpc_timer.expires = jiffies + (MPC_P2 * HZ);
-	checking_time = mpc_timer.expires;
+	mpc_timer.data = mpc_timer.expires;
+	mpc_timer.function = mpc_cache_check;
 	add_timer(&mpc_timer);
 }
 
-static void mpc_cache_check(struct timer_list *unused)
+static void mpc_cache_check(unsigned long checking_time)
 {
 	struct mpoa_client *mpc = mpcs;
 	static unsigned long previous_resolving_check_time;
@@ -1492,8 +1492,8 @@ static void __exit atm_mpoa_cleanup(void)
 
 	mpc_proc_clean();
 
-	del_timer_sync(&mpc_timer);
-	unregister_netdevice_notifier(&mpoa_notifier);
+	del_timer(&mpc_timer);
+	unregister_netdevice_notifier_rh(&mpoa_notifier);
 	deregister_atm_ioctl(&atm_ioctl_ops);
 
 	mpc = mpcs;

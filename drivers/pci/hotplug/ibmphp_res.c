@@ -1785,11 +1785,11 @@ void ibmphp_print_test(void)
 	}
 
 	list_for_each_entry(bus_cur, &gbuses, bus_list) {
-		debug_pci ("This is bus # %d.  There are\n", bus_cur->busno);
-		debug_pci ("IORanges = %d\t", bus_cur->noIORanges);
-		debug_pci ("MemRanges = %d\t", bus_cur->noMemRanges);
-		debug_pci ("PFMemRanges = %d\n", bus_cur->noPFMemRanges);
-		debug_pci ("The IO Ranges are as follows:\n");
+		debug_pci("This is bus # %d.  There are\n", bus_cur->busno);
+		debug_pci("IORanges = %d\t", bus_cur->noIORanges);
+		debug_pci("MemRanges = %d\t", bus_cur->noMemRanges);
+		debug_pci("PFMemRanges = %d\n", bus_cur->noPFMemRanges);
+		debug_pci("The IO Ranges are as follows:\n");
 		if (bus_cur->rangeIO) {
 			range = bus_cur->rangeIO;
 			for (i = 0; i < bus_cur->noIORanges; i++) {

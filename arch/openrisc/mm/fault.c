@@ -17,10 +17,10 @@
 
 #include <linux/mm.h>
 #include <linux/interrupt.h>
-#include <linux/extable.h>
-#include <linux/sched/signal.h>
+#include <linux/module.h>
+#include <linux/sched.h>
 
-#include <linux/uaccess.h>
+#include <asm/uaccess.h>
 #include <asm/siginfo.h>
 #include <asm/signal.h>
 
@@ -33,7 +33,7 @@ unsigned long pte_errors;	/* updated by do_page_fault() */
 /* __PHX__ :: - check the vmalloc_fault in do_page_fault()
  *            - also look into include/asm-or32/mmu_context.h
  */
-volatile pgd_t *current_pgd[NR_CPUS];
+volatile pgd_t *current_pgd;
 
 extern void die(char *, struct pt_regs *, long);
 
@@ -86,7 +86,6 @@ asmlinkage void do_page_fault(struct pt_regs *regs, unsigned long address,
 	if (user_mode(regs)) {
 		/* Exception was in userspace: reenable interrupts */
 		local_irq_enable();
-		flags |= FAULT_FLAG_USER;
 	} else {
 		/* If exception was in a syscall, then IRQ's may have
 		 * been enabled or disabled.  If they were enabled,
@@ -171,8 +170,6 @@ good_area:
 	if (unlikely(fault & VM_FAULT_ERROR)) {
 		if (fault & VM_FAULT_OOM)
 			goto out_of_memory;
-		else if (fault & VM_FAULT_SIGSEGV)
-			goto bad_area;
 		else if (fault & VM_FAULT_SIGBUS)
 			goto do_sigbus;
 		BUG();
@@ -270,10 +267,10 @@ out_of_memory:
 	__asm__ __volatile__("l.nop 1");
 
 	up_read(&mm->mmap_sem);
-	if (!user_mode(regs))
-		goto no_context;
-	pagefault_out_of_memory();
-	return;
+	printk("VM: killing process %s\n", tsk->comm);
+	if (user_mode(regs))
+		do_exit(SIGKILL);
+	goto no_context;
 
 do_sigbus:
 	up_read(&mm->mmap_sem);
@@ -319,7 +316,7 @@ vmalloc_fault:
 
 		phx_mmu("vmalloc_fault");
 */
-		pgd = (pgd_t *)current_pgd[smp_processor_id()] + offset;
+		pgd = (pgd_t *)current_pgd + offset;
 		pgd_k = init_mm.pgd + offset;
 
 		/* Since we're two-level, we don't need to do both

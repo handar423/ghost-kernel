@@ -359,7 +359,7 @@ static int __init wpan_phy_class_init(void)
 	if (rc)
 		goto err_sysfs;
 
-	rc = register_netdevice_notifier(&cfg802154_netdev_notifier);
+	rc = register_netdevice_notifier_rh(&cfg802154_netdev_notifier);
 	if (rc)
 		goto err_nl;
 
@@ -377,7 +377,7 @@ err_ieee802154_nl:
 	ieee802154_nl_exit();
 
 err_notifier:
-	unregister_netdevice_notifier(&cfg802154_netdev_notifier);
+	unregister_netdevice_notifier_rh(&cfg802154_netdev_notifier);
 err_nl:
 	wpan_phy_sysfs_exit();
 err_sysfs:
@@ -391,7 +391,7 @@ static void __exit wpan_phy_class_exit(void)
 {
 	nl802154_exit();
 	ieee802154_nl_exit();
-	unregister_netdevice_notifier(&cfg802154_netdev_notifier);
+	unregister_netdevice_notifier_rh(&cfg802154_netdev_notifier);
 	wpan_phy_sysfs_exit();
 	unregister_pernet_device(&cfg802154_pernet_ops);
 }

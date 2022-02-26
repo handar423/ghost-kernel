@@ -88,15 +88,13 @@ static psmouse_ret_t ps2pp_process_byte(struct psmouse *psmouse)
 				    (packet[1] >> 4) | (packet[0] & 0x30));
 			break;
 		}
+
+		psmouse_report_standard_buttons(dev, packet[0]);
+
 	} else {
 		/* Standard PS/2 motion data */
-		input_report_rel(dev, REL_X, packet[1] ? (int) packet[1] - (int) ((packet[0] << 4) & 0x100) : 0);
-		input_report_rel(dev, REL_Y, packet[2] ? (int) ((packet[0] << 3) & 0x100) - (int) packet[2] : 0);
+		psmouse_report_standard_packet(dev, packet);
 	}
-
-	input_report_key(dev, BTN_LEFT,    packet[0]       & 1);
-	input_report_key(dev, BTN_MIDDLE, (packet[0] >> 2) & 1);
-	input_report_key(dev, BTN_RIGHT,  (packet[0] >> 1) & 1);
 
 	input_sync(dev);
 
@@ -113,7 +111,7 @@ static psmouse_ret_t ps2pp_process_byte(struct psmouse *psmouse)
 
 static int ps2pp_cmd(struct psmouse *psmouse, unsigned char *param, unsigned char command)
 {
-	if (psmouse_sliced_command(psmouse, command))
+	if (ps2_sliced_command(&psmouse->ps2dev, command))
 		return -1;
 
 	if (ps2_command(&psmouse->ps2dev, param, PSMOUSE_CMD_POLL | 0x0300))
@@ -220,7 +218,7 @@ static const struct ps2pp_info *get_model_info(unsigned char model)
 		{ 61,	PS2PP_KIND_MX,					/* MX700 */
 				PS2PP_WHEEL | PS2PP_SIDE_BTN | PS2PP_TASK_BTN |
 				PS2PP_EXTRA_BTN | PS2PP_NAV_BTN },
-		{ 66,	PS2PP_KIND_MX,					/* MX3100 receiver */
+		{ 66,	PS2PP_KIND_MX,					/* MX3100 reciver */
 				PS2PP_WHEEL | PS2PP_SIDE_BTN | PS2PP_TASK_BTN |
 				PS2PP_EXTRA_BTN | PS2PP_NAV_BTN | PS2PP_HWHEEL },
 		{ 72,	PS2PP_KIND_TRACKMAN,	0 },			/* T-CH11: TrackMan Marble */
@@ -325,7 +323,7 @@ static void ps2pp_set_model_properties(struct psmouse *psmouse,
  * that support it.
  */
 
-int ps2pp_detect(struct psmouse *psmouse, bool set_properties)
+int ps2pp_init(struct psmouse *psmouse, bool set_properties)
 {
 	struct ps2dev *ps2dev = &psmouse->ps2dev;
 	unsigned char param[4];

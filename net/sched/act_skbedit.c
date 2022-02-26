@@ -27,7 +27,7 @@
 #include <linux/tc_act/tc_skbedit.h>
 #include <net/tc_act/tc_skbedit.h>
 
-static unsigned int skbedit_net_id;
+static int skbedit_net_id;
 static struct tc_action_ops act_skbedit_ops;
 
 static int tcf_skbedit(struct sk_buff *skb, const struct tc_action *a,
@@ -80,7 +80,7 @@ static int tcf_skbedit_init(struct net *net, struct nlattr *nla,
 	if (nla == NULL)
 		return -EINVAL;
 
-	err = nla_parse_nested(tb, TCA_SKBEDIT_MAX, nla, skbedit_policy, NULL);
+	err = nla_parse_nested(tb, TCA_SKBEDIT_MAX, nla, skbedit_policy);
 	if (err < 0)
 		return err;
 
@@ -121,7 +121,8 @@ static int tcf_skbedit_init(struct net *net, struct nlattr *nla,
 		return 0;
 
 	if (!flags) {
-		tcf_idr_release(*a, bind);
+		if (exists)
+			tcf_idr_release(*a, bind);
 		return -EINVAL;
 	}
 
@@ -135,9 +136,10 @@ static int tcf_skbedit_init(struct net *net, struct nlattr *nla,
 		ret = ACT_P_CREATED;
 	} else {
 		d = to_skbedit(*a);
-		tcf_idr_release(*a, bind);
-		if (!ovr)
+		if (!ovr) {
+			tcf_idr_release(*a, bind);
 			return -EEXIST;
+		}
 	}
 
 	spin_lock_bh(&d->tcf_lock);

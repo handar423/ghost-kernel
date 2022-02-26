@@ -1,11 +1,22 @@
 /*
- * Copyright 2017 Broadcom. All Rights Reserved.
- * The term "Broadcom" refers to Broadcom Limited and/or its subsidiaries.
+ * This file is part of the Emulex Linux Device Driver for Enterprise iSCSI
+ * Host Bus Adapters. Refer to the README file included with this package
+ * for driver version and adapter compatibility.
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License version 2
- * as published by the Free Software Foundation. The full GNU General
- * Public License is included in this distribution in the file called COPYING.
+ * Copyright (c) 2018 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
+ *
+ * This program is free software; you can redistribute it and/or modify it
+ * under the terms of version 2 of the GNU General Public License as published
+ * by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful. ALL EXPRESS
+ * OR IMPLIED CONDITIONS, REPRESENTATIONS AND WARRANTIES, INCLUDING ANY
+ * IMPLIED WARRANTY OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE,
+ * OR NON-INFRINGEMENT, ARE DISCLAIMED, EXCEPT TO THE EXTENT THAT SUCH
+ * DISCLAIMERS ARE HELD TO BE LEGALLY INVALID.
+ * See the GNU General Public License for more details, a copy of which
+ * can be found in the file COPYING included with this package.
  *
  * Contact Information:
  * linux-drivers@broadcom.com
@@ -225,9 +236,9 @@ static int beiscsi_eh_abort(struct scsi_cmnd *sc)
 	session = cls_session->dd_data;
 
 	/* check if we raced, task just got cleaned up under us */
-	spin_lock_bh(&session->back_lock);
+	spin_lock_bh(&session->lock);
 	if (!abrt_task || !abrt_task->sc) {
-		spin_unlock_bh(&session->back_lock);
+		spin_unlock_bh(&session->lock);
 		return SUCCESS;
 	}
 	/* get a task ref till FW processes the req for the ICD used */
@@ -246,7 +257,7 @@ static int beiscsi_eh_abort(struct scsi_cmnd *sc)
 	}
 	inv_tbl.cid = beiscsi_conn->beiscsi_conn_cid;
 	inv_tbl.icd = abrt_io_task->psgl_handle->sgl_index;
-	spin_unlock_bh(&session->back_lock);
+	spin_unlock_bh(&session->lock);
 
 	rc = beiscsi_mgmt_invalidate_icds(phba, &inv_tbl, 1);
 	iscsi_put_task(abrt_task);
@@ -279,9 +290,9 @@ static int beiscsi_eh_device_reset(struct scsi_cmnd *sc)
 	cls_session = starget_to_session(scsi_target(sc->device));
 	session = cls_session->dd_data;
 
-	spin_lock_bh(&session->frwd_lock);
+	spin_lock_bh(&session->lock);
 	if (!session->leadconn || session->state != ISCSI_STATE_LOGGED_IN) {
-		spin_unlock_bh(&session->frwd_lock);
+		spin_unlock_bh(&session->lock);
 		return FAILED;
 	}
 
@@ -291,14 +302,12 @@ static int beiscsi_eh_device_reset(struct scsi_cmnd *sc)
 
 	inv_tbl = kzalloc(sizeof(*inv_tbl), GFP_ATOMIC);
 	if (!inv_tbl) {
-		spin_unlock_bh(&session->frwd_lock);
+		spin_unlock_bh(&session->lock);
 		beiscsi_log(phba, KERN_ERR, BEISCSI_LOG_EH,
 			    "BM_%d : invldt_cmd_tbl alloc failed\n");
 		return FAILED;
 	}
 	nents = 0;
-	/* take back_lock to prevent task from getting cleaned up under us */
-	spin_lock(&session->back_lock);
 	for (i = 0; i < conn->session->cmds_max; i++) {
 		task = conn->session->cmds[i];
 		if (!task->sc)
@@ -332,8 +341,7 @@ static int beiscsi_eh_device_reset(struct scsi_cmnd *sc)
 		inv_tbl->task[nents] = task;
 		nents++;
 	}
-	spin_unlock(&session->back_lock);
-	spin_unlock_bh(&session->frwd_lock);
+	spin_unlock_bh(&session->lock);
 
 	rc = SUCCESS;
 	if (!nents)
@@ -375,16 +383,22 @@ static const struct pci_device_id beiscsi_pci_id_table[] = {
 };
 MODULE_DEVICE_TABLE(pci, beiscsi_pci_id_table);
 
+static const struct pci_device_id beiscsi_pci_id_deprecated[] = {
+	{ PCI_DEVICE(BE_VENDOR_ID, BE_DEVICE_ID1) },
+	{ PCI_DEVICE(BE_VENDOR_ID, OC_DEVICE_ID1) },
+	{ PCI_DEVICE(BE_VENDOR_ID, OC_DEVICE_ID2) },
+	{ 0 }
+};
+
 
 static struct scsi_host_template beiscsi_sht = {
 	.module = THIS_MODULE,
 	.name = "Emulex 10Gbe open-iscsi Initiator Driver",
 	.proc_name = DRV_NAME,
 	.queuecommand = iscsi_queuecommand,
-	.change_queue_depth = scsi_change_queue_depth,
+	.change_queue_depth = iscsi_change_queue_depth,
 	.slave_configure = beiscsi_slave_configure,
 	.target_alloc = iscsi_target_alloc,
-	.eh_timed_out = iscsi_eh_cmd_timed_out,
 	.eh_abort_handler = beiscsi_eh_abort,
 	.eh_device_reset_handler = beiscsi_eh_device_reset,
 	.eh_target_reset_handler = iscsi_eh_session_reset,
@@ -396,7 +410,7 @@ static struct scsi_host_template beiscsi_sht = {
 	.cmd_per_lun = BEISCSI_CMD_PER_LUN,
 	.use_clustering = ENABLE_CLUSTERING,
 	.vendor_id = SCSI_NL_VID_TYPE_PCI | BE_VENDOR_ID,
-	.track_queue_depth = 1,
+
 };
 
 static struct scsi_transport_template *beiscsi_scsi_transport;
@@ -962,7 +976,7 @@ beiscsi_get_wrb_handle(struct hwi_wrb_context *pwrb_context,
 
 	spin_lock_irqsave(&pwrb_context->wrb_lock, flags);
 	if (!pwrb_context->wrb_handles_available) {
-		spin_unlock_irqrestore(&pwrb_context->wrb_lock, flags);
+		spin_unlock_bh(&pwrb_context->wrb_lock);
 		return NULL;
 	}
 	pwrb_handle = pwrb_context->pwrb_handle_base[pwrb_context->alloc_index];
@@ -1246,11 +1260,11 @@ hwi_complete_drvr_msgs(struct beiscsi_conn *beiscsi_conn,
 	pwrb_context = &phwi_ctrlr->wrb_context[cri_index];
 	pwrb_handle = pwrb_context->pwrb_handle_basestd[wrb_index];
 	session = beiscsi_conn->conn->session;
-	spin_lock_bh(&session->back_lock);
+	spin_lock_bh(&session->lock);
 	task = pwrb_handle->pio_handle;
 	if (task)
 		__iscsi_put_task(task);
-	spin_unlock_bh(&session->back_lock);
+	spin_unlock_bh(&session->lock);
 }
 
 static void
@@ -1351,10 +1365,10 @@ static void hwi_complete_cmd(struct beiscsi_conn *beiscsi_conn,
 	pwrb_handle = pwrb_context->pwrb_handle_basestd[
 		      csol_cqe.wrb_index];
 
-	spin_lock_bh(&session->back_lock);
+	spin_lock_bh(&session->lock);
 	task = pwrb_handle->pio_handle;
 	if (!task) {
-		spin_unlock_bh(&session->back_lock);
+		spin_unlock_bh(&session->lock);
 		return;
 	}
 	type = ((struct beiscsi_io_task *)task->dd_data)->wrb_type;
@@ -1397,7 +1411,7 @@ static void hwi_complete_cmd(struct beiscsi_conn *beiscsi_conn,
 		break;
 	}
 
-	spin_unlock_bh(&session->back_lock);
+	spin_unlock_bh(&session->lock);
 }
 
 /**
@@ -1634,9 +1648,9 @@ beiscsi_hdl_fwd_pdu(struct beiscsi_conn *beiscsi_conn,
 			    pasync_ctx->async_entry[cri].wq.bytes_needed,
 			    pasync_ctx->async_entry[cri].wq.bytes_received);
 	}
-	spin_lock_bh(&session->back_lock);
+	spin_lock_bh(&session->lock);
 	status = beiscsi_complete_pdu(beiscsi_conn, phdr, pdata, dlen);
-	spin_unlock_bh(&session->back_lock);
+	spin_unlock_bh(&session->lock);
 	beiscsi_hdl_purge_handles(phba, pasync_ctx, cri);
 	return status;
 }
@@ -1855,7 +1869,6 @@ unsigned int beiscsi_process_cq(struct be_eq_obj *pbe_eq, int budget)
 {
 	struct be_queue_info *cq;
 	struct sol_cqe *sol;
-	struct dmsg_cqe *dmsg;
 	unsigned int total = 0;
 	unsigned int num_processed = 0;
 	unsigned short code = 0, cid = 0;
@@ -1928,7 +1941,6 @@ unsigned int beiscsi_process_cq(struct be_eq_obj *pbe_eq, int budget)
 				    "BM_%d : Received %s[%d] on CID : %d\n",
 				    cqe_desc[code], code, cid);
 
-			dmsg = (struct dmsg_cqe *)sol;
 			hwi_complete_drvr_msgs(beiscsi_conn, phba, sol);
 			break;
 		case UNSOL_HDR_NOTIFY:
@@ -3327,9 +3339,10 @@ static int be_queue_alloc(struct beiscsi_hba *phba, struct be_queue_info *q,
 	q->len = len;
 	q->entry_size = entry_size;
 	mem->size = len * entry_size;
-	mem->va = pci_zalloc_consistent(phba->pcidev, mem->size, &mem->dma);
+	mem->va = pci_alloc_consistent(phba->pcidev, mem->size, &mem->dma);
 	if (!mem->va)
 		return -ENOMEM;
+	memset(mem->va, 0, mem->size);
 	return 0;
 }
 
@@ -4312,9 +4325,9 @@ beiscsi_offload_connection(struct beiscsi_conn *beiscsi_conn,
 	 * login/startup related tasks.
 	 */
 	beiscsi_conn->login_in_progress = 0;
-	spin_lock_bh(&session->back_lock);
+	spin_lock_bh(&session->lock);
 	beiscsi_cleanup_task(task);
-	spin_unlock_bh(&session->back_lock);
+	spin_unlock_bh(&session->lock);
 
 	pwrb_handle = alloc_wrb_handle(phba, beiscsi_conn->beiscsi_conn_cid,
 				       &pwrb_context);
@@ -5247,11 +5260,12 @@ static void beiscsi_eqd_update_work(struct work_struct *work)
 			      msecs_to_jiffies(BEISCSI_EQD_UPDATE_INTERVAL));
 }
 
-static void beiscsi_hw_tpe_check(struct timer_list *t)
+static void beiscsi_hw_tpe_check(unsigned long ptr)
 {
-	struct beiscsi_hba *phba = from_timer(phba, t, hw_check);
+	struct beiscsi_hba *phba;
 	u32 wait;
 
+	phba = (struct beiscsi_hba *)ptr;
 	/* if not TPE, do nothing */
 	if (!beiscsi_detect_tpe(phba))
 		return;
@@ -5264,10 +5278,11 @@ static void beiscsi_hw_tpe_check(struct timer_list *t)
 			   msecs_to_jiffies(wait));
 }
 
-static void beiscsi_hw_health_check(struct timer_list *t)
+static void beiscsi_hw_health_check(unsigned long ptr)
 {
-	struct beiscsi_hba *phba = from_timer(phba, t, hw_check);
+	struct beiscsi_hba *phba;
 
+	phba = (struct beiscsi_hba *)ptr;
 	beiscsi_detect_ue(phba);
 	if (beiscsi_detect_ue(phba)) {
 		__beiscsi_log(phba, KERN_ERR,
@@ -5570,14 +5585,14 @@ static int beiscsi_dev_probe(struct pci_dev *pcidev,
 
 	phba->mac_addr_set = false;
 
+	pci_hw_vendor_status(beiscsi_pci_id_deprecated, pcidev);
+
 	switch (pcidev->device) {
 	case BE_DEVICE_ID1:
 	case OC_DEVICE_ID1:
 	case OC_DEVICE_ID2:
 		phba->generation = BE_GEN2;
 		phba->iotask_fn = beiscsi_iotask;
-		dev_warn(&pcidev->dev,
-			 "Obsolete/Unsupported BE2 Adapter Family\n");
 		break;
 	case BE_DEVICE_ID2:
 	case OC_DEVICE_ID3:
@@ -5717,7 +5732,9 @@ static int beiscsi_dev_probe(struct pci_dev *pcidev,
 	 * Start UE detection here. UE before this will cause stall in probe
 	 * and eventually fail the probe.
 	 */
-	timer_setup(&phba->hw_check, beiscsi_hw_health_check, 0);
+	init_timer(&phba->hw_check);
+	phba->hw_check.function = beiscsi_hw_health_check;
+	phba->hw_check.data = (unsigned long)phba;
 	mod_timer(&phba->hw_check,
 		  jiffies + msecs_to_jiffies(BEISCSI_UE_DETECT_INTERVAL));
 	beiscsi_log(phba, KERN_INFO, BEISCSI_LOG_INIT,

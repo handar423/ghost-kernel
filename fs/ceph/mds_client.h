@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _FS_CEPH_MDS_CLIENT_H
 #define _FS_CEPH_MDS_CLIENT_H
 
@@ -8,7 +7,6 @@
 #include <linux/mutex.h>
 #include <linux/rbtree.h>
 #include <linux/spinlock.h>
-#include <linux/refcount.h>
 #include <linux/utsname.h>
 
 #include <linux/ceph/types.h>
@@ -49,6 +47,8 @@ struct ceph_mds_reply_info_in {
 	char *inline_data;
 	u32 pool_ns_len;
 	char *pool_ns_data;
+	u64 max_bytes;
+	u64 max_files;
 };
 
 struct ceph_mds_reply_dir_entry {
@@ -112,7 +112,7 @@ struct ceph_mds_reply_info_parsed {
  * Account for per-message overhead of mds_cap_release header
  * and __le32 for osd epoch barrier trailing field.
  */
-#define CEPH_CAPS_PER_RELEASE ((PAGE_SIZE - sizeof(u32) -		\
+#define CEPH_CAPS_PER_RELEASE ((PAGE_CACHE_SIZE - sizeof(u32) -		\
 				sizeof(struct ceph_mds_cap_release)) /	\
 			        sizeof(struct ceph_mds_cap_item))
 
@@ -163,7 +163,7 @@ struct ceph_mds_session {
 	unsigned long     s_renew_requested; /* last time we sent a renew req */
 	u64               s_renew_seq;
 
-	refcount_t          s_ref;
+	atomic_t          s_ref;
 	struct list_head  s_waiting;  /* waiting requests */
 	struct list_head  s_unsafe;   /* unsafe requests */
 };
@@ -312,6 +312,8 @@ struct ceph_mds_client {
 	int                     max_sessions;  /* len of s_mds_sessions */
 	int                     stopping;      /* true if shutting down */
 
+	atomic64_t		quotarealms_count; /* # realms with quota */
+
 	/*
 	 * snap_rwsem will cover cap linkage into snaprealms, and
 	 * realm snap contexts.  (later, we can do per-realm snap
@@ -382,7 +384,7 @@ __ceph_lookup_mds_session(struct ceph_mds_client *, int mds);
 static inline struct ceph_mds_session *
 ceph_get_mds_session(struct ceph_mds_session *s)
 {
-	refcount_inc(&s->s_ref);
+	atomic_inc(&s->s_ref);
 	return s;
 }
 
@@ -444,4 +446,7 @@ ceph_mdsc_open_export_target_session(struct ceph_mds_client *mdsc, int target);
 extern void ceph_mdsc_open_export_target_sessions(struct ceph_mds_client *mdsc,
 					  struct ceph_mds_session *session);
 
+extern int ceph_trim_caps(struct ceph_mds_client *mdsc,
+			  struct ceph_mds_session *session,
+			  int max_caps);
 #endif

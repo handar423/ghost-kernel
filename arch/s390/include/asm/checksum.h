@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 /*
  *    S390 fast network checksum routines
  *
@@ -12,7 +11,7 @@
 #ifndef _S390_CHECKSUM_H
 #define _S390_CHECKSUM_H
 
-#include <linux/uaccess.h>
+#include <asm/uaccess.h>
 
 /*
  * computes the checksum of a memory block at buff, length len,
@@ -45,15 +44,22 @@ csum_partial(const void *buff, int len, __wsum sum)
  * here even more important to align src and dst on a 32-bit (or even
  * better 64-bit) boundary
  *
- * Copy from userspace and compute checksum.
+ * Copy from userspace and compute checksum.  If we catch an exception
+ * then zero the rest of the buffer.
  */
 static inline __wsum
 csum_partial_copy_from_user(const void __user *src, void *dst,
                                           int len, __wsum sum,
                                           int *err_ptr)
 {
-	if (unlikely(copy_from_user(dst, src, len)))
+	int missing;
+
+	missing = copy_from_user(dst, src, len);
+	if (missing) {
+		memset(dst + len - missing, 0, missing);
 		*err_ptr = -EFAULT;
+	}
+		
 	return csum_partial(dst, len, sum);
 }
 

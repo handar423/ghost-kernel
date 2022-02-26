@@ -178,7 +178,7 @@ const u32 qlcnic_83xx_reg_tbl[] = {
 	0x3540,		/* Device state, DRV_REG1 */
 	0x3544,		/* Driver state, DRV_REG2 */
 	0x3548,		/* Driver scratch, DRV_REG3 */
-	0x354C,		/* Device partition info, DRV_REG4 */
+	0x354C,		/* Device partiton info, DRV_REG4 */
 	0x3524,		/* Driver IDC ver, DRV_REG5 */
 	0x3550,		/* FW_VER_MAJOR */
 	0x3554,		/* FW_VER_MINOR */
@@ -2134,7 +2134,8 @@ out:
 }
 
 void qlcnic_83xx_change_l2_filter(struct qlcnic_adapter *adapter, u64 *addr,
-				  u16 vlan_id)
+				  u16 vlan_id,
+				  struct qlcnic_host_tx_ring *tx_ring)
 {
 	u8 mac[ETH_ALEN];
 	memcpy(&mac, addr, ETH_ALEN);
@@ -3439,13 +3440,13 @@ int qlcnic_83xx_set_link_ksettings(struct qlcnic_adapter *adapter,
 			return -EINVAL;
 		}
 	}
+
 	status = qlcnic_83xx_set_port_config(adapter);
 	if (status) {
 		netdev_info(adapter->netdev,
 			    "Failed to Set Link Speed and autoneg.\n");
 		ahw->port_config = config;
 	}
-
 	return status;
 }
 
@@ -3858,7 +3859,7 @@ static int qlcnic_83xx_resume(struct qlcnic_adapter *adapter)
 
 void qlcnic_83xx_reinit_mbx_work(struct qlcnic_mailbox *mbx)
 {
-	reinit_completion(&mbx->completion);
+	INIT_COMPLETION(mbx->completion);
 	set_bit(QLC_83XX_MBX_READY, &mbx->status);
 }
 

@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _INET_ECN_H_
 #define _INET_ECN_H_
 
@@ -134,6 +133,11 @@ static inline int IP6_ECN_set_ce(struct sk_buff *skb, struct ipv6hdr *iph)
 	return 1;
 }
 
+static inline void IP6_ECN_clear(struct ipv6hdr *iph)
+{
+	*(__be32*)iph &= ~htonl(INET_ECN_MASK << 20);
+}
+
 static inline void ipv6_copy_dscp(unsigned int dscp, struct ipv6hdr *inner)
 {
 	dscp &= ~INET_ECN_MASK;
@@ -160,7 +164,7 @@ static inline int INET_ECN_set_ce(struct sk_buff *skb)
 }
 
 /*
- * RFC 6040 4.2
+ * RFC 6080 4.2
  *  To decapsulate the inner header at the tunnel egress, a compliant
  *  tunnel egress MUST set the outgoing ECN field to the codepoint at the
  *  intersection of the appropriate arriving inner header (row) and outer

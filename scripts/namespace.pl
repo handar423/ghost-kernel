@@ -1,4 +1,4 @@
-#!/usr/bin/env perl
+#!/usr/bin/perl -w
 #
 #	namespace.pl.  Mon Aug 30 2004
 #
@@ -62,7 +62,7 @@
 #	  result.
 #
 
-use warnings;
+require 5;	# at least perl 5
 use strict;
 use File::Find;
 
@@ -117,8 +117,6 @@ my %nameexception = (
     'kallsyms_names'	=> 1,
     'kallsyms_num_syms'	=> 1,
     'kallsyms_addresses'=> 1,
-    'kallsyms_offsets'	=> 1,
-    'kallsyms_relative_base'=> 1,
     '__this_module'	=> 1,
     '_etext'		=> 1,
     '_edata'		=> 1,

@@ -25,11 +25,8 @@
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/io.h>
-#include <linux/sched/debug.h>
-#include <linux/sched/task.h>
-#include <linux/sched/task_stack.h>
 #include <asm/syscalls.h>
-#include <linux/uaccess.h>
+#include <asm/uaccess.h>
 #include <asm/pgtable.h>
 #include <asm/mmu_context.h>
 #include <asm/fpu.h>
@@ -291,7 +288,7 @@ void show_regs(struct pt_regs *regs)
 /*
  * Free current thread data structures etc..
  */
-void exit_thread(struct task_struct *tsk)
+void exit_thread(void)
 {
 	/*
 	 * See arch/sparc/kernel/process.c for the precedent for doing
@@ -310,8 +307,9 @@ void exit_thread(struct task_struct *tsk)
 	 * which it would get safely nulled.
 	 */
 #ifdef CONFIG_SH_FPU
-	if (last_task_used_math == tsk)
+	if (last_task_used_math == current) {
 		last_task_used_math = NULL;
+	}
 #endif
 }
 
@@ -376,7 +374,7 @@ asmlinkage void ret_from_kernel_thread(void);
 int copy_thread(unsigned long clone_flags, unsigned long usp,
 		unsigned long arg, struct task_struct *p)
 {
-	struct pt_regs *childregs;
+	struct pt_regs *childregs, *regs = current_pt_regs();
 
 #ifdef CONFIG_SH_FPU
 	/* can't happen for a kernel thread */
@@ -395,7 +393,7 @@ int copy_thread(unsigned long clone_flags, unsigned long usp,
 	if (unlikely(p->flags & PF_KTHREAD)) {
 		memset(childregs, 0, sizeof(struct pt_regs));
 		childregs->regs[2] = (unsigned long)arg;
-		childregs->regs[3] = (unsigned long)usp;
+		childregs->regs[3] = (unsigned long)fn;
 		childregs->sr = (1 << 30); /* not user_mode */
 		childregs->sr |= SR_FD; /* Invalidate FPU flag */
 		p->thread.pc = (unsigned long) ret_from_kernel_thread;

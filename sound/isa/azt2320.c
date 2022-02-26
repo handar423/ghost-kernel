@@ -79,7 +79,7 @@ struct snd_card_azt2320 {
 	struct snd_wss *chip;
 };
 
-static const struct pnp_card_device_id snd_azt2320_pnpids[] = {
+static struct pnp_card_device_id snd_azt2320_pnpids[] = {
 	/* PRO16V */
 	{ .id = "AZT1008", .devs = { { "AZT1008" }, { "AZT2001" }, } },
 	/* Aztech Sound Galaxy 16 */
@@ -215,7 +215,7 @@ static int snd_card_azt2320_probe(int dev,
 	sprintf(card->longname, "%s, WSS at 0x%lx, irq %i, dma %i&%i",
 		card->shortname, chip->port, irq[dev], dma1[dev], dma2[dev]);
 
-	error = snd_wss_pcm(chip, 0);
+	error = snd_wss_pcm(chip, 0, NULL);
 	if (error < 0) {
 		snd_card_free(card);
 		return error;
@@ -225,7 +225,7 @@ static int snd_card_azt2320_probe(int dev,
 		snd_card_free(card);
 		return error;
 	}
-	error = snd_wss_timer(chip, 0);
+	error = snd_wss_timer(chip, 0, NULL);
 	if (error < 0) {
 		snd_card_free(card);
 		return error;

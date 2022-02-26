@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0+
 /*
  * Cryptographic API.
  *
@@ -7,13 +6,17 @@
  * Copyright IBM Corp. 2003, 2011
  * Author(s): Thomas Spatzier
  *	      Jan Glauber (jan.glauber@de.ibm.com)
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
  */
 
 #include <linux/init.h>
 #include <linux/module.h>
-#include <linux/cpufeature.h>
 #include <linux/crypto.h>
-#include <linux/fips.h>
 #include <crypto/algapi.h>
 #include <crypto/des.h>
 #include <asm/cpacf.h>
@@ -217,32 +220,19 @@ static struct crypto_alg cbc_des_alg = {
  *   same as DES.  Implementers MUST reject keys that exhibit this
  *   property.
  *
- *   In fips mode additinally check for all 3 keys are unique.
- *
  */
 static int des3_setkey(struct crypto_tfm *tfm, const u8 *key,
 		       unsigned int key_len)
 {
 	struct s390_des_ctx *ctx = crypto_tfm_ctx(tfm);
 
-	if (!(crypto_memneq(key, &key[DES_KEY_SIZE], DES_KEY_SIZE) &&
-	    crypto_memneq(&key[DES_KEY_SIZE], &key[DES_KEY_SIZE * 2],
-			  DES_KEY_SIZE)) &&
+	if (!(memcmp(key, &key[DES_KEY_SIZE], DES_KEY_SIZE) &&
+	    memcmp(&key[DES_KEY_SIZE], &key[DES_KEY_SIZE * 2],
+		   DES_KEY_SIZE)) &&
 	    (tfm->crt_flags & CRYPTO_TFM_REQ_WEAK_KEY)) {
 		tfm->crt_flags |= CRYPTO_TFM_RES_WEAK_KEY;
 		return -EINVAL;
 	}
-
-	/* in fips mode, ensure k1 != k2 and k2 != k3 and k1 != k3 */
-	if (fips_enabled &&
-	    !(crypto_memneq(key, &key[DES_KEY_SIZE], DES_KEY_SIZE) &&
-	      crypto_memneq(&key[DES_KEY_SIZE], &key[DES_KEY_SIZE * 2],
-			    DES_KEY_SIZE) &&
-	      crypto_memneq(key, &key[DES_KEY_SIZE * 2], DES_KEY_SIZE))) {
-		tfm->crt_flags |= CRYPTO_TFM_RES_WEAK_KEY;
-		return -EINVAL;
-	}
-
 	memcpy(ctx->key, key, key_len);
 	return 0;
 }
@@ -582,7 +572,7 @@ out_err:
 	return ret;
 }
 
-module_cpu_feature_match(MSA, des_s390_init);
+module_init(des_s390_init);
 module_exit(des_s390_exit);
 
 MODULE_ALIAS_CRYPTO("des");

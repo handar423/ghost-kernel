@@ -58,7 +58,7 @@ bool release_page_wait_timeout(struct fscache_cookie *cookie, struct page *page)
 
 /*
  * decide whether a page can be released, possibly by cancelling a store to it
- * - we're allowed to sleep if __GFP_DIRECT_RECLAIM is flagged
+ * - we're allowed to sleep if __GFP_WAIT is flagged
  */
 bool __fscache_maybe_release_page(struct fscache_cookie *cookie,
 				  struct page *page,
@@ -113,7 +113,7 @@ try_again:
 
 	wake_up_bit(&cookie->flags, 0);
 	if (xpage)
-		put_page(xpage);
+		page_cache_release(xpage);
 	__fscache_uncache_page(cookie, page);
 	return true;
 
@@ -122,7 +122,7 @@ page_busy:
 	 * allocator as the work threads writing to the cache may all end up
 	 * sleeping on memory allocation, so we may need to impose a timeout
 	 * too. */
-	if (!(gfp & __GFP_DIRECT_RECLAIM) || !(gfp & __GFP_FS)) {
+	if (!(gfp & __GFP_WAIT) || !(gfp & __GFP_FS)) {
 		fscache_stat(&fscache_n_store_vmscan_busy);
 		return false;
 	}
@@ -132,7 +132,7 @@ page_busy:
 		_debug("fscache writeout timeout page: %p{%lx}",
 			page, page->index);
 
-	gfp &= ~__GFP_DIRECT_RECLAIM;
+	gfp &= ~__GFP_WAIT;
 	goto try_again;
 }
 EXPORT_SYMBOL(__fscache_maybe_release_page);
@@ -164,7 +164,7 @@ static void fscache_end_page_write(struct fscache_object *object,
 	}
 	spin_unlock(&object->lock);
 	if (xpage)
-		put_page(xpage);
+		page_cache_release(xpage);
 }
 
 /*
@@ -185,9 +185,11 @@ static void fscache_attr_changed_op(struct fscache_operation *op)
 		fscache_stat_d(&fscache_n_cop_attr_changed);
 		if (ret < 0)
 			fscache_abort_object(object);
+		fscache_op_complete(op, ret < 0);
+	} else {
+		fscache_op_complete(op, true);
 	}
 
-	fscache_op_complete(op, true);
 	_leave("");
 }
 
@@ -780,11 +782,12 @@ static void fscache_write_op(struct fscache_operation *_op)
 	cookie = object->cookie;
 
 	if (!fscache_object_is_active(object)) {
-		/* If we get here, then the on-disk cache object likely longer
-		 * exists, so we should just cancel this write operation.
+		/* If we get here, then the on-disk cache object likely no
+		 * longer exists, so we should just cancel this write
+		 * operation.
 		 */
 		spin_unlock(&object->lock);
-		fscache_op_complete(&op->op, false);
+		fscache_op_complete(&op->op, true);
 		_leave(" [inactive]");
 		return;
 	}
@@ -797,7 +800,7 @@ static void fscache_write_op(struct fscache_operation *_op)
 		 * cancel this write operation.
 		 */
 		spin_unlock(&object->lock);
-		fscache_op_complete(&op->op, false);
+		fscache_op_complete(&op->op, true);
 		_leave(" [cancel] op{f=%lx s=%u} obj{s=%s f=%lx}",
 		       _op->flags, _op->state, object->state->short_name,
 		       object->flags);
@@ -851,7 +854,7 @@ superseded:
 	spin_unlock(&cookie->stores_lock);
 	clear_bit(FSCACHE_OBJECT_PENDING_WRITE, &object->flags);
 	spin_unlock(&object->lock);
-	fscache_op_complete(&op->op, true);
+	fscache_op_complete(&op->op, false);
 	_leave("");
 }
 
@@ -884,10 +887,8 @@ void fscache_invalidate_writes(struct fscache_cookie *cookie)
 		spin_unlock(&cookie->stores_lock);
 
 		for (i = n - 1; i >= 0; i--)
-			put_page(results[i]);
+			page_cache_release(results[i]);
 	}
-
-	wake_up_bit(&cookie->flags, 0);
 
 	_leave("");
 }
@@ -984,7 +985,7 @@ int __fscache_write_page(struct fscache_cookie *cookie,
 
 	radix_tree_tag_set(&cookie->stores, page->index,
 			   FSCACHE_COOKIE_PENDING_TAG);
-	get_page(page);
+	page_cache_get(page);
 
 	/* we only want one writer at a time, but we do need to queue new
 	 * writers after exclusive ops */
@@ -1028,7 +1029,7 @@ submit_failed:
 	radix_tree_delete(&cookie->stores, page->index);
 	spin_unlock(&cookie->stores_lock);
 	wake_cookie = __fscache_unuse_cookie(cookie);
-	put_page(page);
+	page_cache_release(page);
 	ret = -ENOBUFS;
 	goto nobufs;
 
@@ -1175,13 +1176,14 @@ void __fscache_uncache_all_inode_pages(struct fscache_cookie *cookie,
 		return;
 	}
 
-	pagevec_init(&pvec);
+	pagevec_init(&pvec, 0);
 	next = 0;
 	do {
-		if (!pagevec_lookup(&pvec, mapping, &next))
+		if (!pagevec_lookup(&pvec, mapping, next, PAGEVEC_SIZE))
 			break;
 		for (i = 0; i < pagevec_count(&pvec); i++) {
 			struct page *page = pvec.pages[i];
+			next = page->index;
 			if (PageFsCache(page)) {
 				__fscache_wait_on_page_write(cookie, page);
 				__fscache_uncache_page(cookie, page);
@@ -1189,7 +1191,7 @@ void __fscache_uncache_all_inode_pages(struct fscache_cookie *cookie,
 		}
 		pagevec_release(&pvec);
 		cond_resched();
-	} while (next);
+	} while (++next);
 
 	_leave("");
 }

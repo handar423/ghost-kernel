@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _PSMOUSE_H
 #define _PSMOUSE_H
 
@@ -40,11 +39,6 @@ typedef enum {
 	PSMOUSE_FULL_PACKET
 } psmouse_ret_t;
 
-enum psmouse_scale {
-	PSMOUSE_SCALE11,
-	PSMOUSE_SCALE21
-};
-
 enum psmouse_type {
 	PSMOUSE_NONE,
 	PSMOUSE_PS2,
@@ -64,9 +58,7 @@ enum psmouse_type {
 	PSMOUSE_FSP,
 	PSMOUSE_SYNAPTICS_RELATIVE,
 	PSMOUSE_CYPRESS,
-	PSMOUSE_FOCALTECH,
 	PSMOUSE_VMMOUSE,
-	PSMOUSE_BYD,
 	PSMOUSE_SYNAPTICS_SMBUS,
 	PSMOUSE_AUTO		/* This one should always be last */
 };
@@ -117,7 +109,6 @@ struct psmouse {
 	psmouse_ret_t (*protocol_handler)(struct psmouse *psmouse);
 	void (*set_rate)(struct psmouse *psmouse, unsigned int rate);
 	void (*set_resolution)(struct psmouse *psmouse, unsigned int resolution);
-	void (*set_scale)(struct psmouse *psmouse, enum psmouse_scale scale);
 
 	int (*reconnect)(struct psmouse *psmouse);
 	int (*fast_reconnect)(struct psmouse *psmouse);
@@ -131,7 +122,6 @@ struct psmouse {
 
 void psmouse_queue_work(struct psmouse *psmouse, struct delayed_work *work,
 		unsigned long delay);
-int psmouse_sliced_command(struct psmouse *psmouse, unsigned char command);
 int psmouse_reset(struct psmouse *psmouse);
 void psmouse_set_state(struct psmouse *psmouse, enum psmouse_state new_state);
 void psmouse_set_resolution(struct psmouse *psmouse, unsigned int resolution);
@@ -139,6 +129,10 @@ psmouse_ret_t psmouse_process_byte(struct psmouse *psmouse);
 int psmouse_activate(struct psmouse *psmouse);
 int psmouse_deactivate(struct psmouse *psmouse);
 bool psmouse_matches_pnp_id(struct psmouse *psmouse, const char * const ids[]);
+
+void psmouse_report_standard_buttons(struct input_dev *, u8 buttons);
+void psmouse_report_standard_motion(struct input_dev *, u8 *packet);
+void psmouse_report_standard_packet(struct input_dev *, u8 *packet);
 
 struct psmouse_attribute {
 	struct device_attribute dattr;

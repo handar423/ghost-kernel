@@ -9,15 +9,14 @@
 #include <linux/bootmem.h>
 #include <linux/init.h>
 #include <linux/io.h>
-#include <linux/ioport.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/mmiotrace.h>
 #include <linux/mem_encrypt.h>
 #include <linux/efi.h>
 
-#include <asm/set_memory.h>
-#include <asm/e820/api.h>
+#include <asm/cacheflush.h>
+#include <asm/e820.h>
 #include <asm/fixmap.h>
 #include <asm/pgtable.h>
 #include <asm/tlbflush.h>
@@ -29,7 +28,7 @@
 
 struct ioremap_mem_flags {
 	bool system_ram;
-	bool desc_other;
+	bool name_other;
 };
 
 /*
@@ -49,9 +48,6 @@ int ioremap_change_attr(unsigned long vaddr, unsigned long size,
 		break;
 	case _PAGE_CACHE_MODE_WC:
 		err = _set_memory_wc(vaddr, nrpages);
-		break;
-	case _PAGE_CACHE_MODE_WT:
-		err = _set_memory_wt(vaddr, nrpages);
 		break;
 	case _PAGE_CACHE_MODE_WB:
 		err = _set_memory_wb(vaddr, nrpages);
@@ -81,9 +77,17 @@ static bool __ioremap_check_ram(struct resource *res)
 	return false;
 }
 
-static int __ioremap_check_desc_other(struct resource *res)
+static int __ioremap_check_name_other(struct resource *res)
 {
-	return (res->desc != IORES_DESC_NONE);
+	if (!res->name)
+		return 0;
+
+	if (!strcmp(res->name, "ACPI Tables"))
+		return 1;
+	if (!strcmp(res->name, "ACPI Non-volatile Storage"))
+		return 1;
+
+	return 0;
 }
 
 static int __ioremap_res_check(struct resource *res, void *arg)
@@ -93,10 +97,10 @@ static int __ioremap_res_check(struct resource *res, void *arg)
 	if (!flags->system_ram)
 		flags->system_ram = __ioremap_check_ram(res);
 
-	if (!flags->desc_other)
-		flags->desc_other = __ioremap_check_desc_other(res);
+	if (!flags->name_other)
+		flags->name_other = __ioremap_check_name_other(res);
 
-	return flags->system_ram && flags->desc_other;
+	return flags->system_ram && flags->name_other;
 }
 
 /*
@@ -131,7 +135,8 @@ static void __ioremap_check_mem(resource_size_t addr, unsigned long size,
  * caller shouldn't need to know that small detail.
  */
 static void __iomem *__ioremap_caller(resource_size_t phys_addr,
-		unsigned long size, enum page_cache_mode pcm, void *caller)
+		unsigned long size, enum page_cache_mode pcm,
+		void *caller, bool encrypted)
 {
 	unsigned long offset, vaddr;
 	resource_size_t last_addr;
@@ -162,8 +167,8 @@ static void __iomem *__ioremap_caller(resource_size_t phys_addr,
 	 * Don't allow anybody to remap normal RAM that we're using..
 	 */
 	if (mem_flags.system_ram) {
-		WARN_ONCE(1, "ioremap on RAM at %pa - %pa\n",
-			  &phys_addr, &last_addr);
+		WARN_ONCE(1, "ioremap on RAM at 0x%llx - 0x%llx\n",
+					phys_addr, last_addr);
 		return NULL;
 	}
 
@@ -199,7 +204,7 @@ static void __iomem *__ioremap_caller(resource_size_t phys_addr,
 	 * resulting mapping.
 	 */
 	prot = PAGE_KERNEL_IO;
-	if (sev_active() && mem_flags.desc_other)
+	if ((sev_active() && mem_flags.name_other) || encrypted)
 		prot = pgprot_encrypted(prot);
 
 	switch (pcm) {
@@ -215,10 +220,6 @@ static void __iomem *__ioremap_caller(resource_size_t phys_addr,
 	case _PAGE_CACHE_MODE_WC:
 		prot = __pgprot(pgprot_val(prot) |
 				cachemode2protval(_PAGE_CACHE_MODE_WC));
-		break;
-	case _PAGE_CACHE_MODE_WT:
-		prot = __pgprot(pgprot_val(prot) |
-				cachemode2protval(_PAGE_CACHE_MODE_WT));
 		break;
 	case _PAGE_CACHE_MODE_WB:
 		break;
@@ -282,51 +283,17 @@ void __iomem *ioremap_nocache(resource_size_t phys_addr, unsigned long size)
 {
 	/*
 	 * Ideally, this should be:
-	 *	pat_enabled() ? _PAGE_CACHE_MODE_UC : _PAGE_CACHE_MODE_UC_MINUS;
+	 *	pat_enabled ? _PAGE_CACHE_MODE_UC : _PAGE_CACHE_MODE_UC_MINUS;
 	 *
 	 * Till we fix all X drivers to use ioremap_wc(), we will use
-	 * UC MINUS. Drivers that are certain they need or can already
-	 * be converted over to strong UC can use ioremap_uc().
+	 * UC MINUS.
 	 */
 	enum page_cache_mode pcm = _PAGE_CACHE_MODE_UC_MINUS;
 
 	return __ioremap_caller(phys_addr, size, pcm,
-				__builtin_return_address(0));
+				__builtin_return_address(0), false);
 }
 EXPORT_SYMBOL(ioremap_nocache);
-
-/**
- * ioremap_uc     -   map bus memory into CPU space as strongly uncachable
- * @phys_addr:    bus address of the memory
- * @size:      size of the resource to map
- *
- * ioremap_uc performs a platform specific sequence of operations to
- * make bus memory CPU accessible via the readb/readw/readl/writeb/
- * writew/writel functions and the other mmio helpers. The returned
- * address is not guaranteed to be usable directly as a virtual
- * address.
- *
- * This version of ioremap ensures that the memory is marked with a strong
- * preference as completely uncachable on the CPU when possible. For non-PAT
- * systems this ends up setting page-attribute flags PCD=1, PWT=1. For PAT
- * systems this will set the PAT entry for the pages as strong UC.  This call
- * will honor existing caching rules from things like the PCI bus. Note that
- * there are other caches and buffers on many busses. In particular driver
- * authors should read up on PCI writes.
- *
- * It's useful if some control registers are in such an area and
- * write combining or read caching is not desirable:
- *
- * Must be freed with iounmap.
- */
-void __iomem *ioremap_uc(resource_size_t phys_addr, unsigned long size)
-{
-	enum page_cache_mode pcm = _PAGE_CACHE_MODE_UC;
-
-	return __ioremap_caller(phys_addr, size, pcm,
-				__builtin_return_address(0));
-}
-EXPORT_SYMBOL_GPL(ioremap_uc);
 
 /**
  * ioremap_wc	-	map memory into CPU space write combined
@@ -340,32 +307,25 @@ EXPORT_SYMBOL_GPL(ioremap_uc);
  */
 void __iomem *ioremap_wc(resource_size_t phys_addr, unsigned long size)
 {
-	return __ioremap_caller(phys_addr, size, _PAGE_CACHE_MODE_WC,
-					__builtin_return_address(0));
+	if (pat_enabled)
+		return __ioremap_caller(phys_addr, size, _PAGE_CACHE_MODE_WC,
+					__builtin_return_address(0), false);
+	else
+		return ioremap_nocache(phys_addr, size);
 }
 EXPORT_SYMBOL(ioremap_wc);
 
-/**
- * ioremap_wt	-	map memory into CPU space write through
- * @phys_addr:	bus address of the memory
- * @size:	size of the resource to map
- *
- * This version of ioremap ensures that the memory is marked write through.
- * Write through stores data into memory while keeping the cache up-to-date.
- *
- * Must be freed with iounmap.
- */
-void __iomem *ioremap_wt(resource_size_t phys_addr, unsigned long size)
+void __iomem *ioremap_encrypted(resource_size_t phys_addr, unsigned long size)
 {
-	return __ioremap_caller(phys_addr, size, _PAGE_CACHE_MODE_WT,
-					__builtin_return_address(0));
+	return __ioremap_caller(phys_addr, size, _PAGE_CACHE_MODE_WB,
+				__builtin_return_address(0), true);
 }
-EXPORT_SYMBOL(ioremap_wt);
+EXPORT_SYMBOL(ioremap_encrypted);
 
 void __iomem *ioremap_cache(resource_size_t phys_addr, unsigned long size)
 {
 	return __ioremap_caller(phys_addr, size, _PAGE_CACHE_MODE_WB,
-				__builtin_return_address(0));
+				__builtin_return_address(0), false);
 }
 EXPORT_SYMBOL(ioremap_cache);
 
@@ -374,7 +334,7 @@ void __iomem *ioremap_prot(resource_size_t phys_addr, unsigned long size,
 {
 	return __ioremap_caller(phys_addr, size,
 				pgprot2cachemode(__pgprot(prot_val)),
-				__builtin_return_address(0));
+				__builtin_return_address(0), false);
 }
 EXPORT_SYMBOL(ioremap_prot);
 
@@ -404,10 +364,10 @@ void iounmap(volatile void __iomem *addr)
 		return;
 	}
 
-	mmiotrace_iounmap(addr);
-
 	addr = (volatile void __iomem *)
 		(PAGE_MASK & (unsigned long __force)addr);
+
+	mmiotrace_iounmap(addr);
 
 	/* Use the vm area unlocked, assuming the caller
 	   ensures there isn't another iounmap for the same address
@@ -431,18 +391,18 @@ void iounmap(volatile void __iomem *addr)
 }
 EXPORT_SYMBOL(iounmap);
 
-int __init arch_ioremap_pud_supported(void)
+int arch_ioremap_pud_supported(void)
 {
 #ifdef CONFIG_X86_64
-	return boot_cpu_has(X86_FEATURE_GBPAGES);
+	return cpu_has_gbpages;
 #else
 	return 0;
 #endif
 }
 
-int __init arch_ioremap_pmd_supported(void)
+int arch_ioremap_pmd_supported(void)
 {
-	return boot_cpu_has(X86_FEATURE_PSE);
+	return cpu_has_pse;
 }
 
 /*
@@ -490,8 +450,7 @@ static bool memremap_should_map_decrypted(resource_size_t phys_addr,
 	 * Check if the address is part of a persistent memory region.
 	 * This check covers areas added by E820, EFI and ACPI.
 	 */
-	is_pmem = region_intersects(phys_addr, size, IORESOURCE_MEM,
-				    IORES_DESC_PERSISTENT_MEMORY);
+	is_pmem = region_intersects_pmem(phys_addr, size);
 	if (is_pmem != REGION_DISJOINT)
 		return true;
 
@@ -512,16 +471,16 @@ static bool memremap_should_map_decrypted(resource_size_t phys_addr,
 
 	/* Check if the address is outside kernel usable area */
 	switch (e820__get_entry_type(phys_addr, phys_addr + size - 1)) {
-	case E820_TYPE_RESERVED:
-	case E820_TYPE_ACPI:
-	case E820_TYPE_NVS:
-	case E820_TYPE_UNUSABLE:
+	case E820_RESERVED:
+	case E820_ACPI:
+	case E820_NVS:
+	case E820_UNUSABLE:
 		/* For SEV, these areas are encrypted */
 		if (sev_active())
 			break;
 		/* Fallthrough */
 
-	case E820_TYPE_PRAM:
+	case E820_PRAM:
 		return true;
 	default:
 		break;
@@ -698,6 +657,18 @@ bool phys_mem_access_encrypted(unsigned long phys_addr, unsigned long size)
 }
 
 #ifdef CONFIG_ARCH_USE_MEMREMAP_PROT
+
+static void __init __iomem *
+__early_ioremap(resource_size_t phys_addr, unsigned long size, pgprot_t prot);
+
+void __init *
+early_memremap_prot(resource_size_t phys_addr, unsigned long size,
+		    unsigned long prot_val)
+{
+	return (__force void *)__early_ioremap(phys_addr, size,
+					       __pgprot(prot_val));
+}
+
 /* Remap memory with encryption */
 void __init *early_memremap_encrypted(resource_size_t phys_addr,
 				      unsigned long size)
@@ -741,6 +712,17 @@ void __init *early_memremap_decrypted_wp(resource_size_t phys_addr,
 }
 #endif	/* CONFIG_ARCH_USE_MEMREMAP_PROT */
 
+static int __initdata early_ioremap_debug;
+
+static int __init early_ioremap_debug_setup(char *str)
+{
+	early_ioremap_debug = 1;
+
+	return 0;
+}
+early_param("early_ioremap_debug", early_ioremap_debug_setup);
+
+static __initdata int after_paging_init;
 static pte_t bm_pte[PAGE_SIZE/sizeof(pte_t)] __page_aligned_bss;
 
 static inline pmd_t * __init early_ioremap_pmd(unsigned long addr)
@@ -748,8 +730,7 @@ static inline pmd_t * __init early_ioremap_pmd(unsigned long addr)
 	/* Don't assume we're using swapper_pg_dir at this point */
 	pgd_t *base = __va(read_cr3_pa());
 	pgd_t *pgd = &base[pgd_index(addr)];
-	p4d_t *p4d = p4d_offset(pgd, addr);
-	pud_t *pud = pud_offset(p4d, addr);
+	pud_t *pud = pud_offset(pgd, addr);
 	pmd_t *pmd = pmd_offset(pud, addr);
 
 	return pmd;
@@ -765,17 +746,18 @@ bool __init is_early_ioremap_ptep(pte_t *ptep)
 	return ptep >= &bm_pte[0] && ptep < &bm_pte[PAGE_SIZE/sizeof(pte_t)];
 }
 
+static unsigned long slot_virt[FIX_BTMAPS_SLOTS] __initdata;
+
 void __init early_ioremap_init(void)
 {
 	pmd_t *pmd;
+	int i;
 
-#ifdef CONFIG_X86_64
-	BUILD_BUG_ON((fix_to_virt(0) + PAGE_SIZE) & ((1 << PMD_SHIFT) - 1));
-#else
-	WARN_ON((fix_to_virt(0) + PAGE_SIZE) & ((1 << PMD_SHIFT) - 1));
-#endif
+	if (early_ioremap_debug)
+		printk(KERN_INFO "early_ioremap_init()\n");
 
-	early_ioremap_setup();
+	for (i = 0; i < FIX_BTMAPS_SLOTS; i++)
+		slot_virt[i] = __fix_to_virt(FIX_BTMAP_BEGIN - NR_FIX_BTMAPS*i);
 
 	pmd = early_ioremap_pmd(fix_to_virt(FIX_BTMAP_BEGIN));
 	memset(bm_pte, 0, sizeof(bm_pte));
@@ -804,8 +786,13 @@ void __init early_ioremap_init(void)
 	}
 }
 
-void __init __early_set_fixmap(enum fixed_addresses idx,
-			       phys_addr_t phys, pgprot_t flags)
+void __init early_ioremap_reset(void)
+{
+	after_paging_init = 1;
+}
+
+static void __init __early_set_fixmap(enum fixed_addresses idx,
+				      phys_addr_t phys, pgprot_t flags)
 {
 	unsigned long addr = __fix_to_virt(idx);
 	pte_t *pte;
@@ -821,4 +808,207 @@ void __init __early_set_fixmap(enum fixed_addresses idx,
 	else
 		pte_clear(&init_mm, addr, pte);
 	__flush_tlb_one(addr);
+}
+
+static inline void __init early_set_fixmap(enum fixed_addresses idx,
+					   phys_addr_t phys, pgprot_t prot)
+{
+	if (after_paging_init)
+		__set_fixmap(idx, phys, prot);
+	else
+		__early_set_fixmap(idx, phys, prot);
+}
+
+static inline void __init early_clear_fixmap(enum fixed_addresses idx)
+{
+	if (after_paging_init)
+		clear_fixmap(idx);
+	else
+		__early_set_fixmap(idx, 0, __pgprot(0));
+}
+
+static void __iomem *prev_map[FIX_BTMAPS_SLOTS] __initdata;
+static unsigned long prev_size[FIX_BTMAPS_SLOTS] __initdata;
+
+void __init fixup_early_ioremap(void)
+{
+	int i;
+
+	for (i = 0; i < FIX_BTMAPS_SLOTS; i++) {
+		if (prev_map[i]) {
+			WARN_ON(1);
+			break;
+		}
+	}
+
+	early_ioremap_init();
+}
+
+static int __init check_early_ioremap_leak(void)
+{
+	int count = 0;
+	int i;
+
+	for (i = 0; i < FIX_BTMAPS_SLOTS; i++)
+		if (prev_map[i])
+			count++;
+
+	if (!count)
+		return 0;
+	WARN(1, KERN_WARNING
+	       "Debug warning: early ioremap leak of %d areas detected.\n",
+		count);
+	printk(KERN_WARNING
+		"please boot with early_ioremap_debug and report the dmesg.\n");
+
+	return 1;
+}
+late_initcall(check_early_ioremap_leak);
+
+static void __init __iomem *
+__early_ioremap(resource_size_t phys_addr, unsigned long size, pgprot_t prot)
+{
+	unsigned long offset;
+	resource_size_t last_addr;
+	unsigned int nrpages;
+	enum fixed_addresses idx0, idx;
+	int i, slot;
+
+	WARN_ON(system_state != SYSTEM_BOOTING);
+
+	slot = -1;
+	for (i = 0; i < FIX_BTMAPS_SLOTS; i++) {
+		if (!prev_map[i]) {
+			slot = i;
+			break;
+		}
+	}
+
+	if (slot < 0) {
+		printk(KERN_INFO "early_iomap(%08llx, %08lx) not found slot\n",
+			 (u64)phys_addr, size);
+		WARN_ON(1);
+		return NULL;
+	}
+
+	if (early_ioremap_debug) {
+		printk(KERN_INFO "early_ioremap(%08llx, %08lx) [%d] => ",
+		       (u64)phys_addr, size, slot);
+		dump_stack();
+	}
+
+	/* Don't allow wraparound or zero size */
+	last_addr = phys_addr + size - 1;
+	if (!size || last_addr < phys_addr) {
+		WARN_ON(1);
+		return NULL;
+	}
+
+	prev_size[slot] = size;
+	/*
+	 * Mappings have to be page-aligned
+	 */
+	offset = phys_addr & ~PAGE_MASK;
+	phys_addr &= PAGE_MASK;
+	size = PAGE_ALIGN(last_addr + 1) - phys_addr;
+
+	/*
+	 * Mappings have to fit in the FIX_BTMAP area.
+	 */
+	nrpages = size >> PAGE_SHIFT;
+	if (nrpages > NR_FIX_BTMAPS) {
+		WARN_ON(1);
+		return NULL;
+	}
+
+	/*
+	 * Ok, go for it..
+	 */
+	idx0 = FIX_BTMAP_BEGIN - NR_FIX_BTMAPS*slot;
+	idx = idx0;
+	while (nrpages > 0) {
+		early_set_fixmap(idx, phys_addr, prot);
+		phys_addr += PAGE_SIZE;
+		--idx;
+		--nrpages;
+	}
+	if (early_ioremap_debug)
+		printk(KERN_CONT "%08lx + %08lx\n", offset, slot_virt[slot]);
+
+	prev_map[slot] = (void __iomem *)(offset + slot_virt[slot]);
+	return prev_map[slot];
+}
+
+/* Remap an IO device */
+void __init __iomem *
+early_ioremap(resource_size_t phys_addr, unsigned long size)
+{
+	return __early_ioremap(phys_addr, size, PAGE_KERNEL_IO);
+}
+
+/* Remap memory */
+void __init *early_memremap(resource_size_t phys_addr, unsigned long size)
+{
+	pgprot_t prot = early_memremap_pgprot_adjust(phys_addr, size,
+						     PAGE_KERNEL);
+
+	return (__force void *)__early_ioremap(phys_addr, size, prot);
+}
+
+void __init early_iounmap(void __iomem *addr, unsigned long size)
+{
+	unsigned long virt_addr;
+	unsigned long offset;
+	unsigned int nrpages;
+	enum fixed_addresses idx;
+	int i, slot;
+
+	slot = -1;
+	for (i = 0; i < FIX_BTMAPS_SLOTS; i++) {
+		if (prev_map[i] == addr) {
+			slot = i;
+			break;
+		}
+	}
+
+	if (slot < 0) {
+		printk(KERN_INFO "early_iounmap(%p, %08lx) not found slot\n",
+			 addr, size);
+		WARN_ON(1);
+		return;
+	}
+
+	if (prev_size[slot] != size) {
+		printk(KERN_INFO "early_iounmap(%p, %08lx) [%d] size not consistent %08lx\n",
+			 addr, size, slot, prev_size[slot]);
+		WARN_ON(1);
+		return;
+	}
+
+	if (early_ioremap_debug) {
+		printk(KERN_INFO "early_iounmap(%p, %08lx) [%d]\n", addr,
+		       size, slot);
+		dump_stack();
+	}
+
+	virt_addr = (unsigned long)addr;
+	if (virt_addr < fix_to_virt(FIX_BTMAP_BEGIN)) {
+		WARN_ON(1);
+		return;
+	}
+	offset = virt_addr & ~PAGE_MASK;
+	nrpages = PAGE_ALIGN(offset + size) >> PAGE_SHIFT;
+
+	idx = FIX_BTMAP_BEGIN - NR_FIX_BTMAPS*slot;
+	while (nrpages > 0) {
+		early_clear_fixmap(idx);
+		--idx;
+		--nrpages;
+	}
+	prev_map[slot] = NULL;
+}
+
+void __init early_memunmap(void *addr, unsigned long size)
+{
+	early_iounmap((__force void __iomem *)addr, size);
 }

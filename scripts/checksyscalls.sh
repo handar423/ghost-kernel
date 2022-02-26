@@ -1,5 +1,4 @@
 #!/bin/sh
-# SPDX-License-Identifier: GPL-2.0
 #
 # Check if current architecture are missing any function calls compared
 # to i386.
@@ -26,7 +25,7 @@ cat << EOF
 #define __IGNORE_rmdir		/* unlinkat */
 #define __IGNORE_lchown		/* fchownat */
 #define __IGNORE_access		/* faccessat */
-#define __IGNORE_rename		/* renameat2 */
+#define __IGNORE_rename		/* renameat */
 #define __IGNORE_readlink	/* readlinkat */
 #define __IGNORE_symlink	/* symlinkat */
 #define __IGNORE_utimes		/* futimesat */
@@ -37,9 +36,6 @@ cat << EOF
 #define __IGNORE_stat64		/* fstatat64 */
 #define __IGNORE_lstat64	/* fstatat64 */
 #endif
-
-/* Missing flags argument */
-#define __IGNORE_renameat	/* renameat2 */
 
 /* CLOEXEC flag */
 #define __IGNORE_pipe		/* pipe2 */
@@ -149,7 +145,6 @@ cat << EOF
 #define __IGNORE_sysfs
 #define __IGNORE_uselib
 #define __IGNORE__sysctl
-#define __IGNORE_arch_prctl
 
 /* ... including the "new" 32-bit uid syscalls */
 #define __IGNORE_lchown32
@@ -199,17 +194,23 @@ cat << EOF
 #define __IGNORE_getpmsg
 #define __IGNORE_putpmsg
 #define __IGNORE_vserver
+
+/* ignore userfaultfd if the syscall is missing in some arch */
+#define __IGNORE_userfaultfd
 EOF
 }
 
 syscall_list() {
-    grep '^[0-9]' "$1" | sort -n |
+    grep '^[0-9]' "$1" | sort -n | (
 	while read nr abi name entry ; do
-		echo "#if !defined(__NR_${name}) && !defined(__IGNORE_${name})"
-		echo "#warning syscall ${name} not implemented"
-		echo "#endif"
+	    cat <<EOF
+#if !defined(__NR_${name}) && !defined(__IGNORE_${name})
+#warning syscall ${name} not implemented
+#endif
+EOF
 	done
+    )
 }
 
-(ignore_list && syscall_list $(dirname $0)/../arch/x86/entry/syscalls/syscall_32.tbl) | \
+(ignore_list && syscall_list $(dirname $0)/../arch/x86/syscalls/syscall_32.tbl) | \
 $* -E -x c - > /dev/null

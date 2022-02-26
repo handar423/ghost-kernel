@@ -29,7 +29,7 @@ static int polling_pipe = 1;
 module_param(polling_pipe, int, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(polling_pipe, "polling pipe (0: ctl, 1: bulk)");
 
-static const struct mfd_cell rtsx_usb_cells[] = {
+static struct mfd_cell rtsx_usb_cells[] = {
 	[RTSX_USB_SD_CARD] = {
 		.name = "rtsx_usb_sdmmc",
 		.pdata_size = 0,
@@ -40,9 +40,9 @@ static const struct mfd_cell rtsx_usb_cells[] = {
 	},
 };
 
-static void rtsx_usb_sg_timed_out(struct timer_list *t)
+static void rtsx_usb_sg_timed_out(unsigned long data)
 {
-	struct rtsx_ucr *ucr = from_timer(ucr, t, sg_timer);
+	struct rtsx_ucr *ucr = (struct rtsx_ucr *)data;
 
 	dev_dbg(&ucr->pusb_intf->dev, "%s: sg transfer timed out", __func__);
 	usb_sg_cancel(&ucr->current_sg);
@@ -663,10 +663,10 @@ static int rtsx_usb_probe(struct usb_interface *intf,
 		goto out_init_fail;
 
 	/* initialize USB SG transfer timer */
-	timer_setup(&ucr->sg_timer, rtsx_usb_sg_timed_out, 0);
+	setup_timer(&ucr->sg_timer, rtsx_usb_sg_timed_out, (unsigned long) ucr);
 
-	ret = mfd_add_hotplug_devices(&intf->dev, rtsx_usb_cells,
-				      ARRAY_SIZE(rtsx_usb_cells));
+	ret = mfd_add_devices(&intf->dev, usb_dev->devnum, rtsx_usb_cells,
+			ARRAY_SIZE(rtsx_usb_cells), NULL, 0, NULL);
 	if (ret)
 		goto out_init_fail;
 

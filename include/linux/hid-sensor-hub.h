@@ -171,7 +171,7 @@ int sensor_hub_input_get_attribute_info(struct hid_sensor_hub_device *hsdev,
 			struct hid_sensor_hub_attribute_info *info);
 
 /**
-* sensor_hub_input_attr_get_raw_value() - Synchronous read request
+* sensor_hub_input_attr_get_raw_value() - Attribute read request
 * @hsdev:	Hub device instance.
 * @usage_id:	Attribute usage id of parent physical device as per spec
 * @attr_usage_id:	Attribute usage id as per spec
@@ -231,7 +231,6 @@ struct hid_sensor_common {
 	unsigned usage_id;
 	atomic_t data_ready;
 	atomic_t user_requested_state;
-	atomic_t runtime_pm_enable;
 	int poll_interval;
 	int raw_hystersis;
 	int latency_ms;

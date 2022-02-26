@@ -13,6 +13,7 @@
 #include <linux/namei.h>
 #include <linux/ctype.h>
 #include <linux/string.h>
+#include <linux/overflow.h>  /* until safe to add to slab.h */
 #include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/mutex.h>
@@ -48,7 +49,6 @@ struct dm_table {
 	bool integrity_supported:1;
 	bool singleton:1;
 	bool all_blk_mq:1;
-	unsigned integrity_added:1;
 
 	/*
 	 * Indicates the rw permissions for the new logical
@@ -320,39 +320,6 @@ static int device_area_is_invalid(struct dm_target *ti, struct dm_dev *dev,
 		return 1;
 	}
 
-	/*
-	 * If the target is mapped to zoned block device(s), check
-	 * that the zones are not partially mapped.
-	 */
-	if (bdev_zoned_model(bdev) != BLK_ZONED_NONE) {
-		unsigned int zone_sectors = bdev_zone_sectors(bdev);
-
-		if (start & (zone_sectors - 1)) {
-			DMWARN("%s: start=%llu not aligned to h/w zone size %u of %s",
-			       dm_device_name(ti->table->md),
-			       (unsigned long long)start,
-			       zone_sectors, bdevname(bdev, b));
-			return 1;
-		}
-
-		/*
-		 * Note: The last zone of a zoned block device may be smaller
-		 * than other zones. So for a target mapping the end of a
-		 * zoned block device with such a zone, len would not be zone
-		 * aligned. We do not allow such last smaller zone to be part
-		 * of the mapping here to ensure that mappings with multiple
-		 * devices do not end up with a smaller zone in the middle of
-		 * the sector range.
-		 */
-		if (len & (zone_sectors - 1)) {
-			DMWARN("%s: len=%llu not aligned to h/w zone size %u of %s",
-			       dm_device_name(ti->table->md),
-			       (unsigned long long)len,
-			       zone_sectors, bdevname(bdev, b));
-			return 1;
-		}
-	}
-
 	if (logical_block_size_sectors <= 1)
 		return 0;
 
@@ -451,17 +418,16 @@ int dm_get_device(struct dm_target *ti, const char *path, fmode_t mode,
 			return r;
 		}
 
-		refcount_set(&dd->count, 1);
+		atomic_set(&dd->count, 0);
 		list_add(&dd->list, &t->devices);
-		goto out;
 
 	} else if (dd->dm_dev->mode != (mode | dd->dm_dev->mode)) {
 		r = upgrade_mode(dd, mode, t->md);
 		if (r)
 			return r;
 	}
-	refcount_inc(&dd->count);
-out:
+	atomic_inc(&dd->count);
+
 	*result = dd->dm_dev;
 	return 0;
 }
@@ -491,8 +457,14 @@ static int dm_set_device_limits(struct dm_target *ti, struct dm_dev *dev,
 		       q->limits.alignment_offset,
 		       (unsigned long long) start << SECTOR_SHIFT);
 
-	limits->zoned = blk_queue_zoned_model(q);
-
+	/*
+	 * Check if merge fn is supported.
+	 * If not we'll force DM to use PAGE_SIZE or
+	 * smaller I/O, just to be safe.
+	 */
+	if (dm_queue_merge_is_compulsory(q) && !ti->type->merge)
+		blk_limits_max_hw_sectors(limits,
+					  (unsigned int) (PAGE_SIZE >> 9));
 	return 0;
 }
 
@@ -516,7 +488,7 @@ void dm_put_device(struct dm_target *ti, struct dm_dev *d)
 		       dm_device_name(ti->table->md), d->name);
 		return;
 	}
-	if (refcount_dec_and_test(&dd->count)) {
+	if (atomic_dec_and_test(&dd->count)) {
 		dm_put_table_device(ti->table->md, d);
 		list_del(&dd->list);
 		kfree(dd);
@@ -548,14 +520,14 @@ static int adjoin(struct dm_table *table, struct dm_target *ti)
  * On the other hand, dm-switch needs to process bulk data using messages and
  * excessive use of GFP_NOIO could cause trouble.
  */
-static char **realloc_argv(unsigned *array_size, char **old_argv)
+static char **realloc_argv(unsigned *size, char **old_argv)
 {
 	char **argv;
 	unsigned new_size;
 	gfp_t gfp;
 
-	if (*array_size) {
-		new_size = *array_size * 2;
+	if (*size) {
+		new_size = *size * 2;
 		gfp = GFP_KERNEL;
 	} else {
 		new_size = 8;
@@ -563,8 +535,8 @@ static char **realloc_argv(unsigned *array_size, char **old_argv)
 	}
 	argv = kmalloc(new_size * sizeof(*argv), gfp);
 	if (argv) {
-		memcpy(argv, old_argv, *array_size * sizeof(*argv));
-		*array_size = new_size;
+		memcpy(argv, old_argv, *size * sizeof(*argv));
+		*size = new_size;
 	}
 
 	kfree(old_argv);
@@ -664,7 +636,14 @@ static int validate_hardware_logical_block_alignment(struct dm_table *table,
 
 	struct dm_target *uninitialized_var(ti);
 	struct queue_limits ti_limits;
+	struct queue_limits_aux ti_limits_aux;
 	unsigned i;
+
+	/* 
+	 * Initialize limits_aux pointer to stack queue_limits_aux
+	 * members.
+	 */
+	ti_limits.limits_aux = &ti_limits_aux;
 
 	/*
 	 * Check each entry in the table in turn.
@@ -762,9 +741,6 @@ int dm_table_add_target(struct dm_table *t, const char *type,
 		}
 		t->immutable_target_type = tgt->type;
 	}
-
-	if (dm_target_has_integrity(tgt->type))
-		t->integrity_added = 1;
 
 	tgt->table = t;
 	tgt->begin = start;
@@ -884,9 +860,7 @@ EXPORT_SYMBOL_GPL(dm_table_set_type);
 static int device_supports_dax(struct dm_target *ti, struct dm_dev *dev,
 			       sector_t start, sector_t len, void *data)
 {
-	struct request_queue *q = bdev_get_queue(dev->bdev);
-
-	return q && blk_queue_dax(q);
+	return bdev_dax_supported(dev->bdev, PAGE_SIZE);
 }
 
 static bool dm_table_supports_dax(struct dm_table *t)
@@ -1001,7 +975,7 @@ verify_rq_based:
 	list_for_each_entry(dd, devices, list) {
 		struct request_queue *q = bdev_get_queue(dd->dm_dev->bdev);
 
-		if (!queue_is_rq_based(q)) {
+		if (!blk_queue_stackable(q)) {
 			DMERR("table load rejected: including"
 			      " non-request-stackable devices");
 			return -EINVAL;
@@ -1159,32 +1133,26 @@ static int dm_table_build_index(struct dm_table *t)
 	return r;
 }
 
-static bool integrity_profile_exists(struct gendisk *disk)
-{
-	return !!blk_get_integrity(disk);
-}
-
 /*
  * Get a disk whose integrity profile reflects the table's profile.
+ * If %match_all is true, all devices' profiles must match.
+ * If %match_all is false, all devices must at least have an
+ * allocated integrity profile; but uninitialized is ok.
  * Returns NULL if integrity support was inconsistent or unavailable.
  */
-static struct gendisk * dm_table_get_integrity_disk(struct dm_table *t)
+static struct gendisk * dm_table_get_integrity_disk(struct dm_table *t,
+						    bool match_all)
 {
 	struct list_head *devices = dm_table_get_devices(t);
 	struct dm_dev_internal *dd = NULL;
 	struct gendisk *prev_disk = NULL, *template_disk = NULL;
-	unsigned i;
-
-	for (i = 0; i < dm_table_get_num_targets(t); i++) {
-		struct dm_target *ti = dm_table_get_target(t, i);
-		if (!dm_target_passes_integrity(ti->type))
-			goto no_integrity;
-	}
 
 	list_for_each_entry(dd, devices, list) {
 		template_disk = dd->dm_dev->bdev->bd_disk;
-		if (!integrity_profile_exists(template_disk))
+		if (!blk_get_integrity(template_disk))
 			goto no_integrity;
+		if (!match_all && !blk_integrity_is_initialized(template_disk))
+			continue; /* skip uninitialized profiles */
 		else if (prev_disk &&
 			 blk_integrity_compare(prev_disk, template_disk) < 0)
 			goto no_integrity;
@@ -1203,44 +1171,34 @@ no_integrity:
 }
 
 /*
- * Register the mapped device for blk_integrity support if the
- * underlying devices have an integrity profile.  But all devices may
- * not have matching profiles (checking all devices isn't reliable
+ * Register the mapped device for blk_integrity support if
+ * the underlying devices have an integrity profile.  But all devices
+ * may not have matching profiles (checking all devices isn't reliable
  * during table load because this table may use other DM device(s) which
- * must be resumed before they will have an initialized integity
- * profile).  Consequently, stacked DM devices force a 2 stage integrity
- * profile validation: First pass during table load, final pass during
- * resume.
+ * must be resumed before they will have an initialized integity profile).
+ * Stacked DM devices force a 2 stage integrity profile validation:
+ * 1 - during load, validate all initialized integrity profiles match
+ * 2 - during resume, validate all integrity profiles match
  */
-static int dm_table_register_integrity(struct dm_table *t)
+static int dm_table_prealloc_integrity(struct dm_table *t, struct mapped_device *md)
 {
-	struct mapped_device *md = t->md;
 	struct gendisk *template_disk = NULL;
 
-	/* If target handles integrity itself do not register it here. */
-	if (t->integrity_added)
-		return 0;
-
-	template_disk = dm_table_get_integrity_disk(t);
+	template_disk = dm_table_get_integrity_disk(t, false);
 	if (!template_disk)
 		return 0;
 
-	if (!integrity_profile_exists(dm_disk(md))) {
+	if (!blk_integrity_is_initialized(dm_disk(md))) {
 		t->integrity_supported = true;
-		/*
-		 * Register integrity profile during table load; we can do
-		 * this because the final profile must match during resume.
-		 */
-		blk_integrity_register(dm_disk(md),
-				       blk_get_integrity(template_disk));
-		return 0;
+		return blk_integrity_register(dm_disk(md), NULL);
 	}
 
 	/*
-	 * If DM device already has an initialized integrity
+	 * If DM device already has an initalized integrity
 	 * profile the new profile should not conflict.
 	 */
-	if (blk_integrity_compare(dm_disk(md), template_disk) < 0) {
+	if (blk_integrity_is_initialized(template_disk) &&
+	    blk_integrity_compare(dm_disk(md), template_disk) < 0) {
 		DMWARN("%s: conflict with existing integrity profile: "
 		       "%s profile mismatch",
 		       dm_device_name(t->md),
@@ -1248,7 +1206,7 @@ static int dm_table_register_integrity(struct dm_table *t)
 		return 1;
 	}
 
-	/* Preserve existing integrity profile */
+	/* Preserve existing initialized integrity profile */
 	t->integrity_supported = true;
 	return 0;
 }
@@ -1273,7 +1231,7 @@ int dm_table_complete(struct dm_table *t)
 		return r;
 	}
 
-	r = dm_table_register_integrity(t);
+	r = dm_table_prealloc_integrity(t, t->md);
 	if (r) {
 		DMERR("could not register integrity profile.");
 		return r;
@@ -1384,101 +1342,24 @@ bool dm_table_has_no_data_devices(struct dm_table *table)
 	return true;
 }
 
-static int device_is_zoned_model(struct dm_target *ti, struct dm_dev *dev,
-				 sector_t start, sector_t len, void *data)
-{
-	struct request_queue *q = bdev_get_queue(dev->bdev);
-	enum blk_zoned_model *zoned_model = data;
-
-	return q && blk_queue_zoned_model(q) == *zoned_model;
-}
-
-static bool dm_table_supports_zoned_model(struct dm_table *t,
-					  enum blk_zoned_model zoned_model)
-{
-	struct dm_target *ti;
-	unsigned i;
-
-	for (i = 0; i < dm_table_get_num_targets(t); i++) {
-		ti = dm_table_get_target(t, i);
-
-		if (zoned_model == BLK_ZONED_HM &&
-		    !dm_target_supports_zoned_hm(ti->type))
-			return false;
-
-		if (!ti->type->iterate_devices ||
-		    !ti->type->iterate_devices(ti, device_is_zoned_model, &zoned_model))
-			return false;
-	}
-
-	return true;
-}
-
-static int device_matches_zone_sectors(struct dm_target *ti, struct dm_dev *dev,
-				       sector_t start, sector_t len, void *data)
-{
-	struct request_queue *q = bdev_get_queue(dev->bdev);
-	unsigned int *zone_sectors = data;
-
-	return q && blk_queue_zone_sectors(q) == *zone_sectors;
-}
-
-static bool dm_table_matches_zone_sectors(struct dm_table *t,
-					  unsigned int zone_sectors)
-{
-	struct dm_target *ti;
-	unsigned i;
-
-	for (i = 0; i < dm_table_get_num_targets(t); i++) {
-		ti = dm_table_get_target(t, i);
-
-		if (!ti->type->iterate_devices ||
-		    !ti->type->iterate_devices(ti, device_matches_zone_sectors, &zone_sectors))
-			return false;
-	}
-
-	return true;
-}
-
-static int validate_hardware_zoned_model(struct dm_table *table,
-					 enum blk_zoned_model zoned_model,
-					 unsigned int zone_sectors)
-{
-	if (zoned_model == BLK_ZONED_NONE)
-		return 0;
-
-	if (!dm_table_supports_zoned_model(table, zoned_model)) {
-		DMERR("%s: zoned model is not consistent across all devices",
-		      dm_device_name(table->md));
-		return -EINVAL;
-	}
-
-	/* Check zone size validity and compatibility */
-	if (!zone_sectors || !is_power_of_2(zone_sectors))
-		return -EINVAL;
-
-	if (!dm_table_matches_zone_sectors(table, zone_sectors)) {
-		DMERR("%s: zone sectors is not consistent across all devices",
-		      dm_device_name(table->md));
-		return -EINVAL;
-	}
-
-	return 0;
-}
-
 /*
  * Establish the new table's queue_limits and validate them.
  */
 int dm_calculate_queue_limits(struct dm_table *table,
 			      struct queue_limits *limits)
 {
-	struct dm_target *ti;
+	struct dm_target *uninitialized_var(ti);
 	struct queue_limits ti_limits;
+	struct queue_limits_aux ti_limits_aux;
 	unsigned i;
-	enum blk_zoned_model zoned_model = BLK_ZONED_NONE;
-	unsigned int zone_sectors = 0;
 
 	blk_set_stacking_limits(limits);
+
+	/* 
+	 * Initialize limits_aux pointer to stack queue_limits_aux
+	 * members.
+	 */
+	ti_limits.limits_aux = &ti_limits_aux;
 
 	for (i = 0; i < dm_table_get_num_targets(table); i++) {
 		blk_set_stacking_limits(&ti_limits);
@@ -1493,15 +1374,6 @@ int dm_calculate_queue_limits(struct dm_table *table,
 		 */
 		ti->type->iterate_devices(ti, dm_set_device_limits,
 					  &ti_limits);
-
-		if (zoned_model == BLK_ZONED_NONE && ti_limits.zoned != BLK_ZONED_NONE) {
-			/*
-			 * After stacking all limits, validate all devices
-			 * in table support this zoned model and zone sectors.
-			 */
-			zoned_model = ti_limits.zoned;
-			zone_sectors = ti_limits.chunk_sectors;
-		}
 
 		/* Set I/O hints portion of queue limits */
 		if (ti->type->io_hints)
@@ -1527,85 +1399,47 @@ combine_limits:
 			       dm_device_name(table->md),
 			       (unsigned long long) ti->begin,
 			       (unsigned long long) ti->len);
-
-		/*
-		 * FIXME: this should likely be moved to blk_stack_limits(), would
-		 * also eliminate limits->zoned stacking hack in dm_set_device_limits()
-		 */
-		if (limits->zoned == BLK_ZONED_NONE && ti_limits.zoned != BLK_ZONED_NONE) {
-			/*
-			 * By default, the stacked limits zoned model is set to
-			 * BLK_ZONED_NONE in blk_set_stacking_limits(). Update
-			 * this model using the first target model reported
-			 * that is not BLK_ZONED_NONE. This will be either the
-			 * first target device zoned model or the model reported
-			 * by the target .io_hints.
-			 */
-			limits->zoned = ti_limits.zoned;
-		}
 	}
-
-	/*
-	 * Verify that the zoned model and zone sectors, as determined before
-	 * any .io_hints override, are the same across all devices in the table.
-	 * - this is especially relevant if .io_hints is emulating a disk-managed
-	 *   zoned model (aka BLK_ZONED_NONE) on host-managed zoned block devices.
-	 * BUT...
-	 */
-	if (limits->zoned != BLK_ZONED_NONE) {
-		/*
-		 * ...IF the above limits stacking determined a zoned model
-		 * validate that all of the table's devices conform to it.
-		 */
-		zoned_model = limits->zoned;
-		zone_sectors = limits->chunk_sectors;
-	}
-	if (validate_hardware_zoned_model(table, zoned_model, zone_sectors))
-		return -EINVAL;
 
 	return validate_hardware_logical_block_alignment(table, limits);
 }
 
 /*
- * Verify that all devices have an integrity profile that matches the
- * DM device's registered integrity profile.  If the profiles don't
- * match then unregister the DM device's integrity profile.
+ * Set the integrity profile for this device if all devices used have
+ * matching profiles.  We're quite deep in the resume path but still
+ * don't know if all devices (particularly DM devices this device
+ * may be stacked on) have matching profiles.  Even if the profiles
+ * don't match we have no way to fail (to resume) at this point.
  */
-static void dm_table_verify_integrity(struct dm_table *t)
+static void dm_table_set_integrity(struct dm_table *t)
 {
 	struct gendisk *template_disk = NULL;
 
-	if (t->integrity_added)
+	if (!blk_get_integrity(dm_disk(t->md)))
 		return;
 
-	if (t->integrity_supported) {
-		/*
-		 * Verify that the original integrity profile
-		 * matches all the devices in this table.
-		 */
-		template_disk = dm_table_get_integrity_disk(t);
-		if (template_disk &&
-		    blk_integrity_compare(dm_disk(t->md), template_disk) >= 0)
-			return;
-	}
-
-	if (integrity_profile_exists(dm_disk(t->md))) {
+	template_disk = dm_table_get_integrity_disk(t, true);
+	if (template_disk)
+		blk_integrity_register(dm_disk(t->md),
+				       blk_get_integrity(template_disk));
+	else if (blk_integrity_is_initialized(dm_disk(t->md)))
+		DMWARN("%s: device no longer has a valid integrity profile",
+		       dm_device_name(t->md));
+	else
 		DMWARN("%s: unable to establish an integrity profile",
 		       dm_device_name(t->md));
-		blk_integrity_unregister(dm_disk(t->md));
-	}
 }
 
 static int device_flush_capable(struct dm_target *ti, struct dm_dev *dev,
 				sector_t start, sector_t len, void *data)
 {
-	unsigned long flush = (unsigned long) data;
+	unsigned flush = (*(unsigned *)data);
 	struct request_queue *q = bdev_get_queue(dev->bdev);
 
-	return q && (q->queue_flags & flush);
+	return q && (q->flush_flags & flush);
 }
 
-static bool dm_table_supports_flush(struct dm_table *t, unsigned long flush)
+static bool dm_table_supports_flush(struct dm_table *t, unsigned flush)
 {
 	struct dm_target *ti;
 	unsigned i;
@@ -1626,11 +1460,27 @@ static bool dm_table_supports_flush(struct dm_table *t, unsigned long flush)
 			return true;
 
 		if (ti->type->iterate_devices &&
-		    ti->type->iterate_devices(ti, device_flush_capable, (void *) flush))
+		    ti->type->iterate_devices(ti, device_flush_capable, &flush))
 			return true;
 	}
 
 	return false;
+}
+
+static bool dm_table_discard_zeroes_data(struct dm_table *t)
+{
+	struct dm_target *ti;
+	unsigned i = 0;
+
+	/* Ensure that all targets supports discard_zeroes_data. */
+	while (i < dm_table_get_num_targets(t)) {
+		ti = dm_table_get_target(t, i++);
+
+		if (ti->discard_zeroes_data_unsupported)
+			return false;
+	}
+
+	return true;
 }
 
 static int device_dax_write_cache_enabled(struct dm_target *ti,
@@ -1732,33 +1582,6 @@ static bool dm_table_supports_write_same(struct dm_table *t)
 	return true;
 }
 
-static int device_not_write_zeroes_capable(struct dm_target *ti, struct dm_dev *dev,
-					   sector_t start, sector_t len, void *data)
-{
-	struct request_queue *q = bdev_get_queue(dev->bdev);
-
-	return q && !q->limits.max_write_zeroes_sectors;
-}
-
-static bool dm_table_supports_write_zeroes(struct dm_table *t)
-{
-	struct dm_target *ti;
-	unsigned i = 0;
-
-	while (i < dm_table_get_num_targets(t)) {
-		ti = dm_table_get_target(t, i++);
-
-		if (!ti->num_write_zeroes_bios)
-			return false;
-
-		if (!ti->type->iterate_devices ||
-		    ti->type->iterate_devices(ti, device_not_write_zeroes_capable, NULL))
-			return false;
-	}
-
-	return true;
-}
-
 static int device_not_discard_capable(struct dm_target *ti, struct dm_dev *dev,
 				      sector_t start, sector_t len, void *data)
 {
@@ -1792,36 +1615,76 @@ static bool dm_table_supports_discards(struct dm_table *t)
 	return true;
 }
 
+static int device_requires_stable_pages(struct dm_target *ti,
+					struct dm_dev *dev, sector_t start,
+					sector_t len, void *data)
+{
+	struct request_queue *q = bdev_get_queue(dev->bdev);
+
+	return q && bdi_cap_stable_pages_required(&q->backing_dev_info);
+}
+
+/*
+ * If any underlying device requires stable pages, a table must require
+ * them as well.  Only targets that support iterate_devices are considered:
+ * don't want error, zero, etc to require stable pages.
+ */
+static bool dm_table_requires_stable_pages(struct dm_table *t)
+{
+	struct dm_target *ti;
+	unsigned i;
+
+	for (i = 0; i < dm_table_get_num_targets(t); i++) {
+		ti = dm_table_get_target(t, i);
+
+		if (ti->type->iterate_devices &&
+		    ti->type->iterate_devices(ti, device_requires_stable_pages, NULL))
+			return true;
+	}
+
+	return false;
+}
+
 void dm_table_set_restrictions(struct dm_table *t, struct request_queue *q,
 			       struct queue_limits *limits)
 {
-	bool wc = false, fua = false;
+	unsigned flush = 0;
+	struct queue_limits_aux *limits_aux = q->limits.limits_aux;
 
 	/*
 	 * Copy table's limits to the DM device's request_queue
 	 */
 	q->limits = *limits;
+	memcpy(limits_aux, limits->limits_aux, sizeof(struct queue_limits_aux));
+	q->limits.limits_aux = limits_aux;
 
 	if (!dm_table_supports_discards(t)) {
 		queue_flag_clear_unlocked(QUEUE_FLAG_DISCARD, q);
 		/* Must also clear discard limits... */
 		q->limits.max_discard_sectors = 0;
-		q->limits.max_hw_discard_sectors = 0;
 		q->limits.discard_granularity = 0;
 		q->limits.discard_alignment = 0;
 		q->limits.discard_misaligned = 0;
 	} else
 		queue_flag_set_unlocked(QUEUE_FLAG_DISCARD, q);
 
-	if (dm_table_supports_flush(t, (1UL << QUEUE_FLAG_WC))) {
-		wc = true;
-		if (dm_table_supports_flush(t, (1UL << QUEUE_FLAG_FUA)))
-			fua = true;
+	if (dm_table_supports_flush(t, REQ_FLUSH)) {
+		flush |= REQ_FLUSH;
+		if (dm_table_supports_flush(t, REQ_FUA))
+			flush |= REQ_FUA;
 	}
-	blk_queue_write_cache(q, wc, fua);
+	blk_queue_flush(q, flush);
+
+	if (dm_table_supports_dax(t))
+		queue_flag_set_unlocked(QUEUE_FLAG_DAX, q);
+	else
+		queue_flag_clear_unlocked(QUEUE_FLAG_DAX, q);
 
 	if (dm_table_supports_dax_write_cache(t))
 		dax_write_cache(t->md->dax_dev, true);
+
+	if (!dm_table_discard_zeroes_data(t))
+		q->limits.discard_zeroes_data = 0;
 
 	/* Ensure that all underlying devices are non-rotational. */
 	if (dm_table_all_devices_attribute(t, device_is_nonrot))
@@ -1831,15 +1694,22 @@ void dm_table_set_restrictions(struct dm_table *t, struct request_queue *q,
 
 	if (!dm_table_supports_write_same(t))
 		q->limits.max_write_same_sectors = 0;
-	if (!dm_table_supports_write_zeroes(t))
-		q->limits.max_write_zeroes_sectors = 0;
 
 	if (dm_table_all_devices_attribute(t, queue_supports_sg_merge))
 		queue_flag_clear_unlocked(QUEUE_FLAG_NO_SG_MERGE, q);
 	else
 		queue_flag_set_unlocked(QUEUE_FLAG_NO_SG_MERGE, q);
 
-	dm_table_verify_integrity(t);
+	dm_table_set_integrity(t);
+
+	/*
+	 * Some devices don't use blk_integrity but still want stable pages
+	 * because they do their own checksumming.
+	 */
+	if (dm_table_requires_stable_pages(t))
+		q->backing_dev_info.capabilities |= BDI_CAP_STABLE_WRITES;
+	else
+		q->backing_dev_info.capabilities &= ~BDI_CAP_STABLE_WRITES;
 
 	/*
 	 * Determine whether or not this queue's I/O timings contribute
@@ -1849,6 +1719,19 @@ void dm_table_set_restrictions(struct dm_table *t, struct request_queue *q,
 	 */
 	if (blk_queue_add_random(q) && dm_table_all_devices_attribute(t, device_is_not_random))
 		queue_flag_clear_unlocked(QUEUE_FLAG_ADD_RANDOM, q);
+
+	/*
+	 * QUEUE_FLAG_STACKABLE must be set after all queue settings are
+	 * visible to other CPUs because, once the flag is set, incoming bios
+	 * are processed by request-based dm, which refers to the queue
+	 * settings.
+	 * Until the flag set, bios are passed to bio-based dm and queued to
+	 * md->deferred where queue settings are not needed yet.
+	 * Those bios are passed to request-based dm at the resume time.
+	 */
+	smp_mb();
+	if (dm_table_request_based(t))
+		queue_flag_set_unlocked(QUEUE_FLAG_STACKABLE, q);
 }
 
 unsigned int dm_table_get_num_targets(struct dm_table *t)
@@ -1971,7 +1854,7 @@ int dm_table_any_congested(struct dm_table *t, int bdi_bits)
 		char b[BDEVNAME_SIZE];
 
 		if (likely(q))
-			r |= bdi_congested(q->backing_dev_info, bdi_bits);
+			r |= bdi_congested(&q->backing_dev_info, bdi_bits);
 		else
 			DMWARN_LIMIT("%s: any_congested: nonexistent device %s",
 				     dm_device_name(t->md),

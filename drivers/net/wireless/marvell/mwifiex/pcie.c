@@ -398,10 +398,28 @@ static void mwifiex_pcie_reset_done(struct pci_dev *pdev)
 		mwifiex_dbg(adapter, INFO, "%s, successful\n", __func__);
 }
 
+#if 0 /* Not in RHEL */
 static const struct pci_error_handlers mwifiex_pcie_err_handler = {
 	.reset_prepare		= mwifiex_pcie_reset_prepare,
 	.reset_done		= mwifiex_pcie_reset_done,
 };
+#else
+static const struct pci_error_handlers mwifiex_pcie_err_handler = {
+};
+
+static void mwifiex_pcie_reset_notify(struct pci_dev *pdev, bool prepare)
+{
+	if (prepare)
+		mwifiex_pcie_reset_prepare(pdev);
+	else
+		mwifiex_pcie_reset_done(pdev);
+}
+
+static struct pci_driver_rh mwifiex_pcie_driver_rh = {
+	.size		= sizeof(struct pci_driver_rh),
+	.reset_notify	= mwifiex_pcie_reset_notify
+};
+#endif
 
 #ifdef CONFIG_PM_SLEEP
 /* Power Management Hooks */
@@ -422,6 +440,9 @@ static struct pci_driver __refdata mwifiex_pcie = {
 #endif
 	.shutdown = mwifiex_pcie_shutdown,
 	.err_handler = &mwifiex_pcie_err_handler,
+#if 1 /* in RHEL */
+	.pci_driver_rh	= &mwifiex_pcie_driver_rh
+#endif
 };
 
 /*

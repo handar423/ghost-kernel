@@ -30,7 +30,7 @@
 
 
 #include <linux/module.h>
-#include <linux/uaccess.h>
+#include <asm/uaccess.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/ptrace.h>
@@ -41,7 +41,7 @@
 #include <linux/fs.h>
 #include <linux/ioctl.h>
 #include <linux/init.h>
-#include <linux/io.h>
+#include <asm/io.h>
 
 #include <linux/mtd/mtd.h>
 
@@ -163,9 +163,8 @@ static int register_device(char *name, unsigned long start, unsigned long length
 	}
 
 	if (!(((slram_priv_t *)(*curmtd)->mtdinfo->priv)->start =
-		memremap(start, length,
-			 MEMREMAP_WB | MEMREMAP_WT | MEMREMAP_WC))) {
-		E("slram: memremap failed\n");
+				ioremap(start, length))) {
+		E("slram: ioremap failed\n");
 		return -EIO;
 	}
 	((slram_priv_t *)(*curmtd)->mtdinfo->priv)->end =
@@ -187,7 +186,7 @@ static int register_device(char *name, unsigned long start, unsigned long length
 
 	if (mtd_device_register((*curmtd)->mtdinfo, NULL, 0))	{
 		E("slram: Failed to register new device\n");
-		memunmap(((slram_priv_t *)(*curmtd)->mtdinfo->priv)->start);
+		iounmap(((slram_priv_t *)(*curmtd)->mtdinfo->priv)->start);
 		kfree((*curmtd)->mtdinfo->priv);
 		kfree((*curmtd)->mtdinfo);
 		return(-EAGAIN);
@@ -207,7 +206,7 @@ static void unregister_devices(void)
 	while (slram_mtdlist) {
 		nextitem = slram_mtdlist->next;
 		mtd_device_unregister(slram_mtdlist->mtdinfo);
-		memunmap(((slram_priv_t *)slram_mtdlist->mtdinfo->priv)->start);
+		iounmap(((slram_priv_t *)slram_mtdlist->mtdinfo->priv)->start);
 		kfree(slram_mtdlist->mtdinfo->priv);
 		kfree(slram_mtdlist->mtdinfo);
 		kfree(slram_mtdlist);
@@ -281,10 +280,13 @@ __setup("slram=", mtd_slram_setup);
 static int __init init_slram(void)
 {
 	char *devname;
+	int i;
 
 #ifndef MODULE
 	char *devstart;
 	char *devlength;
+
+	i = 0;
 
 	if (!map) {
 		E("slram: not enough parameters.\n");
@@ -312,7 +314,6 @@ static int __init init_slram(void)
 	}
 #else
 	int count;
-	int i;
 
 	for (count = 0; count < SLRAM_MAX_DEVICES_PARAMS && map[count];
 			count++) {

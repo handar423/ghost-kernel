@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 /* hardirq.h: 64-bit Sparc hard IRQ support.
  *
  * Copyright (C) 1997, 1998, 2005 David S. Miller (davem@davemloft.net)
@@ -14,5 +13,7 @@
 	(local_cpu_data().__softirq_pending)
 
 void ack_bad_irq(unsigned int irq);
+
+#define HARDIRQ_BITS	8
 
 #endif /* !(__SPARC64_HARDIRQ_H) */

@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __ASM_GENERIC_MMU_CONTEXT_H
 #define __ASM_GENERIC_MMU_CONTEXT_H
 
@@ -40,6 +39,11 @@ static inline void switch_mm(struct mm_struct *prev,
 
 static inline void activate_mm(struct mm_struct *prev_mm,
 			       struct mm_struct *next_mm)
+{
+}
+
+static inline void arch_bprm_mm_init(struct mm_struct *mm,
+			struct vm_area_struct *vma)
 {
 }
 

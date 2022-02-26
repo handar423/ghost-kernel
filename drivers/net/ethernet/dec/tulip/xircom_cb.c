@@ -28,9 +28,10 @@
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
 #include <linux/delay.h>
+#include <linux/init.h>
 #include <linux/bitops.h>
 
-#include <linux/uaccess.h>
+#include <asm/uaccess.h>
 #include <asm/io.h>
 #ifdef CONFIG_NET_POLL_CONTROLLER
 #include <asm/irq.h>
@@ -174,6 +175,7 @@ static const struct net_device_ops netdev_ops = {
 	.ndo_open		= xircom_open,
 	.ndo_stop		= xircom_close,
 	.ndo_start_xmit		= xircom_start_xmit,
+	.ndo_change_mtu_rh74	= eth_change_mtu,
 	.ndo_set_mac_address	= eth_mac_addr,
 	.ndo_validate_addr	= eth_validate_addr,
 #ifdef CONFIG_NET_POLL_CONTROLLER
@@ -287,6 +289,7 @@ out:
 err_unmap:
 	pci_iounmap(pdev, private->ioaddr);
 reg_fail:
+	pci_set_drvdata(pdev, NULL);
 	dma_free_coherent(d, 8192, private->tx_buffer, private->tx_dma_handle);
 tx_buf_fail:
 	dma_free_coherent(d, 8192, private->rx_buffer, private->rx_dma_handle);
@@ -314,6 +317,7 @@ static void xircom_remove(struct pci_dev *pdev)
 
 	unregister_netdev(dev);
 	pci_iounmap(pdev, card->ioaddr);
+	pci_set_drvdata(pdev, NULL);
 	dma_free_coherent(d, 8192, card->tx_buffer, card->tx_dma_handle);
 	dma_free_coherent(d, 8192, card->rx_buffer, card->rx_dma_handle);
 	free_netdev(dev);
@@ -1167,4 +1171,16 @@ investigate_write_descriptor(struct net_device *dev,
 	}
 }
 
-module_pci_driver(xircom_ops);
+static int __init xircom_init(void)
+{
+	return pci_register_driver(&xircom_ops);
+}
+
+static void __exit xircom_exit(void)
+{
+	pci_unregister_driver(&xircom_ops);
+}
+
+module_init(xircom_init)
+module_exit(xircom_exit)
+

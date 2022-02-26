@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (c) 2014 Anna Schumaker <Anna.Schumaker@Netapp.com>
  */
@@ -56,37 +55,45 @@
 #define decode_clone_maxsz		(op_decode_hdr_maxsz)
 
 #define NFS4_enc_allocate_sz		(compound_encode_hdr_maxsz + \
+					 encode_sequence_maxsz + \
 					 encode_putfh_maxsz + \
 					 encode_allocate_maxsz + \
 					 encode_getattr_maxsz)
 #define NFS4_dec_allocate_sz		(compound_decode_hdr_maxsz + \
+					 decode_sequence_maxsz + \
 					 decode_putfh_maxsz + \
 					 decode_allocate_maxsz + \
 					 decode_getattr_maxsz)
 #define NFS4_enc_copy_sz		(compound_encode_hdr_maxsz + \
+					 encode_sequence_maxsz + \
 					 encode_putfh_maxsz + \
 					 encode_savefh_maxsz + \
 					 encode_putfh_maxsz + \
 					 encode_copy_maxsz + \
 					 encode_commit_maxsz)
 #define NFS4_dec_copy_sz		(compound_decode_hdr_maxsz + \
+					 decode_sequence_maxsz + \
 					 decode_putfh_maxsz + \
 					 decode_savefh_maxsz + \
 					 decode_putfh_maxsz + \
 					 decode_copy_maxsz + \
 					 decode_commit_maxsz)
 #define NFS4_enc_deallocate_sz		(compound_encode_hdr_maxsz + \
+					 encode_sequence_maxsz + \
 					 encode_putfh_maxsz + \
 					 encode_deallocate_maxsz + \
 					 encode_getattr_maxsz)
 #define NFS4_dec_deallocate_sz		(compound_decode_hdr_maxsz + \
+					 decode_sequence_maxsz + \
 					 decode_putfh_maxsz + \
 					 decode_deallocate_maxsz + \
 					 decode_getattr_maxsz)
 #define NFS4_enc_seek_sz		(compound_encode_hdr_maxsz + \
+					 encode_sequence_maxsz + \
 					 encode_putfh_maxsz + \
 					 encode_seek_maxsz)
 #define NFS4_dec_seek_sz		(compound_decode_hdr_maxsz + \
+					 decode_sequence_maxsz + \
 					 decode_putfh_maxsz + \
 					 decode_seek_maxsz)
 #define NFS4_enc_layoutstats_sz		(compound_encode_hdr_maxsz + \
@@ -113,7 +120,7 @@
 					 decode_getattr_maxsz)
 
 static void encode_fallocate(struct xdr_stream *xdr,
-			     const struct nfs42_falloc_args *args)
+			     struct nfs42_falloc_args *args)
 {
 	encode_nfs4_stateid(xdr, &args->falloc_stateid);
 	encode_uint64(xdr, args->falloc_offset);
@@ -121,7 +128,7 @@ static void encode_fallocate(struct xdr_stream *xdr,
 }
 
 static void encode_allocate(struct xdr_stream *xdr,
-			    const struct nfs42_falloc_args *args,
+			    struct nfs42_falloc_args *args,
 			    struct compound_hdr *hdr)
 {
 	encode_op_hdr(xdr, OP_ALLOCATE, decode_allocate_maxsz, hdr);
@@ -129,7 +136,7 @@ static void encode_allocate(struct xdr_stream *xdr,
 }
 
 static void encode_copy(struct xdr_stream *xdr,
-			const struct nfs42_copy_args *args,
+			struct nfs42_copy_args *args,
 			struct compound_hdr *hdr)
 {
 	encode_op_hdr(xdr, OP_COPY, decode_copy_maxsz, hdr);
@@ -146,7 +153,7 @@ static void encode_copy(struct xdr_stream *xdr,
 }
 
 static void encode_deallocate(struct xdr_stream *xdr,
-			      const struct nfs42_falloc_args *args,
+			      struct nfs42_falloc_args *args,
 			      struct compound_hdr *hdr)
 {
 	encode_op_hdr(xdr, OP_DEALLOCATE, decode_deallocate_maxsz, hdr);
@@ -154,7 +161,7 @@ static void encode_deallocate(struct xdr_stream *xdr,
 }
 
 static void encode_seek(struct xdr_stream *xdr,
-			const struct nfs42_seek_args *args,
+			struct nfs42_seek_args *args,
 			struct compound_hdr *hdr)
 {
 	encode_op_hdr(xdr, OP_SEEK, decode_seek_maxsz, hdr);
@@ -164,7 +171,7 @@ static void encode_seek(struct xdr_stream *xdr,
 }
 
 static void encode_layoutstats(struct xdr_stream *xdr,
-			       const struct nfs42_layoutstat_args *args,
+			       struct nfs42_layoutstat_args *args,
 			       struct nfs42_layoutstat_devinfo *devinfo,
 			       struct compound_hdr *hdr)
 {
@@ -192,7 +199,7 @@ static void encode_layoutstats(struct xdr_stream *xdr,
 }
 
 static void encode_clone(struct xdr_stream *xdr,
-			 const struct nfs42_clone_args *args,
+			 struct nfs42_clone_args *args,
 			 struct compound_hdr *hdr)
 {
 	__be32 *p;
@@ -211,9 +218,8 @@ static void encode_clone(struct xdr_stream *xdr,
  */
 static void nfs4_xdr_enc_allocate(struct rpc_rqst *req,
 				  struct xdr_stream *xdr,
-				  const void *data)
+				  struct nfs42_falloc_args *args)
 {
-	const struct nfs42_falloc_args *args = data;
 	struct compound_hdr hdr = {
 		.minorversion = nfs4_xdr_minorversion(&args->seq_args),
 	};
@@ -227,7 +233,7 @@ static void nfs4_xdr_enc_allocate(struct rpc_rqst *req,
 }
 
 static void encode_copy_commit(struct xdr_stream *xdr,
-			  const struct nfs42_copy_args *args,
+			  struct nfs42_copy_args *args,
 			  struct compound_hdr *hdr)
 {
 	__be32 *p;
@@ -243,9 +249,8 @@ static void encode_copy_commit(struct xdr_stream *xdr,
  */
 static void nfs4_xdr_enc_copy(struct rpc_rqst *req,
 			      struct xdr_stream *xdr,
-			      const void *data)
+			      struct nfs42_copy_args *args)
 {
-	const struct nfs42_copy_args *args = data;
 	struct compound_hdr hdr = {
 		.minorversion = nfs4_xdr_minorversion(&args->seq_args),
 	};
@@ -265,9 +270,8 @@ static void nfs4_xdr_enc_copy(struct rpc_rqst *req,
  */
 static void nfs4_xdr_enc_deallocate(struct rpc_rqst *req,
 				    struct xdr_stream *xdr,
-				    const void *data)
+				    struct nfs42_falloc_args *args)
 {
-	const struct nfs42_falloc_args *args = data;
 	struct compound_hdr hdr = {
 		.minorversion = nfs4_xdr_minorversion(&args->seq_args),
 	};
@@ -285,9 +289,8 @@ static void nfs4_xdr_enc_deallocate(struct rpc_rqst *req,
  */
 static void nfs4_xdr_enc_seek(struct rpc_rqst *req,
 			      struct xdr_stream *xdr,
-			      const void *data)
+			      struct nfs42_seek_args *args)
 {
-	const struct nfs42_seek_args *args = data;
 	struct compound_hdr hdr = {
 		.minorversion = nfs4_xdr_minorversion(&args->seq_args),
 	};
@@ -304,9 +307,8 @@ static void nfs4_xdr_enc_seek(struct rpc_rqst *req,
  */
 static void nfs4_xdr_enc_layoutstats(struct rpc_rqst *req,
 				     struct xdr_stream *xdr,
-				     const void *data)
+				     struct nfs42_layoutstat_args *args)
 {
-	const struct nfs42_layoutstat_args *args = data;
 	int i;
 
 	struct compound_hdr hdr = {
@@ -327,9 +329,8 @@ static void nfs4_xdr_enc_layoutstats(struct rpc_rqst *req,
  */
 static void nfs4_xdr_enc_clone(struct rpc_rqst *req,
 			       struct xdr_stream *xdr,
-			       const void *data)
+			       struct nfs42_clone_args *args)
 {
-	const struct nfs42_clone_args *args = data;
 	struct compound_hdr hdr = {
 		.minorversion = nfs4_xdr_minorversion(&args->seq_args),
 	};
@@ -353,21 +354,13 @@ static int decode_write_response(struct xdr_stream *xdr,
 				 struct nfs42_write_res *res)
 {
 	__be32 *p;
+	int stateids;
 
 	p = xdr_inline_decode(xdr, 4 + 8 + 4);
 	if (unlikely(!p))
 		goto out_overflow;
 
-	/*
-	 * We never use asynchronous mode, so warn if a server returns
-	 * a stateid.
-	 */
-	if (unlikely(*p != 0)) {
-		pr_err_once("%s: server has set unrequested "
-				"asynchronous mode\n", __func__);
-		return -EREMOTEIO;
-	}
-	p++;
+	stateids = be32_to_cpup(p++);
 	p = xdr_decode_hyper(p, &res->count);
 	res->verifier.committed = be32_to_cpup(p);
 	return decode_verifier(xdr, &res->verifier.verifier);
@@ -455,9 +448,8 @@ static int decode_clone(struct xdr_stream *xdr)
  */
 static int nfs4_xdr_dec_allocate(struct rpc_rqst *rqstp,
 				 struct xdr_stream *xdr,
-				 void *data)
+				 struct nfs42_falloc_res *res)
 {
-	struct nfs42_falloc_res *res = data;
 	struct compound_hdr hdr;
 	int status;
 
@@ -483,9 +475,8 @@ out:
  */
 static int nfs4_xdr_dec_copy(struct rpc_rqst *rqstp,
 			     struct xdr_stream *xdr,
-			     void *data)
+			     struct nfs42_copy_res *res)
 {
-	struct nfs42_copy_res *res = data;
 	struct compound_hdr hdr;
 	int status;
 
@@ -517,9 +508,8 @@ out:
  */
 static int nfs4_xdr_dec_deallocate(struct rpc_rqst *rqstp,
 				   struct xdr_stream *xdr,
-				   void *data)
+				   struct nfs42_falloc_res *res)
 {
-	struct nfs42_falloc_res *res = data;
 	struct compound_hdr hdr;
 	int status;
 
@@ -545,9 +535,8 @@ out:
  */
 static int nfs4_xdr_dec_seek(struct rpc_rqst *rqstp,
 			     struct xdr_stream *xdr,
-			     void *data)
+			     struct nfs42_seek_res *res)
 {
-	struct nfs42_seek_res *res = data;
 	struct compound_hdr hdr;
 	int status;
 
@@ -570,9 +559,8 @@ out:
  */
 static int nfs4_xdr_dec_layoutstats(struct rpc_rqst *rqstp,
 				    struct xdr_stream *xdr,
-				    void *data)
+				    struct nfs42_layoutstat_res *res)
 {
-	struct nfs42_layoutstat_res *res = data;
 	struct compound_hdr hdr;
 	int status, i;
 
@@ -601,9 +589,8 @@ out:
  */
 static int nfs4_xdr_dec_clone(struct rpc_rqst *rqstp,
 			      struct xdr_stream *xdr,
-			      void *data)
+			      struct nfs42_clone_res *res)
 {
-	struct nfs42_clone_res *res = data;
 	struct compound_hdr hdr;
 	int status;
 

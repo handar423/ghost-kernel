@@ -126,17 +126,17 @@ static void fnic_release_ioreq_buf(struct fnic *fnic,
 				   struct scsi_cmnd *sc)
 {
 	if (io_req->sgl_list_pa)
-		pci_unmap_single(fnic->pdev, io_req->sgl_list_pa,
+		dma_unmap_single(&fnic->pdev->dev, io_req->sgl_list_pa,
 				 sizeof(io_req->sgl_list[0]) * io_req->sgl_cnt,
-				 PCI_DMA_TODEVICE);
+				 DMA_TO_DEVICE);
 	scsi_dma_unmap(sc);
 
 	if (io_req->sgl_cnt)
 		mempool_free(io_req->sgl_list_alloc,
 			     fnic->io_sgl_pool[io_req->sgl_type]);
 	if (io_req->sense_buf_pa)
-		pci_unmap_single(fnic->pdev, io_req->sense_buf_pa,
-				 SCSI_SENSE_BUFFERSIZE, PCI_DMA_FROMDEVICE);
+		dma_unmap_single(&fnic->pdev->dev, io_req->sense_buf_pa,
+				 SCSI_SENSE_BUFFERSIZE, DMA_FROM_DEVICE);
 }
 
 /* Free up Copy Wq descriptors. Called with copy_wq lock held */
@@ -180,20 +180,19 @@ void
 __fnic_set_state_flags(struct fnic *fnic, unsigned long st_flags,
 			unsigned long clearbits)
 {
-	struct Scsi_Host *host = fnic->lport->host;
-	int sh_locked = spin_is_locked(host->host_lock);
 	unsigned long flags = 0;
+	unsigned long host_lock_flags = 0;
 
-	if (!sh_locked)
-		spin_lock_irqsave(host->host_lock, flags);
+	spin_lock_irqsave(&fnic->fnic_lock, flags);
+	spin_lock_irqsave(fnic->lport->host->host_lock, host_lock_flags);
 
 	if (clearbits)
 		fnic->state_flags &= ~st_flags;
 	else
 		fnic->state_flags |= st_flags;
 
-	if (!sh_locked)
-		spin_unlock_irqrestore(host->host_lock, flags);
+	spin_unlock_irqrestore(fnic->lport->host->host_lock, host_lock_flags);
+	spin_unlock_irqrestore(&fnic->fnic_lock, flags);
 
 	return;
 }
@@ -325,12 +324,13 @@ static inline int fnic_queue_wq_copy_desc(struct fnic *fnic,
 	struct fc_rport_libfc_priv *rp = rport->dd_data;
 	struct host_sg_desc *desc;
 	struct misc_stats *misc_stats = &fnic->fnic_stats.misc_stats;
+	u8 pri_tag = 0;
 	unsigned int i;
 	unsigned long intr_flags;
 	int flags;
 	u8 exch_flags;
 	struct scsi_lun fc_lun;
-	int r;
+	char msg[2];
 
 	if (sg_count) {
 		/* For each SGE, create a device desc entry */
@@ -342,34 +342,35 @@ static inline int fnic_queue_wq_copy_desc(struct fnic *fnic,
 			desc++;
 		}
 
-		io_req->sgl_list_pa = pci_map_single
-			(fnic->pdev,
-			 io_req->sgl_list,
-			 sizeof(io_req->sgl_list[0]) * sg_count,
-			 PCI_DMA_TODEVICE);
-
-		r = pci_dma_mapping_error(fnic->pdev, io_req->sgl_list_pa);
-		if (r) {
-			printk(KERN_ERR "PCI mapping failed with error %d\n", r);
+		io_req->sgl_list_pa = dma_map_single(&fnic->pdev->dev,
+				io_req->sgl_list,
+				sizeof(io_req->sgl_list[0]) * sg_count,
+				DMA_TO_DEVICE);
+		if (dma_mapping_error(&fnic->pdev->dev, io_req->sgl_list_pa)) {
+			printk(KERN_ERR "DMA mapping failed\n");
 			return SCSI_MLQUEUE_HOST_BUSY;
 		}
 	}
 
-	io_req->sense_buf_pa = pci_map_single(fnic->pdev,
+	io_req->sense_buf_pa = dma_map_single(&fnic->pdev->dev,
 					      sc->sense_buffer,
 					      SCSI_SENSE_BUFFERSIZE,
-					      PCI_DMA_FROMDEVICE);
-
-	r = pci_dma_mapping_error(fnic->pdev, io_req->sense_buf_pa);
-	if (r) {
-		pci_unmap_single(fnic->pdev, io_req->sgl_list_pa,
+					      DMA_FROM_DEVICE);
+	if (dma_mapping_error(&fnic->pdev->dev, io_req->sense_buf_pa)) {
+		dma_unmap_single(&fnic->pdev->dev, io_req->sgl_list_pa,
 				sizeof(io_req->sgl_list[0]) * sg_count,
-				PCI_DMA_TODEVICE);
-		printk(KERN_ERR "PCI mapping failed with error %d\n", r);
+				DMA_TO_DEVICE);
+		printk(KERN_ERR "DMA mapping failed\n");
 		return SCSI_MLQUEUE_HOST_BUSY;
 	}
 
 	int_to_scsilun(sc->device->lun, &fc_lun);
+
+	pri_tag = FCPIO_ICMND_PTA_SIMPLE;
+	msg[0] = MSG_SIMPLE_TAG;
+	scsi_populate_tag_msg(sc, msg);
+	if (msg[0] == MSG_ORDERED_TAG)
+		pri_tag = FCPIO_ICMND_PTA_ORDERED;
 
 	/* Enqueue the descriptor in the Copy WQ */
 	spin_lock_irqsave(&fnic->wq_copy_lock[0], intr_flags);
@@ -402,8 +403,7 @@ static inline int fnic_queue_wq_copy_desc(struct fnic *fnic,
 					 io_req->sgl_list_pa,
 					 io_req->sense_buf_pa,
 					 0, /* scsi cmd ref, always 0 */
-					 FCPIO_ICMND_PTA_SIMPLE,
-					 	/* scsi pri and tag */
+					 pri_tag, /* scsi pri and tag */
 					 flags,	/* command flags */
 					 sc->cmnd, sc->cmd_len,
 					 scsi_bufflen(sc),
@@ -444,6 +444,9 @@ static int fnic_queuecommand_lck(struct scsi_cmnd *sc, void (*done)(struct scsi_
 	struct fc_rport_libfc_priv *rp;
 
 	if (unlikely(fnic_chk_state_flags_locked(fnic, FNIC_FLAGS_IO_BLOCKED)))
+		return SCSI_MLQUEUE_HOST_BUSY;
+
+	if (unlikely(fnic_chk_state_flags_locked(fnic, FNIC_FLAGS_FWRESET)))
 		return SCSI_MLQUEUE_HOST_BUSY;
 
 	rport = starget_to_rport(scsi_target(sc->device));
@@ -906,7 +909,7 @@ static void fnic_fcpio_icmnd_cmpl_handler(struct fnic *fnic,
 
 		FNIC_SCSI_DBG(KERN_INFO, fnic->lport->host,
 			"icmnd_cmpl abts pending "
-			  "hdr status = %s tag = 0x%x sc = 0x%p"
+			  "hdr status = %s tag = 0x%x sc = 0x%p "
 			  "scsi_status = %x residual = %d\n",
 			  fnic_fcpio_status_to_str(hdr_status),
 			  id, sc,
@@ -1031,7 +1034,8 @@ static void fnic_fcpio_icmnd_cmpl_handler(struct fnic *fnic,
 		atomic64_inc(&fnic_stats->io_stats.io_completions);
 
 
-	io_duration_time = jiffies_to_msecs(jiffies) - jiffies_to_msecs(io_req->start_time);
+	io_duration_time = jiffies_to_msecs(jiffies) -
+						jiffies_to_msecs(start_time);
 
 	if(io_duration_time <= 10)
 		atomic64_inc(&fnic_stats->io_stats.io_btw_0_to_10_msec);
@@ -1403,8 +1407,9 @@ static void fnic_cleanup_io(struct fnic *fnic, int exclude_id)
 cleanup_scsi_cmd:
 		sc->result = DID_TRANSPORT_DISRUPTED << 16;
 		FNIC_SCSI_DBG(KERN_DEBUG, fnic->lport->host,
-			      "%s: sc duration = %lu DID_TRANSPORT_DISRUPTED\n",
-			      __func__, (jiffies - start_time));
+			      "%s: tag:0x%x : sc:0x%p duration = %lu DID_TRANSPORT_DISRUPTED\n",
+			      __func__, sc->request->tag, sc,
+			      (jiffies - start_time));
 
 		if (atomic64_read(&fnic->io_cmpl_skip))
 			atomic64_dec(&fnic->io_cmpl_skip);
@@ -1413,6 +1418,11 @@ cleanup_scsi_cmd:
 
 		/* Complete the command to SCSI */
 		if (sc->scsi_done) {
+			if (!(CMD_FLAGS(sc) & FNIC_IO_ISSUED))
+				shost_printk(KERN_ERR, fnic->lport->host,
+				"Calling done for IO not issued to fw: tag:0x%x sc:0x%p\n",
+				 sc->request->tag, sc);
+
 			FNIC_TRACE(fnic_cleanup_io,
 				  sc->device->host->host_no, i, sc,
 				  jiffies_to_msecs(jiffies - start_time),
@@ -1844,7 +1854,7 @@ int fnic_abort_cmd(struct scsi_cmnd *sc)
 	tag = sc->request->tag;
 	FNIC_SCSI_DBG(KERN_DEBUG,
 		fnic->lport->host,
-		"Abort Cmd called FCID 0x%x, LUN 0x%llx TAG %x flags %x\n",
+		"Abort Cmd called FCID 0x%x, LUN 0x%x TAG %x flags %x\n",
 		rport->port_id, sc->device->lun, tag, CMD_FLAGS(sc));
 
 	CMD_FLAGS(sc) = FNIC_NO_FLAGS;
@@ -2272,33 +2282,17 @@ clean_pending_aborts_end:
 static inline int
 fnic_scsi_host_start_tag(struct fnic *fnic, struct scsi_cmnd *sc)
 {
-	struct blk_queue_tag *bqt = fnic->lport->host->bqt;
-	int tag, ret = SCSI_NO_TAG;
+	struct request_queue *q = sc->request->q;
+	struct request *dummy;
 
-	BUG_ON(!bqt);
-	if (!bqt) {
-		pr_err("Tags are not supported\n");
-		goto end;
-	}
+	dummy = blk_mq_alloc_request(q, REQ_OP_WRITE, BLK_MQ_REQ_NOWAIT);
+	if (IS_ERR(dummy))
+		return SCSI_NO_TAG;
 
-	do {
-		tag = find_next_zero_bit(bqt->tag_map, bqt->max_depth, 1);
-		if (tag >= bqt->max_depth) {
-			pr_err("Tag allocation failure\n");
-			goto end;
-		}
-	} while (test_and_set_bit(tag, bqt->tag_map));
+	sc->tag = sc->request->tag = dummy->tag;
+	sc->host_scribble = (unsigned char *)dummy;
 
-	bqt->tag_index[tag] = sc->request;
-	sc->request->tag = tag;
-	sc->tag = tag;
-	if (!sc->request->special)
-		sc->request->special = sc;
-
-	ret = tag;
-
-end:
-	return ret;
+	return dummy->tag;
 }
 
 /**
@@ -2308,20 +2302,9 @@ end:
 static inline void
 fnic_scsi_host_end_tag(struct fnic *fnic, struct scsi_cmnd *sc)
 {
-	struct blk_queue_tag *bqt = fnic->lport->host->bqt;
-	int tag = sc->request->tag;
+	struct request *dummy = (struct request *)sc->host_scribble;
 
-	if (tag == SCSI_NO_TAG)
-		return;
-
-	BUG_ON(!bqt || !bqt->tag_index[tag]);
-	if (!bqt)
-		return;
-
-	bqt->tag_index[tag] = NULL;
-	clear_bit(tag, bqt->tag_map);
-
-	return;
+	blk_mq_free_request(dummy);
 }
 
 /*
@@ -2362,7 +2345,7 @@ int fnic_device_reset(struct scsi_cmnd *sc)
 
 	rport = starget_to_rport(scsi_target(sc->device));
 	FNIC_SCSI_DBG(KERN_DEBUG, fnic->lport->host,
-		      "Device reset called FCID 0x%x, LUN 0x%llx sc 0x%p\n",
+		      "Device reset called FCID 0x%x, LUN 0x%x sc 0x%p\n",
 		      rport->port_id, sc->device->lun, sc);
 
 	if (lp->state != LPORT_ST_READY || !(lp->link_up))
@@ -2380,19 +2363,9 @@ int fnic_device_reset(struct scsi_cmnd *sc)
 	tag = sc->request->tag;
 	if (unlikely(tag < 0)) {
 		/*
-		 * XXX(hch): current the midlayer fakes up a struct
-		 * request for the explicit reset ioctls, and those
-		 * don't have a tag allocated to them.  The below
-		 * code pokes into midlayer structures to paper over
-		 * this design issue, but that won't work for blk-mq.
-		 *
-		 * Either someone who can actually test the hardware
-		 * will have to come up with a similar hack for the
-		 * blk-mq case, or we'll have to bite the bullet and
-		 * fix the way the EH ioctls work for real, but until
-		 * that happens we fail these explicit requests here.
+		 * Really should fix the midlayer to pass in a proper
+		 * request for ioctls...
 		 */
-
 		tag = fnic_scsi_host_start_tag(fnic, sc);
 		if (unlikely(tag == SCSI_NO_TAG))
 			goto fnic_device_reset_end;
@@ -2605,7 +2578,7 @@ int fnic_reset(struct Scsi_Host *shost)
 	 * Reset local port, this will clean up libFC exchanges,
 	 * reset remote port sessions, and if link is up, begin flogi
 	 */
-	ret = fc_lport_reset(lp);
+	ret = lp->tt.lport_reset(lp);
 
 	FNIC_SCSI_DBG(KERN_DEBUG, fnic->lport->host,
 		      "Returning from fnic reset %s\n",

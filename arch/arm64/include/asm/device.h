@@ -17,13 +17,7 @@
 #define __ASM_DEVICE_H
 
 struct dev_archdata {
-#ifdef CONFIG_IOMMU_API
-	void *iommu;			/* private IOMMU data */
-#endif
-#ifdef CONFIG_XEN
-	const struct dma_map_ops *dev_dma_ops;
-#endif
-	bool dma_coherent;
+	struct dma_map_ops *dma_ops;
 };
 
 struct pdev_archdata {

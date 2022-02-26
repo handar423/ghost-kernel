@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /* pci_sabre.c: Sabre specific PCI controller support.
  *
  * Copyright (C) 1997, 1998, 1999, 2007 David S. Miller (davem@davemloft.net)
@@ -601,6 +600,7 @@ static const struct of_device_id sabre_match[] = {
 static struct platform_driver sabre_driver = {
 	.driver = {
 		.name = DRIVER_NAME,
+		.owner = THIS_MODULE,
 		.of_match_table = sabre_match,
 	},
 	.probe		= sabre_probe,

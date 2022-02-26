@@ -1357,15 +1357,20 @@ struct vp_rpt_id_entry_24xx {
 	uint8_t port_id[3];
 	uint8_t format;
 	union {
-		struct {
+		struct _f0 {
 			/* format 0 loop */
 			uint8_t vp_idx_map[16];
 			uint8_t reserved_4[32];
 		} f0;
-		struct {
+		struct _f1 {
 			/* format 1 fabric */
 			uint8_t vpstat1_subcode; /* vp_status=1 subcode */
 			uint8_t flags;
+#define TOPO_MASK  0xE
+#define TOPO_FL    0x2
+#define TOPO_N2N   0x4
+#define TOPO_F     0x6
+
 			uint16_t fip_flags;
 			uint8_t rsv2[12];
 
@@ -1379,21 +1384,22 @@ struct vp_rpt_id_entry_24xx {
 			uint16_t bbcr;
 			uint8_t reserved_5[6];
 		} f1;
-		struct { /* format 2: N2N direct connect */
-		    uint8_t vpstat1_subcode;
-		    uint8_t flags;
-		    uint16_t rsv6;
-		    uint8_t rsv2[12];
+		struct _f2 { /* format 2: N2N direct connect */
+			uint8_t vpstat1_subcode;
+			uint8_t flags;
+			uint16_t fip_flags;
+			uint8_t rsv2[12];
 
-		    uint8_t ls_rjt_vendor;
-		    uint8_t ls_rjt_explanation;
-		    uint8_t ls_rjt_reason;
-		    uint8_t rsv3[5];
+			uint8_t ls_rjt_vendor;
+			uint8_t ls_rjt_explanation;
+			uint8_t ls_rjt_reason;
+			uint8_t rsv3[5];
 
-		    uint8_t port_name[8];
-		    uint8_t node_name[8];
-		    uint32_t remote_nport_id;
-		    uint32_t reserved_5;
+			uint8_t port_name[8];
+			uint8_t node_name[8];
+			uint16_t bbcr;
+			uint8_t reserved_5[2];
+			uint8_t remote_nport_id[4];
 		} f2;
 	} u;
 };
@@ -1510,12 +1516,34 @@ struct qla_flt_header {
 #define FLT_REG_VPD_SEC_27XX_2	0xD8
 #define FLT_REG_VPD_SEC_27XX_3	0xDA
 
+/* 28xx */
+#define FLT_REG_AUX_IMG_PRI_28XX	0x125
+#define FLT_REG_AUX_IMG_SEC_28XX	0x126
+#define FLT_REG_VPD_SEC_28XX_0		0x10C
+#define FLT_REG_VPD_SEC_28XX_1		0x10E
+#define FLT_REG_VPD_SEC_28XX_2		0x110
+#define FLT_REG_VPD_SEC_28XX_3		0x112
+#define FLT_REG_NVRAM_SEC_28XX_0	0x10D
+#define FLT_REG_NVRAM_SEC_28XX_1	0x10F
+#define FLT_REG_NVRAM_SEC_28XX_2	0x111
+#define FLT_REG_NVRAM_SEC_28XX_3	0x113
+#define FLT_REG_MPI_PRI_28XX		0xD3
+#define FLT_REG_MPI_SEC_28XX		0xF0
+#define FLT_REG_PEP_PRI_28XX		0xD1
+#define FLT_REG_PEP_SEC_28XX		0xF1
+
 struct qla_flt_region {
-	uint32_t code;
+	uint16_t code;
+	uint8_t attribute;
+	uint8_t reserved;
 	uint32_t size;
 	uint32_t start;
 	uint32_t end;
 };
+
+#define FLT_REGION_SIZE		16
+#define FLT_MAX_REGIONS		0xFF
+#define FLT_REGIONS_SIZE	(FLT_REGION_SIZE * FLT_MAX_REGIONS)
 
 /* Flash NPIV Configuration Table ********************************************/
 
@@ -1706,6 +1734,10 @@ struct access_chip_rsp_84xx {
 #define LR_DIST_FW_SHIFT	(LR_DIST_FW_POS - LR_DIST_NV_POS)
 #define LR_DIST_FW_FIELD(x)	((x) << LR_DIST_FW_SHIFT & 0xf000)
 
+/* FAC semaphore defines */
+#define FAC_SEMAPHORE_UNLOCK    0
+#define FAC_SEMAPHORE_LOCK      1
+
 struct nvram_81xx {
 	/* NVRAM header. */
 	uint8_t id[4];
@@ -1752,7 +1784,7 @@ struct nvram_81xx {
 	uint16_t reserved_6_3[14];
 
 	/* Offset 192. */
-	uint8_t min_link_speed;
+	uint8_t min_supported_speed;
 	uint8_t reserved_7_0;
 	uint16_t reserved_7[31];
 
@@ -2000,6 +2032,8 @@ struct ex_init_cb_81xx {
 
 #define FARX_ACCESS_FLASH_CONF_81XX	0x7FFD0000
 #define FARX_ACCESS_FLASH_DATA_81XX	0x7F800000
+#define FARX_ACCESS_FLASH_CONF_28XX	0x7FFD0000
+#define FARX_ACCESS_FLASH_DATA_28XX	0x7F7D0000
 
 /* FCP priority config defines *************************************/
 /* operations */
@@ -2074,6 +2108,9 @@ struct qla_fcp_prio_cfg {
 #define FA_NPIV_CONF1_ADDR_81	0xD2000
 
 /* 83XX Flash locations -- occupies second 8MB region. */
-#define FA_FLASH_LAYOUT_ADDR_83	0xFC400
+#define FA_FLASH_LAYOUT_ADDR_83	(0x3F1000/4)
+#define FA_FLASH_LAYOUT_ADDR_28	(0x11000/4)
+
+#define NVRAM_DUAL_FCP_NVME_FLAG_OFFSET	0x196
 
 #endif

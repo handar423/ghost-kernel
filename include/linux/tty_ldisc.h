@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _LINUX_TTY_LDISC_H
 #define _LINUX_TTY_LDISC_H
 
@@ -25,6 +24,12 @@
  *	This function instructs the line discipline to clear its
  *	buffers of any input characters it may have queued to be
  *	delivered to the user mode process.
+ *
+ * ssize_t (*chars_in_buffer)(struct tty_struct *tty);
+ *
+ *	This function returns the number of input characters the line
+ *	discipline may have queued up to be delivered to the user mode
+ *	process.
  *
  * ssize_t (*read)(struct tty_struct * tty, struct file * file,
  *		   unsigned char * buf, size_t nr);
@@ -79,18 +84,14 @@
  *	processing.  <cp> is a pointer to the buffer of input
  *	character received by the device.  <fp> is a pointer to a
  *	pointer of flag bytes which indicate whether a character was
- *	received with a parity error, etc. <fp> may be NULL to indicate
- *	all data received is TTY_NORMAL.
+ *	received with a parity error, etc.
  *
  * void	(*write_wakeup)(struct tty_struct *);
  *
  *	This function is called by the low-level tty driver to signal
  *	that line discpline should try to send more characters to the
  *	low-level driver for transmission.  If the line discpline does
- *	not have any more data to send, it can just return. If the line
- *	discipline does have some data to send, please arise a tasklet
- *	or workqueue to do the real data transfer. Do not send data in
- *	this hook, it may leads to a deadlock.
+ *	not have any more data to send, it can just return.
  *
  * int (*hangup)(struct tty_struct *)
  *
@@ -98,6 +99,11 @@
  *	cease I/O to the tty driver. Can sleep. The driver should
  *	seek to perform this action quickly but should wait until
  *	any pending driver I/O is completed.
+ *
+ * void (*fasync)(struct tty_struct *, int on)
+ *
+ *	Notify line discipline when signal-driven I/O is enabled or
+ *	disabled.
  *
  * void (*dcd_change)(struct tty_struct *tty, unsigned int status)
  *
@@ -112,12 +118,12 @@
  *	processing.  <cp> is a pointer to the buffer of input
  *	character received by the device.  <fp> is a pointer to a
  *	pointer of flag bytes which indicate whether a character was
- *	received with a parity error, etc. <fp> may be NULL to indicate
- *	all data received is TTY_NORMAL.
+ *	received with a parity error, etc.
  *	If assigned, prefer this function for automatic flow control.
  */
 
 #include <linux/fs.h>
+#include <linux/wait.h>
 #include <linux/wait.h>
 
 
@@ -178,6 +184,7 @@ struct tty_ldisc_ops {
 	int	(*open)(struct tty_struct *);
 	void	(*close)(struct tty_struct *);
 	void	(*flush_buffer)(struct tty_struct *tty);
+	ssize_t	(*chars_in_buffer)(struct tty_struct *tty);
 	ssize_t	(*read)(struct tty_struct *tty, struct file *file,
 			unsigned char __user *buf, size_t nr);
 	ssize_t	(*write)(struct tty_struct *tty, struct file *file,
@@ -198,17 +205,21 @@ struct tty_ldisc_ops {
 			       char *fp, int count);
 	void	(*write_wakeup)(struct tty_struct *);
 	void	(*dcd_change)(struct tty_struct *, unsigned int);
-	int	(*receive_buf2)(struct tty_struct *, const unsigned char *cp,
-				char *fp, int count);
 
 	struct  module *owner;
 
 	int refcount;
+
+	RH_KABI_EXTEND(void (*fasync)(struct tty_struct *tty, int on))
+	RH_KABI_EXTEND(int (*receive_buf2)(struct tty_struct *,
+		const unsigned char *cp, char *fp, int count))
 };
 
 struct tty_ldisc {
 	struct tty_ldisc_ops *ops;
-	struct tty_struct *tty;
+	atomic_t users;			/* unused */
+	wait_queue_head_t wq_idle;	/* unused */
+	RH_KABI_EXTEND(struct tty_struct *tty)
 };
 
 #define TTY_LDISC_MAGIC	0x5403

@@ -18,7 +18,6 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/crypto.h>
-#include <linux/compiler.h>
 #include <linux/vmalloc.h>
 #include <crypto/algapi.h>
 #include <linux/cryptouser.h>
@@ -58,11 +57,16 @@ static int crypto_scomp_report(struct sk_buff *skb, struct crypto_alg *alg)
 #endif
 
 static void crypto_scomp_show(struct seq_file *m, struct crypto_alg *alg)
-	__maybe_unused;
+	__attribute__ ((unused));
 
 static void crypto_scomp_show(struct seq_file *m, struct crypto_alg *alg)
 {
 	seq_puts(m, "type         : scomp\n");
+}
+
+static int crypto_scomp_init_tfm(struct crypto_tfm *tfm)
+{
+	return 0;
 }
 
 static void crypto_scomp_free_scratches(void * __percpu *scratches)
@@ -120,24 +124,10 @@ static int crypto_scomp_alloc_all_scratches(void)
 		if (!scomp_src_scratches)
 			return -ENOMEM;
 		scomp_dst_scratches = crypto_scomp_alloc_scratches();
-		if (!scomp_dst_scratches) {
-			crypto_scomp_free_scratches(scomp_src_scratches);
-			scomp_src_scratches = NULL;
+		if (!scomp_dst_scratches)
 			return -ENOMEM;
-		}
 	}
 	return 0;
-}
-
-static int crypto_scomp_init_tfm(struct crypto_tfm *tfm)
-{
-	int ret;
-
-	mutex_lock(&scomp_lock);
-	ret = crypto_scomp_alloc_all_scratches();
-	mutex_unlock(&scomp_lock);
-
-	return ret;
 }
 
 static void crypto_scomp_sg_free(struct scatterlist *sgl)
@@ -220,7 +210,9 @@ static int scomp_acomp_comp_decomp(struct acomp_req *req, int dir)
 					      scratch_dst, &req->dlen, *ctx);
 	if (!ret) {
 		if (!req->dst) {
-			req->dst = crypto_scomp_sg_alloc(req->dlen, GFP_ATOMIC);
+			req->dst = crypto_scomp_sg_alloc(req->dlen,
+				   req->base.flags & CRYPTO_TFM_REQ_MAY_SLEEP ?
+				   GFP_KERNEL : GFP_ATOMIC);
 			if (!req->dst)
 				goto out;
 		}
@@ -247,10 +239,6 @@ static void crypto_exit_scomp_ops_async(struct crypto_tfm *tfm)
 	struct crypto_scomp **ctx = crypto_tfm_ctx(tfm);
 
 	crypto_free_scomp(*ctx);
-
-	mutex_lock(&scomp_lock);
-	crypto_scomp_free_all_scratches();
-	mutex_unlock(&scomp_lock);
 }
 
 int crypto_init_scomp_ops_async(struct crypto_tfm *tfm)
@@ -327,18 +315,40 @@ static const struct crypto_type crypto_scomp_type = {
 int crypto_register_scomp(struct scomp_alg *alg)
 {
 	struct crypto_alg *base = &alg->base;
+	int ret = -ENOMEM;
+
+	mutex_lock(&scomp_lock);
+	if (crypto_scomp_alloc_all_scratches())
+		goto error;
 
 	base->cra_type = &crypto_scomp_type;
 	base->cra_flags &= ~CRYPTO_ALG_TYPE_MASK;
 	base->cra_flags |= CRYPTO_ALG_TYPE_SCOMPRESS;
 
-	return crypto_register_alg(base);
+	ret = crypto_register_alg(base);
+	if (ret)
+		goto error;
+
+	mutex_unlock(&scomp_lock);
+	return ret;
+
+error:
+	crypto_scomp_free_all_scratches();
+	mutex_unlock(&scomp_lock);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(crypto_register_scomp);
 
 int crypto_unregister_scomp(struct scomp_alg *alg)
 {
-	return crypto_unregister_alg(&alg->base);
+	int ret;
+
+	mutex_lock(&scomp_lock);
+	ret = crypto_unregister_alg(&alg->base);
+	crypto_scomp_free_all_scratches();
+	mutex_unlock(&scomp_lock);
+
+	return ret;
 }
 EXPORT_SYMBOL_GPL(crypto_unregister_scomp);
 

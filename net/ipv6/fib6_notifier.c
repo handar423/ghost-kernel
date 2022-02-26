@@ -52,12 +52,12 @@ int __net_init fib6_notifier_init(struct net *net)
 	ops = fib_notifier_ops_register(&fib6_notifier_ops_template, net);
 	if (IS_ERR(ops))
 		return PTR_ERR(ops);
-	net->ipv6.notifier_ops = ops;
+	net->ipv6_notifier_ops = ops;
 
 	return 0;
 }
 
 void __net_exit fib6_notifier_exit(struct net *net)
 {
-	fib_notifier_ops_unregister(net->ipv6.notifier_ops);
+	fib_notifier_ops_unregister(net->ipv6_notifier_ops);
 }

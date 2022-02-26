@@ -21,7 +21,7 @@
 #include <linux/spinlock.h>
 #include <linux/workqueue.h>
 #include <linux/bitops.h>
-#include <linux/types.h>
+#include <asm/types.h>
 
 
 enum lw_bits {
@@ -147,7 +147,7 @@ static void linkwatch_do_dev(struct net_device *dev)
 	 * Make sure the above read is complete since it can be
 	 * rewritten as soon as we clear the bit below.
 	 */
-	smp_mb__before_atomic();
+	smp_mb__before_clear_bit();
 
 	/* We are about to handle this device,
 	 * so new events can be accepted
@@ -155,7 +155,7 @@ static void linkwatch_do_dev(struct net_device *dev)
 	clear_bit(__LINK_STATE_LINKWATCH_PENDING, &dev->state);
 
 	rfc2863_policy(dev);
-	if (dev->flags & IFF_UP) {
+	if (dev->flags & IFF_UP && netif_device_present(dev)) {
 		if (netif_carrier_ok(dev))
 			dev_activate(dev);
 		else

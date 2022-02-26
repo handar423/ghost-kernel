@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _LINUX_PROJID_H
 #define _LINUX_PROJID_H
 
@@ -19,6 +18,8 @@ extern struct user_namespace init_user_ns;
 
 typedef __kernel_uid32_t projid_t;
 
+#ifdef CONFIG_UIDGID_STRICT_TYPE_CHECKS
+
 typedef struct {
 	projid_t val;
 } kprojid_t;
@@ -29,6 +30,19 @@ static inline projid_t __kprojid_val(kprojid_t projid)
 }
 
 #define KPROJIDT_INIT(value) (kprojid_t){ value }
+
+#else
+
+typedef projid_t kprojid_t;
+
+static inline projid_t __kprojid_val(kprojid_t projid)
+{
+	return projid;
+}
+
+#define KPROJIDT_INIT(value) ((kprojid_t) value )
+
+#endif
 
 #define INVALID_PROJID KPROJIDT_INIT(-1)
 #define OVERFLOW_PROJID 65534

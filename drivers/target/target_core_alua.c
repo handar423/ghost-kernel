@@ -26,12 +26,10 @@
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/configfs.h>
-#include <linux/delay.h>
 #include <linux/export.h>
-#include <linux/fcntl.h>
 #include <linux/file.h>
-#include <linux/fs.h>
-#include <scsi/scsi_proto.h>
+#include <scsi/scsi.h>
+#include <scsi/scsi_cmnd.h>
 #include <asm/unaligned.h>
 
 #include <target/target_core_base.h>
@@ -268,7 +266,7 @@ target_emulate_report_target_port_groups(struct se_cmd *cmd)
 	}
 	transport_kunmap_data_sg(cmd);
 
-	target_complete_cmd(cmd, GOOD);
+	target_complete_cmd_with_length(cmd, GOOD, rd_len + 4);
 	return 0;
 }
 
@@ -451,7 +449,7 @@ static inline void set_ascq(struct se_cmd *cmd, u8 alua_ascq)
 	pr_debug("[%s]: ALUA TG Port not available, "
 		"SenseKey: NOT_READY, ASC/ASCQ: "
 		"0x04/0x%02x\n",
-		cmd->se_tfo->get_fabric_name(), alua_ascq);
+		cmd->se_tfo->fabric_name, alua_ascq);
 
 	cmd->scsi_asc = 0x04;
 	cmd->scsi_ascq = alua_ascq;
@@ -703,7 +701,6 @@ target_alua_state_check(struct se_cmd *cmd)
 		set_ascq(cmd, ASCQ_04H_ALUA_OFFLINE);
 		return TCM_CHECK_CONDITION_NOT_READY;
 	}
-
 	if (!lun->lun_tg_pt_gp)
 		return 0;
 
@@ -896,14 +893,13 @@ static int core_alua_write_tpg_metadata(
 	u32 md_buf_len)
 {
 	struct file *file = filp_open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
-	loff_t pos = 0;
 	int ret;
 
 	if (IS_ERR(file)) {
 		pr_err("filp_open(%s) for ALUA metadata failed\n", path);
 		return -ENODEV;
 	}
-	ret = kernel_write(file, md_buf, md_buf_len, &pos);
+	ret = kernel_write(file, md_buf, md_buf_len, 0);
 	if (ret < 0)
 		pr_err("Error writing ALUA metadata file: %s\n", path);
 	fput(file);
@@ -918,7 +914,7 @@ static int core_alua_update_tpg_primary_metadata(
 {
 	unsigned char *md_buf;
 	struct t10_wwn *wwn = &tg_pt_gp->tg_pt_gp_dev->t10_wwn;
-	char *path;
+	char path[ALUA_METADATA_PATH_LEN];
 	int len, rc;
 
 	md_buf = kzalloc(ALUA_MD_BUF_LEN, GFP_KERNEL);
@@ -926,6 +922,8 @@ static int core_alua_update_tpg_primary_metadata(
 		pr_err("Unable to allocate buf for ALUA metadata\n");
 		return -ENOMEM;
 	}
+
+	memset(path, 0, ALUA_METADATA_PATH_LEN);
 
 	len = snprintf(md_buf, ALUA_MD_BUF_LEN,
 			"tg_pt_gp_id=%hu\n"
@@ -935,23 +933,20 @@ static int core_alua_update_tpg_primary_metadata(
 			tg_pt_gp->tg_pt_gp_alua_access_state,
 			tg_pt_gp->tg_pt_gp_alua_access_status);
 
-	rc = -ENOMEM;
-	path = kasprintf(GFP_KERNEL, "%s/alua/tpgs_%s/%s", db_root,
-			&wwn->unit_serial[0],
-			config_item_name(&tg_pt_gp->tg_pt_gp_group.cg_item));
-	if (path) {
-		rc = core_alua_write_tpg_metadata(path, md_buf, len);
-		kfree(path);
-	}
+	snprintf(path, ALUA_METADATA_PATH_LEN,
+		"/var/target/alua/tpgs_%s/%s", &wwn->unit_serial[0],
+		config_item_name(&tg_pt_gp->tg_pt_gp_group.cg_item));
+
+	rc = core_alua_write_tpg_metadata(path, md_buf, len);
 	kfree(md_buf);
 	return rc;
 }
 
-static void core_alua_queue_state_change_ua(struct t10_alua_tg_pt_gp *tg_pt_gp)
+static void core_alua_do_transition_ua(struct t10_alua_tg_pt_gp *tg_pt_gp)
 {
 	struct se_dev_entry *se_deve;
-	struct se_lun *lun;
 	struct se_lun_acl *lacl;
+	struct se_lun *lun;
 
 	spin_lock(&tg_pt_gp->tg_pt_gp_lock);
 	list_for_each_entry(lun, &tg_pt_gp->tg_pt_gp_lun_list,
@@ -1043,8 +1038,6 @@ static int core_alua_do_transition_tg_pt(
 				ALUA_STATUS_ALTERED_BY_EXPLICIT_STPG :
 				ALUA_STATUS_ALTERED_BY_IMPLICIT_ALUA;
 
-	core_alua_queue_state_change_ua(tg_pt_gp);
-
 	if (new_state == ALUA_ACCESS_STATE_TRANSITION) {
 		mutex_unlock(&tg_pt_gp->tg_pt_gp_transition_mutex);
 		return 0;
@@ -1060,6 +1053,7 @@ static int core_alua_do_transition_tg_pt(
 	 * Set the current primary ALUA access state to the requested new state
 	 */
 	tg_pt_gp->tg_pt_gp_alua_access_state = new_state;
+	core_alua_do_transition_ua(tg_pt_gp);
 
 	/*
 	 * Update the ALUA metadata buf that has been allocated in
@@ -1083,8 +1077,6 @@ static int core_alua_do_transition_tg_pt(
 		tg_pt_gp->tg_pt_gp_id,
 		core_alua_dump_state(prev_state),
 		core_alua_dump_state(new_state));
-
-	core_alua_queue_state_change_ua(tg_pt_gp);
 
 	mutex_unlock(&tg_pt_gp->tg_pt_gp_transition_mutex);
 	return 0;
@@ -1210,7 +1202,7 @@ static int core_alua_update_tpg_secondary_metadata(struct se_lun *lun)
 {
 	struct se_portal_group *se_tpg = lun->lun_tpg;
 	unsigned char *md_buf;
-	char *path;
+	char path[ALUA_METADATA_PATH_LEN], wwn[ALUA_SECONDARY_METADATA_WWN_LEN];
 	int len, rc;
 
 	mutex_lock(&lun->lun_tg_pt_md_mutex);
@@ -1222,32 +1214,28 @@ static int core_alua_update_tpg_secondary_metadata(struct se_lun *lun)
 		goto out_unlock;
 	}
 
+	memset(path, 0, ALUA_METADATA_PATH_LEN);
+	memset(wwn, 0, ALUA_SECONDARY_METADATA_WWN_LEN);
+
+	len = snprintf(wwn, ALUA_SECONDARY_METADATA_WWN_LEN, "%s",
+			se_tpg->se_tpg_tfo->tpg_get_wwn(se_tpg));
+
+	if (se_tpg->se_tpg_tfo->tpg_get_tag != NULL)
+		snprintf(wwn+len, ALUA_SECONDARY_METADATA_WWN_LEN-len, "+%hu",
+				se_tpg->se_tpg_tfo->tpg_get_tag(se_tpg));
+
 	len = snprintf(md_buf, ALUA_MD_BUF_LEN, "alua_tg_pt_offline=%d\n"
 			"alua_tg_pt_status=0x%02x\n",
 			atomic_read(&lun->lun_tg_pt_secondary_offline),
 			lun->lun_tg_pt_secondary_stat);
 
-	if (se_tpg->se_tpg_tfo->tpg_get_tag != NULL) {
-		path = kasprintf(GFP_KERNEL, "%s/alua/%s/%s+%hu/lun_%llu",
-				db_root, se_tpg->se_tpg_tfo->get_fabric_name(),
-				se_tpg->se_tpg_tfo->tpg_get_wwn(se_tpg),
-				se_tpg->se_tpg_tfo->tpg_get_tag(se_tpg),
-				lun->unpacked_lun);
-	} else {
-		path = kasprintf(GFP_KERNEL, "%s/alua/%s/%s/lun_%llu",
-				db_root, se_tpg->se_tpg_tfo->get_fabric_name(),
-				se_tpg->se_tpg_tfo->tpg_get_wwn(se_tpg),
-				lun->unpacked_lun);
-	}
-	if (!path) {
-		rc = -ENOMEM;
-		goto out_free;
-	}
+	snprintf(path, ALUA_METADATA_PATH_LEN, "/var/target/alua/%s/%s/lun_%llu",
+			se_tpg->se_tpg_tfo->fabric_name, wwn,
+			lun->unpacked_lun);
 
 	rc = core_alua_write_tpg_metadata(path, md_buf, len);
-	kfree(path);
-out_free:
 	kfree(md_buf);
+
 out_unlock:
 	mutex_unlock(&lun->lun_tg_pt_md_mutex);
 	return rc;

@@ -1,9 +1,12 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * Performance event support for s390x - CPU-measurement Counter Facility
  *
- *  Copyright IBM Corp. 2012, 2017
- *  Author(s): Hendrik Brueckner <brueckner@linux.vnet.ibm.com>
+ *  Copyright IBM Corp. 2012, 2019
+ *  Author(s): Hendrik Brueckner <brueckner@linux.ibm.com>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License (version 2 only)
+ * as published by the Free Software Foundation.
  */
 #define KMSG_COMPONENT	"cpum_cf"
 #define pr_fmt(fmt)	KMSG_COMPONENT ": " fmt
@@ -88,7 +91,7 @@ static enum cpumf_ctr_set get_counter_set(u64 event)
 		set = CPUMF_CTR_SET_USER;
 	else if (event < 128)
 		set = CPUMF_CTR_SET_CRYPTO;
-	else if (event < 256)
+	else if (event < 288)
 		set = CPUMF_CTR_SET_EXT;
 	else if (event >= 448 && event < 496)
 		set = CPUMF_CTR_SET_MT_DIAG;
@@ -112,12 +115,19 @@ static int validate_ctr_version(const struct hw_perf_event *hwc)
 			err = -EOPNOTSUPP;
 		break;
 	case CPUMF_CTR_SET_CRYPTO:
+		if ((cpuhw->info.csvn >= 1 && cpuhw->info.csvn <= 5 &&
+		     hwc->config > 79) ||
+		    (cpuhw->info.csvn >= 6 && hwc->config > 83))
+			err = -EOPNOTSUPP;
+		break;
 	case CPUMF_CTR_SET_EXT:
 		if (cpuhw->info.csvn < 1)
 			err = -EOPNOTSUPP;
 		if ((cpuhw->info.csvn == 1 && hwc->config > 159) ||
 		    (cpuhw->info.csvn == 2 && hwc->config > 175) ||
-		    (cpuhw->info.csvn  > 2 && hwc->config > 255))
+		    (cpuhw->info.csvn >= 3 && cpuhw->info.csvn <= 5
+		     && hwc->config > 255) ||
+		    (cpuhw->info.csvn >= 6 && hwc->config > 287))
 			err = -EOPNOTSUPP;
 		break;
 	case CPUMF_CTR_SET_MT_DIAG:
@@ -175,7 +185,7 @@ static int validate_ctr_auth(const struct hw_perf_event *hwc)
  */
 static void cpumf_pmu_enable(struct pmu *pmu)
 {
-	struct cpu_hw_events *cpuhw = this_cpu_ptr(&cpu_hw_events);
+	struct cpu_hw_events *cpuhw = &__get_cpu_var(cpu_hw_events);
 	int err;
 
 	if (cpuhw->flags & PMU_F_ENABLED)
@@ -198,7 +208,7 @@ static void cpumf_pmu_enable(struct pmu *pmu)
  */
 static void cpumf_pmu_disable(struct pmu *pmu)
 {
-	struct cpu_hw_events *cpuhw = this_cpu_ptr(&cpu_hw_events);
+	struct cpu_hw_events *cpuhw = &__get_cpu_var(cpu_hw_events);
 	int err;
 	u64 inactive;
 
@@ -232,7 +242,7 @@ static void cpumf_measurement_alert(struct ext_code ext_code,
 		return;
 
 	inc_irq_stat(IRQEXT_CMC);
-	cpuhw = this_cpu_ptr(&cpu_hw_events);
+	cpuhw = &__get_cpu_var(cpu_hw_events);
 
 	/* Measurement alerts are shared and might happen when the PMU
 	 * is not reserved.  Ignore these alerts in this case. */
@@ -257,7 +267,7 @@ static void cpumf_measurement_alert(struct ext_code ext_code,
 #define PMC_RELEASE   1
 static void setup_pmc_cpu(void *flags)
 {
-	struct cpu_hw_events *cpuhw = this_cpu_ptr(&cpu_hw_events);
+	struct cpu_hw_events *cpuhw = &__get_cpu_var(cpu_hw_events);
 
 	switch (*((int *) flags)) {
 	case PMC_INIT:
@@ -424,6 +434,12 @@ static int cpumf_pmu_event_init(struct perf_event *event)
 	case PERF_TYPE_HARDWARE:
 	case PERF_TYPE_HW_CACHE:
 	case PERF_TYPE_RAW:
+		/* The CPU measurement counter facility does not have overflow
+		 * interrupts to do sampling.  Sampling must be provided by
+		 * external means, for example, by timers.
+		 */
+		if (is_sampling_event(event))
+			return -ENOENT;
 		err = __hw_perf_event_init(event);
 		break;
 	default:
@@ -459,7 +475,7 @@ static int hw_perf_event_reset(struct perf_event *event)
 	return err;
 }
 
-static void hw_perf_event_update(struct perf_event *event)
+static int hw_perf_event_update(struct perf_event *event)
 {
 	u64 prev, new, delta;
 	int err;
@@ -468,12 +484,14 @@ static void hw_perf_event_update(struct perf_event *event)
 		prev = local64_read(&event->hw.prev_count);
 		err = ecctr(event->hw.config, &new);
 		if (err)
-			return;
+			goto out;
 	} while (local64_cmpxchg(&event->hw.prev_count, prev, new) != prev);
 
 	delta = (prev <= new) ? new - prev
 			      : (-1ULL - prev) + new + 1;	 /* overflow */
 	local64_add(delta, &event->count);
+out:
+	return err;
 }
 
 static void cpumf_pmu_read(struct perf_event *event)
@@ -486,7 +504,7 @@ static void cpumf_pmu_read(struct perf_event *event)
 
 static void cpumf_pmu_start(struct perf_event *event, int flags)
 {
-	struct cpu_hw_events *cpuhw = this_cpu_ptr(&cpu_hw_events);
+	struct cpu_hw_events *cpuhw = &__get_cpu_var(cpu_hw_events);
 	struct hw_perf_event *hwc = &event->hw;
 
 	if (WARN_ON_ONCE(!(hwc->state & PERF_HES_STOPPED)))
@@ -517,7 +535,7 @@ static void cpumf_pmu_start(struct perf_event *event, int flags)
 
 static void cpumf_pmu_stop(struct perf_event *event, int flags)
 {
-	struct cpu_hw_events *cpuhw = this_cpu_ptr(&cpu_hw_events);
+	struct cpu_hw_events *cpuhw = &__get_cpu_var(cpu_hw_events);
 	struct hw_perf_event *hwc = &event->hw;
 
 	if (!(hwc->state & PERF_HES_STOPPED)) {
@@ -538,7 +556,7 @@ static void cpumf_pmu_stop(struct perf_event *event, int flags)
 
 static int cpumf_pmu_add(struct perf_event *event, int flags)
 {
-	struct cpu_hw_events *cpuhw = this_cpu_ptr(&cpu_hw_events);
+	struct cpu_hw_events *cpuhw = &__get_cpu_var(cpu_hw_events);
 
 	/* Check authorization for the counter set to which this
 	 * counter belongs.
@@ -562,7 +580,7 @@ static int cpumf_pmu_add(struct perf_event *event, int flags)
 
 static void cpumf_pmu_del(struct perf_event *event, int flags)
 {
-	struct cpu_hw_events *cpuhw = this_cpu_ptr(&cpu_hw_events);
+	struct cpu_hw_events *cpuhw = &__get_cpu_var(cpu_hw_events);
 
 	cpumf_pmu_stop(event, PERF_EF_UPDATE);
 
@@ -590,7 +608,7 @@ static void cpumf_pmu_del(struct perf_event *event, int flags)
  */
 static void cpumf_pmu_start_txn(struct pmu *pmu, unsigned int txn_flags)
 {
-	struct cpu_hw_events *cpuhw = this_cpu_ptr(&cpu_hw_events);
+	struct cpu_hw_events *cpuhw = &__get_cpu_var(cpu_hw_events);
 
 	WARN_ON_ONCE(cpuhw->txn_flags);		/* txn already in flight */
 
@@ -610,7 +628,7 @@ static void cpumf_pmu_start_txn(struct pmu *pmu, unsigned int txn_flags)
 static void cpumf_pmu_cancel_txn(struct pmu *pmu)
 {
 	unsigned int txn_flags;
-	struct cpu_hw_events *cpuhw = this_cpu_ptr(&cpu_hw_events);
+	struct cpu_hw_events *cpuhw = &__get_cpu_var(cpu_hw_events);
 
 	WARN_ON_ONCE(!cpuhw->txn_flags);	/* no txn in flight */
 
@@ -631,7 +649,7 @@ static void cpumf_pmu_cancel_txn(struct pmu *pmu)
  */
 static int cpumf_pmu_commit_txn(struct pmu *pmu)
 {
-	struct cpu_hw_events *cpuhw = this_cpu_ptr(&cpu_hw_events);
+	struct cpu_hw_events *cpuhw = &__get_cpu_var(cpu_hw_events);
 	u64 state;
 
 	WARN_ON_ONCE(!cpuhw->txn_flags);	/* no txn in flight */
@@ -669,22 +687,27 @@ static struct pmu cpumf_pmu = {
 	.cancel_txn   = cpumf_pmu_cancel_txn,
 };
 
-static int cpumf_pmf_setup(unsigned int cpu, int flags)
+static int cpumf_pmu_notifier(struct notifier_block *self, unsigned long action,
+			      void *hcpu)
 {
-	local_irq_disable();
-	setup_pmc_cpu(&flags);
-	local_irq_enable();
-	return 0;
-}
+	unsigned int cpu = (long) hcpu;
+	int flags;
 
-static int s390_pmu_online_cpu(unsigned int cpu)
-{
-	return cpumf_pmf_setup(cpu, PMC_INIT);
-}
+	switch (action & ~CPU_TASKS_FROZEN) {
+	case CPU_ONLINE:
+	case CPU_DOWN_FAILED:
+		flags = PMC_INIT;
+		smp_call_function_single(cpu, setup_pmc_cpu, &flags, 1);
+		break;
+	case CPU_DOWN_PREPARE:
+		flags = PMC_RELEASE;
+		smp_call_function_single(cpu, setup_pmc_cpu, &flags, 1);
+		break;
+	default:
+		break;
+	}
 
-static int s390_pmu_offline_cpu(unsigned int cpu)
-{
-	return cpumf_pmf_setup(cpu, PMC_RELEASE);
+	return NOTIFY_OK;
 }
 
 static int __init cpumf_pmu_init(void)
@@ -704,7 +727,7 @@ static int __init cpumf_pmu_init(void)
 	if (rc) {
 		pr_err("Registering for CPU-measurement alerts "
 		       "failed with rc=%i\n", rc);
-		return rc;
+		goto out;
 	}
 
 	cpumf_pmu.attr_groups = cpumf_cf_event_group();
@@ -713,10 +736,10 @@ static int __init cpumf_pmu_init(void)
 		pr_err("Registering the cpum_cf PMU failed with rc=%i\n", rc);
 		unregister_external_irq(EXT_IRQ_MEASURE_ALERT,
 					cpumf_measurement_alert);
-		return rc;
+		goto out;
 	}
-	return cpuhp_setup_state(CPUHP_AP_PERF_S390_CF_ONLINE,
-				 "perf/s390/cf:online",
-				 s390_pmu_online_cpu, s390_pmu_offline_cpu);
+	perf_cpu_notifier(cpumf_pmu_notifier);
+out:
+	return rc;
 }
 early_initcall(cpumf_pmu_init);

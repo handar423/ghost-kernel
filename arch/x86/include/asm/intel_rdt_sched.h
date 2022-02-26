@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_X86_INTEL_RDT_SCHED_H
 #define _ASM_X86_INTEL_RDT_SCHED_H
 
@@ -32,10 +31,9 @@ struct intel_pqr_state {
 };
 
 DECLARE_PER_CPU(struct intel_pqr_state, pqr_state);
-
-DECLARE_STATIC_KEY_FALSE(rdt_enable_key);
-DECLARE_STATIC_KEY_FALSE(rdt_alloc_enable_key);
-DECLARE_STATIC_KEY_FALSE(rdt_mon_enable_key);
+extern struct static_key rdt_enable_key;
+extern struct static_key rdt_alloc_enable_key;
+extern struct static_key rdt_mon_enable_key;
 
 /*
  * __intel_rdt_sched_in() - Writes the task's CLOSid/RMID to IA32_PQR_MSR
@@ -61,12 +59,12 @@ static void __intel_rdt_sched_in(void)
 	 * If this task has a closid/rmid assigned, use it.
 	 * Else use the closid/rmid assigned to this cpu.
 	 */
-	if (static_branch_likely(&rdt_alloc_enable_key)) {
+	if (static_key_false(&rdt_alloc_enable_key)) {
 		if (current->closid)
 			closid = current->closid;
 	}
 
-	if (static_branch_likely(&rdt_mon_enable_key)) {
+	if (static_key_false(&rdt_mon_enable_key)) {
 		if (current->rmid)
 			rmid = current->rmid;
 	}
@@ -80,7 +78,7 @@ static void __intel_rdt_sched_in(void)
 
 static inline void intel_rdt_sched_in(void)
 {
-	if (static_branch_likely(&rdt_enable_key))
+	if (static_key_false(&rdt_enable_key))
 		__intel_rdt_sched_in();
 }
 

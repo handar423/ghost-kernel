@@ -557,10 +557,9 @@ static void speedtch_check_status(struct work_struct *work)
 	}
 }
 
-static void speedtch_status_poll(struct timer_list *t)
+static void speedtch_status_poll(unsigned long data)
 {
-	struct speedtch_instance_data *instance = from_timer(instance, t,
-						             status_check_timer);
+	struct speedtch_instance_data *instance = (void *)data;
 
 	schedule_work(&instance->status_check_work);
 
@@ -571,10 +570,9 @@ static void speedtch_status_poll(struct timer_list *t)
 		atm_warn(instance->usbatm, "Too many failures - disabling line status polling\n");
 }
 
-static void speedtch_resubmit_int(struct timer_list *t)
+static void speedtch_resubmit_int(unsigned long data)
 {
-	struct speedtch_instance_data *instance = from_timer(instance, t,
-							     resubmit_timer);
+	struct speedtch_instance_data *instance = (void *)data;
 	struct urb *int_urb = instance->int_urb;
 	int ret;
 
@@ -862,11 +860,13 @@ static int speedtch_bind(struct usbatm_data *usbatm,
 	usbatm->flags |= (use_isoc ? UDSL_USE_ISOC : 0);
 
 	INIT_WORK(&instance->status_check_work, speedtch_check_status);
-	timer_setup(&instance->status_check_timer, speedtch_status_poll, 0);
+	setup_timer(&instance->status_check_timer, speedtch_status_poll,
+		    (unsigned long)instance);
 	instance->last_status = 0xff;
 	instance->poll_delay = MIN_POLL_DELAY;
 
-	timer_setup(&instance->resubmit_timer, speedtch_resubmit_int, 0);
+	setup_timer(&instance->resubmit_timer, speedtch_resubmit_int,
+		    (unsigned long)instance);
 
 	instance->int_urb = usb_alloc_urb(0, GFP_KERNEL);
 

@@ -7,8 +7,8 @@
  * Licensed under GPLv2 or later.
  */
 /dts-v1/;
-#include "at91sam9x25.dtsi"
-#include "at91sam9x5ek.dtsi"
+/include/ "at91sam9x25.dtsi"
+/include/ "at91sam9x5ek.dtsi"
 
 / {
 	model = "Atmel AT91SAM9X25-EK";
@@ -16,10 +16,6 @@
 
 	ahb {
 		apb {
-			can1: can@f8004000 {
-				status = "okay";
-			};
-
 			macb0: ethernet@f802c000 {
 				phy-mode = "rmii";
 				status = "okay";
@@ -27,12 +23,6 @@
 
 			macb1: ethernet@f8030000 {
 				phy-mode = "rmii";
-				status = "okay";
-			};
-
-			pwm0: pwm@f8034000 {
-				pinctrl-names = "default";
-				pinctrl-0 = <&pinctrl_pwm0_pwm0_1>;
 				status = "okay";
 			};
 		};

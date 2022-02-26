@@ -208,7 +208,7 @@ int main(int argc, const char *argv[])
 	}
 
 	get_cpu_info(&cpupower_cpu_info);
-	run_as_root = !geteuid();
+	run_as_root = !getuid();
 	if (run_as_root) {
 		ret = uname(&uts);
 		sprintf(pathname, "/dev/cpu/%d/msr", base_cpu);

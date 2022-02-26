@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 /*
  *  Machine specific APM BIOS functions for generic.
  *  Split out from apm.c by Osamu Tomita <tomita@cinet.co.jp>
@@ -6,6 +5,8 @@
 
 #ifndef _ASM_X86_MACH_DEFAULT_APM_H
 #define _ASM_X86_MACH_DEFAULT_APM_H
+
+#include <asm/spec_ctrl.h>
 
 #ifdef APM_ZERO_SEGS
 #	define APM_DO_ZERO_SEGS \
@@ -28,6 +29,9 @@ static inline void apm_bios_call_asm(u32 func, u32 ebx_in, u32 ecx_in,
 					u32 *eax, u32 *ebx, u32 *ecx,
 					u32 *edx, u32 *esi)
 {
+	bool ibrs_on;
+
+	ibrs_on = unprotected_firmware_begin();
 	/*
 	 * N.B. We do NOT need a cld after the BIOS call
 	 * because we always save and restore the flags.
@@ -44,14 +48,16 @@ static inline void apm_bios_call_asm(u32 func, u32 ebx_in, u32 ecx_in,
 		  "=S" (*esi)
 		: "a" (func), "b" (ebx_in), "c" (ecx_in)
 		: "memory", "cc");
+	unprotected_firmware_end(ibrs_on);
 }
 
-static inline bool apm_bios_call_simple_asm(u32 func, u32 ebx_in,
-					    u32 ecx_in, u32 *eax)
+static inline u8 apm_bios_call_simple_asm(u32 func, u32 ebx_in,
+						u32 ecx_in, u32 *eax)
 {
 	int	cx, dx, si;
-	bool	error;
+	u8	error;
 
+	ibrs_on = unprotected_firmware_begin();
 	/*
 	 * N.B. We do NOT need a cld after the BIOS call
 	 * because we always save and restore the flags.
@@ -68,6 +74,7 @@ static inline bool apm_bios_call_simple_asm(u32 func, u32 ebx_in,
 		  "=S" (si)
 		: "a" (func), "b" (ebx_in), "c" (ecx_in)
 		: "memory", "cc");
+	unprotected_firmware_end(ibrs_on);
 	return error;
 }
 

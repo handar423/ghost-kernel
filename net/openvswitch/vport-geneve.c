@@ -86,7 +86,7 @@ static struct vport *geneve_tnl_create(const struct vport_parms *parms)
 	geneve_port->dst_port = dst_port;
 
 	rtnl_lock();
-	dev = geneve_dev_create_fb(net, parms->name, NET_NAME_USER, dst_port);
+	dev = geneve_dev_create_fb(net, parms->name, dst_port);
 	if (IS_ERR(dev)) {
 		rtnl_unlock();
 		ovs_vport_free(vport);
@@ -139,6 +139,6 @@ static void __exit ovs_geneve_tnl_exit(void)
 module_init(ovs_geneve_tnl_init);
 module_exit(ovs_geneve_tnl_exit);
 
-MODULE_DESCRIPTION("OVS: Geneve switching port");
+MODULE_DESCRIPTION("OVS: Geneve swiching port");
 MODULE_LICENSE("GPL");
 MODULE_ALIAS("vport-type-5");

@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  *  S390 version
  *    Copyright IBM Corp. 1999
@@ -27,11 +26,9 @@
 #include <linux/poison.h>
 #include <linux/initrd.h>
 #include <linux/export.h>
-#include <linux/cma.h>
 #include <linux/gfp.h>
-#include <linux/memblock.h>
 #include <asm/processor.h>
-#include <linux/uaccess.h>
+#include <asm/uaccess.h>
 #include <asm/pgtable.h>
 #include <asm/pgalloc.h>
 #include <asm/dma.h>
@@ -41,7 +38,10 @@
 #include <asm/sections.h>
 #include <asm/ctl_reg.h>
 #include <asm/sclp.h>
-#include <asm/set_memory.h>
+#include <linux/dma-mapping.h>
+#include <asm/dma-mapping.h>
+#include <linux/swiotlb.h>
+#include <asm/uv.h>
 
 pgd_t swapper_pg_dir[PTRS_PER_PGD] __section(.bss..swapper_pg_dir);
 
@@ -49,15 +49,78 @@ unsigned long empty_zero_page, zero_page_mask;
 EXPORT_SYMBOL(empty_zero_page);
 EXPORT_SYMBOL(zero_page_mask);
 
+static void *s390_dma_noop_alloc(struct device *dev, size_t size,
+			    dma_addr_t *dma_handle, gfp_t gfp,
+			    struct dma_attrs *attrs);
+
+struct dma_map_ops s390_dma_noop_ops = {
+	.alloc			= s390_dma_noop_alloc,
+	.free			= dma_noop_free,
+	.map_page		= dma_noop_map_page,
+	.map_sg			= dma_noop_map_sg,
+	.mapping_error		= dma_noop_mapping_error,
+	.dma_supported		= dma_noop_supported,
+};
+
+
+struct dma_map_ops *s390_dma_ops =  &s390_dma_noop_ops;
+EXPORT_SYMBOL(s390_dma_ops);
+
+static void *s390_dma_noop_alloc(struct device *dev, size_t size,
+			    dma_addr_t *dma_handle, gfp_t gfp,
+			    struct dma_attrs *attrs)
+{
+	void *ret;
+
+	/* dma_noop_ops.alloc() disregards dev->.*dma_mask which is a problem
+	 * for us. Here comes the workaraund.
+	 */
+	if (dev->coherent_dma_mask != DMA_BIT_MASK(64)
+			&& dev->coherent_dma_mask <= DMA_BIT_MASK(31))
+		gfp |= GFP_DMA;
+
+	ret = dma_noop_alloc(dev, size, dma_handle, gfp, attrs);
+	if (((unsigned long) ret) + size -1 < dev->coherent_dma_mask)
+		return ret;
+	/* Failed. Clean up the mess. */
+	dma_noop_free(dev, size, ret, *dma_handle, attrs);
+	*dma_handle = DMA_ERROR_CODE;
+	return NULL;
+}
+
 static void __init setup_zero_pages(void)
 {
+	struct cpuid cpu_id;
 	unsigned int order;
 	struct page *page;
 	int i;
 
-	/* Latest machines require a mapping granularity of 512KB */
-	order = 7;
-
+	get_cpu_id(&cpu_id);
+	switch (cpu_id.machine) {
+	case 0x9672:	/* g5 */
+	case 0x2064:	/* z900 */
+	case 0x2066:	/* z900 */
+	case 0x2084:	/* z990 */
+	case 0x2086:	/* z990 */
+	case 0x2094:	/* z9-109 */
+	case 0x2096:	/* z9-109 */
+		order = 0;
+		break;
+	case 0x2097:	/* z10 */
+	case 0x2098:	/* z10 */
+	case 0x2817:	/* z196 */
+	case 0x2818:	/* z196 */
+		order = 2;
+		break;
+	case 0x2827:	/* zEC12 */
+	case 0x2828:	/* zEC12 */
+		order = 5;
+		break;
+	case 0x2964:	/* z13 */
+	default:
+		order = 7;
+		break;
+	}
 	/* Limit number of empty zero pages for small memory sizes */
 	while (order > 2 && (totalram_pages >> 10) < (1UL << order))
 		order--;
@@ -83,30 +146,33 @@ void __init paging_init(void)
 {
 	unsigned long max_zone_pfns[MAX_NR_ZONES];
 	unsigned long pgd_type, asce_bits;
-	psw_t psw;
 
 	init_mm.pgd = swapper_pg_dir;
-	if (VMALLOC_END > _REGION2_SIZE) {
+#ifdef CONFIG_64BIT
+	if (VMALLOC_END > (1UL << 42)) {
 		asce_bits = _ASCE_TYPE_REGION2 | _ASCE_TABLE_LENGTH;
 		pgd_type = _REGION2_ENTRY_EMPTY;
 	} else {
 		asce_bits = _ASCE_TYPE_REGION3 | _ASCE_TABLE_LENGTH;
 		pgd_type = _REGION3_ENTRY_EMPTY;
 	}
+#else
+	asce_bits = _ASCE_TABLE_LENGTH;
+	pgd_type = _SEGMENT_ENTRY_EMPTY;
+#endif
 	init_mm.context.asce = (__pa(init_mm.pgd) & PAGE_MASK) | asce_bits;
 	S390_lowcore.kernel_asce = init_mm.context.asce;
-	S390_lowcore.user_asce = S390_lowcore.kernel_asce;
-	crst_table_init((unsigned long *) init_mm.pgd, pgd_type);
+	clear_table((unsigned long *) init_mm.pgd, pgd_type,
+		    sizeof(unsigned long)*2048);
 	vmem_map_init();
 
         /* enable virtual mapping in kernel mode */
 	__ctl_load(S390_lowcore.kernel_asce, 1, 1);
 	__ctl_load(S390_lowcore.kernel_asce, 7, 7);
 	__ctl_load(S390_lowcore.kernel_asce, 13, 13);
-	psw.mask = __extract_psw();
-	psw_bits(psw).dat = 1;
-	psw_bits(psw).as = PSW_BITS_AS_HOME;
-	__load_psw_mask(psw.mask);
+	arch_local_irq_restore(4UL << (BITS_PER_LONG - 8));
+
+	atomic_set(&init_mm.context.attach_count, 1);
 
 	sparse_memory_present_with_active_regions(MAX_NUMNODES);
 	sparse_init();
@@ -116,49 +182,207 @@ void __init paging_init(void)
 	free_area_init_nodes(max_zone_pfns);
 }
 
-void mark_rodata_ro(void)
-{
-	unsigned long size = __end_ro_after_init - __start_ro_after_init;
+#ifdef CONFIG_SWIOTLB
 
-	set_memory_ro((unsigned long)__start_ro_after_init, size >> PAGE_SHIFT);
-	pr_info("Write protected read-only-after-init data: %luk\n", size >> 10);
+int set_memory_encrypted(unsigned long addr, int numpages)
+{
+	int i;
+
+	/* make specified pages unshared, (swiotlb, dma_free) */
+	for (i = 0; i < numpages; ++i) {
+		uv_remove_shared(addr);
+		addr += PAGE_SIZE;
+	}
+	return 0;
 }
+
+int set_memory_decrypted(unsigned long addr, int numpages)
+{
+	int i;
+	/* make specified pages shared (swiotlb, dma_alloca) */
+	for (i = 0; i < numpages; ++i) {
+		uv_set_shared(addr);
+		addr += PAGE_SIZE;
+	}
+	return 0;
+}
+
+/* are we a protected virtualization guest? */
+bool sev_active(void)
+{
+	return is_prot_virt_guest();
+}
+
+static void *s390_pv_alloc_coherent(struct device *dev, size_t size,
+					 dma_addr_t *dma_handle, gfp_t gfp,
+					 struct dma_attrs *attrs)
+{
+	void *ret;
+
+	if (dev->coherent_dma_mask != DMA_BIT_MASK(64))
+		gfp |= GFP_DMA;
+	ret = swiotlb_alloc_coherent(dev, size, dma_handle, gfp);
+
+	/* share */
+	if (ret)
+		set_memory_decrypted((unsigned long)ret, 1 << get_order(size));
+
+	return ret;
+}
+
+static void s390_pv_free_coherent(struct device *dev, size_t size,
+				       void *vaddr, dma_addr_t dma_addr,
+				       struct dma_attrs *attrs)
+{
+	if (!vaddr)
+		return;
+
+	/* unshare */
+	set_memory_encrypted((unsigned long)vaddr, 1 << get_order(size));
+
+	swiotlb_free_coherent(dev, size, vaddr, dma_addr);
+}
+
+static struct dma_map_ops s390_pv_dma_ops = {
+	.alloc = s390_pv_alloc_coherent,
+	.free = s390_pv_free_coherent,
+	.map_page = swiotlb_map_page,
+	.unmap_page = swiotlb_unmap_page,
+	.map_sg = swiotlb_map_sg_attrs,
+	.unmap_sg = swiotlb_unmap_sg_attrs,
+	.sync_single_for_cpu = swiotlb_sync_single_for_cpu,
+	.sync_single_for_device = swiotlb_sync_single_for_device,
+	.sync_sg_for_cpu = swiotlb_sync_sg_for_cpu,
+	.sync_sg_for_device = swiotlb_sync_sg_for_device,
+	.dma_supported = swiotlb_dma_supported,
+	.mapping_error = swiotlb_dma_mapping_error,
+	.max_mapping_size = swiotlb_max_mapping_size,
+};
+
+void swiotlb_set_mem_attributes(void *vaddr, unsigned long size)
+{
+	WARN(PAGE_ALIGN(size) != size,
+	     "size is not page-aligned (%#lx)\n", size);
+
+	/* Make the SWIOTLB buffer area decrypted */
+	set_memory_decrypted((unsigned long)vaddr, size >> PAGE_SHIFT);
+}
+
+/* protected virtualization */
+static void pv_init(void)
+{
+	if (!is_prot_virt_guest())
+		return;
+
+	/* make sure bounce buffers are shared */
+	swiotlb_init(1);
+	swiotlb_update_mem_attributes();
+	swiotlb_force = 1;
+	swiotlb_panic_on_full = 0;
+	/* use swiotlb_dma_ops */
+	s390_dma_ops = &s390_pv_dma_ops;
+}
+
+#else
+
+static void pv_init(void) {}
+
+#endif /* CONFIG_SWIOTLB */
 
 void __init mem_init(void)
 {
-	cpumask_set_cpu(0, &init_mm.context.cpu_attach_mask);
-	cpumask_set_cpu(0, mm_cpumask(&init_mm));
+	unsigned long codesize, reservedpages, datasize, initsize;
 
-	set_max_mapnr(max_low_pfn);
+        max_mapnr = num_physpages = max_low_pfn;
         high_memory = (void *) __va(max_low_pfn * PAGE_SIZE);
+
+	pv_init();
 
 	/* Setup guest page hinting */
 	cmma_init();
 
 	/* this will put all low memory onto the freelists */
-	free_all_bootmem();
+	totalram_pages += free_all_bootmem();
 	setup_zero_pages();	/* Setup zeroed pages. */
 
-	cmma_init_nodat();
+	reservedpages = 0;
 
-	mem_init_print_info(NULL);
+	codesize =  (unsigned long) &_etext - (unsigned long) &_text;
+	datasize =  (unsigned long) &_edata - (unsigned long) &_etext;
+	initsize =  (unsigned long) &__init_end - (unsigned long) &__init_begin;
+        printk("Memory: %luk/%luk available (%ldk kernel code, %ldk reserved, %ldk data, %ldk init)\n",
+		nr_free_pages() << (PAGE_SHIFT-10),
+                max_mapnr << (PAGE_SHIFT-10),
+                codesize >> 10,
+                reservedpages << (PAGE_SHIFT-10),
+                datasize >>10,
+                initsize >> 10);
+	printk("Write protected kernel read-only data: %#lx - %#lx\n",
+	       (unsigned long)&_stext,
+	       PFN_ALIGN((unsigned long)&_eshared) - 1);
 }
 
 void free_initmem(void)
 {
-	__set_memory((unsigned long)_sinittext,
-		     (unsigned long)(_einittext - _sinittext) >> PAGE_SHIFT,
+	__set_memory((unsigned long) _sinittext,
+		     (_einittext - _sinittext) >> PAGE_SHIFT,
 		     SET_MEMORY_RW | SET_MEMORY_NX);
-	free_initmem_default(POISON_FREE_INITMEM);
+	free_initmem_default(0);
 }
 
 #ifdef CONFIG_BLK_DEV_INITRD
 void __init free_initrd_mem(unsigned long start, unsigned long end)
 {
-	free_reserved_area((void *)start, (void *)end, POISON_FREE_INITMEM,
-			   "initrd");
+	free_reserved_area(start, end, POISON_FREE_INITMEM, "initrd");
 }
 #endif
+
+#ifdef CONFIG_MEMORY_HOTPLUG
+int add_pages(int nid, unsigned long start, unsigned long size,
+	      struct vmem_altmap *altmap, bool for_device)
+{
+	return -EINVAL;
+}
+
+int arch_add_memory(int nid, u64 start, u64 size, struct vmem_altmap *altmap,
+		bool for_device)
+{
+	unsigned long zone_start_pfn, zone_end_pfn, nr_pages;
+	unsigned long start_pfn = PFN_DOWN(start);
+	unsigned long size_pages = PFN_DOWN(size);
+	struct zone *zone;
+	int rc;
+
+	rc = vmem_add_mapping(start, size);
+	if (rc)
+		return rc;
+	for_each_zone(zone) {
+		if (zone_idx(zone) != ZONE_MOVABLE) {
+			/* Add range within existing zone limits */
+			zone_start_pfn = zone->zone_start_pfn;
+			zone_end_pfn = zone->zone_start_pfn +
+				       zone->spanned_pages;
+		} else {
+			/* Add remaining range to ZONE_MOVABLE */
+			zone_start_pfn = start_pfn;
+			zone_end_pfn = start_pfn + size_pages;
+		}
+		if (start_pfn < zone_start_pfn || start_pfn >= zone_end_pfn)
+			continue;
+		nr_pages = (start_pfn + size_pages > zone_end_pfn) ?
+			   zone_end_pfn - start_pfn : size_pages;
+		rc = __add_pages(nid, zone, start_pfn, nr_pages, altmap);
+		if (rc)
+			break;
+		start_pfn += nr_pages;
+		size_pages -= nr_pages;
+		if (!size_pages)
+			break;
+	}
+	if (rc)
+		vmem_remove_mapping(start, size);
+	return rc;
+}
 
 unsigned long memory_block_size_bytes(void)
 {
@@ -166,80 +390,11 @@ unsigned long memory_block_size_bytes(void)
 	 * Make sure the memory block size is always greater
 	 * or equal than the memory increment size.
 	 */
-	return max_t(unsigned long, MIN_MEMORY_BLOCK_SIZE, sclp.rzm);
-}
-
-#ifdef CONFIG_MEMORY_HOTPLUG
-
-#ifdef CONFIG_CMA
-
-/* Prevent memory blocks which contain cma regions from going offline */
-
-struct s390_cma_mem_data {
-	unsigned long start;
-	unsigned long end;
-};
-
-static int s390_cma_check_range(struct cma *cma, void *data)
-{
-	struct s390_cma_mem_data *mem_data;
-	unsigned long start, end;
-
-	mem_data = data;
-	start = cma_get_base(cma);
-	end = start + cma_get_size(cma);
-	if (end < mem_data->start)
-		return 0;
-	if (start >= mem_data->end)
-		return 0;
-	return -EBUSY;
-}
-
-static int s390_cma_mem_notifier(struct notifier_block *nb,
-				 unsigned long action, void *data)
-{
-	struct s390_cma_mem_data mem_data;
-	struct memory_notify *arg;
-	int rc = 0;
-
-	arg = data;
-	mem_data.start = arg->start_pfn << PAGE_SHIFT;
-	mem_data.end = mem_data.start + (arg->nr_pages << PAGE_SHIFT);
-	if (action == MEM_GOING_OFFLINE)
-		rc = cma_for_each_area(s390_cma_check_range, &mem_data);
-	return notifier_from_errno(rc);
-}
-
-static struct notifier_block s390_cma_mem_nb = {
-	.notifier_call = s390_cma_mem_notifier,
-};
-
-static int __init s390_cma_mem_init(void)
-{
-	return register_memory_notifier(&s390_cma_mem_nb);
-}
-device_initcall(s390_cma_mem_init);
-
-#endif /* CONFIG_CMA */
-
-int arch_add_memory(int nid, u64 start, u64 size, bool want_memblock)
-{
-	unsigned long start_pfn = PFN_DOWN(start);
-	unsigned long size_pages = PFN_DOWN(size);
-	int rc;
-
-	rc = vmem_add_mapping(start, size);
-	if (rc)
-		return rc;
-
-	rc = __add_pages(nid, start_pfn, size_pages, want_memblock);
-	if (rc)
-		vmem_remove_mapping(start, size);
-	return rc;
+	return max_t(unsigned long, MIN_MEMORY_BLOCK_SIZE, sclp_get_rzm());
 }
 
 #ifdef CONFIG_MEMORY_HOTREMOVE
-int arch_remove_memory(u64 start, u64 size)
+int arch_remove_memory(u64 start, u64 size, struct vmem_altmap *altmap)
 {
 	/*
 	 * There is no hardware or firmware interface which could trigger a

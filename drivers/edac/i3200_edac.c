@@ -13,9 +13,11 @@
 #include <linux/pci_ids.h>
 #include <linux/edac.h>
 #include <linux/io.h>
-#include "edac_module.h"
+#include "edac_core.h"
 
-#include <linux/io-64-nonatomic-lo-hi.h>
+#include <asm-generic/io-64-nonatomic-lo-hi.h>
+
+#define I3200_REVISION        "1.1"
 
 #define EDAC_MOD_STR        "i3200_edac"
 
@@ -240,11 +242,11 @@ static void i3200_process_error_info(struct mem_ctl_info *mci,
 					     -1, -1,
 					     "i3000 UE", "");
 		} else if (log & I3200_ECCERRLOG_CE) {
-			edac_mc_handle_error(HW_EVENT_ERR_CORRECTED, mci, 1,
+			edac_mc_handle_error(HW_EVENT_ERR_UNCORRECTED, mci, 1,
 					     0, 0, eccerrlog_syndrome(log),
 					     eccerrlog_row(channel, log),
 					     -1, -1,
-					     "i3000 CE", "");
+					     "i3000 UE", "");
 		}
 	}
 }
@@ -258,7 +260,8 @@ static void i3200_check(struct mem_ctl_info *mci)
 	i3200_process_error_info(mci, &info);
 }
 
-static void __iomem *i3200_map_mchbar(struct pci_dev *pdev)
+
+void __iomem *i3200_map_mchbar(struct pci_dev *pdev)
 {
 	union {
 		u64 mchbar;
@@ -373,6 +376,7 @@ static int i3200_probe1(struct pci_dev *pdev, int dev_idx)
 	mci->edac_cap = EDAC_FLAG_SECDED;
 
 	mci->mod_name = EDAC_MOD_STR;
+	mci->mod_ver = I3200_REVISION;
 	mci->ctl_name = i3200_devs[dev_idx].ctl_name;
 	mci->dev_name = pci_name(pdev);
 	mci->edac_check = i3200_check;
@@ -399,7 +403,7 @@ static int i3200_probe1(struct pci_dev *pdev, int dev_idx)
 			if (nr_pages == 0)
 				continue;
 
-			edac_dbg(0, "csrow %d, channel %d%s, size = %ld Mb\n", i, j,
+			edac_dbg(0, "csrow %d, channel %d%s, size = %ld MiB\n", i, j,
 				 stacked ? " (stacked)" : "", PAGES_TO_MiB(nr_pages));
 
 			dimm->nr_pages = nr_pages;
@@ -461,8 +465,6 @@ static void i3200_remove_one(struct pci_dev *pdev)
 	iounmap(priv->window);
 
 	edac_mc_free(mci);
-
-	pci_disable_device(pdev);
 }
 
 static const struct pci_device_id i3200_pci_tbl[] = {
@@ -520,7 +522,8 @@ fail1:
 	pci_unregister_driver(&i3200_driver);
 
 fail0:
-	pci_dev_put(mci_pdev);
+	if (mci_pdev)
+		pci_dev_put(mci_pdev);
 
 	return pci_rc;
 }

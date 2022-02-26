@@ -146,9 +146,9 @@ static irqreturn_t w90p910_ts_interrupt(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
-static void w90p910_check_pen_up(struct timer_list *t)
+static void w90p910_check_pen_up(unsigned long data)
 {
-	struct w90p910_ts *w90p910_ts = from_timer(w90p910_ts, t, timer);
+	struct w90p910_ts *w90p910_ts = (struct w90p910_ts *) data;
 	unsigned long flags;
 
 	spin_lock_irqsave(&w90p910_ts->lock, flags);
@@ -232,7 +232,8 @@ static int w90x900ts_probe(struct platform_device *pdev)
 	w90p910_ts->input = input_dev;
 	w90p910_ts->state = TS_IDLE;
 	spin_lock_init(&w90p910_ts->lock);
-	timer_setup(&w90p910_ts->timer, w90p910_check_pen_up, 0);
+	setup_timer(&w90p910_ts->timer, w90p910_check_pen_up,
+		    (unsigned long)w90p910_ts);
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!res) {
@@ -317,6 +318,8 @@ static int w90x900ts_remove(struct platform_device *pdev)
 	input_unregister_device(w90p910_ts->input);
 	kfree(w90p910_ts);
 
+	platform_set_drvdata(pdev, NULL);
+
 	return 0;
 }
 
@@ -325,6 +328,7 @@ static struct platform_driver w90x900ts_driver = {
 	.remove		= w90x900ts_remove,
 	.driver		= {
 		.name	= "nuc900-ts",
+		.owner	= THIS_MODULE,
 	},
 };
 module_platform_driver(w90x900ts_driver);

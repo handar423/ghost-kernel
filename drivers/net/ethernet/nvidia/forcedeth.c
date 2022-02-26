@@ -26,7 +26,8 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; if not, see <http://www.gnu.org/licenses/>.
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  *
  * Known bugs:
  * We suspect that on some hardware no TX done interrupts are generated.
@@ -58,6 +59,7 @@
 #include <linux/skbuff.h>
 #include <linux/mii.h>
 #include <linux/random.h>
+#include <linux/init.h>
 #include <linux/if_vlan.h>
 #include <linux/dma-mapping.h>
 #include <linux/slab.h>
@@ -406,7 +408,7 @@ union ring_type {
 
 #define NV_RX_DESCRIPTORVALID	(1<<16)
 #define NV_RX_MISSEDFRAME	(1<<17)
-#define NV_RX_SUBTRACT1		(1<<18)
+#define NV_RX_SUBSTRACT1	(1<<18)
 #define NV_RX_ERROR1		(1<<23)
 #define NV_RX_ERROR2		(1<<24)
 #define NV_RX_ERROR3		(1<<25)
@@ -423,7 +425,7 @@ union ring_type {
 #define NV_RX2_CHECKSUM_IP_TCP	(0x14000000)
 #define NV_RX2_CHECKSUM_IP_UDP	(0x18000000)
 #define NV_RX2_DESCRIPTORVALID	(1<<29)
-#define NV_RX2_SUBTRACT1	(1<<25)
+#define NV_RX2_SUBSTRACT1	(1<<25)
 #define NV_RX2_ERROR1		(1<<18)
 #define NV_RX2_ERROR2		(1<<19)
 #define NV_RX2_ERROR3		(1<<20)
@@ -1024,18 +1026,12 @@ static void free_rings(struct net_device *dev)
 
 	if (!nv_optimized(np)) {
 		if (np->rx_ring.orig)
-			dma_free_coherent(&np->pci_dev->dev,
-					  sizeof(struct ring_desc) *
-					  (np->rx_ring_size +
-					  np->tx_ring_size),
-					  np->rx_ring.orig, np->ring_addr);
+			pci_free_consistent(np->pci_dev, sizeof(struct ring_desc) * (np->rx_ring_size + np->tx_ring_size),
+					    np->rx_ring.orig, np->ring_addr);
 	} else {
 		if (np->rx_ring.ex)
-			dma_free_coherent(&np->pci_dev->dev,
-					  sizeof(struct ring_desc_ex) *
-					  (np->rx_ring_size +
-					  np->tx_ring_size),
-					  np->rx_ring.ex, np->ring_addr);
+			pci_free_consistent(np->pci_dev, sizeof(struct ring_desc_ex) * (np->rx_ring_size + np->tx_ring_size),
+					    np->rx_ring.ex, np->ring_addr);
 	}
 	kfree(np->rx_skb);
 	kfree(np->tx_skb);
@@ -1487,7 +1483,7 @@ static int phy_init(struct net_device *dev)
 	}
 
 	/* phy vendor specific configuration */
-	if (np->phy_oui == PHY_OUI_CICADA) {
+	if ((np->phy_oui == PHY_OUI_CICADA)) {
 		if (init_cicada(dev, np, phyinterface)) {
 			netdev_info(dev, "%s: phy init failed\n",
 				    pci_name(np->pci_dev));
@@ -1739,7 +1735,7 @@ static void nv_update_stats(struct net_device *dev)
  * Called with read_lock(&dev_base_lock) held for read -
  * only synchronized against unregister_netdevice.
  */
-static void
+static struct rtnl_link_stats64*
 nv_get_stats64(struct net_device *dev, struct rtnl_link_stats64 *storage)
 	__acquires(&netdev_priv(dev)->hwstats_lock)
 	__releases(&netdev_priv(dev)->hwstats_lock)
@@ -1799,6 +1795,8 @@ nv_get_stats64(struct net_device *dev, struct rtnl_link_stats64 *storage)
 
 		spin_unlock_bh(&np->hwstats_lock);
 	}
+
+	return storage;
 }
 
 /*
@@ -1819,12 +1817,12 @@ static int nv_alloc_rx(struct net_device *dev)
 		struct sk_buff *skb = netdev_alloc_skb(dev, np->rx_buf_sz + NV_RX_ALLOC_PAD);
 		if (skb) {
 			np->put_rx_ctx->skb = skb;
-			np->put_rx_ctx->dma = dma_map_single(&np->pci_dev->dev,
+			np->put_rx_ctx->dma = pci_map_single(np->pci_dev,
 							     skb->data,
 							     skb_tailroom(skb),
-							     DMA_FROM_DEVICE);
-			if (unlikely(dma_mapping_error(&np->pci_dev->dev,
-						       np->put_rx_ctx->dma))) {
+							     PCI_DMA_FROMDEVICE);
+			if (pci_dma_mapping_error(np->pci_dev,
+						  np->put_rx_ctx->dma)) {
 				kfree_skb(skb);
 				goto packet_dropped;
 			}
@@ -1860,12 +1858,12 @@ static int nv_alloc_rx_optimized(struct net_device *dev)
 		struct sk_buff *skb = netdev_alloc_skb(dev, np->rx_buf_sz + NV_RX_ALLOC_PAD);
 		if (skb) {
 			np->put_rx_ctx->skb = skb;
-			np->put_rx_ctx->dma = dma_map_single(&np->pci_dev->dev,
+			np->put_rx_ctx->dma = pci_map_single(np->pci_dev,
 							     skb->data,
 							     skb_tailroom(skb),
-							     DMA_FROM_DEVICE);
-			if (unlikely(dma_mapping_error(&np->pci_dev->dev,
-						       np->put_rx_ctx->dma))) {
+							     PCI_DMA_FROMDEVICE);
+			if (pci_dma_mapping_error(np->pci_dev,
+						  np->put_rx_ctx->dma)) {
 				kfree_skb(skb);
 				goto packet_dropped;
 			}
@@ -1890,9 +1888,10 @@ packet_dropped:
 }
 
 /* If rx bufs are exhausted called after 50ms to attempt to refresh */
-static void nv_do_rx_refill(struct timer_list *t)
+static void nv_do_rx_refill(unsigned long data)
 {
-	struct fe_priv *np = from_timer(np, t, oom_kick);
+	struct net_device *dev = (struct net_device *) data;
+	struct fe_priv *np = netdev_priv(dev);
 
 	/* Just reschedule NAPI rx processing */
 	napi_schedule(&np->napi);
@@ -1982,13 +1981,13 @@ static void nv_unmap_txskb(struct fe_priv *np, struct nv_skb_map *tx_skb)
 {
 	if (tx_skb->dma) {
 		if (tx_skb->dma_single)
-			dma_unmap_single(&np->pci_dev->dev, tx_skb->dma,
+			pci_unmap_single(np->pci_dev, tx_skb->dma,
 					 tx_skb->dma_len,
-					 DMA_TO_DEVICE);
+					 PCI_DMA_TODEVICE);
 		else
-			dma_unmap_page(&np->pci_dev->dev, tx_skb->dma,
+			pci_unmap_page(np->pci_dev, tx_skb->dma,
 				       tx_skb->dma_len,
-				       DMA_TO_DEVICE);
+				       PCI_DMA_TODEVICE);
 		tx_skb->dma = 0;
 	}
 }
@@ -2052,10 +2051,10 @@ static void nv_drain_rx(struct net_device *dev)
 		}
 		wmb();
 		if (np->rx_skb[i].skb) {
-			dma_unmap_single(&np->pci_dev->dev, np->rx_skb[i].dma,
+			pci_unmap_single(np->pci_dev, np->rx_skb[i].dma,
 					 (skb_end_pointer(np->rx_skb[i].skb) -
-					 np->rx_skb[i].skb->data),
-					 DMA_FROM_DEVICE);
+					  np->rx_skb[i].skb->data),
+					 PCI_DMA_FROMDEVICE);
 			dev_kfree_skb(np->rx_skb[i].skb);
 			np->rx_skb[i].skb = NULL;
 		}
@@ -2226,14 +2225,15 @@ static netdev_tx_t nv_start_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	/* setup the header buffer */
 	do {
+		prev_tx = put_tx;
+		prev_tx_ctx = np->put_tx_ctx;
 		bcnt = (size > NV_TX2_TSO_MAX_SIZE) ? NV_TX2_TSO_MAX_SIZE : size;
-		np->put_tx_ctx->dma = dma_map_single(&np->pci_dev->dev,
-						     skb->data + offset, bcnt,
-						     DMA_TO_DEVICE);
-		if (unlikely(dma_mapping_error(&np->pci_dev->dev,
-					       np->put_tx_ctx->dma))) {
+		np->put_tx_ctx->dma = pci_map_single(np->pci_dev, skb->data + offset, bcnt,
+						PCI_DMA_TODEVICE);
+		if (pci_dma_mapping_error(np->pci_dev,
+					  np->put_tx_ctx->dma)) {
 			/* on DMA mapping error - drop the packet */
-			dev_kfree_skb_any(skb);
+			kfree_skb(skb);
 			u64_stats_update_begin(&np->swstats_tx_syncp);
 			np->stat_tx_dropped++;
 			u64_stats_update_end(&np->swstats_tx_syncp);
@@ -2260,6 +2260,8 @@ static netdev_tx_t nv_start_xmit(struct sk_buff *skb, struct net_device *dev)
 		offset = 0;
 
 		do {
+			prev_tx = put_tx;
+			prev_tx_ctx = np->put_tx_ctx;
 			if (!start_tx_ctx)
 				start_tx_ctx = tmp_tx_ctx = np->put_tx_ctx;
 
@@ -2269,8 +2271,7 @@ static netdev_tx_t nv_start_xmit(struct sk_buff *skb, struct net_device *dev)
 							frag, offset,
 							bcnt,
 							DMA_TO_DEVICE);
-			if (unlikely(dma_mapping_error(&np->pci_dev->dev,
-						       np->put_tx_ctx->dma))) {
+			if (dma_mapping_error(&np->pci_dev->dev, np->put_tx_ctx->dma)) {
 
 				/* Unwind the mapped fragments */
 				do {
@@ -2278,7 +2279,7 @@ static netdev_tx_t nv_start_xmit(struct sk_buff *skb, struct net_device *dev)
 					if (unlikely(tmp_tx_ctx++ == np->last_tx_ctx))
 						tmp_tx_ctx = np->first_tx_ctx;
 				} while (tmp_tx_ctx != np->put_tx_ctx);
-				dev_kfree_skb_any(skb);
+				kfree_skb(skb);
 				np->put_tx_ctx = start_tx_ctx;
 				u64_stats_update_begin(&np->swstats_tx_syncp);
 				np->stat_tx_dropped++;
@@ -2299,16 +2300,6 @@ static netdev_tx_t nv_start_xmit(struct sk_buff *skb, struct net_device *dev)
 				np->put_tx_ctx = np->first_tx_ctx;
 		} while (frag_size);
 	}
-
-	if (unlikely(put_tx == np->first_tx.orig))
-		prev_tx = np->last_tx.orig;
-	else
-		prev_tx = put_tx - 1;
-
-	if (unlikely(np->put_tx_ctx == np->first_tx_ctx))
-		prev_tx_ctx = np->last_tx_ctx;
-	else
-		prev_tx_ctx = np->put_tx_ctx - 1;
 
 	/* set last fragment flag  */
 	prev_tx->flaglen |= cpu_to_le32(tx_flags_extra);
@@ -2383,14 +2374,15 @@ static netdev_tx_t nv_start_xmit_optimized(struct sk_buff *skb,
 
 	/* setup the header buffer */
 	do {
+		prev_tx = put_tx;
+		prev_tx_ctx = np->put_tx_ctx;
 		bcnt = (size > NV_TX2_TSO_MAX_SIZE) ? NV_TX2_TSO_MAX_SIZE : size;
-		np->put_tx_ctx->dma = dma_map_single(&np->pci_dev->dev,
-						     skb->data + offset, bcnt,
-						     DMA_TO_DEVICE);
-		if (unlikely(dma_mapping_error(&np->pci_dev->dev,
-					       np->put_tx_ctx->dma))) {
+		np->put_tx_ctx->dma = pci_map_single(np->pci_dev, skb->data + offset, bcnt,
+						PCI_DMA_TODEVICE);
+		if (pci_dma_mapping_error(np->pci_dev,
+					  np->put_tx_ctx->dma)) {
 			/* on DMA mapping error - drop the packet */
-			dev_kfree_skb_any(skb);
+			kfree_skb(skb);
 			u64_stats_update_begin(&np->swstats_tx_syncp);
 			np->stat_tx_dropped++;
 			u64_stats_update_end(&np->swstats_tx_syncp);
@@ -2418,6 +2410,8 @@ static netdev_tx_t nv_start_xmit_optimized(struct sk_buff *skb,
 		offset = 0;
 
 		do {
+			prev_tx = put_tx;
+			prev_tx_ctx = np->put_tx_ctx;
 			bcnt = (frag_size > NV_TX2_TSO_MAX_SIZE) ? NV_TX2_TSO_MAX_SIZE : frag_size;
 			if (!start_tx_ctx)
 				start_tx_ctx = tmp_tx_ctx = np->put_tx_ctx;
@@ -2427,8 +2421,7 @@ static netdev_tx_t nv_start_xmit_optimized(struct sk_buff *skb,
 							bcnt,
 							DMA_TO_DEVICE);
 
-			if (unlikely(dma_mapping_error(&np->pci_dev->dev,
-						       np->put_tx_ctx->dma))) {
+			if (dma_mapping_error(&np->pci_dev->dev, np->put_tx_ctx->dma)) {
 
 				/* Unwind the mapped fragments */
 				do {
@@ -2436,7 +2429,7 @@ static netdev_tx_t nv_start_xmit_optimized(struct sk_buff *skb,
 					if (unlikely(tmp_tx_ctx++ == np->last_tx_ctx))
 						tmp_tx_ctx = np->first_tx_ctx;
 				} while (tmp_tx_ctx != np->put_tx_ctx);
-				dev_kfree_skb_any(skb);
+				kfree_skb(skb);
 				np->put_tx_ctx = start_tx_ctx;
 				u64_stats_update_begin(&np->swstats_tx_syncp);
 				np->stat_tx_dropped++;
@@ -2457,16 +2450,6 @@ static netdev_tx_t nv_start_xmit_optimized(struct sk_buff *skb,
 				np->put_tx_ctx = np->first_tx_ctx;
 		} while (frag_size);
 	}
-
-	if (unlikely(put_tx == np->first_tx.ex))
-		prev_tx = np->last_tx.ex;
-	else
-		prev_tx = put_tx - 1;
-
-	if (unlikely(np->put_tx_ctx == np->first_tx_ctx))
-		prev_tx_ctx = np->last_tx_ctx;
-	else
-		prev_tx_ctx = np->put_tx_ctx - 1;
 
 	/* set last fragment flag  */
 	prev_tx->flaglen |= cpu_to_le32(NV_TX2_LASTPACKET);
@@ -2831,9 +2814,9 @@ static int nv_rx_process(struct net_device *dev, int limit)
 		 * TODO: check if a prefetch of the first cacheline improves
 		 * the performance.
 		 */
-		dma_unmap_single(&np->pci_dev->dev, np->get_rx_ctx->dma,
-				 np->get_rx_ctx->dma_len,
-				 DMA_FROM_DEVICE);
+		pci_unmap_single(np->pci_dev, np->get_rx_ctx->dma,
+				np->get_rx_ctx->dma_len,
+				PCI_DMA_FROMDEVICE);
 		skb = np->get_rx_ctx->skb;
 		np->get_rx_ctx->skb = NULL;
 
@@ -2851,7 +2834,7 @@ static int nv_rx_process(struct net_device *dev, int limit)
 					}
 					/* framing errors are soft errors */
 					else if ((flags & NV_RX_ERROR_MASK) == NV_RX_FRAMINGERR) {
-						if (flags & NV_RX_SUBTRACT1)
+						if (flags & NV_RX_SUBSTRACT1)
 							len--;
 					}
 					/* the rest are hard errors */
@@ -2882,7 +2865,7 @@ static int nv_rx_process(struct net_device *dev, int limit)
 					}
 					/* framing errors are soft errors */
 					else if ((flags & NV_RX2_ERROR_MASK) == NV_RX2_FRAMINGERR) {
-						if (flags & NV_RX2_SUBTRACT1)
+						if (flags & NV_RX2_SUBSTRACT1)
 							len--;
 					}
 					/* the rest are hard errors */
@@ -2937,9 +2920,9 @@ static int nv_rx_process_optimized(struct net_device *dev, int limit)
 		 * TODO: check if a prefetch of the first cacheline improves
 		 * the performance.
 		 */
-		dma_unmap_single(&np->pci_dev->dev, np->get_rx_ctx->dma,
-				 np->get_rx_ctx->dma_len,
-				 DMA_FROM_DEVICE);
+		pci_unmap_single(np->pci_dev, np->get_rx_ctx->dma,
+				np->get_rx_ctx->dma_len,
+				PCI_DMA_FROMDEVICE);
 		skb = np->get_rx_ctx->skb;
 		np->get_rx_ctx->skb = NULL;
 
@@ -2956,7 +2939,7 @@ static int nv_rx_process_optimized(struct net_device *dev, int limit)
 				}
 				/* framing errors are soft errors */
 				else if ((flags & NV_RX2_ERROR_MASK) == NV_RX2_FRAMINGERR) {
-					if (flags & NV_RX2_SUBTRACT1)
+					if (flags & NV_RX2_SUBSTRACT1)
 						len--;
 				}
 				/* the rest are hard errors */
@@ -3027,11 +3010,16 @@ static int nv_change_mtu(struct net_device *dev, int new_mtu)
 	struct fe_priv *np = netdev_priv(dev);
 	int old_mtu;
 
+	if (new_mtu < 64 || new_mtu > np->pkt_limit)
+		return -EINVAL;
+
 	old_mtu = dev->mtu;
 	dev->mtu = new_mtu;
 
 	/* return early if the buffer sizes will not change */
 	if (old_mtu <= ETH_DATA_LEN && new_mtu <= ETH_DATA_LEN)
+		return 0;
+	if (old_mtu == new_mtu)
 		return 0;
 
 	/* synchronized against open : rtnl_lock() held by caller */
@@ -3293,6 +3281,8 @@ static void nv_force_linkspeed(struct net_device *dev, int speed, int duplex)
 	pci_push(base);
 	writel(np->linkspeed, base + NvRegLinkSpeed);
 	pci_push(base);
+
+	return;
 }
 
 /**
@@ -3768,7 +3758,7 @@ static int nv_napi_poll(struct napi_struct *napi, int budget)
 	if (rx_work < budget) {
 		/* re-enable interrupts
 		   (msix not enabled in napi) */
-		napi_complete_done(napi, rx_work);
+		napi_complete(napi);
 
 		writel(np->irqmask, base + NvRegIrqMask);
 	}
@@ -3942,7 +3932,7 @@ static int nv_request_irq(struct net_device *dev, int intr_test)
 {
 	struct fe_priv *np = get_nvpriv(dev);
 	u8 __iomem *base = get_hwbase(dev);
-	int ret;
+	int ret = 1;
 	int i;
 	irqreturn_t (*handler)(int foo, void *data);
 
@@ -3958,18 +3948,14 @@ static int nv_request_irq(struct net_device *dev, int intr_test)
 	if (np->msi_flags & NV_MSI_X_CAPABLE) {
 		for (i = 0; i < (np->msi_flags & NV_MSI_X_VECTORS_MASK); i++)
 			np->msi_x_entry[i].entry = i;
-		ret = pci_enable_msix_range(np->pci_dev,
-					    np->msi_x_entry,
-					    np->msi_flags & NV_MSI_X_VECTORS_MASK,
-					    np->msi_flags & NV_MSI_X_VECTORS_MASK);
-		if (ret > 0) {
+		ret = pci_enable_msix(np->pci_dev, np->msi_x_entry, (np->msi_flags & NV_MSI_X_VECTORS_MASK));
+		if (ret == 0) {
 			np->msi_flags |= NV_MSI_X_ENABLED;
 			if (optimization_mode == NV_OPTIMIZATION_MODE_THROUGHPUT && !intr_test) {
 				/* Request irq for rx handling */
 				sprintf(np->name_rx, "%s-rx", dev->name);
-				ret = request_irq(np->msi_x_entry[NV_MSI_X_VECTOR_RX].vector,
-						  nv_nic_irq_rx, IRQF_SHARED, np->name_rx, dev);
-				if (ret) {
+				if (request_irq(np->msi_x_entry[NV_MSI_X_VECTOR_RX].vector,
+						nv_nic_irq_rx, IRQF_SHARED, np->name_rx, dev) != 0) {
 					netdev_info(dev,
 						    "request_irq failed for rx %d\n",
 						    ret);
@@ -3979,9 +3965,8 @@ static int nv_request_irq(struct net_device *dev, int intr_test)
 				}
 				/* Request irq for tx handling */
 				sprintf(np->name_tx, "%s-tx", dev->name);
-				ret = request_irq(np->msi_x_entry[NV_MSI_X_VECTOR_TX].vector,
-						  nv_nic_irq_tx, IRQF_SHARED, np->name_tx, dev);
-				if (ret) {
+				if (request_irq(np->msi_x_entry[NV_MSI_X_VECTOR_TX].vector,
+						nv_nic_irq_tx, IRQF_SHARED, np->name_tx, dev) != 0) {
 					netdev_info(dev,
 						    "request_irq failed for tx %d\n",
 						    ret);
@@ -3991,9 +3976,8 @@ static int nv_request_irq(struct net_device *dev, int intr_test)
 				}
 				/* Request irq for link and timer handling */
 				sprintf(np->name_other, "%s-other", dev->name);
-				ret = request_irq(np->msi_x_entry[NV_MSI_X_VECTOR_OTHER].vector,
-						  nv_nic_irq_other, IRQF_SHARED, np->name_other, dev);
-				if (ret) {
+				if (request_irq(np->msi_x_entry[NV_MSI_X_VECTOR_OTHER].vector,
+						nv_nic_irq_other, IRQF_SHARED, np->name_other, dev) != 0) {
 					netdev_info(dev,
 						    "request_irq failed for link %d\n",
 						    ret);
@@ -4009,9 +3993,7 @@ static int nv_request_irq(struct net_device *dev, int intr_test)
 				set_msix_vector_map(dev, NV_MSI_X_VECTOR_OTHER, NVREG_IRQ_OTHER);
 			} else {
 				/* Request irq for all interrupts */
-				ret = request_irq(np->msi_x_entry[NV_MSI_X_VECTOR_ALL].vector,
-						  handler, IRQF_SHARED, dev->name, dev);
-				if (ret) {
+				if (request_irq(np->msi_x_entry[NV_MSI_X_VECTOR_ALL].vector, handler, IRQF_SHARED, dev->name, dev) != 0) {
 					netdev_info(dev,
 						    "request_irq failed %d\n",
 						    ret);
@@ -4025,15 +4007,13 @@ static int nv_request_irq(struct net_device *dev, int intr_test)
 				writel(0, base + NvRegMSIXMap1);
 			}
 			netdev_info(dev, "MSI-X enabled\n");
-			return 0;
 		}
 	}
-	if (np->msi_flags & NV_MSI_CAPABLE) {
+	if (ret != 0 && np->msi_flags & NV_MSI_CAPABLE) {
 		ret = pci_enable_msi(np->pci_dev);
 		if (ret == 0) {
 			np->msi_flags |= NV_MSI_ENABLED;
-			ret = request_irq(np->pci_dev->irq, handler, IRQF_SHARED, dev->name, dev);
-			if (ret) {
+			if (request_irq(np->pci_dev->irq, handler, IRQF_SHARED, dev->name, dev) != 0) {
 				netdev_info(dev, "request_irq failed %d\n",
 					    ret);
 				pci_disable_msi(np->pci_dev);
@@ -4047,12 +4027,13 @@ static int nv_request_irq(struct net_device *dev, int intr_test)
 			/* enable msi vector 0 */
 			writel(NVREG_MSI_VECTOR_0_ENABLED, base + NvRegMSIIrqMask);
 			netdev_info(dev, "MSI enabled\n");
-			return 0;
 		}
 	}
+	if (ret != 0) {
+		if (request_irq(np->pci_dev->irq, handler, IRQF_SHARED, dev->name, dev) != 0)
+			goto out_err;
 
-	if (request_irq(np->pci_dev->irq, handler, IRQF_SHARED, dev->name, dev) != 0)
-		goto out_err;
+	}
 
 	return 0;
 out_free_tx:
@@ -4082,14 +4063,12 @@ static void nv_free_irq(struct net_device *dev)
 	}
 }
 
-static void nv_do_nic_poll(struct timer_list *t)
+static void nv_do_nic_poll(unsigned long data)
 {
-	struct fe_priv *np = from_timer(np, t, nic_poll);
-	struct net_device *dev = np->dev;
+	struct net_device *dev = (struct net_device *) data;
+	struct fe_priv *np = netdev_priv(dev);
 	u8 __iomem *base = get_hwbase(dev);
 	u32 mask = 0;
-	unsigned long flags;
-	unsigned int irq = 0;
 
 	/*
 	 * First disable irq(s) and then
@@ -4099,27 +4078,25 @@ static void nv_do_nic_poll(struct timer_list *t)
 
 	if (!using_multi_irqs(dev)) {
 		if (np->msi_flags & NV_MSI_X_ENABLED)
-			irq = np->msi_x_entry[NV_MSI_X_VECTOR_ALL].vector;
+			disable_irq_lockdep(np->msi_x_entry[NV_MSI_X_VECTOR_ALL].vector);
 		else
-			irq = np->pci_dev->irq;
+			disable_irq_lockdep(np->pci_dev->irq);
 		mask = np->irqmask;
 	} else {
 		if (np->nic_poll_irq & NVREG_IRQ_RX_ALL) {
-			irq = np->msi_x_entry[NV_MSI_X_VECTOR_RX].vector;
+			disable_irq_lockdep(np->msi_x_entry[NV_MSI_X_VECTOR_RX].vector);
 			mask |= NVREG_IRQ_RX_ALL;
 		}
 		if (np->nic_poll_irq & NVREG_IRQ_TX_ALL) {
-			irq = np->msi_x_entry[NV_MSI_X_VECTOR_TX].vector;
+			disable_irq_lockdep(np->msi_x_entry[NV_MSI_X_VECTOR_TX].vector);
 			mask |= NVREG_IRQ_TX_ALL;
 		}
 		if (np->nic_poll_irq & NVREG_IRQ_OTHER) {
-			irq = np->msi_x_entry[NV_MSI_X_VECTOR_OTHER].vector;
+			disable_irq_lockdep(np->msi_x_entry[NV_MSI_X_VECTOR_OTHER].vector);
 			mask |= NVREG_IRQ_OTHER;
 		}
 	}
-
-	disable_irq_nosync_lockdep_irqsave(irq, &flags);
-	synchronize_irq(irq);
+	/* disable_irq() contains synchronize_irq, thus no irq handler can run now */
 
 	if (np->recover_error) {
 		np->recover_error = 0;
@@ -4172,39 +4149,43 @@ static void nv_do_nic_poll(struct timer_list *t)
 			nv_nic_irq_optimized(0, dev);
 		else
 			nv_nic_irq(0, dev);
+		if (np->msi_flags & NV_MSI_X_ENABLED)
+			enable_irq_lockdep(np->msi_x_entry[NV_MSI_X_VECTOR_ALL].vector);
+		else
+			enable_irq_lockdep(np->pci_dev->irq);
 	} else {
 		if (np->nic_poll_irq & NVREG_IRQ_RX_ALL) {
 			np->nic_poll_irq &= ~NVREG_IRQ_RX_ALL;
 			nv_nic_irq_rx(0, dev);
+			enable_irq_lockdep(np->msi_x_entry[NV_MSI_X_VECTOR_RX].vector);
 		}
 		if (np->nic_poll_irq & NVREG_IRQ_TX_ALL) {
 			np->nic_poll_irq &= ~NVREG_IRQ_TX_ALL;
 			nv_nic_irq_tx(0, dev);
+			enable_irq_lockdep(np->msi_x_entry[NV_MSI_X_VECTOR_TX].vector);
 		}
 		if (np->nic_poll_irq & NVREG_IRQ_OTHER) {
 			np->nic_poll_irq &= ~NVREG_IRQ_OTHER;
 			nv_nic_irq_other(0, dev);
+			enable_irq_lockdep(np->msi_x_entry[NV_MSI_X_VECTOR_OTHER].vector);
 		}
 	}
 
-	enable_irq_lockdep_irqrestore(irq, &flags);
 }
 
 #ifdef CONFIG_NET_POLL_CONTROLLER
 static void nv_poll_controller(struct net_device *dev)
 {
-	struct fe_priv *np = netdev_priv(dev);
-
-	nv_do_nic_poll(&np->nic_poll);
+	nv_do_nic_poll((unsigned long) dev);
 }
 #endif
 
-static void nv_do_stats_poll(struct timer_list *t)
+static void nv_do_stats_poll(unsigned long data)
 	__acquires(&netdev_priv(dev)->hwstats_lock)
 	__releases(&netdev_priv(dev)->hwstats_lock)
 {
-	struct fe_priv *np = from_timer(np, t, stats_poll);
-	struct net_device *dev = np->dev;
+	struct net_device *dev = (struct net_device *) data;
+	struct fe_priv *np = netdev_priv(dev);
 
 	/* If lock is currently taken, the stats are being refreshed
 	 * and hence fresh enough */
@@ -4258,22 +4239,23 @@ static int nv_set_wol(struct net_device *dev, struct ethtool_wolinfo *wolinfo)
 	return 0;
 }
 
-static int nv_get_link_ksettings(struct net_device *dev,
-				 struct ethtool_link_ksettings *cmd)
+static int nv_get_settings(struct net_device *dev, struct ethtool_cmd *ecmd)
 {
 	struct fe_priv *np = netdev_priv(dev);
-	u32 speed, supported, advertising;
+	u32 speed;
 	int adv;
 
 	spin_lock_irq(&np->lock);
-	cmd->base.port = PORT_MII;
+	ecmd->port = PORT_MII;
 	if (!netif_running(dev)) {
 		/* We do not track link speed / duplex setting if the
 		 * interface is disabled. Force a link check */
 		if (nv_update_linkspeed(dev)) {
-			netif_carrier_on(dev);
+			if (!netif_carrier_ok(dev))
+				netif_carrier_on(dev);
 		} else {
-			netif_carrier_off(dev);
+			if (netif_carrier_ok(dev))
+				netif_carrier_off(dev);
 		}
 	}
 
@@ -4292,71 +4274,64 @@ static int nv_get_link_ksettings(struct net_device *dev,
 			speed = -1;
 			break;
 		}
-		cmd->base.duplex = DUPLEX_HALF;
+		ecmd->duplex = DUPLEX_HALF;
 		if (np->duplex)
-			cmd->base.duplex = DUPLEX_FULL;
+			ecmd->duplex = DUPLEX_FULL;
 	} else {
-		speed = SPEED_UNKNOWN;
-		cmd->base.duplex = DUPLEX_UNKNOWN;
+		speed = -1;
+		ecmd->duplex = -1;
 	}
-	cmd->base.speed = speed;
-	cmd->base.autoneg = np->autoneg;
+	ethtool_cmd_speed_set(ecmd, speed);
+	ecmd->autoneg = np->autoneg;
 
-	advertising = ADVERTISED_MII;
+	ecmd->advertising = ADVERTISED_MII;
 	if (np->autoneg) {
-		advertising |= ADVERTISED_Autoneg;
+		ecmd->advertising |= ADVERTISED_Autoneg;
 		adv = mii_rw(dev, np->phyaddr, MII_ADVERTISE, MII_READ);
 		if (adv & ADVERTISE_10HALF)
-			advertising |= ADVERTISED_10baseT_Half;
+			ecmd->advertising |= ADVERTISED_10baseT_Half;
 		if (adv & ADVERTISE_10FULL)
-			advertising |= ADVERTISED_10baseT_Full;
+			ecmd->advertising |= ADVERTISED_10baseT_Full;
 		if (adv & ADVERTISE_100HALF)
-			advertising |= ADVERTISED_100baseT_Half;
+			ecmd->advertising |= ADVERTISED_100baseT_Half;
 		if (adv & ADVERTISE_100FULL)
-			advertising |= ADVERTISED_100baseT_Full;
+			ecmd->advertising |= ADVERTISED_100baseT_Full;
 		if (np->gigabit == PHY_GIGABIT) {
 			adv = mii_rw(dev, np->phyaddr, MII_CTRL1000, MII_READ);
 			if (adv & ADVERTISE_1000FULL)
-				advertising |= ADVERTISED_1000baseT_Full;
+				ecmd->advertising |= ADVERTISED_1000baseT_Full;
 		}
 	}
-	supported = (SUPPORTED_Autoneg |
+	ecmd->supported = (SUPPORTED_Autoneg |
 		SUPPORTED_10baseT_Half | SUPPORTED_10baseT_Full |
 		SUPPORTED_100baseT_Half | SUPPORTED_100baseT_Full |
 		SUPPORTED_MII);
 	if (np->gigabit == PHY_GIGABIT)
-		supported |= SUPPORTED_1000baseT_Full;
+		ecmd->supported |= SUPPORTED_1000baseT_Full;
 
-	cmd->base.phy_address = np->phyaddr;
-
-	ethtool_convert_legacy_u32_to_link_mode(cmd->link_modes.supported,
-						supported);
-	ethtool_convert_legacy_u32_to_link_mode(cmd->link_modes.advertising,
-						advertising);
+	ecmd->phy_address = np->phyaddr;
+	ecmd->transceiver = XCVR_EXTERNAL;
 
 	/* ignore maxtxpkt, maxrxpkt for now */
 	spin_unlock_irq(&np->lock);
 	return 0;
 }
 
-static int nv_set_link_ksettings(struct net_device *dev,
-				 const struct ethtool_link_ksettings *cmd)
+static int nv_set_settings(struct net_device *dev, struct ethtool_cmd *ecmd)
 {
 	struct fe_priv *np = netdev_priv(dev);
-	u32 speed = cmd->base.speed;
-	u32 advertising;
+	u32 speed = ethtool_cmd_speed(ecmd);
 
-	ethtool_convert_link_mode_to_legacy_u32(&advertising,
-						cmd->link_modes.advertising);
-
-	if (cmd->base.port != PORT_MII)
+	if (ecmd->port != PORT_MII)
 		return -EINVAL;
-	if (cmd->base.phy_address != np->phyaddr) {
+	if (ecmd->transceiver != XCVR_EXTERNAL)
+		return -EINVAL;
+	if (ecmd->phy_address != np->phyaddr) {
 		/* TODO: support switching between multiple phys. Should be
 		 * trivial, but not enabled due to lack of test hardware. */
 		return -EINVAL;
 	}
-	if (cmd->base.autoneg == AUTONEG_ENABLE) {
+	if (ecmd->autoneg == AUTONEG_ENABLE) {
 		u32 mask;
 
 		mask = ADVERTISED_10baseT_Half | ADVERTISED_10baseT_Full |
@@ -4364,17 +4339,16 @@ static int nv_set_link_ksettings(struct net_device *dev,
 		if (np->gigabit == PHY_GIGABIT)
 			mask |= ADVERTISED_1000baseT_Full;
 
-		if ((advertising & mask) == 0)
+		if ((ecmd->advertising & mask) == 0)
 			return -EINVAL;
 
-	} else if (cmd->base.autoneg == AUTONEG_DISABLE) {
+	} else if (ecmd->autoneg == AUTONEG_DISABLE) {
 		/* Note: autonegotiation disable, speed 1000 intentionally
 		 * forbidden - no one should need that. */
 
 		if (speed != SPEED_10 && speed != SPEED_100)
 			return -EINVAL;
-		if (cmd->base.duplex != DUPLEX_HALF &&
-		    cmd->base.duplex != DUPLEX_FULL)
+		if (ecmd->duplex != DUPLEX_HALF && ecmd->duplex != DUPLEX_FULL)
 			return -EINVAL;
 	} else {
 		return -EINVAL;
@@ -4404,7 +4378,7 @@ static int nv_set_link_ksettings(struct net_device *dev,
 		netif_tx_unlock_bh(dev);
 	}
 
-	if (cmd->base.autoneg == AUTONEG_ENABLE) {
+	if (ecmd->autoneg == AUTONEG_ENABLE) {
 		int adv, bmcr;
 
 		np->autoneg = 1;
@@ -4412,13 +4386,13 @@ static int nv_set_link_ksettings(struct net_device *dev,
 		/* advertise only what has been requested */
 		adv = mii_rw(dev, np->phyaddr, MII_ADVERTISE, MII_READ);
 		adv &= ~(ADVERTISE_ALL | ADVERTISE_100BASE4 | ADVERTISE_PAUSE_CAP | ADVERTISE_PAUSE_ASYM);
-		if (advertising & ADVERTISED_10baseT_Half)
+		if (ecmd->advertising & ADVERTISED_10baseT_Half)
 			adv |= ADVERTISE_10HALF;
-		if (advertising & ADVERTISED_10baseT_Full)
+		if (ecmd->advertising & ADVERTISED_10baseT_Full)
 			adv |= ADVERTISE_10FULL;
-		if (advertising & ADVERTISED_100baseT_Half)
+		if (ecmd->advertising & ADVERTISED_100baseT_Half)
 			adv |= ADVERTISE_100HALF;
-		if (advertising & ADVERTISED_100baseT_Full)
+		if (ecmd->advertising & ADVERTISED_100baseT_Full)
 			adv |= ADVERTISE_100FULL;
 		if (np->pause_flags & NV_PAUSEFRAME_RX_REQ)  /* for rx we set both advertisements but disable tx pause */
 			adv |=  ADVERTISE_PAUSE_CAP | ADVERTISE_PAUSE_ASYM;
@@ -4429,7 +4403,7 @@ static int nv_set_link_ksettings(struct net_device *dev,
 		if (np->gigabit == PHY_GIGABIT) {
 			adv = mii_rw(dev, np->phyaddr, MII_CTRL1000, MII_READ);
 			adv &= ~ADVERTISE_1000FULL;
-			if (advertising & ADVERTISED_1000baseT_Full)
+			if (ecmd->advertising & ADVERTISED_1000baseT_Full)
 				adv |= ADVERTISE_1000FULL;
 			mii_rw(dev, np->phyaddr, MII_CTRL1000, adv);
 		}
@@ -4456,13 +4430,13 @@ static int nv_set_link_ksettings(struct net_device *dev,
 
 		adv = mii_rw(dev, np->phyaddr, MII_ADVERTISE, MII_READ);
 		adv &= ~(ADVERTISE_ALL | ADVERTISE_100BASE4 | ADVERTISE_PAUSE_CAP | ADVERTISE_PAUSE_ASYM);
-		if (speed == SPEED_10 && cmd->base.duplex == DUPLEX_HALF)
+		if (speed == SPEED_10 && ecmd->duplex == DUPLEX_HALF)
 			adv |= ADVERTISE_10HALF;
-		if (speed == SPEED_10 && cmd->base.duplex == DUPLEX_FULL)
+		if (speed == SPEED_10 && ecmd->duplex == DUPLEX_FULL)
 			adv |= ADVERTISE_10FULL;
-		if (speed == SPEED_100 && cmd->base.duplex == DUPLEX_HALF)
+		if (speed == SPEED_100 && ecmd->duplex == DUPLEX_HALF)
 			adv |= ADVERTISE_100HALF;
-		if (speed == SPEED_100 && cmd->base.duplex == DUPLEX_FULL)
+		if (speed == SPEED_100 && ecmd->duplex == DUPLEX_FULL)
 			adv |= ADVERTISE_100FULL;
 		np->pause_flags &= ~(NV_PAUSEFRAME_AUTONEG|NV_PAUSEFRAME_RX_ENABLE|NV_PAUSEFRAME_TX_ENABLE);
 		if (np->pause_flags & NV_PAUSEFRAME_RX_REQ) {/* for rx we set both advertisements but disable tx pause */
@@ -4614,17 +4588,13 @@ static int nv_set_ringparam(struct net_device *dev, struct ethtool_ringparam* ri
 
 	/* allocate new rings */
 	if (!nv_optimized(np)) {
-		rxtx_ring = dma_alloc_coherent(&np->pci_dev->dev,
-					       sizeof(struct ring_desc) *
-					       (ring->rx_pending +
-					       ring->tx_pending),
-					       &ring_addr, GFP_ATOMIC);
+		rxtx_ring = pci_alloc_consistent(np->pci_dev,
+					    sizeof(struct ring_desc) * (ring->rx_pending + ring->tx_pending),
+					    &ring_addr);
 	} else {
-		rxtx_ring = dma_alloc_coherent(&np->pci_dev->dev,
-					       sizeof(struct ring_desc_ex) *
-					       (ring->rx_pending +
-					       ring->tx_pending),
-					       &ring_addr, GFP_ATOMIC);
+		rxtx_ring = pci_alloc_consistent(np->pci_dev,
+					    sizeof(struct ring_desc_ex) * (ring->rx_pending + ring->tx_pending),
+					    &ring_addr);
 	}
 	rx_skbuff = kmalloc(sizeof(struct nv_skb_map) * ring->rx_pending, GFP_KERNEL);
 	tx_skbuff = kmalloc(sizeof(struct nv_skb_map) * ring->tx_pending, GFP_KERNEL);
@@ -4632,18 +4602,12 @@ static int nv_set_ringparam(struct net_device *dev, struct ethtool_ringparam* ri
 		/* fall back to old rings */
 		if (!nv_optimized(np)) {
 			if (rxtx_ring)
-				dma_free_coherent(&np->pci_dev->dev,
-						  sizeof(struct ring_desc) *
-						  (ring->rx_pending +
-						  ring->tx_pending),
-						  rxtx_ring, ring_addr);
+				pci_free_consistent(np->pci_dev, sizeof(struct ring_desc) * (ring->rx_pending + ring->tx_pending),
+						    rxtx_ring, ring_addr);
 		} else {
 			if (rxtx_ring)
-				dma_free_coherent(&np->pci_dev->dev,
-						  sizeof(struct ring_desc_ex) *
-						  (ring->rx_pending +
-						  ring->tx_pending),
-						  rxtx_ring, ring_addr);
+				pci_free_consistent(np->pci_dev, sizeof(struct ring_desc_ex) * (ring->rx_pending + ring->tx_pending),
+						    rxtx_ring, ring_addr);
 		}
 
 		kfree(rx_skbuff);
@@ -5103,11 +5067,11 @@ static int nv_loopback_test(struct net_device *dev)
 		ret = 0;
 		goto out;
 	}
-	test_dma_addr = dma_map_single(&np->pci_dev->dev, tx_skb->data,
+	test_dma_addr = pci_map_single(np->pci_dev, tx_skb->data,
 				       skb_tailroom(tx_skb),
-				       DMA_FROM_DEVICE);
-	if (unlikely(dma_mapping_error(&np->pci_dev->dev,
-				       test_dma_addr))) {
+				       PCI_DMA_FROMDEVICE);
+	if (pci_dma_mapping_error(np->pci_dev,
+				  test_dma_addr)) {
 		dev_kfree_skb_any(tx_skb);
 		goto out;
 	}
@@ -5162,9 +5126,9 @@ static int nv_loopback_test(struct net_device *dev)
 		}
 	}
 
-	dma_unmap_single(&np->pci_dev->dev, test_dma_addr,
-			 (skb_end_pointer(tx_skb) - tx_skb->data),
-			 DMA_TO_DEVICE);
+	pci_unmap_single(np->pci_dev, test_dma_addr,
+		       (skb_end_pointer(tx_skb) - tx_skb->data),
+		       PCI_DMA_TODEVICE);
 	dev_kfree_skb_any(tx_skb);
  out:
 	/* stop engines */
@@ -5186,10 +5150,8 @@ static void nv_self_test(struct net_device *dev, struct ethtool_test *test, u64 
 {
 	struct fe_priv *np = netdev_priv(dev);
 	u8 __iomem *base = get_hwbase(dev);
-	int result, count;
-
-	count = nv_get_sset_count(dev, ETH_SS_TEST);
-	memset(buffer, 0, count * sizeof(u64));
+	int result;
+	memset(buffer, 0, nv_get_sset_count(dev, ETH_SS_TEST)*sizeof(u64));
 
 	if (!nv_link_test(dev)) {
 		test->flags |= ETH_TEST_FL_FAILED;
@@ -5233,7 +5195,7 @@ static void nv_self_test(struct net_device *dev, struct ethtool_test *test, u64 
 			return;
 		}
 
-		if (count > NV_TEST_COUNT_BASE && !nv_loopback_test(dev)) {
+		if (!nv_loopback_test(dev)) {
 			test->flags |= ETH_TEST_FL_FAILED;
 			buffer[3] = 1;
 		}
@@ -5279,6 +5241,8 @@ static const struct ethtool_ops ops = {
 	.get_link = ethtool_op_get_link,
 	.get_wol = nv_get_wol,
 	.set_wol = nv_set_wol,
+	.get_settings = nv_get_settings,
+	.set_settings = nv_set_settings,
 	.get_regs_len = nv_get_regs_len,
 	.get_regs = nv_get_regs,
 	.nway_reset = nv_nway_reset,
@@ -5291,8 +5255,6 @@ static const struct ethtool_ops ops = {
 	.get_sset_count = nv_get_sset_count,
 	.self_test = nv_self_test,
 	.get_ts_info = ethtool_op_get_ts_info,
-	.get_link_ksettings = nv_get_link_ksettings,
-	.set_link_ksettings = nv_set_link_ksettings,
 };
 
 /* The mgmt unit and driver use a semaphore to access the phy during init */
@@ -5657,12 +5619,16 @@ static int nv_probe(struct pci_dev *pci_dev, const struct pci_device_id *id)
 	spin_lock_init(&np->lock);
 	spin_lock_init(&np->hwstats_lock);
 	SET_NETDEV_DEV(dev, &pci_dev->dev);
-	u64_stats_init(&np->swstats_rx_syncp);
-	u64_stats_init(&np->swstats_tx_syncp);
 
-	timer_setup(&np->oom_kick, nv_do_rx_refill, 0);
-	timer_setup(&np->nic_poll, nv_do_nic_poll, 0);
-	timer_setup(&np->stats_poll, nv_do_stats_poll, TIMER_DEFERRABLE);
+	init_timer(&np->oom_kick);
+	np->oom_kick.data = (unsigned long) dev;
+	np->oom_kick.function = nv_do_rx_refill;	/* timer handler */
+	init_timer(&np->nic_poll);
+	np->nic_poll.data = (unsigned long) dev;
+	np->nic_poll.function = nv_do_nic_poll;	/* timer handler */
+	init_timer_deferrable(&np->stats_poll);
+	np->stats_poll.data = (unsigned long) dev;
+	np->stats_poll.function = nv_do_stats_poll;	/* timer handler */
 
 	err = pci_enable_device(pci_dev);
 	if (err)
@@ -5748,10 +5714,6 @@ static int nv_probe(struct pci_dev *pci_dev, const struct pci_device_id *id)
 	/* Add loopback capability to the device. */
 	dev->hw_features |= NETIF_F_LOOPBACK;
 
-	/* MTU range: 64 - 1500 or 9100 */
-	dev->min_mtu = ETH_ZLEN + ETH_FCS_LEN;
-	dev->max_mtu = np->pkt_limit;
-
 	np->pause_flags = NV_PAUSEFRAME_RX_CAPABLE | NV_PAUSEFRAME_RX_REQ | NV_PAUSEFRAME_AUTONEG;
 	if ((id->driver_data & DEV_HAS_PAUSEFRAME_TX_V1) ||
 	    (id->driver_data & DEV_HAS_PAUSEFRAME_TX_V2) ||
@@ -5768,21 +5730,16 @@ static int nv_probe(struct pci_dev *pci_dev, const struct pci_device_id *id)
 	np->tx_ring_size = TX_RING_DEFAULT;
 
 	if (!nv_optimized(np)) {
-		np->rx_ring.orig = dma_alloc_coherent(&pci_dev->dev,
-						      sizeof(struct ring_desc) *
-						      (np->rx_ring_size +
-						      np->tx_ring_size),
-						      &np->ring_addr,
-						      GFP_ATOMIC);
+		np->rx_ring.orig = pci_alloc_consistent(pci_dev,
+					sizeof(struct ring_desc) * (np->rx_ring_size + np->tx_ring_size),
+					&np->ring_addr);
 		if (!np->rx_ring.orig)
 			goto out_unmap;
 		np->tx_ring.orig = &np->rx_ring.orig[np->rx_ring_size];
 	} else {
-		np->rx_ring.ex = dma_alloc_coherent(&pci_dev->dev,
-						    sizeof(struct ring_desc_ex) *
-						    (np->rx_ring_size +
-						    np->tx_ring_size),
-						    &np->ring_addr, GFP_ATOMIC);
+		np->rx_ring.ex = pci_alloc_consistent(pci_dev,
+					sizeof(struct ring_desc_ex) * (np->rx_ring_size + np->tx_ring_size),
+					&np->ring_addr);
 		if (!np->rx_ring.ex)
 			goto out_unmap;
 		np->tx_ring.ex = &np->rx_ring.ex[np->rx_ring_size];
@@ -5798,7 +5755,7 @@ static int nv_probe(struct pci_dev *pci_dev, const struct pci_device_id *id)
 		dev->netdev_ops = &nv_netdev_ops_optimized;
 
 	netif_napi_add(dev, &np->napi, nv_napi_poll, RX_WORK_PER_LOOP);
-	dev->ethtool_ops = &ops;
+	SET_ETHTOOL_OPS(dev, &ops);
 	dev->watchdog_timeo = NV_WATCHDOG_TIMEO;
 
 	pci_set_drvdata(pci_dev, dev);
@@ -6059,6 +6016,7 @@ static int nv_probe(struct pci_dev *pci_dev, const struct pci_device_id *id)
 out_error:
 	if (phystate_orig)
 		writel(phystate|NVREG_ADAPTCTL_RUNNING, base + NvRegAdapterControl);
+	pci_set_drvdata(pci_dev, NULL);
 out_freering:
 	free_rings(dev);
 out_unmap:
@@ -6129,6 +6087,7 @@ static void nv_remove(struct pci_dev *pci_dev)
 	pci_release_regions(pci_dev);
 	pci_disable_device(pci_dev);
 	free_netdev(dev);
+	pci_set_drvdata(pci_dev, NULL);
 }
 
 #ifdef CONFIG_PM_SLEEP
@@ -6381,7 +6340,7 @@ static const struct pci_device_id pci_tbl[] = {
 	{0,},
 };
 
-static struct pci_driver forcedeth_pci_driver = {
+static struct pci_driver driver = {
 	.name		= DRV_NAME,
 	.id_table	= pci_tbl,
 	.probe		= nv_probe,
@@ -6389,6 +6348,16 @@ static struct pci_driver forcedeth_pci_driver = {
 	.shutdown	= nv_shutdown,
 	.driver.pm	= NV_PM_OPS,
 };
+
+static int __init init_nic(void)
+{
+	return pci_register_driver(&driver);
+}
+
+static void __exit exit_nic(void)
+{
+	pci_unregister_driver(&driver);
+}
 
 module_param(max_interrupt_work, int, 0);
 MODULE_PARM_DESC(max_interrupt_work, "forcedeth maximum events handled per interrupt");
@@ -6410,8 +6379,11 @@ module_param(debug_tx_timeout, bool, 0);
 MODULE_PARM_DESC(debug_tx_timeout,
 		 "Dump tx related registers and ring when tx_timeout happens");
 
-module_pci_driver(forcedeth_pci_driver);
 MODULE_AUTHOR("Manfred Spraul <manfred@colorfullife.com>");
 MODULE_DESCRIPTION("Reverse Engineered nForce ethernet driver");
 MODULE_LICENSE("GPL");
+
 MODULE_DEVICE_TABLE(pci, pci_tbl);
+
+module_init(init_nic);
+module_exit(exit_nic);

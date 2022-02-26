@@ -51,6 +51,8 @@ struct intel_function {
  * @reg_num: GPI_IS register number
  * @base: Starting pin of this group
  * @size: Size of this group (maximum is 32).
+ * @gpio_base: Starting GPIO base of this group (%0 if matches with @base,
+ *	       and %-1 if no GPIO mapping should be created)
  * @padown_num: PAD_OWN register number (assigned by the core driver)
  *
  * If pad groups of a community are not the same size, use this structure
@@ -60,6 +62,7 @@ struct intel_padgroup {
 	unsigned reg_num;
 	unsigned base;
 	unsigned size;
+	int gpio_base;
 	unsigned padown_num;
 };
 
@@ -173,6 +176,8 @@ struct intel_pinctrl_soc_data {
 
 int intel_pinctrl_probe(struct platform_device *pdev,
 			const struct intel_pinctrl_soc_data *soc_data);
+int intel_pinctrl_remove(struct platform_device *pdev);
+
 #ifdef CONFIG_PM_SLEEP
 int intel_pinctrl_suspend(struct device *dev);
 int intel_pinctrl_resume(struct device *dev);

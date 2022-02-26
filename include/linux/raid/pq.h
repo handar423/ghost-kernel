@@ -105,8 +105,6 @@ extern const struct raid6_calls raid6_avx2x4;
 extern const struct raid6_calls raid6_avx512x1;
 extern const struct raid6_calls raid6_avx512x2;
 extern const struct raid6_calls raid6_avx512x4;
-extern const struct raid6_calls raid6_tilegx8;
-extern const struct raid6_calls raid6_s390vx8;
 
 struct raid6_recov_calls {
 	void (*data2)(int, size_t, int, int, void **);
@@ -120,8 +118,6 @@ extern const struct raid6_recov_calls raid6_recov_intx1;
 extern const struct raid6_recov_calls raid6_recov_ssse3;
 extern const struct raid6_recov_calls raid6_recov_avx2;
 extern const struct raid6_recov_calls raid6_recov_avx512;
-extern const struct raid6_recov_calls raid6_recov_s390xc;
-extern const struct raid6_recov_calls raid6_recov_neon;
 
 extern const struct raid6_calls raid6_neonx1;
 extern const struct raid6_calls raid6_neonx2;
@@ -143,7 +139,6 @@ int raid6_select_algo(void);
 extern const u8 raid6_gfmul[256][256] __attribute__((aligned(256)));
 extern const u8 raid6_vgfmul[256][32] __attribute__((aligned(256)));
 extern const u8 raid6_gfexp[256]      __attribute__((aligned(256)));
-extern const u8 raid6_gflog[256]      __attribute__((aligned(256)));
 extern const u8 raid6_gfinv[256]      __attribute__((aligned(256)));
 extern const u8 raid6_gfexi[256]      __attribute__((aligned(256)));
 
@@ -160,8 +155,6 @@ void raid6_dual_recov(int disks, size_t bytes, int faila, int failb,
 
 # define jiffies	raid6_jiffies()
 # define printk 	printf
-# define pr_err(format, ...) fprintf(stderr, format, ## __VA_ARGS__)
-# define pr_info(format, ...) fprintf(stdout, format, ## __VA_ARGS__)
 # define GFP_KERNEL	0
 # define __get_free_pages(x, y)	((unsigned long)mmap(NULL, PAGE_SIZE << (y), \
 						     PROT_READ|PROT_WRITE,   \

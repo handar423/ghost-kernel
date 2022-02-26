@@ -43,7 +43,6 @@
 #include "flow.h"
 #include "conntrack.h"
 #include "vport.h"
-#include "flow_netlink.h"
 
 struct deferred_action {
 	struct sk_buff *skb;
@@ -175,8 +174,7 @@ static void update_ethertype(struct sk_buff *skb, struct ethhdr *hdr,
 	if (skb->ip_summed == CHECKSUM_COMPLETE) {
 		__be16 diff[] = { ~(hdr->h_proto), ethertype };
 
-		skb->csum = ~csum_partial((char *)diff, sizeof(diff),
-					~skb->csum);
+		skb->csum = csum_partial((char *)diff, sizeof(diff), skb->csum);
 	}
 
 	hdr->h_proto = ethertype;
@@ -268,8 +266,7 @@ static int set_mpls(struct sk_buff *skb, struct sw_flow_key *flow_key,
 	if (skb->ip_summed == CHECKSUM_COMPLETE) {
 		__be32 diff[] = { ~(stack->label_stack_entry), lse };
 
-		skb->csum = ~csum_partial((char *)diff, sizeof(diff),
-					  ~skb->csum);
+		skb->csum = csum_partial((char *)diff, sizeof(diff), skb->csum);
 	}
 
 	stack->label_stack_entry = lse;
@@ -377,38 +374,6 @@ static int push_eth(struct sk_buff *skb, struct sw_flow_key *key,
 
 	/* safe right before invalidate_flow_key */
 	key->mac_proto = MAC_PROTO_ETHERNET;
-	invalidate_flow_key(key);
-	return 0;
-}
-
-static int push_nsh(struct sk_buff *skb, struct sw_flow_key *key,
-		    const struct nshhdr *nh)
-{
-	int err;
-
-	err = nsh_push(skb, nh);
-	if (err)
-		return err;
-
-	/* safe right before invalidate_flow_key */
-	key->mac_proto = MAC_PROTO_NONE;
-	invalidate_flow_key(key);
-	return 0;
-}
-
-static int pop_nsh(struct sk_buff *skb, struct sw_flow_key *key)
-{
-	int err;
-
-	err = nsh_pop(skb);
-	if (err)
-		return err;
-
-	/* safe right before invalidate_flow_key */
-	if (skb->protocol == htons(ETH_P_TEB))
-		key->mac_proto = MAC_PROTO_ETHERNET;
-	else
-		key->mac_proto = MAC_PROTO_NONE;
 	invalidate_flow_key(key);
 	return 0;
 }
@@ -635,69 +600,6 @@ static int set_ipv6(struct sk_buff *skb, struct sw_flow_key *flow_key,
 	return 0;
 }
 
-static int set_nsh(struct sk_buff *skb, struct sw_flow_key *flow_key,
-		   const struct nlattr *a)
-{
-	struct nshhdr *nh;
-	size_t length;
-	int err;
-	u8 flags;
-	u8 ttl;
-	int i;
-
-	struct ovs_key_nsh key;
-	struct ovs_key_nsh mask;
-
-	err = nsh_key_from_nlattr(a, &key, &mask);
-	if (err)
-		return err;
-
-	/* Make sure the NSH base header is there */
-	if (!pskb_may_pull(skb, skb_network_offset(skb) + NSH_BASE_HDR_LEN))
-		return -ENOMEM;
-
-	nh = nsh_hdr(skb);
-	length = nsh_hdr_len(nh);
-
-	/* Make sure the whole NSH header is there */
-	err = skb_ensure_writable(skb, skb_network_offset(skb) +
-				       length);
-	if (unlikely(err))
-		return err;
-
-	nh = nsh_hdr(skb);
-	skb_postpull_rcsum(skb, nh, length);
-	flags = nsh_get_flags(nh);
-	flags = OVS_MASKED(flags, key.base.flags, mask.base.flags);
-	flow_key->nsh.base.flags = flags;
-	ttl = nsh_get_ttl(nh);
-	ttl = OVS_MASKED(ttl, key.base.ttl, mask.base.ttl);
-	flow_key->nsh.base.ttl = ttl;
-	nsh_set_flags_and_ttl(nh, flags, ttl);
-	nh->path_hdr = OVS_MASKED(nh->path_hdr, key.base.path_hdr,
-				  mask.base.path_hdr);
-	flow_key->nsh.base.path_hdr = nh->path_hdr;
-	switch (nh->mdtype) {
-	case NSH_M_TYPE1:
-		for (i = 0; i < NSH_MD1_CONTEXT_SIZE; i++) {
-			nh->md1.context[i] =
-			    OVS_MASKED(nh->md1.context[i], key.context[i],
-				       mask.context[i]);
-		}
-		memcpy(flow_key->nsh.context, nh->md1.context,
-		       sizeof(nh->md1.context));
-		break;
-	case NSH_M_TYPE2:
-		memset(flow_key->nsh.context, 0,
-		       sizeof(flow_key->nsh.context));
-		break;
-	default:
-		return -EINVAL;
-	}
-	skb_postpush_rcsum(skb, nh, length);
-	return 0;
-}
-
 /* Must follow skb_ensure_writable() since that can move the skb data. */
 static void set_tp_port(struct sk_buff *skb, __be16 *port,
 			__be16 new_port, __sum16 *check)
@@ -809,7 +711,7 @@ static int set_sctp(struct sk_buff *skb, struct sw_flow_key *flow_key,
 	return 0;
 }
 
-static int ovs_vport_output(struct net *net, struct sock *sk, struct sk_buff *skb)
+static int ovs_vport_output(struct sock *sock, struct sk_buff *skb)
 {
 	struct ovs_frag_data *data = this_cpu_ptr(&ovs_frag_data_storage);
 	struct vport *vport = data->vport;
@@ -877,8 +779,7 @@ static void prepare_frag(struct vport *vport, struct sk_buff *skb,
 	skb_pull(skb, hlen);
 }
 
-static void ovs_fragment(struct net *net, struct vport *vport,
-			 struct sk_buff *skb, u16 mru,
+static void ovs_fragment(struct vport *vport, struct sk_buff *skb, u16 mru,
 			 struct sw_flow_key *key)
 {
 	u16 orig_network_offset = 0;
@@ -907,7 +808,7 @@ static void ovs_fragment(struct net *net, struct vport *vport,
 		skb_dst_set_noref(skb, &ovs_dst);
 		IPCB(skb)->frag_max_size = mru;
 
-		ip_do_fragment(net, skb->sk, skb, ovs_vport_output);
+		ip_do_fragment(skb->sk, skb, ovs_vport_output);
 		refdst_drop(orig_dst);
 	} else if (key->eth.type == htons(ETH_P_IPV6)) {
 		const struct nf_ipv6_ops *v6ops = nf_get_ipv6_ops();
@@ -928,7 +829,7 @@ static void ovs_fragment(struct net *net, struct vport *vport,
 		skb_dst_set_noref(skb, &ovs_rt.dst);
 		IP6CB(skb)->frag_max_size = mru;
 
-		v6ops->fragment(net, skb->sk, skb, ovs_vport_output);
+		v6ops->fragment(skb->sk, skb, ovs_vport_output);
 		refdst_drop(orig_dst);
 	} else {
 		WARN_ONCE(1, "Failed fragment ->%s: eth=%04x, MRU=%d, MTU=%d.",
@@ -962,9 +863,7 @@ static void do_output(struct datapath *dp, struct sk_buff *skb, int out_port,
 		           (skb->len <= mru + vport->dev->hard_header_len))) {
 			ovs_vport_send(vport, skb, ovs_key_mac_proto(key));
 		} else if (mru <= vport->dev->mtu) {
-			struct net *net = read_pnet(&dp->net);
-
-			ovs_fragment(net, vport, skb, mru, key);
+			ovs_fragment(vport, skb, mru, key);
 		} else {
 			kfree_skb(skb);
 		}
@@ -1118,10 +1017,6 @@ static int execute_masked_set_action(struct sk_buff *skb,
 	case OVS_KEY_ATTR_ETHERNET:
 		err = set_eth_addr(skb, flow_key, nla_data(a),
 				   get_mask(a, struct ovs_key_ethernet *));
-		break;
-
-	case OVS_KEY_ATTR_NSH:
-		err = set_nsh(skb, flow_key, a);
 		break;
 
 	case OVS_KEY_ATTR_IPV4:
@@ -1314,28 +1209,6 @@ static int do_execute_actions(struct datapath *dp, struct sk_buff *skb,
 		case OVS_ACTION_ATTR_POP_ETH:
 			err = pop_eth(skb, key);
 			break;
-
-		case OVS_ACTION_ATTR_PUSH_NSH: {
-			u8 buffer[NSH_HDR_MAX_LEN];
-			struct nshhdr *nh = (struct nshhdr *)buffer;
-
-			err = nsh_hdr_from_nlattr(nla_data(a), nh,
-						  NSH_HDR_MAX_LEN);
-			if (unlikely(err))
-				break;
-			err = push_nsh(skb, key, nh);
-			break;
-		}
-
-		case OVS_ACTION_ATTR_POP_NSH:
-			err = pop_nsh(skb, key);
-			break;
-
-		case OVS_ACTION_ATTR_METER:
-			if (ovs_meter_execute(dp, skb, key, nla_get_u32(a))) {
-				consume_skb(skb);
-				return 0;
-			}
 		}
 
 		if (unlikely(err)) {

@@ -62,6 +62,9 @@
 #define bond_is_first_slave(bond, pos) (pos == bond_first_slave(bond))
 #define bond_is_last_slave(bond, pos) (pos == bond_last_slave(bond))
 
+/* Since bond_first/last_slave can return NULL, these can return NULL too */
+#define bond_next_slave(bond, pos) __bond_next_slave(bond, pos)
+
 /**
  * bond_for_each_slave - iterate over all slaves
  * @bond:	the bond holding this list
@@ -139,12 +142,6 @@ struct bond_parm_tbl {
 	int mode;
 };
 
-struct netdev_notify_work {
-	struct delayed_work	work;
-	struct net_device	*dev;
-	struct netdev_bonding_info bonding_info;
-};
-
 struct slave {
 	struct net_device *dev; /* first - useful for panic debug */
 	struct bonding *bond; /* our master */
@@ -155,7 +152,6 @@ struct slave {
 	unsigned long target_last_arp_rx[BOND_MAX_ARP_TARGETS];
 	s8     link;		/* one of BOND_LINK_XXXX */
 	s8     link_new_state;	/* one of BOND_LINK_XXXX */
-	s8     new_link;
 	u8     backup:1,   /* indicates backup slave. Value corresponds with
 			      BOND_STATE_ACTIVE and BOND_STATE_BACKUP */
 	       inactive:1, /* indicates inactive slave */
@@ -172,6 +168,7 @@ struct slave {
 #ifdef CONFIG_NET_POLL_CONTROLLER
 	struct netpoll *np;
 #endif
+	struct delayed_work notify_work;
 	struct kobject kobj;
 	struct rtnl_link_stats64 slave_stats;
 };
@@ -235,6 +232,14 @@ struct bonding {
 	struct rtnl_link_stats64 bond_stats;
 };
 
+struct netdev_upper {
+        struct net_device *dev;
+        bool master;
+        struct list_head list;
+        struct rcu_head rcu;
+        struct list_head search_list;
+};
+
 #define bond_slave_get_rcu(dev) \
 	((struct slave *) rcu_dereference(dev->rx_handler_data))
 
@@ -248,6 +253,34 @@ struct bond_vlan_tag {
 	__be16		vlan_proto;
 	unsigned short	vlan_id;
 };
+
+/**
+ * __bond_next_slave - get the next slave after the one provided
+ * @bond - bonding struct
+ * @slave - the slave provided
+ *
+ * Returns the next slave after the slave provided, first slave if the
+ * slave provided is the last slave and NULL if slave is not found
+ */
+static inline struct slave *__bond_next_slave(struct bonding *bond,
+					      struct slave *slave)
+{
+	struct slave *slave_iter;
+	struct list_head *iter;
+	bool found = false;
+
+	netdev_for_each_lower_private(bond->dev, slave_iter, iter) {
+		if (found)
+			return slave_iter;
+		if (slave_iter == slave)
+			found = true;
+	}
+
+	if (found)
+		return bond_first_slave(bond);
+
+	return NULL;
+}
 
 /**
  * Returns NULL if the net_device does not belong to any of the bond's slaves
@@ -284,8 +317,15 @@ static inline bool bond_needs_speed_duplex(const struct bonding *bond)
 
 static inline bool bond_is_nondyn_tlb(const struct bonding *bond)
 {
-	return (BOND_MODE(bond) == BOND_MODE_TLB)  &&
-	       (bond->params.tlb_dynamic_lb == 0);
+	return (bond_is_lb(bond) && bond->params.tlb_dynamic_lb == 0);
+}
+
+static inline bool bond_mode_can_use_xmit_hash(const struct bonding *bond)
+{
+	return (BOND_MODE(bond) == BOND_MODE_8023AD ||
+		BOND_MODE(bond) == BOND_MODE_XOR ||
+		BOND_MODE(bond) == BOND_MODE_TLB ||
+		BOND_MODE(bond) == BOND_MODE_ALB);
 }
 
 static inline bool bond_mode_uses_xmit_hash(const struct bonding *bond)
@@ -523,7 +563,7 @@ static inline void bond_propose_link_state(struct slave *slave, int state)
 
 static inline void bond_commit_link_state(struct slave *slave, bool notify)
 {
-	if (slave->link == slave->link_new_state)
+	if (slave->link_new_state == BOND_LINK_NOCHANGE)
 		return;
 
 	slave->link = slave->link_new_state;
@@ -569,8 +609,8 @@ static inline __be32 bond_confirm_addr(struct net_device *dev, __be32 dst, __be3
 	in_dev = __in_dev_get_rcu(dev);
 
 	if (in_dev)
-		addr = inet_confirm_addr(dev_net(dev), in_dev, dst, local,
-					 RT_SCOPE_HOST);
+		addr = inet_confirm_addr(in_dev, dst, local, RT_SCOPE_HOST);
+
 	rcu_read_unlock();
 	return addr;
 }
@@ -592,8 +632,7 @@ void bond_destroy_sysfs(struct bond_net *net);
 void bond_prepare_sysfs_group(struct bonding *bond);
 int bond_sysfs_slave_add(struct slave *slave);
 void bond_sysfs_slave_del(struct slave *slave);
-int bond_enslave(struct net_device *bond_dev, struct net_device *slave_dev,
-		 struct netlink_ext_ack *extack);
+int bond_enslave(struct net_device *bond_dev, struct net_device *slave_dev);
 int bond_release(struct net_device *bond_dev, struct net_device *slave_dev);
 u32 bond_xmit_hash(struct bonding *bond, struct sk_buff *skb);
 int bond_set_carrier(struct bonding *bond);
@@ -611,9 +650,6 @@ int bond_netlink_init(void);
 void bond_netlink_fini(void);
 struct net_device *bond_option_active_slave_get_rcu(struct bonding *bond);
 const char *bond_slave_link_status(s8 link);
-struct bond_vlan_tag *bond_verify_device_path(struct net_device *start_dev,
-					      struct net_device *end_dev,
-					      int level);
 int bond_update_slave_arr(struct bonding *bond, struct slave *skipslave);
 void bond_slave_arr_work_rearm(struct bonding *bond, unsigned long delay);
 void bond_work_init_all(struct bonding *bond);
@@ -668,27 +704,6 @@ static inline struct slave *bond_slave_has_mac_rcu(struct bonding *bond,
 	return NULL;
 }
 
-/* Caller must hold rcu_read_lock() for read */
-static inline bool bond_slave_has_mac_rx(struct bonding *bond, const u8 *mac)
-{
-	struct list_head *iter;
-	struct slave *tmp;
-	struct netdev_hw_addr *ha;
-
-	bond_for_each_slave_rcu(bond, tmp, iter)
-		if (ether_addr_equal_64bits(mac, tmp->dev->dev_addr))
-			return true;
-
-	if (netdev_uc_empty(bond->dev))
-		return false;
-
-	netdev_for_each_uc_addr(ha, bond->dev)
-		if (ether_addr_equal_64bits(mac, ha->addr))
-			return true;
-
-	return false;
-}
-
 /* Check if the ip is present in arp ip list, or first free slot if ip == 0
  * Returns -1 if not found, index if found
  */
@@ -706,7 +721,7 @@ static inline int bond_get_targets_ip(__be32 *targets, __be32 ip)
 }
 
 /* exported from bond_main.c */
-extern unsigned int bond_net_id;
+extern int bond_net_id;
 extern const struct bond_parm_tbl bond_lacp_tbl[];
 extern const struct bond_parm_tbl xmit_hashtype_tbl[];
 extern const struct bond_parm_tbl arp_validate_tbl[];
@@ -720,7 +735,6 @@ extern struct rtnl_link_ops bond_link_ops;
 
 static inline void bond_tx_drop(struct net_device *dev, struct sk_buff *skb)
 {
-	atomic_long_inc(&dev->tx_dropped);
 	dev_kfree_skb_any(skb);
 }
 

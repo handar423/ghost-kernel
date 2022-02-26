@@ -10,6 +10,7 @@
  */
 #include <linux/delay.h>
 #include <linux/dma-mapping.h>
+#include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
@@ -211,8 +212,9 @@ static void meth_check_link(struct net_device *dev)
 static int meth_init_tx_ring(struct meth_private *priv)
 {
 	/* Init TX ring */
-	priv->tx_ring = dma_zalloc_coherent(NULL, TX_RING_BUFFER_SIZE,
-					    &priv->tx_ring_dma, GFP_ATOMIC);
+	priv->tx_ring = dma_alloc_coherent(NULL, TX_RING_BUFFER_SIZE,
+	                                   &priv->tx_ring_dma,
+					   GFP_ATOMIC | __GFP_ZERO);
 	if (!priv->tx_ring)
 		return -ENOMEM;
 
@@ -815,6 +817,7 @@ static const struct net_device_ops meth_netdev_ops = {
 	.ndo_start_xmit		= meth_tx,
 	.ndo_do_ioctl		= meth_ioctl,
 	.ndo_tx_timeout		= meth_tx_timeout,
+	.ndo_change_mtu		= eth_change_mtu,
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_set_mac_address	= eth_mac_addr,
 	.ndo_set_rx_mode    	= meth_set_rx_mode,
@@ -854,21 +857,23 @@ static int meth_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int meth_remove(struct platform_device *pdev)
+static int __exit meth_remove(struct platform_device *pdev)
 {
 	struct net_device *dev = platform_get_drvdata(pdev);
 
 	unregister_netdev(dev);
 	free_netdev(dev);
+	platform_set_drvdata(pdev, NULL);
 
 	return 0;
 }
 
 static struct platform_driver meth_driver = {
 	.probe	= meth_probe,
-	.remove	= meth_remove,
+	.remove	= __exit_p(meth_remove),
 	.driver = {
 		.name	= "meth",
+		.owner	= THIS_MODULE,
 	}
 };
 

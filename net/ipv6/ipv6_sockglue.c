@@ -52,9 +52,8 @@
 #include <net/udplite.h>
 #include <net/xfrm.h>
 #include <net/compat.h>
-#include <net/seg6.h>
 
-#include <linux/uaccess.h>
+#include <asm/uaccess.h>
 
 struct ip6_ra_chain *ip6_ra_chain;
 DEFINE_RWLOCK(ip6_ra_lock);
@@ -67,12 +66,12 @@ int ip6_ra_control(struct sock *sk, int sel)
 	if (sk->sk_type != SOCK_RAW || inet_sk(sk)->inet_num != IPPROTO_RAW)
 		return -ENOPROTOOPT;
 
-	new_ra = (sel >= 0) ? kmalloc(sizeof(*new_ra), GFP_KERNEL) : NULL;
+	new_ra = (sel>=0) ? kmalloc(sizeof(*new_ra), GFP_KERNEL) : NULL;
 
 	write_lock_bh(&ip6_ra_lock);
-	for (rap = &ip6_ra_chain; (ra = *rap) != NULL; rap = &ra->next) {
+	for (rap = &ip6_ra_chain; (ra=*rap) != NULL; rap = &ra->next) {
 		if (ra->sk == sk) {
-			if (sel >= 0) {
+			if (sel>=0) {
 				write_unlock_bh(&ip6_ra_lock);
 				kfree(new_ra);
 				return -EADDRINUSE;
@@ -86,7 +85,7 @@ int ip6_ra_control(struct sock *sk, int sel)
 			return 0;
 		}
 	}
-	if (!new_ra) {
+	if (new_ra == NULL) {
 		write_unlock_bh(&ip6_ra_lock);
 		return -ENOBUFS;
 	}
@@ -99,6 +98,7 @@ int ip6_ra_control(struct sock *sk, int sel)
 	return 0;
 }
 
+static
 struct ipv6_txoptions *ipv6_update_options(struct sock *sk,
 					   struct ipv6_txoptions *opt)
 {
@@ -147,8 +147,8 @@ static int do_ipv6_setsockopt(struct sock *sk, int level, int optname,
 	int retv = -ENOPROTOOPT;
 	bool needs_rtnl = setsockopt_needs_rtnl(optname);
 
-	if (!optval)
-		val = 0;
+	if (optval == NULL)
+		val=0;
 	else {
 		if (optlen >= sizeof(int)) {
 			if (get_user(val, (int __user *) optval))
@@ -157,7 +157,7 @@ static int do_ipv6_setsockopt(struct sock *sk, int level, int optname,
 			val = 0;
 	}
 
-	valbool = (val != 0);
+	valbool = (val!=0);
 
 	if (ip6_mroute_opt(optname))
 		return ip6_mroute_setsockopt(sk, optname, optval, optlen);
@@ -257,7 +257,7 @@ static int do_ipv6_setsockopt(struct sock *sk, int level, int optname,
 		if (optlen < sizeof(int) ||
 		    inet_sk(sk)->inet_num)
 			goto e_inval;
-		sk->sk_ipv6only = valbool;
+		np->ipv6only = valbool;
 		retv = 0;
 		break;
 
@@ -377,14 +377,6 @@ static int do_ipv6_setsockopt(struct sock *sk, int level, int optname,
 		retv = 0;
 		break;
 
-	case IPV6_FREEBIND:
-		if (optlen < sizeof(int))
-			goto e_inval;
-		/* we also don't have a separate freebind bit for IPV6 */
-		inet_sk(sk)->freebind = valbool;
-		retv = 0;
-		break;
-
 	case IPV6_RECVORIGDSTADDR:
 		if (optlen < sizeof(int))
 			goto e_inval;
@@ -404,7 +396,7 @@ static int do_ipv6_setsockopt(struct sock *sk, int level, int optname,
 		 */
 		if (optlen == 0)
 			optval = NULL;
-		else if (!optval)
+		else if (optval == NULL)
 			goto e_inval;
 		else if (optlen < sizeof(struct ipv6_opt_hdr) ||
 			 optlen & 0x7 || optlen > 8 * 255)
@@ -438,15 +430,6 @@ static int do_ipv6_setsockopt(struct sock *sk, int level, int optname,
 
 				break;
 #endif
-			case IPV6_SRCRT_TYPE_4:
-			{
-				struct ipv6_sr_hdr *srh = (struct ipv6_sr_hdr *)
-							  opt->srcrt;
-
-				if (!seg6_validate_srh(srh, optlen))
-					goto sticky_done;
-				break;
-			}
 			default:
 				goto sticky_done;
 			}
@@ -468,7 +451,7 @@ sticky_done:
 
 		if (optlen == 0)
 			goto e_inval;
-		else if (optlen < sizeof(struct in6_pktinfo) || !optval)
+		else if (optlen < sizeof(struct in6_pktinfo) || optval == NULL)
 			goto e_inval;
 
 		if (copy_from_user(&pkt, optval, sizeof(struct in6_pktinfo))) {
@@ -489,8 +472,7 @@ sticky_done:
 		struct ipv6_txoptions *opt = NULL;
 		struct msghdr msg;
 		struct flowi6 fl6;
-		struct sockcm_cookie sockc_junk;
-		struct ipcm6_cookie ipc6;
+		int junk;
 
 		memset(&fl6, 0, sizeof(fl6));
 		fl6.flowi6_oif = sk->sk_bound_dev_if;
@@ -508,21 +490,21 @@ sticky_done:
 
 		opt = sock_kmalloc(sk, sizeof(*opt) + optlen, GFP_KERNEL);
 		retv = -ENOBUFS;
-		if (!opt)
+		if (opt == NULL)
 			break;
 
 		memset(opt, 0, sizeof(*opt));
-		refcount_set(&opt->refcnt, 1);
+		atomic_set(&opt->refcnt, 1);
 		opt->tot_len = sizeof(*opt) + optlen;
 		retv = -EFAULT;
 		if (copy_from_user(opt+1, optval, optlen))
 			goto done;
 
 		msg.msg_controllen = optlen;
-		msg.msg_control = (void *)(opt+1);
-		ipc6.opt = opt;
+		msg.msg_control = (void*)(opt+1);
 
-		retv = ip6_datagram_send_ctl(net, sk, &msg, &fl6, &ipc6, &sockc_junk);
+		retv = ip6_datagram_send_ctl(net, sk, &msg, &fl6, opt, &junk,
+					     &junk, &junk);
 		if (retv)
 			goto done;
 update:
@@ -602,24 +584,16 @@ done:
 
 		if (val) {
 			struct net_device *dev;
-			int midx;
 
-			rcu_read_lock();
+			if (sk->sk_bound_dev_if && sk->sk_bound_dev_if != val)
+				goto e_inval;
 
-			dev = dev_get_by_index_rcu(net, val);
+			dev = dev_get_by_index(net, val);
 			if (!dev) {
-				rcu_read_unlock();
 				retv = -ENODEV;
 				break;
 			}
-			midx = l3mdev_master_ifindex_rcu(dev);
-
-			rcu_read_unlock();
-
-			if (sk->sk_bound_dev_if &&
-			    sk->sk_bound_dev_if != val &&
-			    (!midx || midx != sk->sk_bound_dev_if))
-				goto e_inval;
+			dev_put(dev);
 		}
 		np->mcast_oif = val;
 		retv = 0;
@@ -718,8 +692,9 @@ done:
 			struct sockaddr_in6 *psin6;
 
 			psin6 = (struct sockaddr_in6 *)&greqs.gsr_group;
-			retv = ipv6_sock_mc_join(sk, greqs.gsr_interface,
-						 &psin6->sin6_addr);
+			retv = ipv6_sock_mc_join_ssm(sk, greqs.gsr_interface,
+						     &psin6->sin6_addr,
+						     MCAST_INCLUDE);
 			/* prior join w/ different source is ok */
 			if (retv && retv != -EADDRINUSE)
 				break;
@@ -742,9 +717,14 @@ done:
 			retv = -ENOBUFS;
 			break;
 		}
-		gsf = memdup_user(optval, optlen);
-		if (IS_ERR(gsf)) {
-			retv = PTR_ERR(gsf);
+		gsf = kmalloc(optlen,GFP_KERNEL);
+		if (!gsf) {
+			retv = -ENOBUFS;
+			break;
+		}
+		retv = -EFAULT;
+		if (copy_from_user(gsf, optval, optlen)) {
+			kfree(gsf);
 			break;
 		}
 		/* numsrc >= (4G-140)/128 overflow in 32 bits */
@@ -884,15 +864,6 @@ pref_skip_coa:
 		np->dontfrag = valbool;
 		retv = 0;
 		break;
-	case IPV6_AUTOFLOWLABEL:
-		np->autoflowlabel = valbool;
-		np->autoflowlabel_set = 1;
-		retv = 0;
-		break;
-	case IPV6_RECVFRAGSIZE:
-		np->rxopt.bits.recvfragsize = valbool;
-		retv = 0;
-		break;
 	}
 
 	release_sock(sk);
@@ -923,15 +894,12 @@ int ipv6_setsockopt(struct sock *sk, int level, int optname,
 #ifdef CONFIG_NETFILTER
 	/* we need to exclude all possible ENOPROTOOPTs except default case */
 	if (err == -ENOPROTOOPT && optname != IPV6_IPSEC_POLICY &&
-			optname != IPV6_XFRM_POLICY) {
-		lock_sock(sk);
-		err = nf_setsockopt(sk, PF_INET6, optname, optval,
-				optlen);
-		release_sock(sk);
-	}
+			optname != IPV6_XFRM_POLICY)
+		err = nf_setsockopt(sk, PF_INET6, optname, optval, optlen);
 #endif
 	return err;
 }
+
 EXPORT_SYMBOL(ipv6_setsockopt);
 
 #ifdef CONFIG_COMPAT
@@ -958,15 +926,13 @@ int compat_ipv6_setsockopt(struct sock *sk, int level, int optname,
 #ifdef CONFIG_NETFILTER
 	/* we need to exclude all possible ENOPROTOOPTs except default case */
 	if (err == -ENOPROTOOPT && optname != IPV6_IPSEC_POLICY &&
-	    optname != IPV6_XFRM_POLICY) {
-		lock_sock(sk);
-		err = compat_nf_setsockopt(sk, PF_INET6, optname,
-					   optval, optlen);
-		release_sock(sk);
-	}
+	    optname != IPV6_XFRM_POLICY)
+		err = compat_nf_setsockopt(sk, PF_INET6, optname, optval,
+					   optlen);
 #endif
 	return err;
 }
+
 EXPORT_SYMBOL(compat_ipv6_setsockopt);
 #endif
 
@@ -978,7 +944,7 @@ static int ipv6_getsockopt_sticky(struct sock *sk, struct ipv6_txoptions *opt,
 	if (!opt)
 		return 0;
 
-	switch (optname) {
+	switch(optname) {
 	case IPV6_HOPOPTS:
 		hdr = opt->hopopt;
 		break;
@@ -1059,9 +1025,13 @@ static int do_ipv6_getsockopt(struct sock *sk, int level, int optname,
 		lock_sock(sk);
 		skb = np->pktoptions;
 		if (skb)
-			ip6_datagram_recv_ctl(sk, &msg, skb);
+			atomic_inc(&skb->users);
 		release_sock(sk);
-		if (!skb) {
+
+		if (skb) {
+			ip6_datagram_recv_ctl(sk, &msg, skb);
+			kfree_skb(skb);
+		} else {
 			if (np->rxopt.bits.rxinfo) {
 				struct in6_pktinfo src_info;
 				src_info.ipi6_ifindex = np->mcast_oif ? np->mcast_oif :
@@ -1115,7 +1085,7 @@ static int do_ipv6_getsockopt(struct sock *sk, int level, int optname,
 	}
 
 	case IPV6_V6ONLY:
-		val = sk->sk_ipv6only;
+		val = np->ipv6only;
 		break;
 
 	case IPV6_RECVPKTINFO:
@@ -1217,14 +1187,11 @@ static int do_ipv6_getsockopt(struct sock *sk, int level, int optname,
 			return -EFAULT;
 
 		return 0;
+		break;
 	}
 
 	case IPV6_TRANSPARENT:
 		val = inet_sk(sk)->transparent;
-		break;
-
-	case IPV6_FREEBIND:
-		val = inet_sk(sk)->freebind;
 		break;
 
 	case IPV6_RECVORIGDSTADDR:
@@ -1278,37 +1245,6 @@ static int do_ipv6_getsockopt(struct sock *sk, int level, int optname,
 		val = np->sndflow;
 		break;
 
-	case IPV6_FLOWLABEL_MGR:
-	{
-		struct in6_flowlabel_req freq;
-		int flags;
-
-		if (len < sizeof(freq))
-			return -EINVAL;
-
-		if (copy_from_user(&freq, optval, sizeof(freq)))
-			return -EFAULT;
-
-		if (freq.flr_action != IPV6_FL_A_GET)
-			return -EINVAL;
-
-		len = sizeof(freq);
-		flags = freq.flr_flags;
-
-		memset(&freq, 0, sizeof(freq));
-
-		val = ipv6_flowlabel_opt_get(sk, &freq, flags);
-		if (val < 0)
-			return val;
-
-		if (put_user(len, optlen))
-			return -EFAULT;
-		if (copy_to_user(optval, &freq, len))
-			return -EFAULT;
-
-		return 0;
-	}
-
 	case IPV6_ADDR_PREFERENCES:
 		val = 0;
 
@@ -1335,21 +1271,13 @@ static int do_ipv6_getsockopt(struct sock *sk, int level, int optname,
 		val = np->dontfrag;
 		break;
 
-	case IPV6_AUTOFLOWLABEL:
-		val = ip6_autoflowlabel(sock_net(sk), np);
-		break;
-
-	case IPV6_RECVFRAGSIZE:
-		val = np->rxopt.bits.recvfragsize;
-		break;
-
 	default:
 		return -ENOPROTOOPT;
 	}
 	len = min_t(unsigned int, sizeof(int), len);
-	if (put_user(len, optlen))
+	if(put_user(len, optlen))
 		return -EFAULT;
-	if (copy_to_user(optval, &val, len))
+	if(copy_to_user(optval,&val,len))
 		return -EFAULT;
 	return 0;
 }
@@ -1362,7 +1290,7 @@ int ipv6_getsockopt(struct sock *sk, int level, int optname,
 	if (level == SOL_IP && sk->sk_type != SOCK_RAW)
 		return udp_prot.getsockopt(sk, level, optname, optval, optlen);
 
-	if (level != SOL_IPV6)
+	if(level != SOL_IPV6)
 		return -ENOPROTOOPT;
 
 	err = do_ipv6_getsockopt(sk, level, optname, optval, optlen, 0);
@@ -1374,16 +1302,14 @@ int ipv6_getsockopt(struct sock *sk, int level, int optname,
 		if (get_user(len, optlen))
 			return -EFAULT;
 
-		lock_sock(sk);
-		err = nf_getsockopt(sk, PF_INET6, optname, optval,
-				&len);
-		release_sock(sk);
+		err = nf_getsockopt(sk, PF_INET6, optname, optval, &len);
 		if (err >= 0)
 			err = put_user(len, optlen);
 	}
 #endif
 	return err;
 }
+
 EXPORT_SYMBOL(ipv6_getsockopt);
 
 #ifdef CONFIG_COMPAT
@@ -1416,16 +1342,14 @@ int compat_ipv6_getsockopt(struct sock *sk, int level, int optname,
 		if (get_user(len, optlen))
 			return -EFAULT;
 
-		lock_sock(sk);
-		err = compat_nf_getsockopt(sk, PF_INET6,
-					   optname, optval, &len);
-		release_sock(sk);
+		err = compat_nf_getsockopt(sk, PF_INET6, optname, optval, &len);
 		if (err >= 0)
 			err = put_user(len, optlen);
 	}
 #endif
 	return err;
 }
+
 EXPORT_SYMBOL(compat_ipv6_getsockopt);
 #endif
 

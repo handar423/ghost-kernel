@@ -11,6 +11,10 @@
  *  but WITHOUT ANY WARRANTY; without even the implied warranty of
  *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  *  GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 #include <linux/module.h>
@@ -35,7 +39,7 @@ MODULE_PARM_DESC(enable_ir, "enable ir (default is enable)");
 
 static unsigned int ir_clock_mhz = 12;
 module_param(ir_clock_mhz, int, 0644);
-MODULE_PARM_DESC(ir_clock_mhz, "ir clock, in MHz");
+MODULE_PARM_DESC(enable_ir, "ir clock, in MHz");
 
 #define URB_SUBMIT_DELAY	100	/* ms - Delay to submit an URB request on retrial and init */
 #define URB_INT_LED_DELAY	100	/* ms - Delay to turn led on again on int mode */
@@ -63,10 +67,11 @@ struct tm6000_IR {
 	u8			wait:1;
 	u8			pwled:2;
 	u8			submit_urb:1;
+	u16			key_addr;
 	struct urb		*int_urb;
 
 	/* IR device properties */
-	u64			rc_proto;
+	u64			rc_type;
 };
 
 void tm6000_ir_wait(struct tm6000_core *dev, u8 state)
@@ -103,13 +108,13 @@ static int tm6000_ir_config(struct tm6000_IR *ir)
 	 * IR, in order to discard such decoding
 	 */
 
-	switch (ir->rc_proto) {
-	case RC_PROTO_BIT_NEC:
+	switch (ir->rc_type) {
+	case RC_BIT_NEC:
 		leader = 900;	/* ms */
 		pulse  = 700;	/* ms - the actual value would be 562 */
 		break;
 	default:
-	case RC_PROTO_BIT_RC5:
+	case RC_BIT_RC5:
 		leader = 900;	/* ms - from the NEC decoding */
 		pulse  = 1780;	/* ms - The actual value would be 1776 */
 		break;
@@ -117,12 +122,12 @@ static int tm6000_ir_config(struct tm6000_IR *ir)
 
 	pulse = ir_clock_mhz * pulse;
 	leader = ir_clock_mhz * leader;
-	if (ir->rc_proto == RC_PROTO_BIT_NEC)
+	if (ir->rc_type == RC_BIT_NEC)
 		leader = leader | 0x8000;
 
 	dprintk(2, "%s: %s, %d MHz, leader = 0x%04x, pulse = 0x%06x \n",
 		__func__,
-		(ir->rc_proto == RC_PROTO_BIT_NEC) ? "NEC" : "RC-5",
+		(ir->rc_type == RC_BIT_NEC) ? "NEC" : "RC-5",
 		ir_clock_mhz, leader, pulse);
 
 	/* Remote WAKEUP = enable, normal mode, from IR decoder output */
@@ -157,42 +162,11 @@ static int tm6000_ir_config(struct tm6000_IR *ir)
 	return 0;
 }
 
-static void tm6000_ir_keydown(struct tm6000_IR *ir,
-			      const char *buf, unsigned int len)
-{
-	u8 device, command;
-	u32 scancode;
-	enum rc_proto protocol;
-
-	if (len < 1)
-		return;
-
-	command = buf[0];
-	device = (len > 1 ? buf[1] : 0x0);
-	switch (ir->rc_proto) {
-	case RC_PROTO_BIT_RC5:
-		protocol = RC_PROTO_RC5;
-		scancode = RC_SCANCODE_RC5(device, command);
-		break;
-	case RC_PROTO_BIT_NEC:
-		protocol = RC_PROTO_NEC;
-		scancode = RC_SCANCODE_NEC(device, command);
-		break;
-	default:
-		protocol = RC_PROTO_OTHER;
-		scancode = RC_SCANCODE_OTHER(device << 8 | command);
-		break;
-	}
-
-	dprintk(1, "%s, protocol: 0x%04x, scancode: 0x%08x\n",
-		__func__, protocol, scancode);
-	rc_keydown(ir->rc, protocol, scancode, 0);
-}
-
 static void tm6000_ir_urb_received(struct urb *urb)
 {
 	struct tm6000_core *dev = urb->context;
 	struct tm6000_IR *ir = dev->ir;
+	struct tm6000_ir_poll_result poll_result;
 	char *buf;
 
 	dprintk(2, "%s\n",__func__);
@@ -210,7 +184,12 @@ static void tm6000_ir_urb_received(struct urb *urb)
 			       DUMP_PREFIX_OFFSET,16, 1,
 			       buf, urb->actual_length, false);
 
-	tm6000_ir_keydown(ir, urb->transfer_buffer, urb->actual_length);
+	poll_result.rc_data = buf[0];
+	if (urb->actual_length > 1)
+		poll_result.rc_data |= buf[1] << 8;
+
+	dprintk(1, "%s, scancode: 0x%04x\n",__func__, poll_result.rc_data);
+	rc_keydown(ir->rc, poll_result.rc_data, 0);
 
 	usb_submit_urb(urb, GFP_ATOMIC);
 	/*
@@ -225,6 +204,7 @@ static void tm6000_ir_handle_key(struct work_struct *work)
 {
 	struct tm6000_IR *ir = container_of(work, struct tm6000_IR, work.work);
 	struct tm6000_core *dev = ir->dev;
+	struct tm6000_ir_poll_result poll_result;
 	int rc;
 	u8 buf[2];
 
@@ -239,8 +219,13 @@ static void tm6000_ir_handle_key(struct work_struct *work)
 	if (rc < 0)
 		return;
 
+	if (rc > 1)
+		poll_result.rc_data = buf[0] | buf[1] << 8;
+	else
+		poll_result.rc_data = buf[0];
+
 	/* Check if something was read */
-	if ((buf[0] & 0xff) == 0xff) {
+	if ((poll_result.rc_data & 0xff) == 0xff) {
 		if (!ir->pwled) {
 			tm6000_flash_led(dev, 1);
 			ir->pwled = 1;
@@ -248,7 +233,8 @@ static void tm6000_ir_handle_key(struct work_struct *work)
 		return;
 	}
 
-	tm6000_ir_keydown(ir, buf, rc);
+	dprintk(1, "%s, scancode: 0x%04x\n",__func__, poll_result.rc_data);
+	rc_keydown(ir->rc, poll_result.rc_data, 0);
 	tm6000_flash_led(dev, 0);
 	ir->pwled = 0;
 
@@ -311,7 +297,7 @@ static void tm6000_ir_stop(struct rc_dev *rc)
 	cancel_delayed_work_sync(&ir->work);
 }
 
-static int tm6000_ir_change_protocol(struct rc_dev *rc, u64 *rc_proto)
+static int tm6000_ir_change_protocol(struct rc_dev *rc, u64 *rc_type)
 {
 	struct tm6000_IR *ir = rc->priv;
 
@@ -320,7 +306,10 @@ static int tm6000_ir_change_protocol(struct rc_dev *rc, u64 *rc_proto)
 
 	dprintk(2, "%s\n",__func__);
 
-	ir->rc_proto = *rc_proto;
+	if ((rc->rc_map.scan) && (*rc_type == RC_BIT_NEC))
+		ir->key_addr = ((rc->rc_map.scan[0].scancode >> 8) & 0xffff);
+
+	ir->rc_type = *rc_type;
 
 	tm6000_ir_config(ir);
 	/* TODO */
@@ -352,7 +341,7 @@ static int __tm6000_ir_int_start(struct rc_dev *rc)
 	dprintk(1, "IR max size: %d\n", size);
 
 	ir->int_urb->transfer_buffer = kzalloc(size, GFP_ATOMIC);
-	if (!ir->int_urb->transfer_buffer) {
+	if (ir->int_urb->transfer_buffer == NULL) {
 		usb_free_urb(ir->int_urb);
 		return err;
 	}
@@ -409,7 +398,7 @@ int tm6000_ir_init(struct tm6000_core *dev)
 	struct tm6000_IR *ir;
 	struct rc_dev *rc;
 	int err = -ENOMEM;
-	u64 rc_proto;
+	u64 rc_type;
 
 	if (!enable_ir)
 		return -ENODEV;
@@ -421,7 +410,7 @@ int tm6000_ir_init(struct tm6000_core *dev)
 		return 0;
 
 	ir = kzalloc(sizeof(*ir), GFP_ATOMIC);
-	rc = rc_allocate_device(RC_DRIVER_SCANCODE);
+	rc = rc_allocate_device();
 	if (!ir || !rc)
 		goto out;
 
@@ -433,9 +422,9 @@ int tm6000_ir_init(struct tm6000_core *dev)
 	ir->rc = rc;
 
 	/* input setup */
-	rc->allowed_protocols = RC_PROTO_BIT_RC5 | RC_PROTO_BIT_NEC;
-	/* Needed, in order to support NEC remotes with 24 or 32 bits */
-	rc->scancode_mask = 0xffff;
+	rc->allowed_protos = RC_BIT_RC5 | RC_BIT_NEC;
+	/* Neded, in order to support NEC remotes with 24 or 32 bits */
+	rc->scanmask = 0xffff;
 	rc->priv = ir;
 	rc->change_protocol = tm6000_ir_change_protocol;
 	if (dev->int_in.endp) {
@@ -448,6 +437,7 @@ int tm6000_ir_init(struct tm6000_core *dev)
 		ir->polling = 50;
 		INIT_DELAYED_WORK(&ir->work, tm6000_ir_handle_key);
 	}
+	rc->driver_type = RC_DRIVER_SCANCODE;
 
 	snprintf(ir->name, sizeof(ir->name), "tm5600/60x0 IR (%s)",
 						dev->name);
@@ -455,10 +445,10 @@ int tm6000_ir_init(struct tm6000_core *dev)
 	usb_make_path(dev->udev, ir->phys, sizeof(ir->phys));
 	strlcat(ir->phys, "/input0", sizeof(ir->phys));
 
-	rc_proto = RC_PROTO_BIT_UNKNOWN;
-	tm6000_ir_change_protocol(rc, &rc_proto);
+	rc_type = RC_BIT_UNKNOWN;
+	tm6000_ir_change_protocol(rc, &rc_type);
 
-	rc->device_name = ir->name;
+	rc->input_name = ir->name;
 	rc->input_phys = ir->phys;
 	rc->input_id.bustype = BUS_USB;
 	rc->input_id.version = 1;

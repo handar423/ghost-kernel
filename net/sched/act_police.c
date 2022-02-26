@@ -53,7 +53,7 @@ struct tc_police_compat {
 
 /* Each policer is serialized by its individual spinlock */
 
-static unsigned int police_net_id;
+static int police_net_id;
 static struct tc_action_ops act_police_ops;
 
 static int tcf_act_police_walker(struct net *net, struct sk_buff *skb,
@@ -76,19 +76,18 @@ static int tcf_act_police_init(struct net *net, struct nlattr *nla,
 			       struct nlattr *est, struct tc_action **a,
 			       int ovr, int bind)
 {
-	int ret = 0, err;
+	int ret = 0, tcfp_result = TC_ACT_OK, err, size;
 	struct nlattr *tb[TCA_POLICE_MAX + 1];
 	struct tc_police *parm;
 	struct tcf_police *police;
 	struct qdisc_rate_table *R_tab = NULL, *P_tab = NULL;
 	struct tc_action_net *tn = net_generic(net, police_net_id);
 	bool exists = false;
-	int size;
 
 	if (nla == NULL)
 		return -EINVAL;
 
-	err = nla_parse_nested(tb, TCA_POLICE_MAX, nla, police_policy, NULL);
+	err = nla_parse_nested(tb, TCA_POLICE_MAX, nla, police_policy);
 	if (err < 0)
 		return err;
 
@@ -109,10 +108,9 @@ static int tcf_act_police_init(struct net *net, struct nlattr *nla,
 		if (ret)
 			return ret;
 		ret = ACT_P_CREATED;
-	} else {
+	} else if (!ovr) {
 		tcf_idr_release(*a, bind);
-		if (!ovr)
-			return -EEXIST;
+		return -EEXIST;
 	}
 
 	police = to_police(*a);
@@ -144,6 +142,16 @@ static int tcf_act_police_init(struct net *net, struct nlattr *nla,
 		goto failure;
 	}
 
+	if (tb[TCA_POLICE_RESULT]) {
+		tcfp_result = nla_get_u32(tb[TCA_POLICE_RESULT]);
+		if (TC_ACT_EXT_CMP(tcfp_result, TC_ACT_GOTO_CHAIN)) {
+			NL_SET_ERR_MSG(extack,
+				       "goto chain not allowed on fallback");
+			err = -EINVAL;
+			goto failure;
+		}
+	}
+
 	spin_lock_bh(&police->tcf_lock);
 	/* No failure allowed after this point */
 	police->tcfp_mtu = parm->mtu;
@@ -167,8 +175,6 @@ static int tcf_act_police_init(struct net *net, struct nlattr *nla,
 		police->peak_present = false;
 	}
 
-	if (tb[TCA_POLICE_RESULT])
-		police->tcfp_result = nla_get_u32(tb[TCA_POLICE_RESULT]);
 	police->tcfp_burst = PSCHED_TICKS2NS(parm->burst);
 	police->tcfp_toks = police->tcfp_burst;
 	if (police->peak_present) {
@@ -193,8 +199,7 @@ static int tcf_act_police_init(struct net *net, struct nlattr *nla,
 failure:
 	qdisc_put_rtab(P_tab);
 	qdisc_put_rtab(R_tab);
-	if (ret == ACT_P_CREATED)
-		tcf_idr_cleanup(*a, est);
+	tcf_idr_release(*a, bind);
 	return err;
 }
 

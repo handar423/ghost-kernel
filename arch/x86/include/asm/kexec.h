@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_X86_KEXEC_H
 #define _ASM_X86_KEXEC_H
 
@@ -25,6 +24,7 @@
 #include <asm/page.h>
 #include <asm/ptrace.h>
 #include <asm/bootparam.h>
+#include <asm-generic/kexec.h>
 
 struct kimage;
 
@@ -166,7 +166,6 @@ struct kimage_arch {
 };
 #else
 struct kimage_arch {
-	p4d_t *p4d;
 	pud_t *pud;
 	pmd_t *pmd;
 	pte_t *pte;

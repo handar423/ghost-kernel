@@ -19,7 +19,6 @@
 #define _LINUX_IO_H
 
 #include <linux/types.h>
-#include <linux/init.h>
 #include <linux/bug.h>
 #include <linux/err.h>
 #include <asm/io.h>
@@ -28,8 +27,7 @@
 struct device;
 struct resource;
 
-__visible void __iowrite32_copy(void __iomem *to, const void *from, size_t count);
-void __ioread32_copy(void *to, const void __iomem *from, size_t count);
+void __iowrite32_copy(void __iomem *to, const void *from, size_t count);
 void __iowrite64_copy(void __iomem *to, const void *from, size_t count);
 
 #ifdef CONFIG_MMU
@@ -54,7 +52,7 @@ static inline void ioremap_huge_init(void) { }
 /*
  * Managed iomap interface
  */
-#ifdef CONFIG_HAS_IOPORT_MAP
+#ifdef CONFIG_HAS_IOPORT
 void __iomem * devm_ioport_map(struct device *dev, unsigned long port,
 			       unsigned int nr);
 void devm_ioport_unmap(struct device *dev, void __iomem *addr);
@@ -71,12 +69,10 @@ static inline void devm_ioport_unmap(struct device *dev, void __iomem *addr)
 }
 #endif
 
-#define IOMEM_ERR_PTR(err) (__force void __iomem *)ERR_PTR(err)
-
 void __iomem *devm_ioremap(struct device *dev, resource_size_t offset,
-			   resource_size_t size);
+			    unsigned long size);
 void __iomem *devm_ioremap_nocache(struct device *dev, resource_size_t offset,
-				   resource_size_t size);
+				    unsigned long size);
 void __iomem *devm_ioremap_wc(struct device *dev, resource_size_t offset,
 				   resource_size_t size);
 void devm_iounmap(struct device *dev, void __iomem *addr);
@@ -89,27 +85,6 @@ void *devm_memremap(struct device *dev, resource_size_t offset,
 void devm_memunmap(struct device *dev, void *addr);
 
 void *__devm_memremap_pages(struct device *dev, struct resource *res);
-
-#ifdef CONFIG_PCI
-/*
- * The PCI specifications (Rev 3.0, 3.2.5 "Transaction Ordering and
- * Posting") mandate non-posted configuration transactions. There is
- * no ioremap API in the kernel that can guarantee non-posted write
- * semantics across arches so provide a default implementation for
- * mapping PCI config space that defaults to ioremap_nocache(); arches
- * should override it if they have memory mapping implementations that
- * guarantee non-posted writes semantics to make the memory mapping
- * compliant with the PCI specification.
- */
-#ifndef pci_remap_cfgspace
-#define pci_remap_cfgspace pci_remap_cfgspace
-static inline void __iomem *pci_remap_cfgspace(phys_addr_t offset,
-					       size_t size)
-{
-	return ioremap_nocache(offset, size);
-}
-#endif
-#endif
 
 /*
  * Some systems do not have legacy ISA devices.
@@ -143,13 +118,6 @@ static inline void arch_phys_wc_del(int handle)
 }
 
 #define arch_phys_wc_add arch_phys_wc_add
-#ifndef arch_phys_wc_index
-static inline int arch_phys_wc_index(int handle)
-{
-	return -1;
-}
-#define arch_phys_wc_index arch_phys_wc_index
-#endif
 #endif
 
 enum {

@@ -84,7 +84,7 @@ static int __init init_ras_IRQ(void)
 
 	return 0;
 }
-machine_subsys_initcall(pseries, init_ras_IRQ);
+subsys_initcall(init_ras_IRQ);
 
 #define EPOW_SHUTDOWN_NORMAL				1
 #define EPOW_SHUTDOWN_ON_UPS				2
@@ -102,7 +102,6 @@ static void handle_system_shutdown(char event_modifier)
 	case EPOW_SHUTDOWN_ON_UPS:
 		pr_emerg("Loss of system power detected. System is running on"
 			 " UPS/battery. Check RTAS error log for details\n");
-		orderly_poweroff(true);
 		break;
 
 	case EPOW_SHUTDOWN_LOSS_OF_CRITICAL_FUNCTIONS:
@@ -139,7 +138,7 @@ struct epow_errorlog {
 #define EPOW_MAIN_ENCLOSURE		5
 #define EPOW_POWER_OFF			7
 
-static void rtas_parse_epow_errlog(struct rtas_error_log *log)
+void rtas_parse_epow_errlog(struct rtas_error_log *log)
 {
 	struct pseries_errorlog *pseries_log;
 	struct epow_errorlog *epow_log;
@@ -352,8 +351,8 @@ static struct rtas_error_log *fwnmi_get_errinfo(struct pt_regs *regs)
 	/* If it isn't an extended log we can use the per cpu 64bit buffer */
 	h = (struct rtas_error_log *)&savep[1];
 	if (!rtas_error_extended(h)) {
-		memcpy(this_cpu_ptr(&mce_data_buf), h, sizeof(__u64));
-		errhdr = (struct rtas_error_log *)this_cpu_ptr(&mce_data_buf);
+		memcpy(&__get_cpu_var(mce_data_buf), h, sizeof(__u64));
+		errhdr = (struct rtas_error_log *)&__get_cpu_var(mce_data_buf);
 	} else {
 		int len, error_log_length;
 
@@ -380,21 +379,6 @@ static void fwnmi_release_errinfo(void)
 
 int pSeries_system_reset_exception(struct pt_regs *regs)
 {
-#ifdef __LITTLE_ENDIAN__
-	/*
-	 * Some firmware byteswaps SRR registers and gives incorrect SRR1. Try
-	 * to detect the bad SRR1 pattern here. Flip the NIP back to correct
-	 * endian for reporting purposes. Unfortunately the MSR can't be fixed,
-	 * so clear it. It will be missing MSR_RI so we won't try to recover.
-	 */
-	if ((be64_to_cpu(regs->msr) &
-			(MSR_LE|MSR_RI|MSR_DR|MSR_IR|MSR_ME|MSR_PR|
-			 MSR_ILE|MSR_HV|MSR_SF)) == (MSR_DR|MSR_SF)) {
-		regs->nip = be64_to_cpu((__be64)regs->nip);
-		regs->msr = 0;
-	}
-#endif
-
 	if (fwnmi_active) {
 		struct rtas_error_log *errhdr = fwnmi_get_errinfo(regs);
 		if (errhdr) {
@@ -402,10 +386,6 @@ int pSeries_system_reset_exception(struct pt_regs *regs)
 		}
 		fwnmi_release_errinfo();
 	}
-
-	if (smp_handle_nmi_ipi(regs))
-		return 1;
-
 	return 0; /* need to perform reset */
 }
 

@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 /* atmdev.h - ATM device driver declarations and various related items */
 #ifndef LINUX_ATMDEV_H
 #define LINUX_ATMDEV_H
@@ -12,7 +11,6 @@
 #include <linux/uio.h>
 #include <net/sock.h>
 #include <linux/atomic.h>
-#include <linux/refcount.h>
 #include <uapi/linux/atmdev.h>
 
 #ifdef CONFIG_PROC_FS
@@ -160,7 +158,7 @@ struct atm_dev {
 	struct k_atm_dev_stats stats;	/* statistics */
 	char		signal;		/* signal status (ATM_PHY_SIG_*) */
 	int		link_rate;	/* link rate (default: OC3) */
-	refcount_t	refcnt;		/* reference count */
+	atomic_t	refcnt;		/* reference count */
 	spinlock_t	lock;		/* protect internal members */
 #ifdef CONFIG_PROC_FS
 	struct proc_dir_entry *proc_entry; /* proc entry */
@@ -256,20 +254,20 @@ static inline void atm_return(struct atm_vcc *vcc,int truesize)
 
 static inline int atm_may_send(struct atm_vcc *vcc,unsigned int size)
 {
-	return (size + refcount_read(&sk_atm(vcc)->sk_wmem_alloc)) <
+	return (size + atomic_read(&sk_atm(vcc)->sk_wmem_alloc)) <
 	       sk_atm(vcc)->sk_sndbuf;
 }
 
 
 static inline void atm_dev_hold(struct atm_dev *dev)
 {
-	refcount_inc(&dev->refcnt);
+	atomic_inc(&dev->refcnt);
 }
 
 
 static inline void atm_dev_put(struct atm_dev *dev)
 {
-	if (refcount_dec_and_test(&dev->refcnt)) {
+	if (atomic_dec_and_test(&dev->refcnt)) {
 		BUG_ON(!test_bit(ATM_DF_REMOVED, &dev->flags));
 		if (dev->ops->dev_close)
 			dev->ops->dev_close(dev);

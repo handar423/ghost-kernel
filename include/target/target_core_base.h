@@ -1,13 +1,14 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef TARGET_CORE_BASE_H
 #define TARGET_CORE_BASE_H
 
-#include <linux/configfs.h>      /* struct config_group */
-#include <linux/dma-direction.h> /* enum dma_data_direction */
-#include <linux/percpu_ida.h>    /* struct percpu_ida */
-#include <linux/percpu-refcount.h>
-#include <linux/semaphore.h>     /* struct semaphore */
-#include <linux/completion.h>
+#include <linux/in.h>
+#include <linux/configfs.h>
+#include <linux/dma-mapping.h>
+#include <linux/blkdev.h>
+#include <linux/percpu_ida.h>
+#include <scsi/scsi_cmnd.h>
+#include <net/sock.h>
+#include <net/tcp.h>
 
 #define TARGET_CORE_VERSION		"v5.0"
 
@@ -20,7 +21,7 @@
  * From include/scsi/scsi_cmnd.h:SCSI_SENSE_BUFFERSIZE, currently
  * defined 96, but the real limit is 252 (or 260 including the header)
  */
-#define TRANSPORT_SENSE_BUFFER			96
+#define TRANSPORT_SENSE_BUFFER			SCSI_SENSE_BUFFERSIZE
 /* Used by transport_send_check_condition_and_sense() */
 #define SPC_SENSE_KEY_OFFSET			2
 #define SPC_ADD_SENSE_LEN_OFFSET		7
@@ -87,6 +88,8 @@
 #define DA_EMULATE_3PC				1
 /* No Emulation for PSCSI by default */
 #define DA_EMULATE_ALUA				0
+/* Emulate SCSI2 RESERVE/RELEASE and Persistent Reservations by default */
+#define DA_EMULATE_PR				1
 /* Enforce SCSI Initiator Port TransportID with 'ISID' for PR */
 #define DA_ENFORCE_PR_ISIDS			1
 /* Force SPC-3 PR Activate Persistence across Target Power Loss */
@@ -138,7 +141,6 @@ enum se_cmd_flags_table {
 	SCF_ALUA_NON_OPTIMIZED		= 0x00008000,
 	SCF_PASSTHROUGH_SG_TO_MEM_NOALLOC = 0x00020000,
 	SCF_COMPARE_AND_WRITE		= 0x00080000,
-	SCF_COMPARE_AND_WRITE_POST	= 0x00100000,
 	SCF_PASSTHROUGH_PROT_SG_TO_MEM_NOALLOC = 0x00200000,
 	SCF_ACK_KREF			= 0x00400000,
 	SCF_USE_CPUID			= 0x00800000,
@@ -149,7 +151,7 @@ enum se_cmd_flags_table {
  * Used by transport_send_check_condition_and_sense()
  * to signal which ASC/ASCQ sense payload should be built.
  */
-typedef unsigned __bitwise sense_reason_t;
+typedef unsigned __bitwise__ sense_reason_t;
 
 enum tcm_sense_reason_table {
 #define R(x)	(__force sense_reason_t )(x)
@@ -183,6 +185,7 @@ enum tcm_sense_reason_table {
 	TCM_TOO_MANY_SEGMENT_DESCS		= R(0x1b),
 	TCM_UNSUPPORTED_SEGMENT_DESC_TYPE_CODE	= R(0x1c),
 	TCM_INSUFFICIENT_REGISTRATION_RESOURCES	= R(0x1d),
+	TCM_LUN_BUSY				= R(0x1e),
 #undef R
 };
 
@@ -429,6 +432,12 @@ enum target_core_dif_check {
 	TARGET_DIF_CHECK_REFTAG = 0x1 << 2,
 };
 
+struct se_dif_v1_tuple {
+	__be16			guard_tag;
+	__be16			app_tag;
+	__be32			ref_tag;
+};
+
 /* for sam_task_attr */
 #define TCM_SIMPLE_TAG	0x20
 #define TCM_HEAD_TAG	0x21
@@ -605,6 +614,7 @@ struct se_session {
 	struct list_head	sess_cmd_list;
 	struct list_head	sess_wait_list;
 	spinlock_t		sess_cmd_lock;
+	struct kref		sess_kref;
 	void			*sess_cmd_map;
 	struct percpu_ida	sess_tag_pool;
 };
@@ -664,7 +674,7 @@ struct se_dev_attrib {
 	int		emulate_tpws;
 	int		emulate_caw;
 	int		emulate_3pc;
-	int		pi_prot_format;
+	int		emulate_pr;
 	enum target_prot_type pi_prot_type;
 	enum target_prot_type hw_pi_prot_type;
 	int		pi_prot_verify;
@@ -808,6 +818,7 @@ struct se_device {
 	/* T10 SPC-2 + SPC-3 Reservations */
 	struct t10_reservation	t10_pr;
 	struct se_dev_attrib	dev_attrib;
+	struct config_group	dev_action_group;
 	struct config_group	dev_group;
 	struct config_group	dev_pr_group;
 	struct se_dev_stat_grps dev_stat_grps;

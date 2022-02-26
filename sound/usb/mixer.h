@@ -25,6 +25,10 @@ struct usb_mixer_interface {
 	u8 rc_buffer[6];
 
 	bool disconnected;
+
+	void *private_data;
+	void (*private_free)(struct usb_mixer_interface *mixer);
+	void (*private_suspend)(struct usb_mixer_interface *mixer);
 };
 
 #define MAX_CHANNELS	16	/* max logical channels */
@@ -52,6 +56,12 @@ struct usb_mixer_elem_list {
 	usb_mixer_elem_dump_func_t dump;
 	usb_mixer_elem_resume_func_t resume;
 };
+
+/* iterate over mixer element list of the given unit id */
+#define for_each_mixer_elem(list, mixer, id)	\
+	for ((list) = (mixer)->id_elems[id]; (list); (list) = (list)->next_id_elem)
+#define mixer_elem_list_to_info(list) \
+	container_of(list, struct usb_mixer_elem_info, head)
 
 struct usb_mixer_elem_info {
 	struct usb_mixer_elem_list head;
@@ -102,5 +112,7 @@ int snd_usb_get_cur_mix_value(struct usb_mixer_elem_info *cval,
                              int channel, int index, int *value);
 
 extern void snd_usb_mixer_elem_free(struct snd_kcontrol *kctl);
+
+extern struct snd_kcontrol_new *snd_usb_feature_unit_ctl;
 
 #endif /* __USBMIXER_H */

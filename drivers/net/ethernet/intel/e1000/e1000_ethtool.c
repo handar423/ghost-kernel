@@ -1012,8 +1012,8 @@ static int e1000_setup_desc_rings(struct e1000_adapter *adapter)
 
 	txdr->size = txdr->count * sizeof(struct e1000_tx_desc);
 	txdr->size = ALIGN(txdr->size, 4096);
-	txdr->desc = dma_zalloc_coherent(&pdev->dev, txdr->size, &txdr->dma,
-					 GFP_KERNEL);
+	txdr->desc = dma_alloc_coherent(&pdev->dev, txdr->size, &txdr->dma,
+					GFP_KERNEL | __GFP_ZERO);
 	if (!txdr->desc) {
 		ret_val = 2;
 		goto err_nomem;
@@ -1070,8 +1070,8 @@ static int e1000_setup_desc_rings(struct e1000_adapter *adapter)
 	}
 
 	rxdr->size = rxdr->count * sizeof(struct e1000_rx_desc);
-	rxdr->desc = dma_zalloc_coherent(&pdev->dev, rxdr->size, &rxdr->dma,
-					 GFP_KERNEL);
+	rxdr->desc = dma_alloc_coherent(&pdev->dev, rxdr->size, &rxdr->dma,
+					GFP_KERNEL | __GFP_ZERO);
 	if (!rxdr->desc) {
 		ret_val = 6;
 		goto err_nomem;
@@ -1838,8 +1838,8 @@ static void e1000_get_ethtool_stats(struct net_device *netdev,
 			p = (char *)adapter + stat->stat_offset;
 			break;
 		default:
-			WARN_ONCE(1, "Invalid E1000 stat type: %u index %d\n",
-				  stat->type, i);
+			netdev_WARN_ONCE(netdev, "Invalid E1000 stat type: %u index %d\n",
+					 stat->type, i);
 			continue;
 		}
 

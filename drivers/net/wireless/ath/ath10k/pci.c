@@ -585,10 +585,10 @@ skip:
 	spin_unlock_irqrestore(&ar_pci->ps_lock, flags);
 }
 
-static void ath10k_pci_ps_timer(struct timer_list *t)
+static void ath10k_pci_ps_timer(unsigned long ptr)
 {
-	struct ath10k_pci *ar_pci = from_timer(ar_pci, t, ps_timer);
-	struct ath10k *ar = ar_pci->ar;
+	struct ath10k *ar = (void *)ptr;
+	struct ath10k_pci *ar_pci = ath10k_pci_priv(ar);
 	unsigned long flags;
 
 	spin_lock_irqsave(&ar_pci->ps_lock, flags);
@@ -838,10 +838,9 @@ void ath10k_pci_rx_post(struct ath10k *ar)
 		ath10k_pci_rx_post_pipe(&ar_pci->pipe_info[i]);
 }
 
-void ath10k_pci_rx_replenish_retry(struct timer_list *t)
+void ath10k_pci_rx_replenish_retry(unsigned long ptr)
 {
-	struct ath10k_pci *ar_pci = from_timer(ar_pci, t, rx_post_retry);
-	struct ath10k *ar = ar_pci->ar;
+	struct ath10k *ar = (void *)ptr;
 
 	ath10k_pci_rx_post(ar);
 }
@@ -1464,7 +1463,7 @@ static void ath10k_pci_dump_registers(struct ath10k *ar,
 static void ath10k_pci_fw_crashed_dump(struct ath10k *ar)
 {
 	struct ath10k_fw_crash_data *crash_data;
-	char guid[UUID_STRING_LEN + 1];
+	char uuid[50];
 
 	spin_lock_bh(&ar->data_lock);
 
@@ -1473,11 +1472,11 @@ static void ath10k_pci_fw_crashed_dump(struct ath10k *ar)
 	crash_data = ath10k_debug_get_new_fw_crash_data(ar);
 
 	if (crash_data)
-		scnprintf(guid, sizeof(guid), "%pUl", &crash_data->guid);
+		scnprintf(uuid, sizeof(uuid), "%pUl", &crash_data->uuid);
 	else
-		scnprintf(guid, sizeof(guid), "n/a");
+		scnprintf(uuid, sizeof(uuid), "n/a");
 
-	ath10k_err(ar, "firmware crashed! (guid %s)\n", guid);
+	ath10k_err(ar, "firmware crashed! (uuid %s)\n", uuid);
 	ath10k_print_driver_info(ar);
 	ath10k_pci_dump_registers(ar, crash_data);
 	ath10k_ce_dump_registers(ar, crash_data);
@@ -3165,7 +3164,8 @@ int ath10k_pci_setup_resource(struct ath10k *ar)
 	spin_lock_init(&ce->ce_lock);
 	spin_lock_init(&ar_pci->ps_lock);
 
-	timer_setup(&ar_pci->rx_post_retry, ath10k_pci_rx_replenish_retry, 0);
+	setup_timer(&ar_pci->rx_post_retry, ath10k_pci_rx_replenish_retry,
+		    (unsigned long)ar);
 
 	if (QCA_REV_6174(ar) || QCA_REV_9377(ar))
 		ath10k_pci_override_ce_config(ar);
@@ -3291,7 +3291,8 @@ static int ath10k_pci_probe(struct pci_dev *pdev,
 	ar->id.subsystem_vendor = pdev->subsystem_vendor;
 	ar->id.subsystem_device = pdev->subsystem_device;
 
-	timer_setup(&ar_pci->ps_timer, ath10k_pci_ps_timer, 0);
+	setup_timer(&ar_pci->ps_timer, ath10k_pci_ps_timer,
+		    (unsigned long)ar);
 
 	ret = ath10k_pci_setup_resource(ar);
 	if (ret) {

@@ -1,7 +1,6 @@
 /*
  * Copyright 2013 Red Hat, Inc.
  * Author: Daniel Borkmann <dborkman@redhat.com>
- *         Chetan Loke <loke.chetan@gmail.com> (TPACKET_V3 usage example)
  *
  * A basic test of packet socket's TPACKET_V1/TPACKET_V2/TPACKET_V3 behavior.
  *
@@ -72,8 +71,18 @@
 # define __align_tpacket(x)	__attribute__((aligned(TPACKET_ALIGN(x))))
 #endif
 
-#define NUM_PACKETS		100
+#define BLOCK_STATUS(x)		((x)->h1.block_status)
+#define BLOCK_NUM_PKTS(x)	((x)->h1.num_pkts)
+#define BLOCK_O2FP(x)		((x)->h1.offset_to_first_pkt)
+#define BLOCK_LEN(x)		((x)->h1.blk_len)
+#define BLOCK_SNUM(x)		((x)->h1.seq_num)
+#define BLOCK_O2PRIV(x)		((x)->offset_to_priv)
+#define BLOCK_PRIV(x)		((void *) ((uint8_t *) (x) + BLOCK_O2PRIV(x)))
+#define BLOCK_HDR_LEN		(ALIGN_8(sizeof(struct block_desc)))
 #define ALIGN_8(x)		(((x) + 8 - 1) & ~(8 - 1))
+#define BLOCK_PLUS_PRIV(sz_pri)	(BLOCK_HDR_LEN + ALIGN_8((sz_pri)))
+
+#define NUM_PACKETS		100
 
 struct ring {
 	struct iovec *rd;
@@ -110,7 +119,7 @@ static unsigned int total_packets, total_bytes;
 
 static int pfsocket(int ver)
 {
-	int ret, sock = socket(PF_PACKET, SOCK_RAW, 0);
+	int ret, sock = socket(PF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
 	if (sock == -1) {
 		perror("socket");
 		exit(1);
@@ -239,6 +248,7 @@ static void walk_v1_v2_rx(int sock, struct ring *ring)
 	bug_on(ring->type != PACKET_RX_RING);
 
 	pair_udp_open(udp_sock, PORT_BASE);
+	pair_udp_setfilter(sock);
 
 	memset(&pfd, 0, sizeof(pfd));
 	pfd.fd = sock;
@@ -310,33 +320,20 @@ static inline void __v2_tx_user_ready(struct tpacket2_hdr *hdr)
 	__sync_synchronize();
 }
 
-static inline int __v3_tx_kernel_ready(struct tpacket3_hdr *hdr)
-{
-	return !(hdr->tp_status & (TP_STATUS_SEND_REQUEST | TP_STATUS_SENDING));
-}
-
-static inline void __v3_tx_user_ready(struct tpacket3_hdr *hdr)
-{
-	hdr->tp_status = TP_STATUS_SEND_REQUEST;
-	__sync_synchronize();
-}
-
-static inline int __tx_kernel_ready(void *base, int version)
+static inline int __v1_v2_tx_kernel_ready(void *base, int version)
 {
 	switch (version) {
 	case TPACKET_V1:
 		return __v1_tx_kernel_ready(base);
 	case TPACKET_V2:
 		return __v2_tx_kernel_ready(base);
-	case TPACKET_V3:
-		return __v3_tx_kernel_ready(base);
 	default:
 		bug_on(1);
 		return 0;
 	}
 }
 
-static inline void __tx_user_ready(void *base, int version)
+static inline void __v1_v2_tx_user_ready(void *base, int version)
 {
 	switch (version) {
 	case TPACKET_V1:
@@ -344,9 +341,6 @@ static inline void __tx_user_ready(void *base, int version)
 		break;
 	case TPACKET_V2:
 		__v2_tx_user_ready(base);
-		break;
-	case TPACKET_V3:
-		__v3_tx_user_ready(base);
 		break;
 	}
 }
@@ -363,22 +357,7 @@ static void __v1_v2_set_packet_loss_discard(int sock)
 	}
 }
 
-static inline void *get_next_frame(struct ring *ring, int n)
-{
-	uint8_t *f0 = ring->rd[0].iov_base;
-
-	switch (ring->version) {
-	case TPACKET_V1:
-	case TPACKET_V2:
-		return ring->rd[n].iov_base;
-	case TPACKET_V3:
-		return f0 + (n * ring->req3.tp_frame_size);
-	default:
-		bug_on(1);
-	}
-}
-
-static void walk_tx(int sock, struct ring *ring)
+static void walk_v1_v2_tx(int sock, struct ring *ring)
 {
 	struct pollfd pfd;
 	int rcv_sock, ret;
@@ -390,19 +369,9 @@ static void walk_tx(int sock, struct ring *ring)
 		.sll_family = PF_PACKET,
 		.sll_halen = ETH_ALEN,
 	};
-	int nframes;
-
-	/* TPACKET_V{1,2} sets up the ring->rd* related variables based
-	 * on frames (e.g., rd_num is tp_frame_nr) whereas V3 sets these
-	 * up based on blocks (e.g, rd_num is  tp_block_nr)
-	 */
-	if (ring->version <= TPACKET_V2)
-		nframes = ring->rd_num;
-	else
-		nframes = ring->req3.tp_frame_nr;
 
 	bug_on(ring->type != PACKET_TX_RING);
-	bug_on(nframes < NUM_PACKETS);
+	bug_on(ring->rd_num < NUM_PACKETS);
 
 	rcv_sock = socket(PF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
 	if (rcv_sock == -1) {
@@ -428,11 +397,10 @@ static void walk_tx(int sock, struct ring *ring)
 	create_payload(packet, &packet_len);
 
 	while (total_packets > 0) {
-		void *next = get_next_frame(ring, frame_num);
-
-		while (__tx_kernel_ready(next, ring->version) &&
+		while (__v1_v2_tx_kernel_ready(ring->rd[frame_num].iov_base,
+					       ring->version) &&
 		       total_packets > 0) {
-			ppd.raw = next;
+			ppd.raw = ring->rd[frame_num].iov_base;
 
 			switch (ring->version) {
 			case TPACKET_V1:
@@ -454,27 +422,14 @@ static void walk_tx(int sock, struct ring *ring)
 				       packet_len);
 				total_bytes += ppd.v2->tp_h.tp_snaplen;
 				break;
-			case TPACKET_V3: {
-				struct tpacket3_hdr *tx = next;
-
-				tx->tp_snaplen = packet_len;
-				tx->tp_len = packet_len;
-				tx->tp_next_offset = 0;
-
-				memcpy((uint8_t *)tx + TPACKET3_HDRLEN -
-				       sizeof(struct sockaddr_ll), packet,
-				       packet_len);
-				total_bytes += tx->tp_snaplen;
-				break;
-			}
 			}
 
 			status_bar_update();
 			total_packets--;
 
-			__tx_user_ready(next, ring->version);
+			__v1_v2_tx_user_ready(ppd.raw, ring->version);
 
-			frame_num = (frame_num + 1) % nframes;
+			frame_num = (frame_num + 1) % ring->rd_num;
 		}
 
 		poll(&pfd, 1, 1);
@@ -514,37 +469,48 @@ static void walk_v1_v2(int sock, struct ring *ring)
 	if (ring->type == PACKET_RX_RING)
 		walk_v1_v2_rx(sock, ring);
 	else
-		walk_tx(sock, ring);
+		walk_v1_v2_tx(sock, ring);
 }
 
 static uint64_t __v3_prev_block_seq_num = 0;
 
 void __v3_test_block_seq_num(struct block_desc *pbd)
 {
-	if (__v3_prev_block_seq_num + 1 != pbd->h1.seq_num) {
+	if (__v3_prev_block_seq_num + 1 != BLOCK_SNUM(pbd)) {
 		fprintf(stderr, "\nprev_block_seq_num:%"PRIu64", expected "
 			"seq:%"PRIu64" != actual seq:%"PRIu64"\n",
 			__v3_prev_block_seq_num, __v3_prev_block_seq_num + 1,
-			(uint64_t) pbd->h1.seq_num);
+			(uint64_t) BLOCK_SNUM(pbd));
 		exit(1);
 	}
 
-	__v3_prev_block_seq_num = pbd->h1.seq_num;
+	__v3_prev_block_seq_num = BLOCK_SNUM(pbd);
 }
 
 static void __v3_test_block_len(struct block_desc *pbd, uint32_t bytes, int block_num)
 {
-	if (pbd->h1.num_pkts && bytes != pbd->h1.blk_len) {
-		fprintf(stderr, "\nblock:%u with %upackets, expected "
-			"len:%u != actual len:%u\n", block_num,
-			pbd->h1.num_pkts, bytes, pbd->h1.blk_len);
-		exit(1);
+	if (BLOCK_NUM_PKTS(pbd)) {
+		if (bytes != BLOCK_LEN(pbd)) {
+			fprintf(stderr, "\nblock:%u with %upackets, expected "
+				"len:%u != actual len:%u\n", block_num,
+				BLOCK_NUM_PKTS(pbd), bytes, BLOCK_LEN(pbd));
+			exit(1);
+		}
+	} else {
+		if (BLOCK_LEN(pbd) != BLOCK_PLUS_PRIV(13)) {
+			fprintf(stderr, "\nblock:%u, expected len:%lu != "
+				"actual len:%u\n", block_num, BLOCK_HDR_LEN,
+				BLOCK_LEN(pbd));
+			exit(1);
+		}
 	}
 }
 
 static void __v3_test_block_header(struct block_desc *pbd, const int block_num)
 {
-	if ((pbd->h1.block_status & TP_STATUS_USER) == 0) {
+	uint32_t block_status = BLOCK_STATUS(pbd);
+
+	if ((block_status & TP_STATUS_USER) == 0) {
 		fprintf(stderr, "\nblock %u: not in TP_STATUS_USER\n", block_num);
 		exit(1);
 	}
@@ -554,15 +520,14 @@ static void __v3_test_block_header(struct block_desc *pbd, const int block_num)
 
 static void __v3_walk_block(struct block_desc *pbd, const int block_num)
 {
-	int num_pkts = pbd->h1.num_pkts, i;
-	unsigned long bytes = 0, bytes_with_padding = ALIGN_8(sizeof(*pbd));
+	int num_pkts = BLOCK_NUM_PKTS(pbd), i;
+	unsigned long bytes = 0;
+	unsigned long bytes_with_padding = BLOCK_PLUS_PRIV(13);
 	struct tpacket3_hdr *ppd;
 
 	__v3_test_block_header(pbd, block_num);
 
-	ppd = (struct tpacket3_hdr *) ((uint8_t *) pbd +
-				       pbd->h1.offset_to_first_pkt);
-
+	ppd = (struct tpacket3_hdr *) ((uint8_t *) pbd + BLOCK_O2FP(pbd));
 	for (i = 0; i < num_pkts; ++i) {
 		bytes += ppd->tp_snaplen;
 
@@ -586,7 +551,7 @@ static void __v3_walk_block(struct block_desc *pbd, const int block_num)
 
 void __v3_flush_block(struct block_desc *pbd)
 {
-	pbd->h1.block_status = TP_STATUS_KERNEL;
+	BLOCK_STATUS(pbd) = TP_STATUS_KERNEL;
 	__sync_synchronize();
 }
 
@@ -600,6 +565,7 @@ static void walk_v3_rx(int sock, struct ring *ring)
 	bug_on(ring->type != PACKET_RX_RING);
 
 	pair_udp_open(udp_sock, PORT_BASE);
+	pair_udp_setfilter(sock);
 
 	memset(&pfd, 0, sizeof(pfd));
 	pfd.fd = sock;
@@ -611,7 +577,7 @@ static void walk_v3_rx(int sock, struct ring *ring)
 	while (total_packets < NUM_PACKETS * 2) {
 		pbd = (struct block_desc *) ring->rd[block_num].iov_base;
 
-		while ((pbd->h1.block_status & TP_STATUS_USER) == 0)
+		while ((BLOCK_STATUS(pbd) & TP_STATUS_USER) == 0)
 			poll(&pfd, 1, 1);
 
 		__v3_walk_block(pbd, block_num);
@@ -636,7 +602,7 @@ static void walk_v3(int sock, struct ring *ring)
 	if (ring->type == PACKET_RX_RING)
 		walk_v3_rx(sock, ring);
 	else
-		walk_tx(sock, ring);
+		bug_on(1);
 }
 
 static void __v1_v2_fill(struct ring *ring, unsigned int blocks)
@@ -655,13 +621,12 @@ static void __v1_v2_fill(struct ring *ring, unsigned int blocks)
 	ring->flen = ring->req.tp_frame_size;
 }
 
-static void __v3_fill(struct ring *ring, unsigned int blocks, int type)
+static void __v3_fill(struct ring *ring, unsigned int blocks)
 {
-	if (type == PACKET_RX_RING) {
-		ring->req3.tp_retire_blk_tov = 64;
-		ring->req3.tp_sizeof_priv = 0;
-		ring->req3.tp_feature_req_word = TP_FT_REQ_FILL_RXHASH;
-	}
+	ring->req3.tp_retire_blk_tov = 64;
+	ring->req3.tp_sizeof_priv = 13;
+	ring->req3.tp_feature_req_word |= TP_FT_REQ_FILL_RXHASH;
+
 	ring->req3.tp_block_size = getpagesize() << 2;
 	ring->req3.tp_frame_size = TPACKET_ALIGNMENT << 7;
 	ring->req3.tp_block_nr = blocks;
@@ -695,7 +660,7 @@ static void setup_ring(int sock, struct ring *ring, int version, int type)
 		break;
 
 	case TPACKET_V3:
-		__v3_fill(ring, blocks, type);
+		__v3_fill(ring, blocks);
 		ret = setsockopt(sock, SOL_PACKET, type, &ring->req3,
 				 sizeof(ring->req3));
 		break;
@@ -738,8 +703,6 @@ static void mmap_ring(int sock, struct ring *ring)
 static void bind_ring(int sock, struct ring *ring)
 {
 	int ret;
-
-	pair_udp_setfilter(sock);
 
 	ring->ll.sll_family = PF_PACKET;
 	ring->ll.sll_protocol = htons(ETH_P_ALL);
@@ -852,7 +815,6 @@ int main(void)
 	ret |= test_tpacket(TPACKET_V2, PACKET_TX_RING);
 
 	ret |= test_tpacket(TPACKET_V3, PACKET_RX_RING);
-	ret |= test_tpacket(TPACKET_V3, PACKET_TX_RING);
 
 	if (ret)
 		return 1;

@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _LINUX_RAMFS_H
 #define _LINUX_RAMFS_H
 
@@ -15,6 +14,13 @@ ramfs_nommu_expand_for_mapping(struct inode *inode, size_t newsize)
 }
 #else
 extern int ramfs_nommu_expand_for_mapping(struct inode *inode, size_t newsize);
+extern unsigned long ramfs_nommu_get_unmapped_area(struct file *file,
+						   unsigned long addr,
+						   unsigned long len,
+						   unsigned long pgoff,
+						   unsigned long flags);
+
+extern int ramfs_nommu_mmap(struct file *file, struct vm_area_struct *vma);
 #endif
 
 extern const struct file_operations ramfs_file_operations;

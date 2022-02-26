@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 #include <linux/ceph/ceph_debug.h>
 
 #include <linux/device.h>
@@ -192,13 +191,12 @@ static void dump_target(struct seq_file *s, struct ceph_osd_request_target *t)
 		seq_printf(s, "%s%d", (!i ? "" : ","), t->acting.osds[i]);
 	seq_printf(s, "]/%d\te%u\t", t->acting.primary, t->epoch);
 	if (t->target_oloc.pool_ns) {
-		seq_printf(s, "%*pE/%*pE\t0x%x",
+		seq_printf(s, "%.*s/%s\t0x%x",
 			(int)t->target_oloc.pool_ns->len,
 			t->target_oloc.pool_ns->str,
-			t->target_oid.name_len, t->target_oid.name, t->flags);
-	} else {
-		seq_printf(s, "%*pE\t0x%x", t->target_oid.name_len,
 			t->target_oid.name, t->flags);
+	} else {
+		seq_printf(s, "%s\t0x%x", t->target_oid.name, t->flags);
 	}
 	if (t->paused)
 		seq_puts(s, "\tP");
@@ -389,7 +387,7 @@ CEPH_DEFINE_SHOW_FUNC(monc_show)
 CEPH_DEFINE_SHOW_FUNC(osdc_show)
 CEPH_DEFINE_SHOW_FUNC(client_options_show)
 
-int ceph_debugfs_init(void)
+int __init ceph_debugfs_init(void)
 {
 	ceph_debugfs_dir = debugfs_create_dir("ceph", NULL);
 	if (!ceph_debugfs_dir)
@@ -418,7 +416,7 @@ int ceph_debugfs_client_init(struct ceph_client *client)
 		goto out;
 
 	client->monc.debugfs_file = debugfs_create_file("monc",
-						      0600,
+						      0400,
 						      client->debugfs_dir,
 						      client,
 						      &monc_show_fops);
@@ -426,7 +424,7 @@ int ceph_debugfs_client_init(struct ceph_client *client)
 		goto out;
 
 	client->osdc.debugfs_file = debugfs_create_file("osdc",
-						      0600,
+						      0400,
 						      client->debugfs_dir,
 						      client,
 						      &osdc_show_fops);
@@ -434,7 +432,7 @@ int ceph_debugfs_client_init(struct ceph_client *client)
 		goto out;
 
 	client->debugfs_monmap = debugfs_create_file("monmap",
-					0600,
+					0400,
 					client->debugfs_dir,
 					client,
 					&monmap_show_fops);
@@ -442,7 +440,7 @@ int ceph_debugfs_client_init(struct ceph_client *client)
 		goto out;
 
 	client->debugfs_osdmap = debugfs_create_file("osdmap",
-					0600,
+					0400,
 					client->debugfs_dir,
 					client,
 					&osdmap_show_fops);
@@ -450,7 +448,7 @@ int ceph_debugfs_client_init(struct ceph_client *client)
 		goto out;
 
 	client->debugfs_options = debugfs_create_file("client_options",
-					0600,
+					0400,
 					client->debugfs_dir,
 					client,
 					&client_options_show_fops);
@@ -477,7 +475,7 @@ void ceph_debugfs_client_cleanup(struct ceph_client *client)
 
 #else  /* CONFIG_DEBUG_FS */
 
-int ceph_debugfs_init(void)
+int __init ceph_debugfs_init(void)
 {
 	return 0;
 }
@@ -496,6 +494,3 @@ void ceph_debugfs_client_cleanup(struct ceph_client *client)
 }
 
 #endif  /* CONFIG_DEBUG_FS */
-
-EXPORT_SYMBOL(ceph_debugfs_init);
-EXPORT_SYMBOL(ceph_debugfs_cleanup);

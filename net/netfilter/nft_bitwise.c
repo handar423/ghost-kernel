@@ -83,26 +83,17 @@ static int nft_bitwise_init(const struct nft_ctx *ctx,
 			    tb[NFTA_BITWISE_MASK]);
 	if (err < 0)
 		return err;
-	if (d1.len != priv->len) {
-		err = -EINVAL;
-		goto err1;
-	}
+	if (d1.len != priv->len)
+		return -EINVAL;
 
 	err = nft_data_init(NULL, &priv->xor, sizeof(priv->xor), &d2,
 			    tb[NFTA_BITWISE_XOR]);
 	if (err < 0)
-		goto err1;
-	if (d2.len != priv->len) {
-		err = -EINVAL;
-		goto err2;
-	}
+		return err;
+	if (d2.len != priv->len)
+		return -EINVAL;
 
 	return 0;
-err2:
-	nft_data_release(&priv->xor, d2.type);
-err1:
-	nft_data_release(&priv->mask, d1.type);
-	return err;
 }
 
 static int nft_bitwise_dump(struct sk_buff *skb, const struct nft_expr *expr)

@@ -5,13 +5,14 @@
  */
 
 #include <linux/kernel.h>
-#include <linux/export.h>
+#include <linux/module.h>
 #include <linux/init.h>
 #include <linux/acpi.h>
 #include <linux/cpu.h>
 #include <linux/sched.h>
 
 #include <acpi/processor.h>
+#include <asm/acpi.h>
 #include <asm/mwait.h>
 #include <asm/special_insns.h>
 
@@ -86,10 +87,7 @@ static long acpi_processor_ffh_cstate_probe_cpu(void *_cx)
 	num_cstate_subtype = edx_part & MWAIT_SUBSTATE_MASK;
 
 	retval = 0;
-	/* If the HW does not support any sub-states in this C-state */
-	if (num_cstate_subtype == 0) {
-		pr_warn(FW_BUG "ACPI MWAIT C-state 0x%x not supported by HW (0x%x)\n",
-				cx->address, edx_part);
+	if (num_cstate_subtype < (cx->address & MWAIT_SUBSTATE_MASK)) {
 		retval = -1;
 		goto out;
 	}
@@ -104,11 +102,11 @@ static long acpi_processor_ffh_cstate_probe_cpu(void *_cx)
 	if (!mwait_supported[cstate_type]) {
 		mwait_supported[cstate_type] = 1;
 		printk(KERN_DEBUG
-			"Monitor-Mwait will be used to enter C-%d state\n",
-			cx->type);
+			"Monitor-Mwait will be used to enter C-%d "
+			"state\n", cx->type);
 	}
 	snprintf(cx->desc,
-			ACPI_CX_DESC_LEN, "ACPI FFH INTEL MWAIT 0x%x",
+			ACPI_CX_DESC_LEN, "ACPI FFH MWAIT 0x%x",
 			cx->address);
 out:
 	return retval;
@@ -166,7 +164,6 @@ EXPORT_SYMBOL_GPL(acpi_processor_ffh_cstate_enter);
 static int __init ffh_cstate_init(void)
 {
 	struct cpuinfo_x86 *c = &boot_cpu_data;
-
 	if (c->x86_vendor != X86_VENDOR_INTEL &&
 	    c->x86_vendor != X86_VENDOR_AMD)
 		return -1;

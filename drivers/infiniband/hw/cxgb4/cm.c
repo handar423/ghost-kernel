@@ -257,8 +257,8 @@ static void set_emss(struct c4iw_ep *ep, u16 opt)
 	if (ep->emss < 128)
 		ep->emss = 128;
 	if (ep->emss & 7)
-		pr_warn("Warning: misaligned mtu idx %u mss %u emss=%u\n",
-			TCPOPT_MSS_G(opt), ep->mss, ep->emss);
+		pr_debug("Warning: misaligned mtu idx %u mss %u emss=%u\n",
+			 TCPOPT_MSS_G(opt), ep->mss, ep->emss);
 	pr_debug("mss_idx %u mss %u emss=%u\n", TCPOPT_MSS_G(opt), ep->mss,
 		 ep->emss);
 }
@@ -403,8 +403,7 @@ void _c4iw_free_ep(struct kref *kref)
 				 ep->com.local_addr.ss_family);
 		dst_release(ep->dst);
 		cxgb4_l2t_release(ep->l2t);
-		if (ep->mpa_skb)
-			kfree_skb(ep->mpa_skb);
+		kfree_skb(ep->mpa_skb);
 	}
 	if (!skb_queue_empty(&ep->com.ep_skb_list))
 		skb_queue_purge(&ep->com.ep_skb_list);
@@ -587,24 +586,29 @@ static int send_flowc(struct c4iw_ep *ep)
 {
 	struct fw_flowc_wr *flowc;
 	struct sk_buff *skb = skb_dequeue(&ep->com.ep_skb_list);
-	int i;
 	u16 vlan = ep->l2t->vlan;
 	int nparams;
+	int flowclen, flowclen16;
 
 	if (WARN_ON(!skb))
 		return -ENOMEM;
 
 	if (vlan == CPL_L2T_VLAN_NONE)
-		nparams = 8;
-	else
 		nparams = 9;
+	else
+		nparams = 10;
 
-	flowc = __skb_put(skb, FLOWC_LEN);
+	flowclen = offsetof(struct fw_flowc_wr, mnemval[nparams]);
+	flowclen16 = DIV_ROUND_UP(flowclen, 16);
+	flowclen = flowclen16 * 16;
+
+	flowc = __skb_put(skb, flowclen);
+	memset(flowc, 0, flowclen);
 
 	flowc->op_to_nparams = cpu_to_be32(FW_WR_OP_V(FW_FLOWC_WR) |
 					   FW_FLOWC_WR_NPARAMS_V(nparams));
-	flowc->flowid_len16 = cpu_to_be32(FW_WR_LEN16_V(DIV_ROUND_UP(FLOWC_LEN,
-					  16)) | FW_WR_FLOWID_V(ep->hwtid));
+	flowc->flowid_len16 = cpu_to_be32(FW_WR_LEN16_V(flowclen16) |
+					  FW_WR_FLOWID_V(ep->hwtid));
 
 	flowc->mnemval[0].mnemonic = FW_FLOWC_MNEM_PFNVFN;
 	flowc->mnemval[0].val = cpu_to_be32(FW_PFVF_CMD_PFN_V
@@ -623,21 +627,13 @@ static int send_flowc(struct c4iw_ep *ep)
 	flowc->mnemval[6].val = cpu_to_be32(ep->snd_win);
 	flowc->mnemval[7].mnemonic = FW_FLOWC_MNEM_MSS;
 	flowc->mnemval[7].val = cpu_to_be32(ep->emss);
-	if (nparams == 9) {
+	flowc->mnemval[8].mnemonic = FW_FLOWC_MNEM_RCV_SCALE;
+	flowc->mnemval[8].val = cpu_to_be32(ep->snd_wscale);
+	if (nparams == 10) {
 		u16 pri;
-
 		pri = (vlan & VLAN_PRIO_MASK) >> VLAN_PRIO_SHIFT;
-		flowc->mnemval[8].mnemonic = FW_FLOWC_MNEM_SCHEDCLASS;
-		flowc->mnemval[8].val = cpu_to_be32(pri);
-	} else {
-		/* Pad WR to 16 byte boundary */
-		flowc->mnemval[8].mnemonic = 0;
-		flowc->mnemval[8].val = 0;
-	}
-	for (i = 0; i < 9; i++) {
-		flowc->mnemval[i].r4[0] = 0;
-		flowc->mnemval[i].r4[1] = 0;
-		flowc->mnemval[i].r4[2] = 0;
+		flowc->mnemval[9].mnemonic = FW_FLOWC_MNEM_SCHEDCLASS;
+		flowc->mnemval[9].val = cpu_to_be32(pri);
 	}
 
 	set_wr_txq(skb, CPL_PRIORITY_DATA, ep->txq_idx);
@@ -659,7 +655,33 @@ static int send_halfclose(struct c4iw_ep *ep)
 	return c4iw_l2t_send(&ep->com.dev->rdev, skb, ep->l2t);
 }
 
-static int send_abort(struct c4iw_ep *ep)
+void read_tcb(struct c4iw_ep *ep)
+{
+	struct sk_buff *skb;
+	struct cpl_get_tcb *req;
+	int wrlen = roundup(sizeof(*req), 16);
+
+	skb = get_skb(NULL, sizeof(*req), GFP_KERNEL);
+	if (WARN_ON(!skb))
+		return;
+
+	set_wr_txq(skb, CPL_PRIORITY_CONTROL, ep->ctrlq_idx);
+	req = (struct cpl_get_tcb *) skb_put(skb, wrlen);
+	memset(req, 0, wrlen);
+	INIT_TP_WR(req, ep->hwtid);
+	OPCODE_TID(req) = cpu_to_be32(MK_OPCODE_TID(CPL_GET_TCB, ep->hwtid));
+	req->reply_ctrl = htons(REPLY_CHAN_V(0) | QUEUENO_V(ep->rss_qid));
+
+	/*
+	 * keep a ref on the ep so the tcb is not unlocked before this
+	 * cpl completes. The ref is released in read_tcb_rpl().
+	 */
+	c4iw_get_ep(&ep->com);
+	if (WARN_ON(c4iw_ofld_send(&ep->com.dev->rdev, skb)))
+		c4iw_put_ep(&ep->com);
+}
+
+static int send_abort_req(struct c4iw_ep *ep)
 {
 	u32 wrlen = roundup(sizeof(struct cpl_abort_req), 16);
 	struct sk_buff *req_skb = skb_dequeue(&ep->com.ep_skb_list);
@@ -672,6 +694,17 @@ static int send_abort(struct c4iw_ep *ep)
 			  ep, abort_arp_failure);
 
 	return c4iw_l2t_send(&ep->com.dev->rdev, req_skb, ep->l2t);
+}
+
+static int send_abort(struct c4iw_ep *ep)
+{
+	if (!ep->com.qp || !ep->com.qp->srq) {
+		send_abort_req(ep);
+		return 0;
+	}
+	set_bit(ABORT_REQ_IN_PROGRESS, &ep->com.flags);
+	read_tcb(ep);
+	return 0;
 }
 
 static int send_connect(struct c4iw_ep *ep)
@@ -1176,6 +1209,7 @@ static int act_establish(struct c4iw_dev *dev, struct sk_buff *skb)
 {
 	struct c4iw_ep *ep;
 	struct cpl_act_establish *req = cplhdr(skb);
+	unsigned short tcp_opt = ntohs(req->tcp_opt);
 	unsigned int tid = GET_TID(req);
 	unsigned int atid = TID_TID_G(ntohl(req->tos_atid));
 	struct tid_info *t = dev->rdev.lldi.tids;
@@ -1196,8 +1230,9 @@ static int act_establish(struct c4iw_dev *dev, struct sk_buff *skb)
 
 	ep->snd_seq = be32_to_cpu(req->snd_isn);
 	ep->rcv_seq = be32_to_cpu(req->rcv_isn);
+	ep->snd_wscale = TCPOPT_SND_WSCALE_G(tcp_opt);
 
-	set_emss(ep, ntohs(req->tcp_opt));
+	set_emss(ep, tcp_opt);
 
 	/* dealloc the atid */
 	remove_handle(ep->com.dev, &ep->com.dev->atid_idr, atid);
@@ -1853,10 +1888,31 @@ static int rx_data(struct c4iw_dev *dev, struct sk_buff *skb)
 	return 0;
 }
 
+static void complete_cached_srq_buffers(struct c4iw_ep *ep, u32 srqidx)
+{
+	enum chip_type adapter_type;
+
+	adapter_type = ep->com.dev->rdev.lldi.adapter_type;
+
+	/*
+	 * If this TCB had a srq buffer cached, then we must complete
+	 * it. For user mode, that means saving the srqidx in the
+	 * user/kernel status page for this qp.  For kernel mode, just
+	 * synthesize the CQE now.
+	 */
+	if (CHELSIO_CHIP_VERSION(adapter_type) > CHELSIO_T5 && srqidx) {
+		if (ep->com.qp->ibqp.uobject)
+			t4_set_wq_in_error(&ep->com.qp->wq, srqidx);
+		else
+			c4iw_flush_srqidx(ep->com.qp, srqidx);
+	}
+}
+
 static int abort_rpl(struct c4iw_dev *dev, struct sk_buff *skb)
 {
+	u32 srqidx;
 	struct c4iw_ep *ep;
-	struct cpl_abort_rpl_rss *rpl = cplhdr(skb);
+	struct cpl_abort_rpl_rss6 *rpl = cplhdr(skb);
 	int release = 0;
 	unsigned int tid = GET_TID(rpl);
 
@@ -1865,6 +1921,12 @@ static int abort_rpl(struct c4iw_dev *dev, struct sk_buff *skb)
 		pr_warn("Abort rpl to freed endpoint\n");
 		return 0;
 	}
+
+	if (ep->com.qp && ep->com.qp->srq) {
+		srqidx = ABORT_RSS_SRQIDX_G(be32_to_cpu(rpl->srqidx_status));
+		complete_cached_srq_buffers(ep, srqidx ? srqidx : ep->srqe_idx);
+	}
+
 	pr_debug("ep %p tid %u\n", ep, ep->hwtid);
 	mutex_lock(&ep->com.mutex);
 	switch (ep->com.state) {
@@ -1879,8 +1941,10 @@ static int abort_rpl(struct c4iw_dev *dev, struct sk_buff *skb)
 	}
 	mutex_unlock(&ep->com.mutex);
 
-	if (release)
+	if (release) {
+		close_complete_upcall(ep, -ECONNRESET);
 		release_ep_resources(ep);
+	}
 	c4iw_put_ep(&ep->com);
 	return 0;
 }
@@ -2034,8 +2098,7 @@ static int import_ep(struct c4iw_ep *ep, int iptype, __u8 *peer_ip,
 		}
 		ep->mtu = pdev->mtu;
 		ep->tx_chan = cxgb4_port_chan(pdev);
-		ep->smac_idx = cxgb4_tp_smt_idx(adapter_type,
-						cxgb4_port_viid(pdev));
+		ep->smac_idx = ((struct port_info *)netdev_priv(pdev))->smt_idx;
 		step = cdev->rdev.lldi.ntxq /
 			cdev->rdev.lldi.nchan;
 		ep->txq_idx = cxgb4_port_idx(pdev) * step;
@@ -2054,8 +2117,7 @@ static int import_ep(struct c4iw_ep *ep, int iptype, __u8 *peer_ip,
 			goto out;
 		ep->mtu = dst_mtu(dst);
 		ep->tx_chan = cxgb4_port_chan(pdev);
-		ep->smac_idx = cxgb4_tp_smt_idx(adapter_type,
-						cxgb4_port_viid(pdev));
+		ep->smac_idx = ((struct port_info *)netdev_priv(pdev))->smt_idx;
 		step = cdev->rdev.lldi.ntxq /
 			cdev->rdev.lldi.nchan;
 		ep->txq_idx = cxgb4_port_idx(pdev) * step;
@@ -2064,7 +2126,6 @@ static int import_ep(struct c4iw_ep *ep, int iptype, __u8 *peer_ip,
 			cdev->rdev.lldi.nchan;
 		ep->rss_qid = cdev->rdev.lldi.rxq_ids[
 			cxgb4_port_idx(pdev) * step];
-		set_tcp_window(ep, (struct port_info *)netdev_priv(pdev));
 
 		if (clear_mpa_v1) {
 			ep->retry_with_mpa_v1 = 0;
@@ -2603,16 +2664,17 @@ static int pass_establish(struct c4iw_dev *dev, struct sk_buff *skb)
 	struct cpl_pass_establish *req = cplhdr(skb);
 	unsigned int tid = GET_TID(req);
 	int ret;
+	u16 tcp_opt = ntohs(req->tcp_opt);
 
 	ep = get_ep_from_tid(dev, tid);
 	pr_debug("ep %p tid %u\n", ep, ep->hwtid);
 	ep->snd_seq = be32_to_cpu(req->snd_isn);
 	ep->rcv_seq = be32_to_cpu(req->rcv_isn);
+	ep->snd_wscale = TCPOPT_SND_WSCALE_G(tcp_opt);
 
-	pr_debug("ep %p hwtid %u tcp_opt 0x%02x\n", ep, tid,
-		 ntohs(req->tcp_opt));
+	pr_debug("ep %p hwtid %u tcp_opt 0x%02x\n", ep, tid, tcp_opt);
 
-	set_emss(ep, ntohs(req->tcp_opt));
+	set_emss(ep, tcp_opt);
 
 	dst_confirm(ep->dst);
 	mutex_lock(&ep->com.mutex);
@@ -2717,31 +2779,51 @@ static int peer_close(struct c4iw_dev *dev, struct sk_buff *skb)
 	return 0;
 }
 
+static void finish_peer_abort(struct c4iw_dev *dev, struct c4iw_ep *ep)
+{
+	complete_cached_srq_buffers(ep, ep->srqe_idx);
+	if (ep->com.cm_id && ep->com.qp) {
+		struct c4iw_qp_attributes attrs;
+
+		attrs.next_state = C4IW_QP_STATE_ERROR;
+		c4iw_modify_qp(ep->com.qp->rhp, ep->com.qp,
+			       C4IW_QP_ATTR_NEXT_STATE,	&attrs, 1);
+	}
+	peer_abort_upcall(ep);
+	release_ep_resources(ep);
+	c4iw_put_ep(&ep->com);
+}
+
 static int peer_abort(struct c4iw_dev *dev, struct sk_buff *skb)
 {
-	struct cpl_abort_req_rss *req = cplhdr(skb);
+	struct cpl_abort_req_rss6 *req = cplhdr(skb);
 	struct c4iw_ep *ep;
 	struct sk_buff *rpl_skb;
 	struct c4iw_qp_attributes attrs;
 	int ret;
 	int release = 0;
 	unsigned int tid = GET_TID(req);
+	u8 status;
+	u32 srqidx;
+
 	u32 len = roundup(sizeof(struct cpl_abort_rpl), 16);
 
 	ep = get_ep_from_tid(dev, tid);
 	if (!ep)
 		return 0;
 
-	if (cxgb_is_neg_adv(req->status)) {
-		pr_warn("%s Negative advice on abort- tid %u status %d (%s)\n",
-			__func__, ep->hwtid, req->status,
-			neg_adv_str(req->status));
+	status = ABORT_RSS_STATUS_G(be32_to_cpu(req->srqidx_status));
+
+	if (cxgb_is_neg_adv(status)) {
+		pr_debug("Negative advice on abort- tid %u status %d (%s)\n",
+			 ep->hwtid, status, neg_adv_str(status));
 		ep->stats.abort_neg_adv++;
 		mutex_lock(&dev->rdev.stats.lock);
 		dev->rdev.stats.neg_adv++;
 		mutex_unlock(&dev->rdev.stats.lock);
 		goto deref_ep;
 	}
+
 	pr_debug("ep %p tid %u state %u\n", ep, ep->hwtid,
 		 ep->com.state);
 	set_bit(PEER_ABORT, &ep->com.history);
@@ -2764,7 +2846,8 @@ static int peer_abort(struct c4iw_dev *dev, struct sk_buff *skb)
 		break;
 	case MPA_REQ_SENT:
 		(void)stop_ep_timer(ep);
-		if (mpa_rev == 1 || (mpa_rev == 2 && ep->tried_with_mpa_v1))
+		if (status != CPL_ERR_CONN_RESET || mpa_rev == 1 ||
+		    (mpa_rev == 2 && ep->tried_with_mpa_v1))
 			connect_reply_upcall(ep, -ECONNRESET);
 		else {
 			/*
@@ -2789,6 +2872,23 @@ static int peer_abort(struct c4iw_dev *dev, struct sk_buff *skb)
 		stop_ep_timer(ep);
 		/*FALLTHROUGH*/
 	case FPDU_MODE:
+		if (ep->com.qp && ep->com.qp->srq) {
+			srqidx = ABORT_RSS_SRQIDX_G(
+					be32_to_cpu(req->srqidx_status));
+			if (srqidx) {
+				complete_cached_srq_buffers(ep,
+							    req->srqidx_status);
+			} else {
+				/* Hold ep ref until finish_peer_abort() */
+				c4iw_get_ep(&ep->com);
+				__state_set(&ep->com, ABORTING);
+				set_bit(PEER_ABORT_IN_PROGRESS, &ep->com.flags);
+				read_tcb(ep);
+				break;
+
+			}
+		}
+
 		if (ep->com.cm_id && ep->com.qp) {
 			attrs.next_state = C4IW_QP_STATE_ERROR;
 			ret = c4iw_modify_qp(ep->com.qp->rhp,
@@ -2912,15 +3012,18 @@ static int terminate(struct c4iw_dev *dev, struct sk_buff *skb)
 
 	ep = get_ep_from_tid(dev, tid);
 
-	if (ep && ep->com.qp) {
-		pr_warn("TERM received tid %u qpid %u\n",
-			tid, ep->com.qp->wq.sq.qid);
-		attrs.next_state = C4IW_QP_STATE_TERMINATE;
-		c4iw_modify_qp(ep->com.qp->rhp, ep->com.qp,
-			       C4IW_QP_ATTR_NEXT_STATE, &attrs, 1);
+	if (ep) {
+		if (ep->com.qp) {
+			pr_warn("TERM received tid %u qpid %u\n", tid,
+				ep->com.qp->wq.sq.qid);
+			attrs.next_state = C4IW_QP_STATE_TERMINATE;
+			c4iw_modify_qp(ep->com.qp->rhp, ep->com.qp,
+				       C4IW_QP_ATTR_NEXT_STATE, &attrs, 1);
+		}
+
+		c4iw_put_ep(&ep->com);
 	} else
 		pr_warn("TERM received tid %u no ep/qp\n", tid);
-	c4iw_put_ep(&ep->com);
 
 	return 0;
 }
@@ -3211,6 +3314,7 @@ int c4iw_connect(struct iw_cm_id *cm_id, struct iw_cm_conn_param *conn_param)
 
 	ep->com.cm_id = cm_id;
 	ref_cm_id(&ep->com);
+	cm_id->provider_data = ep;
 	ep->com.dev = dev;
 	ep->com.qp = get_qhp(dev, conn_param->qpn);
 	if (!ep->com.qp) {
@@ -3444,9 +3548,6 @@ int c4iw_create_listen(struct iw_cm_id *cm_id, int backlog)
 	}
 	insert_handle(dev, &dev->stid_idr, ep, ep->stid);
 
-	memcpy(&ep->com.local_addr, &cm_id->m_local_addr,
-	       sizeof(ep->com.local_addr));
-
 	state_set(&ep->com, LISTEN);
 	if (ep->com.local_addr.ss_family == AF_INET)
 		err = create_server4(dev, ep);
@@ -3567,8 +3668,8 @@ int c4iw_ep_disconnect(struct c4iw_ep *ep, int abrupt, gfp_t gfp)
 	case MORIBUND:
 	case ABORTING:
 	case DEAD:
-		pr_info("%s ignoring disconnect ep %p state %u\n",
-			__func__, ep, ep->com.state);
+		pr_debug("ignoring disconnect ep %p state %u\n",
+			 ep, ep->com.state);
 		break;
 	default:
 		WARN_ONCE(1, "Bad endpoint state %u\n", ep->com.state);
@@ -3578,7 +3679,6 @@ int c4iw_ep_disconnect(struct c4iw_ep *ep, int abrupt, gfp_t gfp)
 	if (close) {
 		if (abrupt) {
 			set_bit(EP_DISC_ABORT, &ep->com.history);
-			close_complete_upcall(ep, -ECONNRESET);
 			ret = send_abort(ep);
 		} else {
 			set_bit(EP_DISC_CLOSE, &ep->com.history);
@@ -3689,6 +3789,80 @@ static void passive_ofld_conn_reply(struct c4iw_dev *dev, struct sk_buff *skb,
 	return;
 }
 
+static inline u64 t4_tcb_get_field64(__be64 *tcb, u16 word)
+{
+	u64 tlo = be64_to_cpu(tcb[((31 - word) / 2)]);
+	u64 thi = be64_to_cpu(tcb[((31 - word) / 2) - 1]);
+	u64 t;
+	u32 shift = 32;
+
+	t = (thi << shift) | (tlo >> shift);
+
+	return t;
+}
+
+static inline u32 t4_tcb_get_field32(__be64 *tcb, u16 word, u32 mask, u32 shift)
+{
+	u32 v;
+	u64 t = be64_to_cpu(tcb[(31 - word) / 2]);
+
+	if (word & 0x1)
+		shift += 32;
+	v = (t >> shift) & mask;
+	return v;
+}
+
+static int read_tcb_rpl(struct c4iw_dev *dev, struct sk_buff *skb)
+{
+	struct cpl_get_tcb_rpl *rpl = cplhdr(skb);
+	__be64 *tcb = (__be64 *)(rpl + 1);
+	unsigned int tid = GET_TID(rpl);
+	struct c4iw_ep *ep;
+	u64 t_flags_64;
+	u32 rx_pdu_out;
+
+	ep = get_ep_from_tid(dev, tid);
+	if (!ep)
+		return 0;
+	/* Examine the TF_RX_PDU_OUT (bit 49 of the t_flags) in order to
+	 * determine if there's a rx PDU feedback event pending.
+	 *
+	 * If that bit is set, it means we'll need to re-read the TCB's
+	 * rq_start value. The final value is the one present in a TCB
+	 * with the TF_RX_PDU_OUT bit cleared.
+	 */
+
+	t_flags_64 = t4_tcb_get_field64(tcb, TCB_T_FLAGS_W);
+	rx_pdu_out = (t_flags_64 & TF_RX_PDU_OUT_V(1)) >> TF_RX_PDU_OUT_S;
+
+	c4iw_put_ep(&ep->com); /* from get_ep_from_tid() */
+	c4iw_put_ep(&ep->com); /* from read_tcb() */
+
+	/* If TF_RX_PDU_OUT bit is set, re-read the TCB */
+	if (rx_pdu_out) {
+		if (++ep->rx_pdu_out_cnt >= 2) {
+			WARN_ONCE(1, "tcb re-read() reached the guard limit, finishing the cleanup\n");
+			goto cleanup;
+		}
+		read_tcb(ep);
+		return 0;
+	}
+
+	ep->srqe_idx = t4_tcb_get_field32(tcb, TCB_RQ_START_W, TCB_RQ_START_W,
+			TCB_RQ_START_S);
+cleanup:
+	pr_debug("ep %p tid %u %016x\n", ep, ep->hwtid, ep->srqe_idx);
+
+	if (test_bit(PEER_ABORT_IN_PROGRESS, &ep->com.flags))
+		finish_peer_abort(dev, ep);
+	else if (test_bit(ABORT_REQ_IN_PROGRESS, &ep->com.flags))
+		send_abort_req(ep);
+	else
+		WARN_ONCE(1, "unexpected state!");
+
+	return 0;
+}
+
 static int deferred_fw6_msg(struct c4iw_dev *dev, struct sk_buff *skb)
 {
 	struct cpl_fw6_msg *rpl = cplhdr(skb);
@@ -3746,7 +3920,7 @@ static void build_cpl_pass_accept_req(struct sk_buff *skb, int stid , u8 tos)
 	 */
 	memset(&tmp_opt, 0, sizeof(tmp_opt));
 	tcp_clear_options(&tmp_opt);
-	tcp_parse_options(&init_net, skb, &tmp_opt, 0, NULL);
+	tcp_parse_options(skb, &tmp_opt, 0, NULL);
 
 	req = __skb_push(skb, sizeof(*req));
 	memset(req, 0, sizeof(*req));
@@ -3758,7 +3932,7 @@ static void build_cpl_pass_accept_req(struct sk_buff *skb, int stid , u8 tos)
 	tcp_hdr_len = RX_TCPHDR_LEN_G(be16_to_cpu(hdr_len));
 	ip_hdr_len = RX_IPHDR_LEN_G(be16_to_cpu(hdr_len));
 	req->hdr_len =
-		cpu_to_be32(SYN_RX_CHAN_V(RX_CHAN_G(be32_to_cpu(l2info))));
+		cpu_to_be32(SYN_RX_CHAN_V(RX_CHAN_G(htonl(l2info))));
 	if (CHELSIO_CHIP_VERSION(type) <= CHELSIO_T5) {
 		eth_hdr_len = is_t4(type) ?
 				RX_ETHHDR_LEN_G(be32_to_cpu(l2info)) :
@@ -3915,7 +4089,7 @@ static int rx_pkt(struct c4iw_dev *dev, struct sk_buff *skb)
 	} else {
 		vlan_eh = (struct vlan_ethhdr *)(req + 1);
 		iph = (struct iphdr *)(vlan_eh + 1);
-		skb->vlan_tci = ntohs(cpl->vlan);
+		__vlan_hwaccel_put_tag(skb, htons(ETH_P_8021Q), ntohs(cpl->vlan));
 	}
 
 	if (iph->version != 0x4)
@@ -4009,6 +4183,7 @@ static c4iw_handler_func work_handlers[NUM_CPL_CMDS + NUM_FAKE_CPLS] = {
 	[CPL_CLOSE_CON_RPL] = close_con_rpl,
 	[CPL_RDMA_TERMINATE] = terminate,
 	[CPL_FW4_ACK] = fw4_ack,
+	[CPL_GET_TCB_RPL] = read_tcb_rpl,
 	[CPL_FW6_MSG] = deferred_fw6_msg,
 	[CPL_RX_PKT] = rx_pkt,
 	[FAKE_CPL_PUT_EP_SAFE] = _put_ep_safe,
@@ -4097,9 +4272,15 @@ static void process_work(struct work_struct *work)
 		dev = *((struct c4iw_dev **) (skb->cb + sizeof(void *)));
 		opcode = rpl->ot.opcode;
 
-		ret = work_handlers[opcode](dev, skb);
-		if (!ret)
+		if (opcode >= ARRAY_SIZE(work_handlers) ||
+		    !work_handlers[opcode]) {
+			pr_err("No handler for opcode 0x%x.\n", opcode);
 			kfree_skb(skb);
+		} else {
+			ret = work_handlers[opcode](dev, skb);
+			if (!ret)
+				kfree_skb(skb);
+		}
 		process_timedout_eps();
 	}
 }
@@ -4201,8 +4382,8 @@ static int peer_abort_intr(struct c4iw_dev *dev, struct sk_buff *skb)
 		return 0;
 	}
 	if (cxgb_is_neg_adv(req->status)) {
-		pr_warn("%s Negative advice on abort- tid %u status %d (%s)\n",
-			__func__, ep->hwtid, req->status,
+		pr_debug("Negative advice on abort- tid %u status %d (%s)\n",
+			 ep->hwtid, req->status,
 			 neg_adv_str(req->status));
 		goto out;
 	}
@@ -4234,6 +4415,7 @@ c4iw_handler_func c4iw_handlers[NUM_CPL_CMDS] = {
 	[CPL_RDMA_TERMINATE] = sched,
 	[CPL_FW4_ACK] = sched,
 	[CPL_SET_TCB_RPL] = set_tcb_rpl,
+	[CPL_GET_TCB_RPL] = sched,
 	[CPL_FW6_MSG] = fw6_msg,
 	[CPL_RX_PKT] = sched
 };

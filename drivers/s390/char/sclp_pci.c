@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * PCI I/O adapter configuration related functions.
  *
@@ -24,6 +23,7 @@
 
 #define SCLP_ATYPE_PCI				2
 
+#define SCLP_ERRNOTIFY_AQ_RESET			0
 #define SCLP_ERRNOTIFY_AQ_REPAIR		1
 #define SCLP_ERRNOTIFY_AQ_INFO_LOG		2
 
@@ -111,9 +111,14 @@ static int sclp_pci_check_report(struct zpci_report_error_header *report)
 	if (report->version != 1)
 		return -EINVAL;
 
-	if (report->action != SCLP_ERRNOTIFY_AQ_REPAIR &&
-	    report->action != SCLP_ERRNOTIFY_AQ_INFO_LOG)
+	switch (report->action) {
+	case SCLP_ERRNOTIFY_AQ_RESET:
+	case SCLP_ERRNOTIFY_AQ_REPAIR:
+	case SCLP_ERRNOTIFY_AQ_INFO_LOG:
+		break;
+	default:
 		return -EINVAL;
+	}
 
 	if (report->length > (PAGE_SIZE - sizeof(struct err_notify_sccb)))
 		return -EINVAL;
@@ -125,7 +130,7 @@ int sclp_pci_report(struct zpci_report_error_header *report, u32 fh, u32 fid)
 {
 	DECLARE_COMPLETION_ONSTACK(completion);
 	struct err_notify_sccb *sccb;
-	struct sclp_req req;
+	struct sclp_req req = { .list = {0}, 0 };
 	int ret;
 
 	ret = sclp_pci_check_report(report);
@@ -148,7 +153,6 @@ int sclp_pci_report(struct zpci_report_error_header *report, u32 fh, u32 fid)
 		goto out_unregister;
 	}
 
-	memset(&req, 0, sizeof(req));
 	req.callback_data = &completion;
 	req.callback = sclp_pci_callback;
 	req.command = SCLP_CMDW_WRITE_EVENT_DATA;

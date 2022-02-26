@@ -31,6 +31,8 @@ typedef __s64			xfs_daddr_t;	/* <disk address> type */
 typedef __u32			xfs_dev_t;
 typedef __u32			xfs_nlink_t;
 
+typedef uuid_be			uuid_t;
+
 #include "xfs_types.h"
 
 #include "kmem.h"
@@ -47,7 +49,7 @@ typedef __u32			xfs_nlink_t;
 #include <linux/file.h>
 #include <linux/swap.h>
 #include <linux/errno.h>
-#include <linux/sched/signal.h>
+#include <linux/sched.h>
 #include <linux/bitops.h>
 #include <linux/major.h>
 #include <linux/pagemap.h>
@@ -70,12 +72,11 @@ typedef __u32			xfs_nlink_t;
 #include <linux/freezer.h>
 #include <linux/list_sort.h>
 #include <linux/ratelimit.h>
-#include <linux/rhashtable.h>
 
 #include <asm/page.h>
 #include <asm/div64.h>
 #include <asm/param.h>
-#include <linux/uaccess.h>
+#include <asm/uaccess.h>
 #include <asm/byteorder.h>
 #include <asm/unaligned.h>
 
@@ -109,7 +110,6 @@ typedef __u32			xfs_nlink_t;
 #define xfs_inherit_nodefrag	xfs_params.inherit_nodfrg.val
 #define xfs_fstrm_centisecs	xfs_params.fstrm_timer.val
 #define xfs_eofb_secs		xfs_params.eofb_timer.val
-#define xfs_cowb_secs		xfs_params.cowb_timer.val
 
 #define current_cpu()		(raw_smp_processor_id())
 #define current_pid()		(current->pid)
@@ -129,7 +129,7 @@ typedef __u32			xfs_nlink_t;
  * Size of block device i/o is parameterized here.
  * Currently the system supports page-sized i/o.
  */
-#define	BLKDEV_IOSHIFT		PAGE_SHIFT
+#define	BLKDEV_IOSHIFT		PAGE_CACHE_SHIFT
 #define	BLKDEV_IOSIZE		(1<<BLKDEV_IOSHIFT)
 /* number of BB's per block device block */
 #define	BLKDEV_BB		BTOBB(BLKDEV_IOSIZE)
@@ -285,8 +285,10 @@ static inline uint64_t howmany_64(uint64_t x, uint32_t y)
 #define XFS_IS_REALTIME_INODE(ip)			\
 	(((ip)->i_d.di_flags & XFS_DIFLAG_REALTIME) &&	\
 	 (ip)->i_mount->m_rtdev_targp)
+#define XFS_IS_REALTIME_MOUNT(mp) ((mp)->m_rtdev_targp ? 1 : 0)
 #else
 #define XFS_IS_REALTIME_INODE(ip) (0)
+#define XFS_IS_REALTIME_MOUNT(mp) (0)
 #endif
 
 #endif /* __XFS_LINUX__ */

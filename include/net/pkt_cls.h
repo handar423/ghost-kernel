@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __NET_PKT_CLS_H
 #define __NET_PKT_CLS_H
 
@@ -13,6 +12,7 @@ struct tcf_walker {
 	int	stop;
 	int	skip;
 	int	count;
+	unsigned long cookie;
 	int	(*fn)(struct tcf_proto *, void *node, struct tcf_walker *);
 };
 
@@ -29,15 +29,17 @@ struct tcf_block_ext_info {
 	enum tcf_block_binder_type binder_type;
 	tcf_chain_head_change_t *chain_head_change;
 	void *chain_head_change_priv;
+	u32 block_index;
 };
 
 struct tcf_block_cb;
-bool tcf_queue_work(struct work_struct *work);
+bool tcf_queue_work(struct rcu_work *rwork, work_func_t func);
 
 #ifdef CONFIG_NET_CLS
 struct tcf_chain *tcf_chain_get(struct tcf_block *block, u32 chain_index,
 				bool create);
 void tcf_chain_put(struct tcf_chain *chain);
+void tcf_block_netif_keep_dst(struct tcf_block *block);
 int tcf_block_get(struct tcf_block **p_block,
 		  struct tcf_proto __rcu **p_filter_chain, struct Qdisc *q);
 int tcf_block_get_ext(struct tcf_block **p_block, struct Qdisc *q,
@@ -46,8 +48,14 @@ void tcf_block_put(struct tcf_block *block);
 void tcf_block_put_ext(struct tcf_block *block, struct Qdisc *q,
 		       struct tcf_block_ext_info *ei);
 
+static inline bool tcf_block_shared(struct tcf_block *block)
+{
+	return block->index;
+}
+
 static inline struct Qdisc *tcf_block_q(struct tcf_block *block)
 {
+	WARN_ON(tcf_block_shared(block));
 	return block->q;
 }
 
@@ -70,6 +78,14 @@ int tcf_block_cb_register(struct tcf_block *block,
 void __tcf_block_cb_unregister(struct tcf_block_cb *block_cb);
 void tcf_block_cb_unregister(struct tcf_block *block,
 			     tc_setup_cb_t *cb, void *cb_ident);
+int __tc_indr_block_cb_register(struct net_device *dev, void *cb_priv,
+				tc_indr_block_bind_cb_t *cb, void *cb_ident);
+int tc_indr_block_cb_register(struct net_device *dev, void *cb_priv,
+			      tc_indr_block_bind_cb_t *cb, void *cb_ident);
+void __tc_indr_block_cb_unregister(struct net_device *dev,
+				   tc_indr_block_bind_cb_t *cb, void *cb_ident);
+void tc_indr_block_cb_unregister(struct net_device *dev,
+				 tc_indr_block_bind_cb_t *cb, void *cb_ident);
 
 int tcf_classify(struct sk_buff *skb, const struct tcf_proto *tp,
 		 struct tcf_result *res, bool compat_mode);
@@ -170,6 +186,32 @@ void __tcf_block_cb_unregister(struct tcf_block_cb *block_cb)
 static inline
 void tcf_block_cb_unregister(struct tcf_block *block,
 			     tc_setup_cb_t *cb, void *cb_ident)
+{
+}
+
+static inline
+int __tc_indr_block_cb_register(struct net_device *dev, void *cb_priv,
+				tc_indr_block_bind_cb_t *cb, void *cb_ident)
+{
+	return 0;
+}
+
+static inline
+int tc_indr_block_cb_register(struct net_device *dev, void *cb_priv,
+			      tc_indr_block_bind_cb_t *cb, void *cb_ident)
+{
+	return 0;
+}
+
+static inline
+void __tc_indr_block_cb_unregister(struct net_device *dev,
+				   tc_indr_block_bind_cb_t *cb, void *cb_ident)
+{
+}
+
+static inline
+void tc_indr_block_cb_unregister(struct net_device *dev,
+				 tc_indr_block_bind_cb_t *cb, void *cb_ident)
 {
 }
 
@@ -304,7 +346,7 @@ tcf_exts_stats_update(const struct tcf_exts *exts,
 	for (i = 0; i < exts->nr_actions; i++) {
 		struct tc_action *a = exts->actions[i];
 
-		tcf_action_stats_update(a, bytes, packets, lastuse);
+		tcf_action_stats_update(a, bytes, packets, lastuse, true);
 	}
 
 	preempt_enable();
@@ -522,7 +564,7 @@ static inline unsigned char * tcf_get_base_ptr(struct sk_buff *skb, int layer)
 {
 	switch (layer) {
 		case TCF_LAYER_LINK:
-			return skb_mac_header(skb);
+			return skb->data;
 		case TCF_LAYER_NETWORK:
 			return skb_network_header(skb);
 		case TCF_LAYER_TRANSPORT:
@@ -568,8 +610,8 @@ tcf_match_indev(struct sk_buff *skb, int ifindex)
 }
 #endif /* CONFIG_NET_CLS_IND */
 
-int tc_setup_cb_call(struct tcf_block *block, struct tcf_exts *exts,
-		     enum tc_setup_type type, void *type_data, bool err_stop);
+int tc_setup_cb_call(struct tcf_block *block, enum tc_setup_type type,
+		     void *type_data, bool err_stop);
 
 enum tc_block_command {
 	TC_BLOCK_BIND,
@@ -637,6 +679,18 @@ static inline bool tc_can_offload(const struct net_device *dev)
 	return dev->features & NETIF_F_HW_TC;
 }
 
+static inline bool
+tc_cls_can_offload_and_chain0(const struct net_device *dev,
+			      struct tc_cls_common_offload *common)
+{
+	if (!tc_can_offload(dev))
+		return false;
+	if (common->chain_index) {
+		return false;
+	}
+	return true;
+}
+
 static inline bool tc_skip_hw(u32 flags)
 {
 	return (flags & TCA_CLS_FLAGS_SKIP_HW) ? true : false;
@@ -694,19 +748,17 @@ struct tc_cls_matchall_offload {
 };
 
 enum tc_clsbpf_command {
-	TC_CLSBPF_OFFLOAD,
-	TC_CLSBPF_STATS,
+	TC_CLSBPF_ADD,
+	TC_CLSBPF_REPLACE,
+	TC_CLSBPF_DESTROY,
 };
 
 struct tc_cls_bpf_offload {
-	struct tc_cls_common_offload common;
 	enum tc_clsbpf_command command;
 	struct tcf_exts *exts;
 	struct bpf_prog *prog;
-	struct bpf_prog *oldprog;
 	const char *name;
 	bool exts_integrated;
-	u32 gen_flags;
 };
 
 struct tc_mqprio_qopt_offload {
@@ -727,6 +779,11 @@ struct tc_cookie {
 	u32 len;
 };
 
+struct tc_qopt_offload_stats {
+	struct gnet_stats_basic_packed *bstats;
+	struct gnet_stats_queue *qstats;
+};
+
 enum tc_red_command {
 	TC_RED_REPLACE,
 	TC_RED_DESTROY,
@@ -739,9 +796,6 @@ struct tc_red_qopt_offload_params {
 	u32 max;
 	u32 probability;
 	bool is_ecn;
-};
-struct tc_red_qopt_offload_stats {
-	struct gnet_stats_basic_packed *bstats;
 	struct gnet_stats_queue *qstats;
 };
 
@@ -751,8 +805,41 @@ struct tc_red_qopt_offload {
 	u32 parent;
 	union {
 		struct tc_red_qopt_offload_params set;
-		struct tc_red_qopt_offload_stats stats;
+		struct tc_qopt_offload_stats stats;
 		struct red_stats *xstats;
+	};
+};
+
+enum tc_prio_command {
+	TC_PRIO_REPLACE,
+	TC_PRIO_DESTROY,
+	TC_PRIO_STATS,
+	TC_PRIO_GRAFT,
+};
+
+struct tc_prio_qopt_offload_params {
+	int bands;
+	u8 priomap[TC_PRIO_MAX + 1];
+	/* In case that a prio qdisc is offloaded and now is changed to a
+	 * non-offloadedable config, it needs to update the backlog & qlen
+	 * values to negate the HW backlog & qlen values (and only them).
+	 */
+	struct gnet_stats_queue *qstats;
+};
+
+struct tc_prio_qopt_offload_graft_params {
+	u8 band;
+	u32 child_handle;
+};
+
+struct tc_prio_qopt_offload {
+	enum tc_prio_command command;
+	u32 handle;
+	u32 parent;
+	union {
+		struct tc_prio_qopt_offload_params replace_params;
+		struct tc_qopt_offload_stats stats;
+		struct tc_prio_qopt_offload_graft_params graft_params;
 	};
 };
 

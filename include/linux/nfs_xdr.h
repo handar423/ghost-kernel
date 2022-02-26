@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _LINUX_NFS_XDR_H
 #define _LINUX_NFS_XDR_H
 
@@ -879,7 +878,7 @@ struct nfs3_readdirargs {
 	struct nfs_fh *		fh;
 	__u64			cookie;
 	__be32			verf[2];
-	bool			plus;
+	int			plus;
 	unsigned int            count;
 	struct page **		pages;
 };
@@ -910,7 +909,7 @@ struct nfs3_linkres {
 struct nfs3_readdirres {
 	struct nfs_fattr *	dir_attr;
 	__be32 *		verf;
-	bool			plus;
+	int			plus;
 };
 
 struct nfs3_getaclres {
@@ -1013,6 +1012,7 @@ struct nfs4_link_res {
 	struct nfs_fattr *		dir_attr;
 };
 
+
 struct nfs4_lookup_arg {
 	struct nfs4_sequence_args	seq_args;
 	const struct nfs_fh *		dir_fh;
@@ -1025,20 +1025,6 @@ struct nfs4_lookup_res {
 	const struct nfs_server *	server;
 	struct nfs_fattr *		fattr;
 	struct nfs_fh *			fh;
-	struct nfs4_label		*label;
-};
-
-struct nfs4_lookupp_arg {
-	struct nfs4_sequence_args	seq_args;
-	const struct nfs_fh		*fh;
-	const u32			*bitmask;
-};
-
-struct nfs4_lookupp_res {
-	struct nfs4_sequence_res	seq_res;
-	const struct nfs_server		*server;
-	struct nfs_fattr		*fattr;
-	struct nfs_fh			*fh;
 	struct nfs4_label		*label;
 };
 
@@ -1067,7 +1053,7 @@ struct nfs4_readdir_arg {
 	struct page **			pages;	/* zero-copy data */
 	unsigned int			pgbase;	/* zero-copy data */
 	const u32 *			bitmask;
-	bool				plus;
+	int				plus;
 };
 
 struct nfs4_readdir_res {
@@ -1226,6 +1212,17 @@ struct pnfs_ds_commit_info {
 	int ncommitting;
 	int nbuckets;
 	struct pnfs_commit_bucket *buckets;
+};
+
+#define NFS4_OP_MAP_NUM_LONGS \
+	DIV_ROUND_UP(LAST_NFS4_OP, 8 * sizeof(unsigned long))
+#define NFS4_OP_MAP_NUM_WORDS \
+	(NFS4_OP_MAP_NUM_LONGS * sizeof(unsigned long) / sizeof(u32))
+struct nfs4_op_map {
+	union {
+		unsigned long longs[NFS4_OP_MAP_NUM_LONGS];
+		u32 words[NFS4_OP_MAP_NUM_WORDS];
+	} u;
 };
 
 struct nfs41_state_protection {
@@ -1434,9 +1431,10 @@ enum {
 	NFS_IOHDR_EOF,
 	NFS_IOHDR_REDO,
 	NFS_IOHDR_STAT,
+	NFS_IOHDR_RESEND_PNFS,
+	NFS_IOHDR_RESEND_MDS,
 };
 
-struct nfs_io_completion;
 struct nfs_pgio_header {
 	struct inode		*inode;
 	struct rpc_cred		*cred;
@@ -1450,8 +1448,8 @@ struct nfs_pgio_header {
 	void (*release) (struct nfs_pgio_header *hdr);
 	const struct nfs_pgio_completion_ops *completion_ops;
 	const struct nfs_rw_ops	*rw_ops;
-	struct nfs_io_completion *io_completion;
 	struct nfs_direct_req	*dreq;
+	void			*layout_private;
 	spinlock_t		lock;
 	/* fields protected by lock */
 	int			pnfs_error;
@@ -1477,7 +1475,7 @@ struct nfs_pgio_header {
 
 struct nfs_mds_commit_info {
 	atomic_t rpcs_out;
-	atomic_long_t		ncommit;
+	unsigned long		ncommit;
 	struct list_head	list;
 };
 
@@ -1527,10 +1525,10 @@ struct nfs_pgio_completion_ops {
 };
 
 struct nfs_unlinkdata {
+	struct hlist_node list;
 	struct nfs_removeargs args;
 	struct nfs_removeres res;
-	struct dentry *dentry;
-	wait_queue_head_t wq;
+	struct inode *dir;
 	struct rpc_cred	*cred;
 	struct nfs_fattr dir_attr;
 	long timeout;
@@ -1580,30 +1578,28 @@ struct nfs_rpc_ops {
 			    struct nfs_fattr *, struct nfs4_label *);
 	int	(*setattr) (struct dentry *, struct nfs_fattr *,
 			    struct iattr *);
-	int	(*lookup)  (struct inode *, const struct qstr *,
+	int	(*lookup)  (struct inode *, struct qstr *,
 			    struct nfs_fh *, struct nfs_fattr *,
 			    struct nfs4_label *);
-	int	(*lookupp) (struct inode *, struct nfs_fh *,
-			    struct nfs_fattr *, struct nfs4_label *);
 	int	(*access)  (struct inode *, struct nfs_access_entry *);
 	int	(*readlink)(struct inode *, struct page *, unsigned int,
 			    unsigned int);
 	int	(*create)  (struct inode *, struct dentry *,
 			    struct iattr *, int);
-	int	(*remove)  (struct inode *, const struct qstr *);
+	int	(*remove)  (struct inode *, struct qstr *);
 	void	(*unlink_setup)  (struct rpc_message *, struct inode *dir);
 	void	(*unlink_rpc_prepare) (struct rpc_task *, struct nfs_unlinkdata *);
 	int	(*unlink_done) (struct rpc_task *, struct inode *);
 	void	(*rename_setup)  (struct rpc_message *msg, struct inode *dir);
 	void	(*rename_rpc_prepare)(struct rpc_task *task, struct nfs_renamedata *);
 	int	(*rename_done) (struct rpc_task *task, struct inode *old_dir, struct inode *new_dir);
-	int	(*link)    (struct inode *, struct inode *, const struct qstr *);
+	int	(*link)    (struct inode *, struct inode *, struct qstr *);
 	int	(*symlink) (struct inode *, struct dentry *, struct page *,
 			    unsigned int, struct iattr *);
 	int	(*mkdir)   (struct inode *, struct dentry *, struct iattr *);
-	int	(*rmdir)   (struct inode *, const struct qstr *);
+	int	(*rmdir)   (struct inode *, struct qstr *);
 	int	(*readdir) (struct dentry *, struct rpc_cred *,
-			    u64, struct page **, unsigned int, bool);
+			    u64, struct page **, unsigned int, int);
 	int	(*mknod)   (struct inode *, struct dentry *, struct iattr *,
 			    dev_t);
 	int	(*statfs)  (struct nfs_server *, struct nfs_fh *,
@@ -1613,7 +1609,7 @@ struct nfs_rpc_ops {
 	int	(*pathconf) (struct nfs_server *, struct nfs_fh *,
 			     struct nfs_pathconf *);
 	int	(*set_capabilities)(struct nfs_server *, struct nfs_fh *);
-	int	(*decode_dirent)(struct xdr_stream *, struct nfs_entry *, bool);
+	int	(*decode_dirent)(struct xdr_stream *, struct nfs_entry *, int);
 	int	(*pgio_rpc_prepare)(struct rpc_task *,
 				    struct nfs_pgio_header *);
 	void	(*read_setup)(struct nfs_pgio_header *, struct rpc_message *);

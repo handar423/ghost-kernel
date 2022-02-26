@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 #ifndef _ASM_X86_HYPERV_H
 #define _ASM_X86_HYPERV_H
 
@@ -74,6 +73,9 @@
 /* Crash MSR available */
 #define HV_FEATURE_GUEST_CRASH_MSR_AVAILABLE (1 << 10)
 
+/* stimer Direct Mode is available */
+#define HV_X64_STIMER_DIRECT_MODE_AVAILABLE	(1 << 19)
+
 /*
  * Feature identification: EBX indicates which flags were specified at
  * partition creation. The format is the same as the partition creation
@@ -111,8 +113,6 @@
 #define HV_X64_HYPERCALL_PARAMS_XMM_AVAILABLE		(1 << 4)
 /* Support for a virtual guest idle state is available */
 #define HV_X64_GUEST_IDLE_STATE_AVAILABLE		(1 << 5)
-/* Guest crash data handler available */
-#define HV_X64_GUEST_CRASH_MSR_AVAILABLE		(1 << 10)
 
 /*
  * Implementation recommendations. Indicates which behaviors the hypervisor
@@ -146,6 +146,10 @@
 #define HV_X64_RELAXED_TIMING_RECOMMENDED	(1 << 5)
 
 /*
+ * HV_VP_SET available
+ */
+#define HV_X64_EX_PROCESSOR_MASKS_RECOMMENDED	(1 << 11)
+/*
  * Virtual APIC support
  */
 #define HV_X64_DEPRECATING_AEOI_RECOMMENDED	(1 << 9)
@@ -154,9 +158,10 @@
 #define HV_X64_EX_PROCESSOR_MASKS_RECOMMENDED	(1 << 11)
 
 /*
- * Crash notification flag.
+ * Crash notification flags.
  */
-#define HV_CRASH_CTL_CRASH_NOTIFY (1ULL << 63)
+#define HV_CRASH_CTL_CRASH_NOTIFY_MSG  BIT_ULL(62)
+#define HV_CRASH_CTL_CRASH_NOTIFY      BIT_ULL(63)
 
 /* MSR used to identify the guest OS. */
 #define HV_X64_MSR_GUEST_OS_ID			0x40000000
@@ -267,8 +272,14 @@
 #define HV_FLUSH_USE_EXTENDED_RANGE_FORMAT	BIT(3)
 
 enum HV_GENERIC_SET_FORMAT {
-	HV_GENERIC_SET_SPARCE_4K,
+	HV_GENERIC_SET_SPARSE_4K,
 	HV_GENERIC_SET_ALL,
+};
+
+struct hv_vpset {
+       __u64 format;
+       __u64 valid_bank_mask;
+       __u64 bank_contents[];
 };
 
 /* hypercall status code */
@@ -291,6 +302,8 @@ typedef struct _HV_REFERENCE_TSC_PAGE {
 #define HV_SYNIC_SINT_COUNT		(16)
 /* Define the expected SynIC version. */
 #define HV_SYNIC_VERSION_1		(0x1)
+/* Valid SynIC vectors are 16-255. */
+#define HV_SYNIC_FIRST_VALID_VECTOR	(16)
 
 #define HV_SYNIC_CONTROL_ENABLE		(1ULL << 0)
 #define HV_SYNIC_SIMP_ENABLE		(1ULL << 0)

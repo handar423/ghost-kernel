@@ -35,7 +35,8 @@
 #include <linux/genhd.h>
 #include <linux/file.h>
 #include <linux/module.h>
-#include <scsi/scsi_proto.h>
+#include <scsi/scsi.h>
+#include <scsi/scsi_host.h>
 #include <asm/unaligned.h>
 
 #include <target/target_core_base.h>
@@ -86,7 +87,6 @@ static int iblock_configure_device(struct se_device *dev)
 	struct block_device *bd = NULL;
 	struct blk_integrity *bi;
 	fmode_t mode;
-	unsigned int max_write_zeroes_sectors;
 	int ret = -ENOMEM;
 
 	if (!(ib_dev->ibd_flags & IBDF_HAS_UDEV_PATH)) {
@@ -94,7 +94,7 @@ static int iblock_configure_device(struct se_device *dev)
 		return -EINVAL;
 	}
 
-	ib_dev->ibd_bio_set = bioset_create(IBLOCK_BIO_POOL_SIZE, 0, BIOSET_NEED_BVECS);
+	ib_dev->ibd_bio_set = bioset_create(IBLOCK_BIO_POOL_SIZE, 0);
 	if (!ib_dev->ibd_bio_set) {
 		pr_err("IBLOCK: Unable to create bioset\n");
 		goto out;
@@ -130,11 +130,7 @@ static int iblock_configure_device(struct se_device *dev)
 	 * Enable write same emulation for IBLOCK and use 0xFFFF as
 	 * the smaller WRITE_SAME(10) only has a two-byte block count.
 	 */
-	max_write_zeroes_sectors = bdev_write_zeroes_sectors(bd);
-	if (max_write_zeroes_sectors)
-		dev->dev_attrib.max_write_same_len = max_write_zeroes_sectors;
-	else
-		dev->dev_attrib.max_write_same_len = 0xFFFF;
+	dev->dev_attrib.max_write_same_len = 0xFFFF;
 
 	if (blk_queue_nonrot(q))
 		dev->dev_attrib.is_nonrot = 1;
@@ -143,17 +139,17 @@ static int iblock_configure_device(struct se_device *dev)
 	if (bi) {
 		struct bio_set *bs = ib_dev->ibd_bio_set;
 
-		if (!strcmp(bi->profile->name, "T10-DIF-TYPE3-IP") ||
-		    !strcmp(bi->profile->name, "T10-DIF-TYPE1-IP")) {
+		if (!strcmp(bi->name, "T10-DIF-TYPE3-IP") ||
+		    !strcmp(bi->name, "T10-DIF-TYPE1-IP")) {
 			pr_err("IBLOCK export of blk_integrity: %s not"
-			       " supported\n", bi->profile->name);
+			       " supported\n", bi->name);
 			ret = -ENOSYS;
 			goto out_blkdev_put;
 		}
 
-		if (!strcmp(bi->profile->name, "T10-DIF-TYPE3-CRC")) {
+		if (!strcmp(bi->name, "T10-DIF-TYPE3-CRC")) {
 			dev->dev_attrib.pi_prot_type = TARGET_DIF_TYPE3_PROT;
-		} else if (!strcmp(bi->profile->name, "T10-DIF-TYPE1-CRC")) {
+		} else if (!strcmp(bi->name, "T10-DIF-TYPE1-CRC")) {
 			dev->dev_attrib.pi_prot_type = TARGET_DIF_TYPE1_PROT;
 		}
 
@@ -190,17 +186,14 @@ static void iblock_dev_call_rcu(struct rcu_head *p)
 
 static void iblock_free_device(struct se_device *dev)
 {
-	call_rcu(&dev->rcu_head, iblock_dev_call_rcu);
-}
-
-static void iblock_destroy_device(struct se_device *dev)
-{
 	struct iblock_dev *ib_dev = IBLOCK_DEV(dev);
 
 	if (ib_dev->ibd_bd != NULL)
 		blkdev_put(ib_dev->ibd_bd, FMODE_WRITE|FMODE_READ|FMODE_EXCL);
 	if (ib_dev->ibd_bio_set != NULL)
 		bioset_free(ib_dev->ibd_bio_set);
+
+	call_rcu(&dev->rcu_head, iblock_dev_call_rcu);
 }
 
 static unsigned long long iblock_emulate_read_cap_with_block_size(
@@ -299,13 +292,20 @@ static void iblock_complete_cmd(struct se_cmd *cmd)
 	kfree(ibr);
 }
 
-static void iblock_bio_done(struct bio *bio)
+static void iblock_bio_done(struct bio *bio, int err)
 {
 	struct se_cmd *cmd = bio->bi_private;
 	struct iblock_req *ibr = cmd->priv;
 
-	if (bio->bi_status) {
-		pr_err("bio error: %p,  err: %d\n", bio, bio->bi_status);
+	/*
+	 * Set -EIO if !BIO_UPTODATE and the passed is still err=0
+	 */
+	if (!test_bit(BIO_UPTODATE, &bio->bi_flags) && !err)
+		err = -EIO;
+
+	if (err != 0) {
+		pr_err("test_bit(BIO_UPTODATE) failed for bio: %p,"
+			" err: %d\n", bio, err);
 		/*
 		 * Bump the ib_bio_err_cnt and release bio.
 		 */
@@ -319,8 +319,7 @@ static void iblock_bio_done(struct bio *bio)
 }
 
 static struct bio *
-iblock_get_bio(struct se_cmd *cmd, sector_t lba, u32 sg_num, int op,
-	       int op_flags)
+iblock_get_bio(struct se_cmd *cmd, sector_t lba, u32 sg_num)
 {
 	struct iblock_dev *ib_dev = IBLOCK_DEV(cmd->se_dev);
 	struct bio *bio;
@@ -338,35 +337,34 @@ iblock_get_bio(struct se_cmd *cmd, sector_t lba, u32 sg_num, int op,
 		return NULL;
 	}
 
-	bio_set_dev(bio, ib_dev->ibd_bd);
+	bio->bi_bdev = ib_dev->ibd_bd;
 	bio->bi_private = cmd;
 	bio->bi_end_io = &iblock_bio_done;
-	bio->bi_iter.bi_sector = lba;
-	bio_set_op_attrs(bio, op, op_flags);
+	bio->bi_sector = lba;
 
 	return bio;
 }
 
-static void iblock_submit_bios(struct bio_list *list)
+static void iblock_submit_bios(struct bio_list *list, int rw)
 {
 	struct blk_plug plug;
 	struct bio *bio;
 
 	blk_start_plug(&plug);
 	while ((bio = bio_list_pop(list)))
-		submit_bio(bio);
+		submit_bio(rw, bio);
 	blk_finish_plug(&plug);
 }
 
-static void iblock_end_io_flush(struct bio *bio)
+static void iblock_end_io_flush(struct bio *bio, int err)
 {
 	struct se_cmd *cmd = bio->bi_private;
 
-	if (bio->bi_status)
-		pr_err("IBLOCK: cache flush failed: %d\n", bio->bi_status);
+	if (err)
+		pr_err("IBLOCK: cache flush failed: %d\n", err);
 
 	if (cmd) {
-		if (bio->bi_status)
+		if (err)
 			target_complete_cmd(cmd, SAM_STAT_CHECK_CONDITION);
 		else
 			target_complete_cmd(cmd, SAM_STAT_GOOD);
@@ -395,11 +393,10 @@ iblock_execute_sync_cache(struct se_cmd *cmd)
 
 	bio = bio_alloc(GFP_KERNEL, 0);
 	bio->bi_end_io = iblock_end_io_flush;
-	bio_set_dev(bio, ib_dev->ibd_bd);
-	bio->bi_opf = REQ_OP_WRITE | REQ_PREFLUSH;
+	bio->bi_bdev = ib_dev->ibd_bd;
 	if (!immed)
 		bio->bi_private = cmd;
-	submit_bio(bio);
+	submit_bio(WRITE_FLUSH, bio);
 	return 0;
 }
 
@@ -423,31 +420,28 @@ iblock_execute_unmap(struct se_cmd *cmd, sector_t lba, sector_t nolb)
 }
 
 static sense_reason_t
-iblock_execute_zero_out(struct block_device *bdev, struct se_cmd *cmd)
+iblock_execute_write_same_direct(struct block_device *bdev, struct se_cmd *cmd)
 {
 	struct se_device *dev = cmd->se_dev;
 	struct scatterlist *sg = &cmd->t_data_sg[0];
-	unsigned char *buf, zero = 0x00, *p = &zero;
-	int rc, ret;
+	struct page *page = NULL;
+	int ret;
 
-	buf = kmap(sg_page(sg)) + sg->offset;
-	if (!buf)
-		return TCM_LOGICAL_UNIT_COMMUNICATION_FAILURE;
-	/*
-	 * Fall back to block_execute_write_same() slow-path if
-	 * incoming WRITE_SAME payload does not contain zeros.
-	 */
-	rc = memcmp(buf, p, cmd->data_length);
-	kunmap(sg_page(sg));
+	if (sg->offset) {
+		page = alloc_page(GFP_KERNEL);
+		if (!page)
+			return TCM_OUT_OF_RESOURCES;
+		sg_copy_to_buffer(sg, cmd->t_data_nents, page_address(page),
+				  dev->dev_attrib.block_size);
+	}
 
-	if (rc)
-		return TCM_LOGICAL_UNIT_COMMUNICATION_FAILURE;
-
-	ret = blkdev_issue_zeroout(bdev,
+	ret = blkdev_issue_write_same(bdev,
 				target_to_linux_sector(dev, cmd->t_task_lba),
 				target_to_linux_sector(dev,
 					sbc_get_write_same_sectors(cmd)),
-				GFP_KERNEL, false);
+				GFP_KERNEL, page ? page : sg_page(sg));
+	if (page)
+		__free_page(page);
 	if (ret)
 		return TCM_LOGICAL_UNIT_COMMUNICATION_FAILURE;
 
@@ -483,17 +477,15 @@ iblock_execute_write_same(struct se_cmd *cmd)
 		return TCM_INVALID_CDB_FIELD;
 	}
 
-	if (bdev_write_zeroes_sectors(bdev)) {
-		if (!iblock_execute_zero_out(bdev, cmd))
-			return 0;
-	}
+	if (bdev_write_same(bdev))
+		return iblock_execute_write_same_direct(bdev, cmd);
 
 	ibr = kzalloc(sizeof(struct iblock_req), GFP_KERNEL);
 	if (!ibr)
 		goto fail;
 	cmd->priv = ibr;
 
-	bio = iblock_get_bio(cmd, block_lba, 1, REQ_OP_WRITE, 0);
+	bio = iblock_get_bio(cmd, block_lba, 1);
 	if (!bio)
 		goto fail_free_ibr;
 
@@ -506,8 +498,7 @@ iblock_execute_write_same(struct se_cmd *cmd)
 		while (bio_add_page(bio, sg_page(sg), sg->length, sg->offset)
 				!= sg->length) {
 
-			bio = iblock_get_bio(cmd, block_lba, 1, REQ_OP_WRITE,
-					     0);
+			bio = iblock_get_bio(cmd, block_lba, 1);
 			if (!bio)
 				goto fail_put_bios;
 
@@ -517,10 +508,10 @@ iblock_execute_write_same(struct se_cmd *cmd)
 
 		/* Always in 512 byte units for Linux/Block */
 		block_lba += sg->length >> IBLOCK_LBA_SHIFT;
-		sectors -= 1;
+		sectors -= sg->length >> IBLOCK_LBA_SHIFT;
 	}
 
-	iblock_submit_bios(&list);
+	iblock_submit_bios(&list, WRITE);
 	return 0;
 
 fail_put_bios:
@@ -653,17 +644,17 @@ iblock_alloc_bip(struct se_cmd *cmd, struct bio *bio)
 	}
 
 	bip = bio_integrity_alloc(bio, GFP_NOIO, cmd->t_prot_nents);
-	if (IS_ERR(bip)) {
+	if (!bip) {
 		pr_err("Unable to allocate bio_integrity_payload\n");
-		return PTR_ERR(bip);
+		return -ENOMEM;
 	}
 
-	bip->bip_iter.bi_size = (cmd->data_length / dev->dev_attrib.block_size) *
+	bip->bip_size = (cmd->data_length / dev->dev_attrib.block_size) *
 			 dev->prot_length;
-	bip->bip_iter.bi_sector = bio->bi_iter.bi_sector;
+	bip->bip_sector = bio->bi_sector;
 
-	pr_debug("IBLOCK BIP Size: %u Sector: %llu\n", bip->bip_iter.bi_size,
-		 (unsigned long long)bip->bip_iter.bi_sector);
+	pr_debug("IBLOCK BIP Size: %u Sector: %llu\n", bip->bip_size,
+		 (unsigned long long)bip->bip_sector);
 
 	for_each_sg(cmd->t_prot_sg, sg, cmd->t_prot_nents, i) {
 
@@ -693,24 +684,28 @@ iblock_execute_rw(struct se_cmd *cmd, struct scatterlist *sgl, u32 sgl_nents,
 	struct scatterlist *sg;
 	u32 sg_num = sgl_nents;
 	unsigned bio_cnt;
-	int i, op, op_flags = 0;
+	int rw = 0;
+	int i;
 
 	if (data_direction == DMA_TO_DEVICE) {
 		struct iblock_dev *ib_dev = IBLOCK_DEV(dev);
 		struct request_queue *q = bdev_get_queue(ib_dev->ibd_bd);
 		/*
-		 * Force writethrough using REQ_FUA if a volatile write cache
+		 * Force writethrough using WRITE_FUA if a volatile write cache
 		 * is not enabled, or if initiator set the Force Unit Access bit.
 		 */
-		op = REQ_OP_WRITE;
-		if (test_bit(QUEUE_FLAG_FUA, &q->queue_flags)) {
+		if (q->flush_flags & REQ_FUA) {
 			if (cmd->se_cmd_flags & SCF_FUA)
-				op_flags = REQ_FUA;
-			else if (!test_bit(QUEUE_FLAG_WC, &q->queue_flags))
-				op_flags = REQ_FUA;
+				rw = WRITE_FUA;
+			else if (!(q->flush_flags & REQ_FLUSH))
+				rw = WRITE_FUA;
+			else
+				rw = WRITE;
+		} else {
+			rw = WRITE;
 		}
 	} else {
-		op = REQ_OP_READ;
+		rw = READ;
 	}
 
 	ibr = kzalloc(sizeof(struct iblock_req), GFP_KERNEL);
@@ -724,7 +719,7 @@ iblock_execute_rw(struct se_cmd *cmd, struct scatterlist *sgl, u32 sgl_nents,
 		return 0;
 	}
 
-	bio = iblock_get_bio(cmd, block_lba, sgl_nents, op, op_flags);
+	bio = iblock_get_bio(cmd, block_lba, sgl_nents);
 	if (!bio)
 		goto fail_free_ibr;
 
@@ -744,12 +739,11 @@ iblock_execute_rw(struct se_cmd *cmd, struct scatterlist *sgl, u32 sgl_nents,
 		while (bio_add_page(bio, sg_page(sg), sg->length, sg->offset)
 				!= sg->length) {
 			if (bio_cnt >= IBLOCK_MAX_BIO_PER_TASK) {
-				iblock_submit_bios(&list);
+				iblock_submit_bios(&list, rw);
 				bio_cnt = 0;
 			}
 
-			bio = iblock_get_bio(cmd, block_lba, sg_num, op,
-					     op_flags);
+			bio = iblock_get_bio(cmd, block_lba, sg_num);
 			if (!bio)
 				goto fail_put_bios;
 
@@ -769,7 +763,7 @@ iblock_execute_rw(struct se_cmd *cmd, struct scatterlist *sgl, u32 sgl_nents,
 			goto fail_put_bios;
 	}
 
-	iblock_submit_bios(&list);
+	iblock_submit_bios(&list, rw);
 	iblock_complete_cmd(cmd);
 	return 0;
 
@@ -849,7 +843,7 @@ static bool iblock_get_write_cache(struct se_device *dev)
 	struct block_device *bd = ib_dev->ibd_bd;
 	struct request_queue *q = bdev_get_queue(bd);
 
-	return test_bit(QUEUE_FLAG_WC, &q->queue_flags);
+	return q->flush_flags & REQ_FLUSH;
 }
 
 static const struct target_backend_ops iblock_ops = {
@@ -861,7 +855,6 @@ static const struct target_backend_ops iblock_ops = {
 	.detach_hba		= iblock_detach_hba,
 	.alloc_device		= iblock_alloc_device,
 	.configure_device	= iblock_configure_device,
-	.destroy_device		= iblock_destroy_device,
 	.free_device		= iblock_free_device,
 	.parse_cdb		= iblock_parse_cdb,
 	.set_configfs_dev_params = iblock_set_configfs_dev_params,

@@ -729,8 +729,8 @@ static void create_le_conn_complete(struct hci_dev *hdev, u8 status, u16 opcode)
 		goto done;
 	}
 
-	bt_dev_err(hdev, "request failed to create LE connection: "
-		   "status 0x%2.2x", status);
+	BT_ERR("HCI request failed to create LE connection: status 0x%2.2x",
+	       status);
 
 	if (!conn)
 		goto done;
@@ -907,7 +907,7 @@ struct hci_conn *hci_connect_le(struct hci_dev *hdev, bdaddr_t *dst,
 		 */
 		if (hci_dev_test_flag(hdev, HCI_LE_SCAN) &&
 		    hdev->le_scan_type == LE_SCAN_ACTIVE) {
-			hci_req_purge(&req);
+			skb_queue_purge(&req.cmd_q);
 			hci_conn_del(conn);
 			return ERR_PTR(-EBUSY);
 		}
@@ -1268,8 +1268,16 @@ auth:
 		return 0;
 
 encrypt:
-	if (test_bit(HCI_CONN_ENCRYPT, &conn->flags))
+	if (test_bit(HCI_CONN_ENCRYPT, &conn->flags)) {
+		/* Ensure that the encryption key size has been read,
+		 * otherwise stall the upper layer responses.
+		 */
+		if (!conn->enc_key_size)
+			return 0;
+
+		/* Nothing else needed, all requirements are met */
 		return 1;
+	}
 
 	hci_conn_encrypt(conn);
 	return 0;

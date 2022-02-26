@@ -1,11 +1,9 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  *  prepare to run common code
  *
  *  Copyright (C) 2000 Andrea Arcangeli <andrea@suse.de> SuSE
  */
 
-#define DISABLE_BRANCH_PROFILING
 #include <linux/init.h>
 #include <linux/linkage.h>
 #include <linux/types.h>
@@ -26,11 +24,10 @@
 #include <asm/tlbflush.h>
 #include <asm/sections.h>
 #include <asm/kdebug.h>
-#include <asm/e820/api.h>
+#include <asm/e820.h>
 #include <asm/bios_ebda.h>
 #include <asm/bootparam_utils.h>
 #include <asm/microcode.h>
-#include <asm/kasan.h>
 
 /*
  * Manage page tables very early on.
@@ -52,11 +49,9 @@ unsigned long __head __startup_64(unsigned long physaddr,
 	unsigned long load_delta, *p;
 	unsigned long pgtable_flags;
 	pgdval_t *pgd;
-	p4dval_t *p4d;
 	pudval_t *pud;
 	pmdval_t *pmd, pmd_entry;
 	int i;
-	unsigned int *next_pgt_ptr;
 
 	/* Is the address too large? */
 	if (physaddr >> MAX_PHYSMEM_BITS)
@@ -80,13 +75,8 @@ unsigned long __head __startup_64(unsigned long physaddr,
 
 	/* Fixup the physical addresses in the page table */
 
-	pgd = fixup_pointer(&early_top_pgt, physaddr);
+	pgd = fixup_pointer(&early_level4_pgt, physaddr);
 	pgd[pgd_index(__START_KERNEL_map)] += load_delta;
-
-	if (IS_ENABLED(CONFIG_X86_5LEVEL)) {
-		p4d = fixup_pointer(&level4_kernel_pgt, physaddr);
-		p4d[511] += load_delta;
-	}
 
 	pud = fixup_pointer(&level3_kernel_pgt, physaddr);
 	pud[510] += load_delta;
@@ -102,27 +92,13 @@ unsigned long __head __startup_64(unsigned long physaddr,
 	 * it avoids problems around wraparound.
 	 */
 
-	next_pgt_ptr = fixup_pointer(&next_early_pgt, physaddr);
-	pud = fixup_pointer(early_dynamic_pgts[(*next_pgt_ptr)++], physaddr);
-	pmd = fixup_pointer(early_dynamic_pgts[(*next_pgt_ptr)++], physaddr);
-
+	pud = fixup_pointer(early_dynamic_pgts[next_early_pgt++], physaddr);
+	pmd = fixup_pointer(early_dynamic_pgts[next_early_pgt++], physaddr);
 	pgtable_flags = _KERNPG_TABLE_NOENC + sme_get_me_mask();
 
-	if (IS_ENABLED(CONFIG_X86_5LEVEL)) {
-		p4d = fixup_pointer(early_dynamic_pgts[next_early_pgt++], physaddr);
-
-		i = (physaddr >> PGDIR_SHIFT) % PTRS_PER_PGD;
-		pgd[i + 0] = (pgdval_t)p4d + pgtable_flags;
-		pgd[i + 1] = (pgdval_t)p4d + pgtable_flags;
-
-		i = (physaddr >> P4D_SHIFT) % PTRS_PER_P4D;
-		p4d[i + 0] = (pgdval_t)pud + pgtable_flags;
-		p4d[i + 1] = (pgdval_t)pud + pgtable_flags;
-	} else {
-		i = (physaddr >> PGDIR_SHIFT) % PTRS_PER_PGD;
-		pgd[i + 0] = (pgdval_t)pud + pgtable_flags;
-		pgd[i + 1] = (pgdval_t)pud + pgtable_flags;
-	}
+	i = (physaddr >> PGDIR_SHIFT) % PTRS_PER_PGD;
+	pgd[i + 0] = (pgdval_t)pud + pgtable_flags;
+	pgd[i + 1] = (pgdval_t)pud + pgtable_flags;
 
 	i = (physaddr >> PUD_SHIFT) % PTRS_PER_PUD;
 	pud[i + 0] = (pudval_t)pmd + pgtable_flags;
@@ -142,13 +118,31 @@ unsigned long __head __startup_64(unsigned long physaddr,
 	 * we might write invalid pmds, when the kernel is relocated
 	 * cleanup_highmap() fixes this up along with the mappings
 	 * beyond _end.
+	 *
+	 * Only the region occupied by the kernel image has so far
+	 * been checked against the table of usable memory regions
+	 * provided by the firmware, so invalidate pages outside that
+	 * region. A page table entry that maps to a reserved area of
+	 * memory would allow processor speculation into that area,
+	 * and on some hardware (particularly the UV platform) even
+	 * speculative access to some reserved areas is caught as an
+	 * error, causing the BIOS to halt the system.
 	 */
 
 	pmd = fixup_pointer(level2_kernel_pgt, physaddr);
-	for (i = 0; i < PTRS_PER_PMD; i++) {
+
+	/* invalidate pages before the kernel image */
+	for (i = 0; i < pmd_index((unsigned long)_text); i++)
+		pmd[i] &= ~_PAGE_PRESENT;
+
+	/* fixup pages that are part of the kernel image */
+	for (; i <= pmd_index((unsigned long)_end); i++)
 		if (pmd[i] & _PAGE_PRESENT)
 			pmd[i] += load_delta;
-	}
+
+	/* invalidate pages after the kernel image */
+	for (; i < PTRS_PER_PMD; i++)
+		pmd[i] &= ~_PAGE_PRESENT;
 
 	/*
 	 * Fixup phys_base - remove the memory encryption mask to obtain
@@ -179,9 +173,10 @@ unsigned long __startup_secondary_64(void)
 /* Wipe all early page tables except for the kernel symbol map */
 static void __init reset_early_page_tables(void)
 {
-	memset(early_top_pgt, 0, sizeof(pgd_t)*(PTRS_PER_PGD-1));
+	memset(early_level4_pgt, 0, sizeof(pgd_t)*(PTRS_PER_PGD-1));
 	next_early_pgt = 0;
-	write_cr3(__sme_pa_nodebug(early_top_pgt));
+
+	__load_cr3(__sme_pa(early_level4_pgt));
 }
 
 /* Create a new PMD entry */
@@ -189,16 +184,16 @@ int __init __early_make_pgtable(unsigned long address, pmdval_t pmd)
 {
 	unsigned long physaddr = address - __PAGE_OFFSET;
 	pgdval_t pgd, *pgd_p;
-	p4dval_t p4d, *p4d_p;
 	pudval_t pud, *pud_p;
 	pmdval_t *pmd_p;
 
 	/* Invalid address or early pgt is done ?  */
-	if (physaddr >= MAXMEM || read_cr3_pa() != __pa_nodebug(early_top_pgt))
+	if (physaddr >= MAXMEM ||
+	    read_cr3_pa() != __pa_nodebug(early_level4_pgt))
 		return -1;
 
 again:
-	pgd_p = &early_top_pgt[pgd_index(address)].pgd;
+	pgd_p = &early_level4_pgt[pgd_index(address)].pgd;
 	pgd = *pgd_p;
 
 	/*
@@ -206,25 +201,8 @@ again:
 	 * critical -- __PAGE_OFFSET would point us back into the dynamic
 	 * range and we might end up looping forever...
 	 */
-	if (!IS_ENABLED(CONFIG_X86_5LEVEL))
-		p4d_p = pgd_p;
-	else if (pgd)
-		p4d_p = (p4dval_t *)((pgd & PTE_PFN_MASK) + __START_KERNEL_map - phys_base);
-	else {
-		if (next_early_pgt >= EARLY_DYNAMIC_PAGE_TABLES) {
-			reset_early_page_tables();
-			goto again;
-		}
-
-		p4d_p = (p4dval_t *)early_dynamic_pgts[next_early_pgt++];
-		memset(p4d_p, 0, sizeof(*p4d_p) * PTRS_PER_P4D);
-		*pgd_p = (pgdval_t)p4d_p - __START_KERNEL_map + phys_base + _KERNPG_TABLE;
-	}
-	p4d_p += p4d_index(address);
-	p4d = *p4d_p;
-
-	if (p4d)
-		pud_p = (pudval_t *)((p4d & PTE_PFN_MASK) + __START_KERNEL_map - phys_base);
+	if (pgd)
+		pud_p = (pudval_t *)((pgd & PTE_PFN_MASK) + __START_KERNEL_map - phys_base);
 	else {
 		if (next_early_pgt >= EARLY_DYNAMIC_PAGE_TABLES) {
 			reset_early_page_tables();
@@ -232,8 +210,8 @@ again:
 		}
 
 		pud_p = (pudval_t *)early_dynamic_pgts[next_early_pgt++];
-		memset(pud_p, 0, sizeof(*pud_p) * PTRS_PER_PUD);
-		*p4d_p = (p4dval_t)pud_p - __START_KERNEL_map + phys_base + _KERNPG_TABLE;
+		memset(pud_p, 0, sizeof(pud_p) * PTRS_PER_PUD);
+		*pgd_p = (pgdval_t)pud_p - __START_KERNEL_map + phys_base + _KERNPG_TABLE;
 	}
 	pud_p += pud_index(address);
 	pud = *pud_p;
@@ -247,7 +225,7 @@ again:
 		}
 
 		pmd_p = (pmdval_t *)early_dynamic_pgts[next_early_pgt++];
-		memset(pmd_p, 0, sizeof(*pmd_p) * PTRS_PER_PMD);
+		memset(pmd_p, 0, sizeof(pmd_p) * PTRS_PER_PMD);
 		*pud_p = (pudval_t)pmd_p - __START_KERNEL_map + phys_base + _KERNPG_TABLE;
 	}
 	pmd_p[pmd_index(address)] = pmd;
@@ -310,8 +288,10 @@ static void __init copy_bootdata(char *real_mode_data)
 	sme_unmap_bootdata(real_mode_data);
 }
 
-asmlinkage __visible void __init x86_64_start_kernel(char * real_mode_data)
+void __init x86_64_start_kernel(char * real_mode_data)
 {
+	int i;
+
 	/*
 	 * Build-time sanity checks on the kernel image and module
 	 * area mappings. (these are purely build-time and produce no code)
@@ -326,14 +306,13 @@ asmlinkage __visible void __init x86_64_start_kernel(char * real_mode_data)
 				(__START_KERNEL & PGDIR_MASK)));
 	BUILD_BUG_ON(__fix_to_virt(__end_of_fixed_addresses) <= MODULES_END);
 
-	cr4_init_shadow();
-
 	/* Kill off the identity-map trampoline */
 	reset_early_page_tables();
 
+	/* clear bss before set_intr_gate with early_idt_handler */
 	clear_bss();
 
-	clear_page(init_top_pgt);
+	clear_page(init_level4_pgt);
 
 	/*
 	 * SME support may update early_pmd_flags to include the memory
@@ -342,9 +321,9 @@ asmlinkage __visible void __init x86_64_start_kernel(char * real_mode_data)
 	 */
 	sme_early_init();
 
-	kasan_early_init();
-
-	idt_setup_early_handler();
+	for (i = 0; i < NUM_EXCEPTION_VECTORS; i++)
+		set_intr_gate(i, early_idt_handler_array[i]);
+	load_idt((const struct desc_ptr *)&idt_descr);
 
 	copy_bootdata(__va(real_mode_data));
 
@@ -353,8 +332,11 @@ asmlinkage __visible void __init x86_64_start_kernel(char * real_mode_data)
 	 */
 	load_ucode_bsp();
 
-	/* set init_top_pgt kernel high mapping*/
-	init_top_pgt[511] = early_top_pgt[511];
+	if (console_loglevel == 10)
+		early_printk("Kernel alive\n");
+
+	/* set init_level4_pgt kernel high mapping*/
+	init_level4_pgt[511] = early_level4_pgt[511];
 
 	x86_64_start_reservations(real_mode_data);
 }
@@ -365,15 +347,7 @@ void __init x86_64_start_reservations(char *real_mode_data)
 	if (!boot_params.hdr.version)
 		copy_bootdata(__va(real_mode_data));
 
-	x86_early_init_platform_quirks();
-
-	switch (boot_params.hdr.hardware_subarch) {
-	case X86_SUBARCH_INTEL_MID:
-		x86_intel_mid_early_setup();
-		break;
-	default:
-		break;
-	}
+	reserve_ebda_region();
 
 	start_kernel();
 }

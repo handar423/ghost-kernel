@@ -29,16 +29,8 @@
 
 #include <linux/virtio_types.h>
 
-/* Default values of the CDB and sense data size configuration fields */
-#define VIRTIO_SCSI_CDB_DEFAULT_SIZE   32
-#define VIRTIO_SCSI_SENSE_DEFAULT_SIZE 96
-
-#ifndef VIRTIO_SCSI_CDB_SIZE
-#define VIRTIO_SCSI_CDB_SIZE VIRTIO_SCSI_CDB_DEFAULT_SIZE
-#endif
-#ifndef VIRTIO_SCSI_SENSE_SIZE
-#define VIRTIO_SCSI_SENSE_SIZE VIRTIO_SCSI_SENSE_DEFAULT_SIZE
-#endif
+#define VIRTIO_SCSI_CDB_SIZE   32
+#define VIRTIO_SCSI_SENSE_SIZE 96
 
 /* SCSI command request, followed by data-out */
 struct virtio_scsi_cmd_req {
@@ -47,18 +39,6 @@ struct virtio_scsi_cmd_req {
 	__u8 task_attr;		/* Task attribute */
 	__u8 prio;		/* SAM command priority field */
 	__u8 crn;
-	__u8 cdb[VIRTIO_SCSI_CDB_SIZE];
-} __attribute__((packed));
-
-/* SCSI command request, followed by protection information */
-struct virtio_scsi_cmd_req_pi {
-	__u8 lun[8];		/* Logical Unit Number */
-	__virtio64 tag;		/* Command identifier */
-	__u8 task_attr;		/* Task attribute */
-	__u8 prio;		/* SAM command priority field */
-	__u8 crn;
-	__virtio32 pi_bytesout;	/* DataOUT PI Number of bytes */
-	__virtio32 pi_bytesin;		/* DataIN PI Number of bytes */
 	__u8 cdb[VIRTIO_SCSI_CDB_SIZE];
 } __attribute__((packed));
 
@@ -119,7 +99,6 @@ struct virtio_scsi_config {
 #define VIRTIO_SCSI_F_INOUT                    0
 #define VIRTIO_SCSI_F_HOTPLUG                  1
 #define VIRTIO_SCSI_F_CHANGE                   2
-#define VIRTIO_SCSI_F_T10_PI                   3
 
 /* Response codes */
 #define VIRTIO_SCSI_S_OK                       0

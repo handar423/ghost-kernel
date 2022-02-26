@@ -13,24 +13,13 @@ config RAID6_PQ
 config BITREVERSE
 	tristate
 
-config HAVE_ARCH_BITREVERSE
-	bool
-	default n
-	depends on BITREVERSE
-	help
-	  This option enables the use of hardware bit-reversal instructions on
-	  architectures which support such operations.
-
 config RATIONAL
-	bool
+	boolean
 
 config GENERIC_STRNCPY_FROM_USER
 	bool
 
 config GENERIC_STRNLEN_USER
-	bool
-
-config GENERIC_NET_UTILS
 	bool
 
 config GENERIC_FIND_FIRST_BIT
@@ -46,14 +35,26 @@ config GENERIC_IOMAP
 	bool
 	select GENERIC_PCI_IOMAP
 
+config GENERIC_IO
+	boolean
+	default n
+
 config STMP_DEVICE
 	bool
+
+config PERCPU_RWSEM
+	boolean
 
 config ARCH_USE_CMPXCHG_LOCKREF
 	bool
 
-config ARCH_HAS_FAST_MULTIPLIER
-	bool
+config CMPXCHG_LOCKREF
+	def_bool y if ARCH_USE_CMPXCHG_LOCKREF
+	depends on SMP
+	depends on !GENERIC_LOCKBREAK
+	depends on !DEBUG_SPINLOCK
+	depends on !DEBUG_LOCK_ALLOC
+	depends on !PREEMPT_RT_BASE
 
 config CRC_CCITT
 	tristate "CRC-CCITT functions"
@@ -99,7 +100,8 @@ config CRC32
 	  functions require M here.
 
 config CRC32_SELFTEST
-	tristate "CRC32 perform self test on init"
+	bool "CRC32 perform self test on init"
+	default n
 	depends on CRC32
 	help
 	  This option enables the CRC32 library functions to perform a
@@ -154,14 +156,6 @@ config CRC32_BIT
 
 endchoice
 
-config CRC4
-	tristate "CRC4 functions"
-	help
-	  This option is provided for the case where no in-kernel-tree
-	  modules require CRC4 functions, but a module built outside
-	  the kernel tree does. Such modules that use library CRC4
-	  functions require M here.
-
 config CRC7
 	tristate "CRC7 functions"
 	help
@@ -188,21 +182,9 @@ config CRC8
 	  when they need to do cyclic redundancy check according CRC8
 	  algorithm. Module will be called crc8.
 
-config XXHASH
-	tristate
-
 config AUDIT_GENERIC
 	bool
 	depends on AUDIT && !AUDIT_ARCH
-	default y
-
-config AUDIT_ARCH_COMPAT_GENERIC
-	bool
-	default n
-
-config AUDIT_COMPAT_GENERIC
-	bool
-	depends on AUDIT_GENERIC && AUDIT_ARCH_COMPAT_GENERIC && COMPAT
 	default y
 
 config RANDOM32_SELFTEST
@@ -216,11 +198,9 @@ config RANDOM32_SELFTEST
 # compression support is select'ed if needed
 #
 config 842_COMPRESS
-	select CRC32
 	tristate
 
 config 842_DECOMPRESS
-	select CRC32
 	tristate
 
 config ZLIB_INFLATE
@@ -228,29 +208,11 @@ config ZLIB_INFLATE
 
 config ZLIB_DEFLATE
 	tristate
-	select BITREVERSE
 
 config LZO_COMPRESS
 	tristate
 
 config LZO_DECOMPRESS
-	tristate
-
-config LZ4_COMPRESS
-	tristate
-
-config LZ4HC_COMPRESS
-	tristate
-
-config LZ4_DECOMPRESS
-	tristate
-
-config ZSTD_COMPRESS
-	select XXHASH
-	tristate
-
-config ZSTD_DECOMPRESS
-	select XXHASH
 	tristate
 
 source "lib/xz/Kconfig"
@@ -277,15 +239,11 @@ config DECOMPRESS_LZO
 	select LZO_DECOMPRESS
 	tristate
 
-config DECOMPRESS_LZ4
-	select LZ4_DECOMPRESS
-	tristate
-
 #
 # Generic allocator support is selected if needed
 #
 config GENERIC_ALLOCATOR
-	bool
+	boolean
 
 #
 # reed solomon support is select'ed if needed
@@ -294,16 +252,16 @@ config REED_SOLOMON
 	tristate
 	
 config REED_SOLOMON_ENC8
-	bool
+	boolean
 
 config REED_SOLOMON_DEC8
-	bool
+	boolean
 
 config REED_SOLOMON_ENC16
-	bool
+	boolean
 
 config REED_SOLOMON_DEC16
-	bool
+	boolean
 
 #
 # BCH support is selected if needed
@@ -312,7 +270,7 @@ config BCH
 	tristate
 
 config BCH_CONST_PARAMS
-	bool
+	boolean
 	help
 	  Drivers may select this option to force specific constant
 	  values for parameters 'm' (Galois field order) and 't'
@@ -348,7 +306,7 @@ config BCH_CONST_T
 # Textsearch support is select'ed if needed
 #
 config TEXTSEARCH
-	bool
+	boolean
 
 config TEXTSEARCH_KMP
 	tristate
@@ -360,10 +318,10 @@ config TEXTSEARCH_FSM
 	tristate
 
 config BTREE
-	bool
+	boolean
 
 config INTERVAL_TREE
-	bool
+	boolean
 	help
 	  Simple, embeddable, interval-tree. Can find the start of an
 	  overlapping range in log(n) time and then iterate over all
@@ -375,6 +333,9 @@ config INTERVAL_TREE
 		Documentation/rbtree.txt
 
 	  for more information.
+
+config GENERIC_PAGE_TABLE
+	bool
 
 config RADIX_TREE_MULTIORDER
 	bool
@@ -394,25 +355,20 @@ config ASSOCIATIVE_ARRAY
 	  for more information.
 
 config HAS_IOMEM
-	bool
+	boolean
 	depends on !NO_IOMEM
 	select GENERIC_IO
 	default y
 
-config HAS_IOPORT_MAP
-	bool
-	depends on HAS_IOMEM && !NO_IOPORT_MAP
+config HAS_IOPORT
+	boolean
+	depends on HAS_IOMEM && !NO_IOPORT
 	default y
 
 config HAS_DMA
-	bool
+	boolean
 	depends on !NO_DMA
 	default y
-
-config DMA_NOOP_OPS
-	bool
-	depends on HAS_DMA && (!64BIT || ARCH_DMA_ADDR_T_64BIT)
-	default n
 
 config DMA_VIRT_OPS
 	bool
@@ -424,10 +380,15 @@ config CHECK_SIGNATURE
 
 config CPUMASK_OFFSTACK
 	bool "Force CPU masks off stack" if DEBUG_PER_CPU_MAPS
+	depends on !PREEMPT_RT_FULL
 	help
 	  Use dynamic allocation for cpumask_var_t, instead of putting
 	  them on the stack.  This is a bit more expensive, but avoids
 	  stack overflow.
+
+config DISABLE_OBSOLETE_CPUMASK_FUNCTIONS
+       bool "Disable obsolete cpumask functions" if DEBUG_PER_CPU_MAPS
+       depends on BROKEN
 
 config CPU_RMAP
 	bool
@@ -435,38 +396,6 @@ config CPU_RMAP
 
 config DQL
 	bool
-
-config GLOB
-	bool
-#	This actually supports modular compilation, but the module overhead
-#	is ridiculous for the amount of code involved.	Until an out-of-tree
-#	driver asks for it, we'll just link it directly it into the kernel
-#	when required.  Since we're ignoring out-of-tree users,	there's also
-#	no need bother prompting for a manual decision:
-#	prompt "glob_match() function"
-	help
-	  This option provides a glob_match function for performing
-	  simple text pattern matching.  It originated in the ATA code
-	  to blacklist particular drive models, but other device drivers
-	  may need similar functionality.
-
-	  All drivers in the Linux kernel tree that require this function
-	  should automatically select this option.  Say N unless you
-	  are compiling an out-of tree driver which tells you that it
-	  depends on this.
-
-config GLOB_SELFTEST
-	tristate "glob self-test on init"
-	depends on GLOB
-	help
-	  This option enables a simple self-test of the glob_match
-	  function on startup.	It is primarily useful for people
-	  working on the code to ensure they haven't introduced any
-	  regressions.
-
-	  It only adds a little bit of code and slows kernel boot (or
-	  module load) by a small amount, so you're welcome to play with
-	  it, but you probably don't need it.
 
 #
 # Netlink attribute parsing support is select'ed if needed
@@ -480,8 +409,21 @@ config NLATTR
 config GENERIC_ATOMIC64
        bool
 
+config ARCH_HAS_ATOMIC64_DEC_IF_POSITIVE
+	def_bool y if GENERIC_ATOMIC64
+
 config LRU_CACHE
 	tristate
+
+config AVERAGE
+	bool "Averaging functions"
+	help
+	  This option is provided for the case where no in-kernel-tree
+	  modules require averaging functions, but a module built outside
+	  the kernel tree does. Such modules that use library averaging
+	  functions require Y here.
+
+	  If unsure, say N.
 
 config CLZ_TAB
 	bool
@@ -515,8 +457,7 @@ config MPILIB
 
 config SIGNATURE
 	tristate
-	depends on KEYS
-	select CRYPTO
+	depends on KEYS && CRYPTO
 	select CRYPTO_SHA1
 	select MPILIB
 	help
@@ -537,15 +478,6 @@ config OID_REGISTRY
 config UCS2_STRING
         tristate
 
-source "lib/fonts/Kconfig"
-
-config SG_SPLIT
-	def_bool n
-	help
-	 Provides a helper to split scatterlists into chunks, each chunk being
-	 a scatterlist. This should be selected by a driver or an API which
-	 whishes to split a scatterlist amongst multiple DMA channels.
-
 config SG_POOL
 	def_bool n
 	help
@@ -553,51 +485,22 @@ config SG_POOL
 	 selected by a driver or an API which whishes to allocate chained
 	 scatterlist.
 
-#
-# sg chaining option
-#
-
-config ARCH_HAS_SG_CHAIN
-	def_bool n
-
 config ARCH_HAS_PMEM_API
 	bool
 
 config ARCH_HAS_UACCESS_FLUSHCACHE
 	bool
 
-config STACKDEPOT
+config ARCH_HAS_UACCESS_MCSAFE
 	bool
-	select STACKTRACE
+
+config ARCH_HAS_MMIO_FLUSH
+	bool
+
+config PARMAN
+	tristate
 
 config SBITMAP
 	bool
 
-config PARMAN
-	tristate "parman" if COMPILE_TEST
-
-config PRIME_NUMBERS
-	tristate
-
-config STRING_SELFTEST
-	tristate "Test string functions"
-
 endmenu
-
-config GENERIC_ASHLDI3
-	bool
-
-config GENERIC_ASHRDI3
-	bool
-
-config GENERIC_LSHRDI3
-	bool
-
-config GENERIC_MULDI3
-	bool
-
-config GENERIC_CMPDI2
-	bool
-
-config GENERIC_UCMPDI2
-	bool

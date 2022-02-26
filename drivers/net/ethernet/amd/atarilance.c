@@ -42,8 +42,8 @@
 
 */
 
-static const char version[] = "atarilance.c: v1.3 04/04/96 "
-			      "Roman.Hodek@informatik.uni-erlangen.de\n";
+static char version[] = "atarilance.c: v1.3 04/04/96 "
+					   "Roman.Hodek@informatik.uni-erlangen.de\n";
 
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
@@ -460,6 +460,7 @@ static const struct net_device_ops lance_netdev_ops = {
 	.ndo_set_mac_address	= lance_set_mac_address,
 	.ndo_tx_timeout		= lance_tx_timeout,
 	.ndo_validate_addr	= eth_validate_addr,
+	.ndo_change_mtu		= eth_change_mtu,
 };
 
 static unsigned long __init lance_probe1( struct net_device *dev,
@@ -552,8 +553,8 @@ static unsigned long __init lance_probe1( struct net_device *dev,
 	if (lp->cardtype == PAM_CARD ||
 		memaddr == (unsigned short *)0xffe00000) {
 		/* PAMs card and Riebl on ST use level 5 autovector */
-		if (request_irq(IRQ_AUTO_5, lance_interrupt, 0,
-				"PAM,Riebl-ST Ethernet", dev)) {
+		if (request_irq(IRQ_AUTO_5, lance_interrupt, IRQ_TYPE_PRIO,
+		            "PAM,Riebl-ST Ethernet", dev)) {
 			printk( "Lance: request for irq %d failed\n", IRQ_AUTO_5 );
 			return 0;
 		}
@@ -566,8 +567,8 @@ static unsigned long __init lance_probe1( struct net_device *dev,
 			printk( "Lance: request for VME interrupt failed\n" );
 			return 0;
 		}
-		if (request_irq(irq, lance_interrupt, 0, "Riebl-VME Ethernet",
-				dev)) {
+		if (request_irq(irq, lance_interrupt, IRQ_TYPE_PRIO,
+		            "Riebl-VME Ethernet", dev)) {
 			printk( "Lance: request for irq %u failed\n", irq );
 			return 0;
 		}
@@ -1012,9 +1013,13 @@ static int lance_rx( struct net_device *dev )
 					u_char *data = PKTBUF_ADDR(head);
 
 					printk(KERN_DEBUG "%s: RX pkt type 0x%04x from %pM to %pM "
-						   "data %8ph len %d\n",
+						   "data %02x %02x %02x %02x %02x %02x %02x %02x "
+						   "len %d\n",
 						   dev->name, ((u_short *)data)[6],
-						   &data[6], data, &data[15], pkt_len);
+						   &data[6], data,
+						   data[15], data[16], data[17], data[18],
+						   data[19], data[20], data[21], data[22],
+						   pkt_len);
 				}
 
 				skb_reserve( skb, 2 );	/* 16 byte align */
@@ -1142,7 +1147,7 @@ static struct net_device *atarilance_dev;
 static int __init atarilance_module_init(void)
 {
 	atarilance_dev = atarilance_probe(-1);
-	return PTR_ERR_OR_ZERO(atarilance_dev);
+	return PTR_RET(atarilance_dev);
 }
 
 static void __exit atarilance_module_exit(void)

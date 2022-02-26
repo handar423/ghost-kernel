@@ -182,7 +182,7 @@ static struct net_device *get_iff_from_mac(struct adapter *adapter,
 	for_each_port(adapter, i) {
 		struct net_device *dev = adapter->port[i];
 
-		if (ether_addr_equal(dev->dev_addr, mac)) {
+		if (!memcmp(dev->dev_addr, mac, ETH_ALEN)) {
 			rcu_read_lock();
 			if (vlan && vlan != VLAN_VID_MASK) {
 				dev = __vlan_find_dev_deep_rcu(dev, htons(ETH_P_8021Q), vlan);
@@ -552,7 +552,7 @@ static inline void mk_tid_release(struct sk_buff *skb, unsigned int tid)
 	struct cpl_tid_release *req;
 
 	skb->priority = CPL_PRIORITY_SETUP;
-	req = __skb_put(skb, sizeof(*req));
+	req = (struct cpl_tid_release *)__skb_put(skb, sizeof(*req));
 	req->wr.wr_hi = htonl(V_WR_OP(FW_WROPCODE_FORWARD));
 	OPCODE_TID(req) = htonl(MK_OPCODE_TID(CPL_TID_RELEASE, tid));
 }
@@ -1096,7 +1096,7 @@ static void set_l2t_ix(struct t3cdev *tdev, u32 tid, struct l2t_entry *e)
 		return;
 	}
 	skb->priority = CPL_PRIORITY_CONTROL;
-	req = skb_put(skb, sizeof(*req));
+	req = (struct cpl_set_tcb_field *)skb_put(skb, sizeof(*req));
 	req->wr.wr_hi = htonl(V_WR_OP(FW_WROPCODE_FORWARD));
 	OPCODE_TID(req) = htonl(MK_OPCODE_TID(CPL_SET_TCB_FIELD, tid));
 	req->reply = 0;

@@ -28,7 +28,7 @@
  * permissions bits or the LSM check.
  */
 int key_task_permission(const key_ref_t key_ref, const struct cred *cred,
-			unsigned perm)
+			key_perm_t perm)
 {
 	struct key *key;
 	key_perm_t kperm;
@@ -68,7 +68,7 @@ use_these_perms:
 	if (is_key_possessed(key_ref))
 		kperm |= key->perm >> 24;
 
-	kperm = kperm & perm & KEY_NEED_ALL;
+	kperm = kperm & perm & KEY_ALL;
 
 	if (kperm != perm)
 		return -EACCES;
@@ -89,7 +89,7 @@ EXPORT_SYMBOL(key_task_permission);
 int key_validate(const struct key *key)
 {
 	unsigned long flags = READ_ONCE(key->flags);
-	time64_t expiry = READ_ONCE(key->expiry);
+	time_t expiry = READ_ONCE(key->expiry);
 
 	if (flags & (1 << KEY_FLAG_INVALIDATED))
 		return -ENOKEY;
@@ -101,7 +101,8 @@ int key_validate(const struct key *key)
 
 	/* check it hasn't expired */
 	if (expiry) {
-		if (ktime_get_real_seconds() >= expiry)
+		struct timespec now = current_kernel_time();
+		if (now.tv_sec >= expiry)
 			return -EKEYEXPIRED;
 	}
 

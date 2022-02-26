@@ -88,12 +88,9 @@ int input_mt_init_slots(struct input_dev *dev, unsigned int num_slots,
 			goto err_mem;
 	}
 
-	/* Mark slots as 'inactive' */
+	/* Mark slots as 'unused' */
 	for (i = 0; i < num_slots; i++)
 		input_mt_set_value(&mt->slots[i], ABS_MT_TRACKING_ID, -1);
-
-	/* Mark slots as 'unused' */
-	mt->frame = 1;
 
 	dev->mt = mt;
 	return 0;
@@ -218,23 +215,8 @@ void input_mt_report_pointer_emulation(struct input_dev *dev, bool use_count)
 	}
 
 	input_event(dev, EV_KEY, BTN_TOUCH, count > 0);
-
-	if (use_count) {
-		if (count == 0 &&
-		    !test_bit(ABS_MT_DISTANCE, dev->absbit) &&
-		    test_bit(ABS_DISTANCE, dev->absbit) &&
-		    input_abs_get_val(dev, ABS_DISTANCE) != 0) {
-			/*
-			 * Force reporting BTN_TOOL_FINGER for devices that
-			 * only report general hover (and not per-contact
-			 * distance) when contact is in proximity but not
-			 * on the surface.
-			 */
-			count = 1;
-		}
-
+	if (use_count)
 		input_mt_report_finger_count(dev, count);
-	}
 
 	if (oldest) {
 		int x = input_mt_get_value(oldest, ABS_MT_POSITION_X);
@@ -254,35 +236,6 @@ void input_mt_report_pointer_emulation(struct input_dev *dev, bool use_count)
 }
 EXPORT_SYMBOL(input_mt_report_pointer_emulation);
 
-static void __input_mt_drop_unused(struct input_dev *dev, struct input_mt *mt)
-{
-	int i;
-
-	for (i = 0; i < mt->num_slots; i++) {
-		if (!input_mt_is_used(mt, &mt->slots[i])) {
-			input_mt_slot(dev, i);
-			input_event(dev, EV_ABS, ABS_MT_TRACKING_ID, -1);
-		}
-	}
-}
-
-/**
- * input_mt_drop_unused() - Inactivate slots not seen in this frame
- * @dev: input device with allocated MT slots
- *
- * Lift all slots not seen since the last call to this function.
- */
-void input_mt_drop_unused(struct input_dev *dev)
-{
-	struct input_mt *mt = dev->mt;
-
-	if (mt) {
-		__input_mt_drop_unused(dev, mt);
-		mt->frame++;
-	}
-}
-EXPORT_SYMBOL(input_mt_drop_unused);
-
 /**
  * input_mt_sync_frame() - synchronize mt frame
  * @dev: input device with allocated MT slots
@@ -294,13 +247,20 @@ EXPORT_SYMBOL(input_mt_drop_unused);
 void input_mt_sync_frame(struct input_dev *dev)
 {
 	struct input_mt *mt = dev->mt;
+	struct input_mt_slot *s;
 	bool use_count = false;
 
 	if (!mt)
 		return;
 
-	if (mt->flags & INPUT_MT_DROP_UNUSED)
-		__input_mt_drop_unused(dev, mt);
+	if (mt->flags & INPUT_MT_DROP_UNUSED) {
+		for (s = mt->slots; s != mt->slots + mt->num_slots; s++) {
+			if (input_mt_is_used(mt, s))
+				continue;
+			input_mt_slot(dev, s - mt->slots);
+			input_event(dev, EV_ABS, ABS_MT_TRACKING_ID, -1);
+		}
+	}
 
 	if ((mt->flags & INPUT_MT_POINTER) && !(mt->flags & INPUT_MT_SEMI_MT))
 		use_count = true;
@@ -383,35 +343,27 @@ static void input_mt_set_slots(struct input_mt *mt,
 			       int *slots, int num_pos)
 {
 	struct input_mt_slot *s;
-	int *w = mt->red, j;
+	int *w = mt->red, *p;
 
-	for (j = 0; j != num_pos; j++)
-		slots[j] = -1;
+	for (p = slots; p != slots + num_pos; p++)
+		*p = -1;
 
 	for (s = mt->slots; s != mt->slots + mt->num_slots; s++) {
 		if (!input_mt_is_active(s))
 			continue;
-
-		for (j = 0; j != num_pos; j++) {
-			if (w[j] < 0) {
-				slots[j] = s - mt->slots;
-				break;
-			}
-		}
-
-		w += num_pos;
+		for (p = slots; p != slots + num_pos; p++)
+			if (*w++ < 0)
+				*p = s - mt->slots;
 	}
 
 	for (s = mt->slots; s != mt->slots + mt->num_slots; s++) {
 		if (input_mt_is_active(s))
 			continue;
-
-		for (j = 0; j != num_pos; j++) {
-			if (slots[j] < 0) {
-				slots[j] = s - mt->slots;
+		for (p = slots; p != slots + num_pos; p++)
+			if (*p < 0) {
+				*p = s - mt->slots;
 				break;
 			}
-		}
 	}
 }
 
@@ -465,8 +417,6 @@ EXPORT_SYMBOL(input_mt_assign_slots);
  * set the key on the first unused slot and return.
  *
  * If no available slot can be found, -1 is returned.
- * Note that for this function to work properly, input_mt_sync_frame() has
- * to be called at each frame.
  */
 int input_mt_get_slot_by_key(struct input_dev *dev, int key)
 {
@@ -481,7 +431,7 @@ int input_mt_get_slot_by_key(struct input_dev *dev, int key)
 			return s - mt->slots;
 
 	for (s = mt->slots; s != mt->slots + mt->num_slots; s++)
-		if (!input_mt_is_active(s) && !input_mt_is_used(mt, s)) {
+		if (!input_mt_is_active(s)) {
 			s->key = key;
 			return s - mt->slots;
 		}

@@ -102,6 +102,13 @@ static inline int smp_startup_cpu(unsigned int lcpu)
 	return 1;
 }
 
+static int __init smp_iic_probe(void)
+{
+	iic_request_IPIs();
+
+	return cpumask_weight(cpu_possible_mask);
+}
+
 static void smp_cell_setup_cpu(int cpu)
 {
 	if (cpu != boot_cpuid)
@@ -115,8 +122,7 @@ static void smp_cell_setup_cpu(int cpu)
 
 static int smp_cell_kick_cpu(int nr)
 {
-	if (nr < 0 || nr >= nr_cpu_ids)
-		return -EINVAL;
+	BUG_ON(nr < 0 || nr >= NR_CPUS);
 
 	if (!smp_startup_cpu(nr))
 		return -ENOENT;
@@ -133,7 +139,7 @@ static int smp_cell_kick_cpu(int nr)
 
 static struct smp_ops_t bpa_iic_smp_ops = {
 	.message_pass	= iic_message_pass,
-	.probe		= iic_request_IPIs,
+	.probe		= smp_iic_probe,
 	.kick_cpu	= smp_cell_kick_cpu,
 	.setup_cpu	= smp_cell_setup_cpu,
 	.cpu_bootable	= smp_generic_cpu_bootable,

@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2017, Intel Corp.
+ * Copyright (C) 2000 - 2013, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -48,6 +48,7 @@
 #define _COMPONENT          ACPI_TABLES
 ACPI_MODULE_NAME("tbxfroot")
 
+/* Local prototypes */
 /*******************************************************************************
  *
  * FUNCTION:    acpi_tb_get_rsdp_length
@@ -89,7 +90,6 @@ u32 acpi_tb_get_rsdp_length(struct acpi_table_rsdp *rsdp)
  * DESCRIPTION: Validate the RSDP (ptr)
  *
  ******************************************************************************/
-
 acpi_status acpi_tb_validate_rsdp(struct acpi_table_rsdp *rsdp)
 {
 
@@ -99,7 +99,8 @@ acpi_status acpi_tb_validate_rsdp(struct acpi_table_rsdp *rsdp)
 	 * Note: Sometimes there exists more than one RSDP in memory; the valid
 	 * RSDP has a valid checksum, all others have an invalid checksum.
 	 */
-	if (!ACPI_VALIDATE_RSDP_SIG(rsdp->signature)) {
+	if (strncmp((char *)rsdp->signature, ACPI_SIG_RSDP,
+		    sizeof(ACPI_SIG_RSDP) - 1) != 0) {
 
 		/* Nope, BAD Signature */
 
@@ -142,8 +143,7 @@ acpi_status acpi_tb_validate_rsdp(struct acpi_table_rsdp *rsdp)
  *
  ******************************************************************************/
 
-acpi_status ACPI_INIT_FUNCTION
-acpi_find_root_pointer(acpi_physical_address *table_address)
+acpi_status acpi_find_root_pointer(acpi_size *table_address)
 {
 	u8 *table_ptr;
 	u8 *mem_rover;
@@ -201,8 +201,7 @@ acpi_find_root_pointer(acpi_physical_address *table_address)
 			physical_address +=
 			    (u32) ACPI_PTR_DIFF(mem_rover, table_ptr);
 
-			*table_address =
-			    (acpi_physical_address)physical_address;
+			*table_address = physical_address;
 			return_ACPI_STATUS(AE_OK);
 		}
 	}
@@ -235,7 +234,7 @@ acpi_find_root_pointer(acpi_physical_address *table_address)
 		    (ACPI_HI_RSDP_WINDOW_BASE +
 		     ACPI_PTR_DIFF(mem_rover, table_ptr));
 
-		*table_address = (acpi_physical_address)physical_address;
+		*table_address = physical_address;
 		return_ACPI_STATUS(AE_OK);
 	}
 
@@ -244,8 +243,6 @@ acpi_find_root_pointer(acpi_physical_address *table_address)
 	ACPI_BIOS_ERROR((AE_INFO, "A valid RSDP was not found"));
 	return_ACPI_STATUS(AE_NOT_FOUND);
 }
-
-ACPI_EXPORT_SYMBOL_INIT(acpi_find_root_pointer)
 
 /*******************************************************************************
  *

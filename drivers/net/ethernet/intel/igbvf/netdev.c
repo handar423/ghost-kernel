@@ -1,28 +1,5 @@
-/*******************************************************************************
-
-  Intel(R) 82576 Virtual Function Linux driver
-  Copyright(c) 2009 - 2012 Intel Corporation.
-
-  This program is free software; you can redistribute it and/or modify it
-  under the terms and conditions of the GNU General Public License,
-  version 2, as published by the Free Software Foundation.
-
-  This program is distributed in the hope it will be useful, but WITHOUT
-  ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
-  FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
-  more details.
-
-  You should have received a copy of the GNU General Public License along with
-  this program; if not, see <http://www.gnu.org/licenses/>.
-
-  The full GNU General Public License is included in this distribution in
-  the file called "COPYING".
-
-  Contact Information:
-  e1000-devel Mailing List <e1000-devel@lists.sourceforge.net>
-  Intel Corporation, 5200 N.E. Elam Young Parkway, Hillsboro, OR 97124-6497
-
-*******************************************************************************/
+// SPDX-License-Identifier: GPL-2.0
+/* Copyright(c) 2009 - 2018 Intel Corporation. */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
@@ -1209,10 +1186,13 @@ static int igbvf_poll(struct napi_struct *napi, int budget)
 
 	igbvf_clean_rx_irq(adapter, &work_done, budget);
 
-	/* If not enough Rx work done, exit the polling mode */
-	if (work_done < budget) {
-		napi_complete_done(napi, work_done);
+	if (work_done == budget)
+		return budget;
 
+	/* Exit the polling mode, but don't re-enable interrupts if stack might
+	 * poll us due to busy-polling
+	 */
+	if (likely(napi_complete_done(napi, work_done))) {
 		if (adapter->requested_itr & 3)
 			igbvf_set_itr(adapter);
 
@@ -1915,9 +1895,9 @@ static bool igbvf_has_link(struct igbvf_adapter *adapter)
  * igbvf_watchdog - Timer Call-back
  * @data: pointer to adapter cast into an unsigned long
  **/
-static void igbvf_watchdog(struct timer_list *t)
+static void igbvf_watchdog(unsigned long data)
 {
-	struct igbvf_adapter *adapter = from_timer(adapter, t, watchdog_timer);
+	struct igbvf_adapter *adapter = (struct igbvf_adapter *)data;
 
 	/* Do the rest outside of interrupt context */
 	schedule_work(&adapter->watchdog_task);
@@ -2125,6 +2105,7 @@ csum_failed:
 			type_tucmd = E1000_ADVTXD_TUCMD_L4T_SCTP;
 			break;
 		}
+		/* fall through */
 	default:
 		skb_checksum_help(skb);
 		goto csum_failed;
@@ -2338,8 +2319,7 @@ static netdev_tx_t igbvf_xmit_frame_ring_adv(struct sk_buff *skb,
 
 	if (skb_vlan_tag_present(skb)) {
 		tx_flags |= IGBVF_TX_FLAGS_VLAN;
-		tx_flags |= (skb_vlan_tag_get(skb) <<
-			     IGBVF_TX_FLAGS_VLAN_SHIFT);
+		tx_flags |= (skb_vlan_tag_get(skb) << IGBVF_TX_FLAGS_VLAN_SHIFT);
 	}
 
 	if (protocol == htons(ETH_P_IP))
@@ -2700,12 +2680,13 @@ igbvf_features_check(struct sk_buff *skb, struct net_device *dev,
 }
 
 static const struct net_device_ops igbvf_netdev_ops = {
+	.ndo_size		= sizeof(struct net_device_ops),
 	.ndo_open		= igbvf_open,
 	.ndo_stop		= igbvf_close,
 	.ndo_start_xmit		= igbvf_xmit_frame,
 	.ndo_set_rx_mode	= igbvf_set_rx_mode,
 	.ndo_set_mac_address	= igbvf_set_mac,
-	.ndo_change_mtu		= igbvf_change_mtu,
+	.extended.ndo_change_mtu	= igbvf_change_mtu,
 	.ndo_do_ioctl		= igbvf_ioctl,
 	.ndo_tx_timeout		= igbvf_tx_timeout,
 	.ndo_vlan_rx_add_vid	= igbvf_vlan_rx_add_vid,
@@ -2824,8 +2805,8 @@ static int igbvf_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 #define IGBVF_GSO_PARTIAL_FEATURES (NETIF_F_GSO_GRE | \
 				    NETIF_F_GSO_GRE_CSUM | \
-				    NETIF_F_GSO_IPXIP4 | \
-				    NETIF_F_GSO_IPXIP6 | \
+				    NETIF_F_GSO_IPIP | \
+				    NETIF_F_GSO_SIT | \
 				    NETIF_F_GSO_UDP_TUNNEL | \
 				    NETIF_F_GSO_UDP_TUNNEL_CSUM)
 
@@ -2848,8 +2829,8 @@ static int igbvf_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 			    NETIF_F_HW_VLAN_CTAG_TX;
 
 	/* MTU range: 68 - 9216 */
-	netdev->min_mtu = ETH_MIN_MTU;
-	netdev->max_mtu = MAX_STD_JUMBO_FRAME_SIZE;
+	netdev->extended->min_mtu = ETH_MIN_MTU;
+	netdev->extended->max_mtu = MAX_STD_JUMBO_FRAME_SIZE;
 
 	spin_lock_bh(&hw->mbx_lock);
 
@@ -2878,7 +2859,8 @@ static int igbvf_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 		       netdev->addr_len);
 	}
 
-	timer_setup(&adapter->watchdog_timer, igbvf_watchdog, 0);
+	setup_timer(&adapter->watchdog_timer, &igbvf_watchdog,
+		    (unsigned long)adapter);
 
 	INIT_WORK(&adapter->reset_task, igbvf_reset_task);
 	INIT_WORK(&adapter->watchdog_task, igbvf_watchdog_task);
@@ -3033,7 +3015,7 @@ module_exit(igbvf_exit_module);
 
 MODULE_AUTHOR("Intel Corporation, <e1000-devel@lists.sourceforge.net>");
 MODULE_DESCRIPTION("Intel(R) Gigabit Virtual Function Network Driver");
-MODULE_LICENSE("GPL");
+MODULE_LICENSE("GPL v2");
 MODULE_VERSION(DRV_VERSION);
 
 /* netdev.c */

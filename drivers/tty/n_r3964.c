@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-1.0+
 /* r3964 linediscipline for linux
  *
  * -----------------------------------------------------------
@@ -6,6 +5,9 @@
  * Philips Automation Projects
  * Kassel (Germany)
  * -----------------------------------------------------------
+ * This software may be used and distributed according to the terms of
+ * the GNU General Public License, incorporated herein by reference.
+ *
  * Author:
  * L. Haag
  *
@@ -63,7 +65,7 @@
 #include <linux/n_r3964.h>
 #include <linux/poll.h>
 #include <linux/init.h>
-#include <linux/uaccess.h>
+#include <asm/uaccess.h>
 
 /*#define DEBUG_QUEUE*/
 
@@ -115,7 +117,7 @@ static void retry_transmit(struct r3964_info *pInfo);
 static void transmit_block(struct r3964_info *pInfo);
 static void receive_char(struct r3964_info *pInfo, const unsigned char c);
 static void receive_error(struct r3964_info *pInfo, const char flag);
-static void on_timeout(struct timer_list *t);
+static void on_timeout(unsigned long priv);
 static int enable_signals(struct r3964_info *pInfo, struct pid *pid, int arg);
 static int read_telegram(struct r3964_info *pInfo, struct pid *pid,
 		unsigned char __user * buf);
@@ -688,9 +690,9 @@ static void receive_error(struct r3964_info *pInfo, const char flag)
 	}
 }
 
-static void on_timeout(struct timer_list *t)
+static void on_timeout(unsigned long priv)
 {
-	struct r3964_info *pInfo = from_timer(pInfo, t, tmr);
+	struct r3964_info *pInfo = (void *)priv;
 
 	switch (pInfo->state) {
 	case R3964_TX_REQUEST:
@@ -993,7 +995,7 @@ static int r3964_open(struct tty_struct *tty)
 	tty->disc_data = pInfo;
 	tty->receive_room = 65536;
 
-	timer_setup(&pInfo->tmr, on_timeout, 0);
+	setup_timer(&pInfo->tmr, on_timeout, (unsigned long)pInfo);
 
 	return 0;
 }
@@ -1246,7 +1248,7 @@ static void r3964_receive_buf(struct tty_struct *tty, const unsigned char *cp,
 {
 	struct r3964_info *pInfo = tty->disc_data;
 	const unsigned char *p;
-	char *f, flags = TTY_NORMAL;
+	char *f, flags = 0;
 	int i;
 
 	for (i = count, p = cp, f = fp; i; i--, p++) {

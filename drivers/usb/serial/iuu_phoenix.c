@@ -58,7 +58,6 @@ struct iuu_private {
 	u8 *buf;		/* used for initialize speed */
 	u8 len;
 	int vcc;		/* vcc (either 3 or 5 V) */
-	u32 baud;
 	u32 boost;
 	u32 clk;
 };
@@ -472,7 +471,6 @@ static int iuu_clk(struct usb_serial_port *port, int dwFrq)
 				}
 	}
 	P2 = ((P - PO) / 2) - 4;
-	DIV = DIV;
 	PUMP = 0x04;
 	PBmsb = (P2 >> 8 & 0x03);
 	PBlsb = P2 & 0xFF;
@@ -964,9 +962,6 @@ static int iuu_open(struct tty_struct *tty, struct usb_serial_port *port)
 	struct iuu_private *priv = usb_get_serial_port_data(port);
 
 	baud = tty->termios.c_ospeed;
-	tty->termios.c_ispeed = baud;
-	/* Re-encode speed */
-	tty_encode_baud_rate(tty, baud, baud);
 
 	dev_dbg(dev, "%s - baud %d\n", __func__, baud);
 	usb_clear_halt(serial->dev, port->write_urb->pipe);
@@ -992,7 +987,6 @@ static int iuu_open(struct tty_struct *tty, struct usb_serial_port *port)
 	if (boost < 100)
 		boost = 100;
 	priv->boost = boost;
-	priv->baud = baud;
 	switch (clockmode) {
 	case 2:		/*  3.680 Mhz */
 		priv->clk = IUU_CLK_3680000;

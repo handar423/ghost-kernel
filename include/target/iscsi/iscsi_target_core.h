@@ -1,15 +1,13 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef ISCSI_TARGET_CORE_H
 #define ISCSI_TARGET_CORE_H
 
-#include <linux/dma-direction.h>     /* enum dma_data_direction */
-#include <linux/list.h>              /* struct list_head */
-#include <linux/socket.h>            /* struct sockaddr_storage */
-#include <linux/types.h>             /* u8 */
-#include <scsi/iscsi_proto.h>        /* itt_t */
-#include <target/target_core_base.h> /* struct se_cmd */
-
-struct sock;
+#include <linux/in.h>
+#include <linux/configfs.h>
+#include <net/sock.h>
+#include <net/tcp.h>
+#include <scsi/scsi_cmnd.h>
+#include <scsi/iscsi_proto.h>
+#include <target/target_core_base.h>
 
 #define ISCSIT_VERSION			"v4.1.0"
 #define ISCSI_MAX_DATASN_MISSING_COUNT	16
@@ -24,6 +22,7 @@ struct sock;
 #define ISCSIT_TCP_BACKLOG		256
 #define ISCSI_RX_THREAD_NAME		"iscsi_trx"
 #define ISCSI_TX_THREAD_NAME		"iscsi_ttx"
+#define ISCSI_IQN_LEN			224
 
 /* struct iscsi_node_attrib sanity values */
 #define NA_DATAOUT_TIMEOUT		3
@@ -64,7 +63,7 @@ struct sock;
 #define TA_CACHE_CORE_NPS		0
 /* T10 protection information disabled by default */
 #define TA_DEFAULT_T10_PI		0
-#define TA_DEFAULT_FABRIC_PROT_TYPE	0
+#define TA_DEFAULT_FABRIC_PROT_TYPE     0
 /* TPG status needs to be enabled to return sendtargets discovery endpoint info */
 #define TA_DEFAULT_TPG_ENABLED_SENDTARGETS 1
 /*
@@ -85,7 +84,7 @@ enum iscsit_transport_type {
 	ISCSI_IWARP_TCP				= 3,
 	ISCSI_IWARP_SCTP			= 4,
 	ISCSI_INFINIBAND			= 5,
-	ISCSI_CXGBIT				= 6,
+	ISCSI_CXGBIT			= 6,
 };
 
 /* RFC-3720 7.1.4  Standard Connection State Diagram for a Target */
@@ -269,9 +268,9 @@ struct iscsi_conn_ops {
 };
 
 struct iscsi_sess_ops {
-	char	InitiatorName[224];
+	char	InitiatorName[ISCSI_IQN_LEN];
 	char	InitiatorAlias[256];
-	char	TargetName[224];
+	char	TargetName[ISCSI_IQN_LEN];
 	char	TargetAlias[256];
 	char	TargetAddress[256];
 	u16	TargetPortalGroupTag;		/* [0..65535] */
@@ -561,7 +560,7 @@ struct iscsi_conn {
 	struct completion	rx_half_close_comp;
 	/* socket used by this connection */
 	struct socket		*sock;
-	void			(*orig_data_ready)(struct sock *);
+	void			(*orig_data_ready)(struct sock *, int);
 	void			(*orig_state_change)(struct sock *);
 #define LOGIN_FLAGS_READ_ACTIVE		1
 #define LOGIN_FLAGS_CLOSED		2
@@ -775,7 +774,7 @@ struct iscsi_tpg_attrib {
 	u32			demo_mode_discovery;
 	u32			default_erl;
 	u8			t10_pi;
-	u32			fabric_prot_type;
+	u32                     fabric_prot_type;
 	u32			tpg_enabled_sendtargets;
 	u32			login_keys_workaround;
 	struct iscsi_portal_group *tpg;
@@ -854,7 +853,6 @@ struct iscsi_wwn_stat_grps {
 };
 
 struct iscsi_tiqn {
-#define ISCSI_IQN_LEN				224
 	unsigned char		tiqn[ISCSI_IQN_LEN];
 	enum tiqn_state_table	tiqn_state;
 	int			tiqn_access_count;

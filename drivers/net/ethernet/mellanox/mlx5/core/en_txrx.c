@@ -32,28 +32,60 @@
 
 #include <linux/irq.h>
 #include "en.h"
+#include "en/xdp.h"
 
+#ifdef CONFIG_GENERIC_HARDIRQS
 static inline bool mlx5e_channel_no_affinity_change(struct mlx5e_channel *c)
 {
 	int current_cpu = smp_processor_id();
 	const struct cpumask *aff;
-	struct irq_data *idata;
 
-	idata = irq_desc_get_irq_data(c->irq_desc);
-	aff = irq_data_get_affinity_mask(idata);
+	aff = irq_desc_get_irq_data(c->irq_desc)->affinity;
 	return cpumask_test_cpu(current_cpu, aff);
+}
+#endif
+
+static void mlx5e_handle_tx_dim(struct mlx5e_txqsq *sq)
+{
+	struct mlx5e_sq_stats *stats = sq->stats;
+	struct net_dim_sample dim_sample;
+
+	if (unlikely(!test_bit(MLX5E_SQ_STATE_AM, &sq->state)))
+		return;
+
+	net_dim_sample(sq->cq.event_ctr, stats->packets, stats->bytes,
+		       &dim_sample);
+	net_dim(&sq->dim, dim_sample);
+}
+
+static void mlx5e_handle_rx_dim(struct mlx5e_rq *rq)
+{
+	struct mlx5e_rq_stats *stats = rq->stats;
+	struct net_dim_sample dim_sample;
+
+	if (unlikely(!test_bit(MLX5E_RQ_STATE_AM, &rq->state)))
+		return;
+
+	net_dim_sample(rq->cq.event_ctr, stats->packets, stats->bytes,
+		       &dim_sample);
+	net_dim(&rq->dim, dim_sample);
 }
 
 int mlx5e_napi_poll(struct napi_struct *napi, int budget)
 {
 	struct mlx5e_channel *c = container_of(napi, struct mlx5e_channel,
 					       napi);
+	struct mlx5e_ch_stats *ch_stats = c->stats;
 	bool busy = false;
 	int work_done = 0;
 	int i;
 
+	ch_stats->poll++;
+
 	for (i = 0; i < c->num_tc; i++)
 		busy |= mlx5e_poll_tx_cq(&c->sq[i].cq, budget);
+
+	busy |= mlx5e_poll_xdpsq_cq(&c->xdpsq.cq);
 
 	if (c->xdp)
 		busy |= mlx5e_poll_xdpsq_cq(&c->rq.xdpsq.cq);
@@ -66,8 +98,11 @@ int mlx5e_napi_poll(struct napi_struct *napi, int budget)
 	busy |= c->rq.post_wqes(&c->rq);
 
 	if (busy) {
+#ifdef CONFIG_GENERIC_HARDIRQS
 		if (likely(mlx5e_channel_no_affinity_change(c)))
 			return budget;
+#endif
+		ch_stats->aff_change++;
 		if (budget && work_done == budget)
 			work_done--;
 	}
@@ -75,14 +110,18 @@ int mlx5e_napi_poll(struct napi_struct *napi, int budget)
 	if (unlikely(!napi_complete_done(napi, work_done)))
 		return work_done;
 
-	for (i = 0; i < c->num_tc; i++)
-		mlx5e_cq_arm(&c->sq[i].cq);
+	ch_stats->arm++;
 
-	if (MLX5E_TEST_BIT(c->rq.state, MLX5E_RQ_STATE_AM))
-		mlx5e_rx_am(&c->rq);
+	for (i = 0; i < c->num_tc; i++) {
+		mlx5e_handle_tx_dim(&c->sq[i]);
+		mlx5e_cq_arm(&c->sq[i].cq);
+	}
+
+	mlx5e_handle_rx_dim(&c->rq);
 
 	mlx5e_cq_arm(&c->rq.cq);
 	mlx5e_cq_arm(&c->icosq.cq);
+	mlx5e_cq_arm(&c->xdpsq.cq);
 
 	return work_done;
 }
@@ -91,8 +130,9 @@ void mlx5e_completion_event(struct mlx5_core_cq *mcq)
 {
 	struct mlx5e_cq *cq = container_of(mcq, struct mlx5e_cq, mcq);
 
-	cq->event_ctr++;
 	napi_schedule(cq->napi);
+	cq->event_ctr++;
+	cq->channel->stats->events++;
 }
 
 void mlx5e_cq_error_event(struct mlx5_core_cq *mcq, enum mlx5_event event)

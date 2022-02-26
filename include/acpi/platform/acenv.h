@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2017, Intel Corp.
+ * Copyright (C) 2000 - 2013, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -66,31 +66,16 @@
  *
  *****************************************************************************/
 
-/* Common application configuration. All single threaded except for acpi_exec. */
-
-#if (defined ACPI_ASL_COMPILER) || \
-	(defined ACPI_BIN_APP)      || \
-	(defined ACPI_DUMP_APP)     || \
-	(defined ACPI_HELP_APP)     || \
-	(defined ACPI_NAMES_APP)    || \
-	(defined ACPI_SRC_APP)      || \
-	(defined ACPI_XTRACT_APP)   || \
-	(defined ACPI_EXAMPLE_APP)  || \
-	(defined ACPI_EFI_HELLO)
-#define ACPI_APPLICATION
-#define ACPI_SINGLE_THREADED
-#define USE_NATIVE_ALLOCATE_ZEROED
-#endif
-
 /* iASL configuration */
 
 #ifdef ACPI_ASL_COMPILER
+#define ACPI_APPLICATION
+#define ACPI_DISASSEMBLER
 #define ACPI_DEBUG_OUTPUT
 #define ACPI_CONSTANT_EVAL_ONLY
 #define ACPI_LARGE_NAMESPACE_NODE
 #define ACPI_DATA_TABLE_DISASSEMBLY
-#define ACPI_32BIT_PHYSICAL_ADDRESS
-#define ACPI_DISASSEMBLER 1
+#define ACPI_SINGLE_THREADED
 #endif
 
 /* acpi_exec configuration. Multithreaded with full AML debugger */
@@ -100,6 +85,20 @@
 #define ACPI_FULL_DEBUG
 #define ACPI_MUTEX_DEBUG
 #define ACPI_DBG_TRACK_ALLOCATIONS
+#endif
+
+/*
+ * acpi_bin/acpi_dump/acpi_help/acpi_names/acpi_src/acpi_xtract/Example configuration.
+ * All single threaded.
+ */
+#if (defined ACPI_BIN_APP)   || \
+	(defined ACPI_DUMP_APP)  || \
+	(defined ACPI_HELP_APP)     || \
+	(defined ACPI_NAMES_APP)    || \
+	(defined ACPI_SRC_APP)   || \
+	(defined ACPI_XTRACT_APP)
+#define ACPI_APPLICATION
+#define ACPI_SINGLE_THREADED
 #endif
 
 /* acpi_help configuration. Error messages disabled. */
@@ -122,7 +121,7 @@
 #define ACPI_USE_NATIVE_RSDP_POINTER
 #endif
 
-/* acpi_dump configuration. Native mapping used if provided by the host */
+/* acpi_dump configuration. Native mapping used if provied by OSPMs */
 
 #ifdef ACPI_DUMP_APP
 #define ACPI_USE_NATIVE_MEMORY_MAPPING
@@ -135,16 +134,11 @@
 #define ACPI_REDUCED_HARDWARE 1
 #endif
 
-/* Linkable ACPICA library. Two versions, one with full debug. */
+/* Linkable ACPICA library */
 
 #ifdef ACPI_LIBRARY
 #define ACPI_USE_LOCAL_CACHE
-#define ACPI_DEBUGGER 1
-#define ACPI_DISASSEMBLER 1
-
-#ifdef _DEBUG
-#define ACPI_DEBUG_OUTPUT
-#endif
+#define ACPI_FUTURE_USAGE
 #endif
 
 /* Common for all ACPICA applications */
@@ -153,43 +147,29 @@
 #define ACPI_USE_LOCAL_CACHE
 #endif
 
-/* Common debug/disassembler support */
+/* Common debug support */
 
 #ifdef ACPI_FULL_DEBUG
+#define ACPI_DEBUGGER
 #define ACPI_DEBUG_OUTPUT
-#define ACPI_DEBUGGER 1
-#define ACPI_DISASSEMBLER 1
+#define ACPI_DISASSEMBLER
 #endif
 
+#ifdef ACPI_DUMP_APP
+#define USE_NATIVE_ALLOCATE_ZEROED
+#endif
 
 /*! [Begin] no source code translation */
 
 /******************************************************************************
  *
  * Host configuration files. The compiler configuration files are included
- * first.
+ * by the host files.
  *
  *****************************************************************************/
 
-#if defined(__GNUC__) && !defined(__INTEL_COMPILER)
-#include <acpi/platform/acgcc.h>
-
-#elif defined(_MSC_VER)
-#include "acmsvc.h"
-
-#elif defined(__INTEL_COMPILER)
-#include <acpi/platform/acintel.h>
-
-#endif
-
 #if defined(_LINUX) || defined(__linux__)
 #include <acpi/platform/aclinux.h>
-
-#elif defined(_APPLE) || defined(__APPLE__)
-#include "acmacosx.h"
-
-#elif defined(__DragonFly__)
-#include "acdragonfly.h"
 
 #elif defined(__FreeBSD__) || defined(__FreeBSD_kernel__)
 #include "acfreebsd.h"
@@ -221,6 +201,12 @@
 #elif defined(__OS2__)
 #include "acos2.h"
 
+#elif defined(_AED_EFI)
+#include "acefi.h"
+
+#elif defined(_GNU_EFI)
+#include "acefi.h"
+
 #elif defined(__HAIKU__)
 #include "achaiku.h"
 
@@ -232,7 +218,7 @@
  * included after including all other host environmental definitions, in
  * order to override the definitions.
  */
-#elif defined(_AED_EFI) || defined(_GNU_EFI) || defined(_EDK2_EFI)
+#elif defined(_AED_EFI) || defined(_GNU_EFI)
 #include "acefi.h"
 
 #else
@@ -288,11 +274,6 @@
 #define ACPI_INLINE
 #endif
 
-/* Use ordered initialization if compiler doesn't support designated. */
-#ifndef ACPI_STRUCT_INIT
-#define ACPI_STRUCT_INIT(field, value)  value
-#endif
-
 /*
  * Configurable calling conventions:
  *
@@ -326,11 +307,11 @@
  * multi-threaded if ACPI_APPLICATION is not set.
  */
 #ifndef DEBUGGER_THREADING
-#if !defined (ACPI_APPLICATION) || defined (ACPI_EXEC_APP)
-#define DEBUGGER_THREADING          DEBUGGER_MULTI_THREADED
+#ifdef ACPI_APPLICATION
+#define DEBUGGER_THREADING          DEBUGGER_SINGLE_THREADED
 
 #else
-#define DEBUGGER_THREADING          DEBUGGER_SINGLE_THREADED
+#define DEBUGGER_THREADING          DEBUGGER_MULTI_THREADED
 #endif
 #endif				/* !DEBUGGER_THREADING */
 
@@ -347,8 +328,8 @@
  *      the standard header files may be used. Defining this implies that
  *      ACPI_USE_SYSTEM_CLIBRARY has been defined.
  *
- * The ACPICA subsystem only uses low level C library functions that do not
- * call operating system services and may therefore be inlined in the code.
+ * The ACPICA subsystem only uses low level C library functions that do not call
+ * operating system services and may therefore be inlined in the code.
  *
  * It may be necessary to tailor these include files to the target
  * generation environment.
@@ -360,10 +341,11 @@
 
 /* Use the standard headers from the standard locations */
 
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
-#if defined (ACPI_APPLICATION) || defined(ACPI_LIBRARY)
+#ifdef ACPI_APPLICATION
 #include <stdio.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -373,7 +355,48 @@
 
 #endif				/* ACPI_USE_STANDARD_HEADERS */
 
+/* We will be linking to the standard Clib functions */
+
+#else
+
+/******************************************************************************
+ *
+ * Not using native C library, use local implementations
+ *
+ *****************************************************************************/
+
+/*
+ * Use local definitions of C library macros and functions. These function
+ * implementations may not be as efficient as an inline or assembly code
+ * implementation provided by a native C library, but they are functionally
+ * equivalent.
+ */
+#ifndef va_arg
+
+#ifndef _VALIST
+#define _VALIST
+typedef char *va_list;
+#endif				/* _VALIST */
+
+/* Storage alignment properties */
+
+#define  _AUPBND                (sizeof (acpi_native_int) - 1)
+#define  _ADNBND                (sizeof (acpi_native_int) - 1)
+
+/* Variable argument list macro definitions */
+
+#define _bnd(X, bnd)            (((sizeof (X)) + (bnd)) & (~(bnd)))
+#define va_arg(ap, T)           (*(T *)(((ap) += (_bnd (T, _AUPBND))) - (_bnd (T,_ADNBND))))
+#define va_end(ap)              (ap = (va_list) NULL)
+#define va_start(ap, A)         (void) ((ap) = (((char *) &(A)) + (_bnd (A,_AUPBND))))
+
+#endif				/* va_arg */
+
+/* Use the local (ACPICA) definitions of the clib functions */
+
+#ifndef ACPI_FILE
 #ifdef ACPI_APPLICATION
+#include <stdio.h>
 #define ACPI_FILE              FILE *
 #define ACPI_FILE_OUT          stdout
 #define ACPI_FILE_ERR          stderr
@@ -382,9 +405,6 @@
 #define ACPI_FILE_OUT          NULL
 #define ACPI_FILE_ERR          NULL
 #endif				/* ACPI_APPLICATION */
-
-#ifndef ACPI_INIT_FUNCTION
-#define ACPI_INIT_FUNCTION
-#endif
+#endif				/* ACPI_FILE */
 
 #endif				/* __ACENV_H__ */

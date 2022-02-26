@@ -23,18 +23,17 @@
 #define __TSL2X7X_H
 #include <linux/pm.h>
 
+/* Max number of segments allowable in LUX table */
+#define TSL2X7X_MAX_LUX_TABLE_SIZE		9
+#define MAX_DEFAULT_TABLE_BYTES (sizeof(int) * TSL2X7X_MAX_LUX_TABLE_SIZE)
+
+struct iio_dev;
+
 struct tsl2x7x_lux {
 	unsigned int ratio;
 	unsigned int ch0;
 	unsigned int ch1;
 };
-
-/* Max number of segments allowable in LUX table */
-#define TSL2X7X_MAX_LUX_TABLE_SIZE		9
-/* The default LUX tables all have 3 elements.  */
-#define TSL2X7X_DEF_LUX_TABLE_SZ		3
-#define TSL2X7X_DEFAULT_TABLE_BYTES (sizeof(struct tsl2x7x_lux) * \
-				     TSL2X7X_DEF_LUX_TABLE_SZ)
 
 /**
  * struct tsl2x7x_default_settings - power on defaults unless
@@ -92,8 +91,8 @@ struct tsl2x7x_settings {
  */
 struct tsl2X7X_platform_data {
 	int (*platform_power)(struct device *dev, pm_message_t);
-	int (*power_on)(struct iio_dev *indio_dev);
-	int (*power_off)(struct i2c_client *dev);
+	int (*power_on)      (struct iio_dev *indio_dev);
+	int (*power_off)     (struct i2c_client *dev);
 	struct tsl2x7x_lux platform_lux_table[TSL2X7X_MAX_LUX_TABLE_SIZE];
 	struct tsl2x7x_settings *platform_default_settings;
 };

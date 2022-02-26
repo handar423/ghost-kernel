@@ -14,8 +14,8 @@
 #include <linux/mnt_namespace.h>
 #include <linux/user_namespace.h>
 #include <linux/namei.h>
+#include <linux/delay.h>
 #include <linux/security.h>
-#include <linux/cred.h>
 #include <linux/idr.h>
 #include <linux/init.h>		/* init_rootfs */
 #include <linux/fs_struct.h>	/* get_fs_root et.al. */
@@ -23,10 +23,10 @@
 #include <linux/uaccess.h>
 #include <linux/proc_ns.h>
 #include <linux/magic.h>
+#include <linux/delay.h>
+#include <linux/module.h>
 #include <linux/bootmem.h>
 #include <linux/task_work.h>
-#include <linux/sched/task.h>
-
 #include "pnode.h"
 #include "internal.h"
 
@@ -275,7 +275,7 @@ int __mnt_is_readonly(struct vfsmount *mnt)
 {
 	if (mnt->mnt_flags & MNT_READONLY)
 		return 1;
-	if (sb_rdonly(mnt->mnt_sb))
+	if (mnt->mnt_sb->s_flags & MS_RDONLY)
 		return 1;
 	return 0;
 }
@@ -353,8 +353,11 @@ int __mnt_want_write(struct vfsmount *m)
 	 * incremented count after it has set MNT_WRITE_HOLD.
 	 */
 	smp_mb();
-	while (READ_ONCE(mnt->mnt.mnt_flags) & MNT_WRITE_HOLD)
-		cpu_relax();
+	while (ACCESS_ONCE(mnt->mnt.mnt_flags) & MNT_WRITE_HOLD) {
+		preempt_enable();
+		cpu_chill();
+		preempt_disable();
+	}
 	/*
 	 * After the slowpath clears MNT_WRITE_HOLD, mnt_is_readonly will
 	 * be set to match its requirements. So we must not load that until
@@ -459,7 +462,7 @@ static inline int may_write_real(struct file *file)
 	struct dentry *upperdentry;
 
 	/* Writable file? */
-	if (file->f_mode & FMODE_WRITER)
+	if (file->f_mode & FMODE_WRITE)
 		return 0;
 
 	/* Not overlayfs? */
@@ -1031,7 +1034,7 @@ vfs_kern_mount(struct file_system_type *type, int flags, const char *name, void 
 	if (!mnt)
 		return ERR_PTR(-ENOMEM);
 
-	if (flags & SB_KERNMOUNT)
+	if (flags & MS_KERNMOUNT)
 		mnt->mnt.mnt_flags = MNT_INTERNAL;
 
 	root = mount_fs(type, flags, name, data);
@@ -1063,7 +1066,7 @@ vfs_submount(const struct dentry *mountpoint, struct file_system_type *type,
 	if (mountpoint->d_sb->s_user_ns != &init_user_ns)
 		return ERR_PTR(-EPERM);
 
-	return vfs_kern_mount(type, SB_SUBMOUNT, name, data);
+	return vfs_kern_mount(type, MS_SUBMOUNT, name, data);
 }
 EXPORT_SYMBOL_GPL(vfs_submount);
 
@@ -1184,22 +1187,34 @@ static LLIST_HEAD(delayed_mntput_list);
 static void delayed_mntput(struct work_struct *unused)
 {
 	struct llist_node *node = llist_del_all(&delayed_mntput_list);
-	struct mount *m, *t;
+	struct llist_node *next;
 
-	llist_for_each_entry_safe(m, t, node, mnt_llist)
-		cleanup_mnt(m);
+	for (; node; node = next) {
+		next = llist_next(node);
+		cleanup_mnt(llist_entry(node, struct mount, mnt_llist));
+	}
 }
 static DECLARE_DELAYED_WORK(delayed_mntput_work, delayed_mntput);
 
 static void mntput_no_expire(struct mount *mnt)
 {
 	rcu_read_lock();
-	mnt_add_count(mnt, -1);
-	if (likely(mnt->mnt_ns)) { /* shouldn't be the last one */
+	if (likely(READ_ONCE(mnt->mnt_ns))) {
+		/*
+		 * Since we don't do lock_mount_hash() here,
+		 * ->mnt_ns can change under us.  However, if it's
+		 * non-NULL, then there's a reference that won't
+		 * be dropped until after an RCU delay done after
+		 * turning ->mnt_ns NULL.  So if we observe it
+		 * non-NULL under rcu_read_lock(), the reference
+		 * we are dropping is not the final one.
+		 */
+		mnt_add_count(mnt, -1);
 		rcu_read_unlock();
 		return;
 	}
 	lock_mount_hash();
+	mnt_add_count(mnt, -1);
 	if (mnt_get_count(mnt)) {
 		rcu_read_unlock();
 		unlock_mount_hash();
@@ -1296,11 +1311,70 @@ struct vfsmount *mnt_clone_internal(const struct path *path)
 	return &p->mnt;
 }
 
+static inline void mangle(struct seq_file *m, const char *s)
+{
+	seq_escape(m, s, " \t\n\\");
+}
+
+/*
+ * Simple .show_options callback for filesystems which don't want to
+ * implement more complex mount option showing.
+ *
+ * See also save_mount_options().
+ */
+int generic_show_options(struct seq_file *m, struct dentry *root)
+{
+	const char *options;
+
+	rcu_read_lock();
+	options = rcu_dereference(root->d_sb->s_options);
+
+	if (options != NULL && options[0]) {
+		seq_putc(m, ',');
+		mangle(m, options);
+	}
+	rcu_read_unlock();
+
+	return 0;
+}
+EXPORT_SYMBOL(generic_show_options);
+
+/*
+ * If filesystem uses generic_show_options(), this function should be
+ * called from the fill_super() callback.
+ *
+ * The .remount_fs callback usually needs to be handled in a special
+ * way, to make sure, that previous options are not overwritten if the
+ * remount fails.
+ *
+ * Also note, that if the filesystem's .remount_fs function doesn't
+ * reset all options to their default value, but changes only newly
+ * given options, then the displayed options will not reflect reality
+ * any more.
+ */
+void save_mount_options(struct super_block *sb, char *options)
+{
+	BUG_ON(sb->s_options);
+	rcu_assign_pointer(sb->s_options, kstrdup(options, GFP_KERNEL));
+}
+EXPORT_SYMBOL(save_mount_options);
+
+void replace_mount_options(struct super_block *sb, char *options)
+{
+	char *old = sb->s_options;
+	rcu_assign_pointer(sb->s_options, options);
+	if (old) {
+		synchronize_rcu();
+		kfree(old);
+	}
+}
+EXPORT_SYMBOL(replace_mount_options);
+
 #ifdef CONFIG_PROC_FS
 /* iterator; we want it to have access to namespace_sem, thus here... */
 static void *m_start(struct seq_file *m, loff_t *pos)
 {
-	struct proc_mounts *p = m->private;
+	struct proc_mounts *p = proc_mounts(m);
 
 	down_read(&namespace_sem);
 	if (p->cached_event == p->ns->event) {
@@ -1321,7 +1395,7 @@ static void *m_start(struct seq_file *m, loff_t *pos)
 
 static void *m_next(struct seq_file *m, void *v, loff_t *pos)
 {
-	struct proc_mounts *p = m->private;
+	struct proc_mounts *p = proc_mounts(m);
 
 	p->cached_mount = seq_list_next(v, &p->ns->list, pos);
 	p->cached_index = *pos;
@@ -1335,7 +1409,7 @@ static void m_stop(struct seq_file *m, void *v)
 
 static int m_show(struct seq_file *m, void *v)
 {
-	struct proc_mounts *p = m->private;
+	struct proc_mounts *p = proc_mounts(m);
 	struct mount *r = list_entry(v, struct mount, mnt_list);
 	return p->show(m, &r->mnt);
 }
@@ -1589,11 +1663,11 @@ static int do_umount(struct mount *mnt, int flags)
 		 * Special case for "unmounting" root ...
 		 * we just try to remount it readonly.
 		 */
-		if (!capable(CAP_SYS_ADMIN))
+		if (!ns_capable(sb->s_user_ns, CAP_SYS_ADMIN))
 			return -EPERM;
 		down_write(&sb->s_umount);
-		if (!sb_rdonly(sb))
-			retval = do_remount_sb(sb, SB_RDONLY, NULL, 0);
+		if (!(sb->s_flags & MS_RDONLY))
+			retval = do_remount_sb(sb, MS_RDONLY, NULL, 0);
 		up_write(&sb->s_umount);
 		return retval;
 	}
@@ -1619,6 +1693,45 @@ static int do_umount(struct mount *mnt, int flags)
 	namespace_unlock();
 	return retval;
 }
+
+int may_detach_mounts __read_mostly;
+
+static int proc_set_may_detach_mounts(struct ctl_table *table, int write,
+	void __user *buffer, size_t *lenp, loff_t *ppos)
+{
+	struct ctl_table tbl;
+	int new = may_detach_mounts;
+	int ret;
+
+	tbl = *table;
+	tbl.data = &new;
+	ret = proc_dointvec_minmax(&tbl, write, buffer, lenp, ppos);
+	if (ret)
+		return ret;
+
+	if (write) {
+		if (new)
+			may_detach_mounts = 1;
+		else if (may_detach_mounts)
+			ret = -EINVAL;
+	}
+	return ret;
+}
+
+static int zero = 0;
+static int one = 1;
+static struct ctl_table fs_table[] = {
+	{
+		.procname	= "may_detach_mounts",
+		.data		= NULL,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_set_may_detach_mounts,
+		.extra1		= &zero,
+		.extra2		= &one,
+	},
+	{}
+};
 
 /*
  * __detach_mounts - lazily unmount all mounts on the specified dentry
@@ -1656,7 +1769,7 @@ out_unlock:
 	namespace_unlock();
 }
 
-/*
+/* 
  * Is the caller allowed to modify his namespace?
  */
 static inline bool may_mount(void)
@@ -1695,6 +1808,8 @@ SYSCALL_DEFINE2(umount, char __user *, name, int, flags)
 
 	if (!(flags & UMOUNT_NOFOLLOW))
 		lookup_flags |= LOOKUP_FOLLOW;
+
+	lookup_flags |= LOOKUP_NO_EVAL;
 
 	retval = user_path_mountpoint_at(AT_FDCWD, name, lookup_flags, &path);
 	if (retval)
@@ -1735,13 +1850,17 @@ SYSCALL_DEFINE1(oldumount, char __user *, name)
 static bool is_mnt_ns_file(struct dentry *dentry)
 {
 	/* Is this a proxy for a mount namespace? */
-	return dentry->d_op == &ns_dentry_operations &&
-	       dentry->d_fsdata == &mntns_operations;
-}
+	struct inode *inode = dentry->d_inode;
+	struct proc_ns *ei;
 
-struct mnt_namespace *to_mnt_ns(struct ns_common *ns)
-{
-	return container_of(ns, struct mnt_namespace, ns);
+	if (!proc_ns_inode(inode))
+		return false;
+
+	ei = get_proc_ns(inode);
+	if (ei->ns_ops != &mntns_operations)
+		return false;
+
+	return true;
 }
 
 static bool mnt_ns_loop(struct dentry *dentry)
@@ -1753,7 +1872,7 @@ static bool mnt_ns_loop(struct dentry *dentry)
 	if (!is_mnt_ns_file(dentry))
 		return false;
 
-	mnt_ns = to_mnt_ns(get_proc_ns(dentry->d_inode));
+	mnt_ns = get_proc_ns(dentry->d_inode)->ns;
 	return current->nsproxy->mnt_ns->seq >= mnt_ns->seq;
 }
 
@@ -1837,7 +1956,7 @@ void drop_collected_mounts(struct vfsmount *mnt)
 {
 	namespace_lock();
 	lock_mount_hash();
-	umount_tree(real_mount(mnt), UMOUNT_SYNC);
+	umount_tree(real_mount(mnt), 0);
 	unlock_mount_hash();
 	namespace_unlock();
 }
@@ -2028,6 +2147,7 @@ static int attach_recursive_mnt(struct mount *source_mnt,
 		lock_mount_hash();
 		if (err)
 			goto out_cleanup_ids;
+
 		for (p = source_mnt; p; p = next_mnt(p, source_mnt))
 			set_mnt_shared(p);
 	} else {
@@ -2079,9 +2199,9 @@ static struct mountpoint *lock_mount(struct path *path)
 	struct vfsmount *mnt;
 	struct dentry *dentry = path->dentry;
 retry:
-	inode_lock(dentry->d_inode);
+	mutex_lock(&dentry->d_inode->i_mutex);
 	if (unlikely(cant_mount(dentry))) {
-		inode_unlock(dentry->d_inode);
+		mutex_unlock(&dentry->d_inode->i_mutex);
 		return ERR_PTR(-ENOENT);
 	}
 	namespace_lock();
@@ -2090,13 +2210,13 @@ retry:
 		struct mountpoint *mp = get_mountpoint(dentry);
 		if (IS_ERR(mp)) {
 			namespace_unlock();
-			inode_unlock(dentry->d_inode);
+			mutex_unlock(&dentry->d_inode->i_mutex);
 			return mp;
 		}
 		return mp;
 	}
 	namespace_unlock();
-	inode_unlock(path->dentry->d_inode);
+	mutex_unlock(&path->dentry->d_inode->i_mutex);
 	path_put(path);
 	path->mnt = mnt;
 	dentry = path->dentry = dget(mnt->mnt_root);
@@ -2112,16 +2232,16 @@ static void unlock_mount(struct mountpoint *where)
 	read_sequnlock_excl(&mount_lock);
 
 	namespace_unlock();
-	inode_unlock(dentry->d_inode);
+	mutex_unlock(&dentry->d_inode->i_mutex);
 }
 
 static int graft_tree(struct mount *mnt, struct mount *p, struct mountpoint *mp)
 {
-	if (mnt->mnt.mnt_sb->s_flags & SB_NOUSER)
+	if (mnt->mnt.mnt_sb->s_flags & MS_NOUSER)
 		return -EINVAL;
 
-	if (d_is_dir(mp->m_dentry) !=
-	      d_is_dir(mnt->mnt.mnt_root))
+	if (S_ISDIR(mp->m_dentry->d_inode->i_mode) !=
+	      S_ISDIR(mnt->mnt.mnt_root->d_inode->i_mode))
 		return -ENOTDIR;
 
 	return attach_recursive_mnt(mnt, p, mp, NULL);
@@ -2131,9 +2251,9 @@ static int graft_tree(struct mount *mnt, struct mount *p, struct mountpoint *mp)
  * Sanity check the flags to change_mnt_propagation.
  */
 
-static int flags_to_propagation_type(int ms_flags)
+static int flags_to_propagation_type(int flags)
 {
-	int type = ms_flags & ~(MS_REC | MS_SILENT);
+	int type = flags & ~(MS_REC | MS_SILENT);
 
 	/* Fail if any non-propagation flags are set */
 	if (type & ~(MS_SHARED | MS_PRIVATE | MS_SLAVE | MS_UNBINDABLE))
@@ -2147,18 +2267,18 @@ static int flags_to_propagation_type(int ms_flags)
 /*
  * recursively change the type of the mountpoint.
  */
-static int do_change_type(struct path *path, int ms_flags)
+static int do_change_type(struct path *path, int flag)
 {
 	struct mount *m;
 	struct mount *mnt = real_mount(path->mnt);
-	int recurse = ms_flags & MS_REC;
+	int recurse = flag & MS_REC;
 	int type;
 	int err = 0;
 
 	if (path->dentry != path->mnt->mnt_root)
 		return -EINVAL;
 
-	type = flags_to_propagation_type(ms_flags);
+	type = flags_to_propagation_type(flag);
 	if (!type)
 		return -EINVAL;
 
@@ -2224,10 +2344,7 @@ static int do_loopback(struct path *path, const char *old_name,
 	if (IS_MNT_UNBINDABLE(old))
 		goto out2;
 
-	if (!check_mnt(parent))
-		goto out2;
-
-	if (!check_mnt(old) && old_path.dentry->d_op != &ns_dentry_operations)
+	if (!check_mnt(parent) || !check_mnt(old))
 		goto out2;
 
 	if (!recurse && has_locked_children(old, old_path.dentry))
@@ -2280,8 +2397,8 @@ static int change_mount_flags(struct vfsmount *mnt, int ms_flags)
  * If you've mounted a non-root directory somewhere and want to do remount
  * on it - tough luck.
  */
-static int do_remount(struct path *path, int ms_flags, int sb_flags,
-		      int mnt_flags, void *data)
+static int do_remount(struct path *path, int flags, int mnt_flags,
+		      void *data)
 {
 	int err;
 	struct super_block *sb = path->mnt->mnt_sb;
@@ -2325,12 +2442,12 @@ static int do_remount(struct path *path, int ms_flags, int sb_flags,
 		return err;
 
 	down_write(&sb->s_umount);
-	if (ms_flags & MS_BIND)
-		err = change_mount_flags(path->mnt, ms_flags);
-	else if (!capable(CAP_SYS_ADMIN))
+	if (flags & MS_BIND)
+		err = change_mount_flags(path->mnt, flags);
+	else if (!ns_capable(sb->s_user_ns, CAP_SYS_ADMIN))
 		err = -EPERM;
 	else
-		err = do_remount_sb(sb, sb_flags, data, 0);
+		err = do_remount_sb(sb, flags, data, 0);
 	if (!err) {
 		lock_mount_hash();
 		mnt_flags |= mnt->mnt.mnt_flags & ~MNT_USER_SETTABLE_MASK;
@@ -2387,8 +2504,8 @@ static int do_move_mount(struct path *path, const char *old_name)
 	if (!mnt_has_parent(old))
 		goto out1;
 
-	if (d_is_dir(path->dentry) !=
-	      d_is_dir(old_path.dentry))
+	if (S_ISDIR(path->dentry->d_inode->i_mode) !=
+	      S_ISDIR(old_path.dentry->d_inode->i_mode))
 		goto out1;
 	/*
 	 * Don't move a mount residing in a shared parent.
@@ -2478,7 +2595,7 @@ static int do_add_mount(struct mount *newmnt, struct path *path, int mnt_flags)
 		goto unlock;
 
 	err = -EINVAL;
-	if (d_is_symlink(newmnt->mnt.mnt_root))
+	if (S_ISLNK(newmnt->mnt.mnt_root->d_inode->i_mode))
 		goto unlock;
 
 	newmnt->mnt.mnt_flags = mnt_flags;
@@ -2495,7 +2612,7 @@ static bool mount_too_revealing(struct vfsmount *mnt, int *new_mnt_flags);
  * create a new mount for userspace and request it to be added into the
  * namespace's tree
  */
-static int do_new_mount(struct path *path, const char *fstype, int sb_flags,
+static int do_new_mount(struct path *path, const char *fstype, int flags,
 			int mnt_flags, const char *name, void *data)
 {
 	struct file_system_type *type;
@@ -2509,7 +2626,7 @@ static int do_new_mount(struct path *path, const char *fstype, int sb_flags,
 	if (!type)
 		return -ENODEV;
 
-	mnt = vfs_kern_mount(type, sb_flags, name, data);
+	mnt = vfs_kern_mount(type, flags, name, data);
 	if (!IS_ERR(mnt) && (type->fs_flags & FS_HAS_SUBTYPE) &&
 	    !mnt->mnt_sb->s_subtype)
 		mnt = fs_set_subtype(mnt, fstype);
@@ -2764,8 +2881,8 @@ long do_mount(const char *dev_name, const char __user *dir_name,
 		const char *type_page, unsigned long flags, void *data_page)
 {
 	struct path path;
-	unsigned int mnt_flags = 0, sb_flags;
 	int retval = 0;
+	int mnt_flags = 0;
 
 	/* Discard magic */
 	if ((flags & MS_MGC_MSK) == MS_MGC_VAL)
@@ -2774,9 +2891,6 @@ long do_mount(const char *dev_name, const char __user *dir_name,
 	/* Basic sanity checks */
 	if (data_page)
 		((char *)data_page)[PAGE_SIZE - 1] = 0;
-
-	if (flags & MS_NOUSER)
-		return -EINVAL;
 
 	/* ... and get the mountpoint */
 	retval = user_path(dir_name, &path);
@@ -2787,7 +2901,7 @@ long do_mount(const char *dev_name, const char __user *dir_name,
 				   type_page, flags, data_page);
 	if (!retval && !may_mount())
 		retval = -EPERM;
-	if (!retval && (flags & SB_MANDLOCK) && !may_mandlock())
+	if (!retval && (flags & MS_MANDLOCK) && !may_mandlock())
 		retval = -EPERM;
 	if (retval)
 		goto dput_out;
@@ -2809,7 +2923,7 @@ long do_mount(const char *dev_name, const char __user *dir_name,
 		mnt_flags |= MNT_NODIRATIME;
 	if (flags & MS_STRICTATIME)
 		mnt_flags &= ~(MNT_RELATIME | MNT_NOATIME);
-	if (flags & SB_RDONLY)
+	if (flags & MS_RDONLY)
 		mnt_flags |= MNT_READONLY;
 
 	/* The default atime for remount is preservation */
@@ -2820,17 +2934,12 @@ long do_mount(const char *dev_name, const char __user *dir_name,
 		mnt_flags |= path.mnt->mnt_flags & MNT_ATIME_MASK;
 	}
 
-	sb_flags = flags & (SB_RDONLY |
-			    SB_SYNCHRONOUS |
-			    SB_MANDLOCK |
-			    SB_DIRSYNC |
-			    SB_SILENT |
-			    SB_POSIXACL |
-			    SB_LAZYTIME |
-			    SB_I_VERSION);
+	flags &= ~(MS_NOSUID | MS_NOEXEC | MS_NODEV | MS_ACTIVE | MS_BORN |
+		   MS_NOATIME | MS_NODIRATIME | MS_RELATIME| MS_KERNMOUNT |
+		   MS_STRICTATIME | MS_NOREMOTELOCK | MS_SUBMOUNT);
 
 	if (flags & MS_REMOUNT)
-		retval = do_remount(&path, flags, sb_flags, mnt_flags,
+		retval = do_remount(&path, flags & ~MS_REMOUNT, mnt_flags,
 				    data_page);
 	else if (flags & MS_BIND)
 		retval = do_loopback(&path, dev_name, flags & MS_REC);
@@ -2839,7 +2948,7 @@ long do_mount(const char *dev_name, const char __user *dir_name,
 	else if (flags & MS_MOVE)
 		retval = do_move_mount(&path, dev_name);
 	else
-		retval = do_new_mount(&path, type_page, sb_flags, mnt_flags,
+		retval = do_new_mount(&path, type_page, flags, mnt_flags,
 				      dev_name, data_page);
 dput_out:
 	path_put(&path);
@@ -2858,7 +2967,7 @@ static void dec_mnt_namespaces(struct ucounts *ucounts)
 
 static void free_mnt_ns(struct mnt_namespace *ns)
 {
-	ns_free_inum(&ns->ns);
+	proc_free_inum(ns->proc_inum);
 	dec_mnt_namespaces(ns->ucounts);
 	put_user_ns(ns->user_ns);
 	kfree(ns);
@@ -2888,13 +2997,12 @@ static struct mnt_namespace *alloc_mnt_ns(struct user_namespace *user_ns)
 		dec_mnt_namespaces(ucounts);
 		return ERR_PTR(-ENOMEM);
 	}
-	ret = ns_alloc_inum(&new_ns->ns);
+	ret = proc_alloc_inum(&new_ns->proc_inum);
 	if (ret) {
 		kfree(new_ns);
 		dec_mnt_namespaces(ucounts);
 		return ERR_PTR(ret);
 	}
-	new_ns->ns.ops = &mntns_operations;
 	new_ns->seq = atomic64_add_return(1, &mnt_ns_seq);
 	atomic_set(&new_ns->count, 1);
 	new_ns->root = NULL;
@@ -2908,7 +3016,6 @@ static struct mnt_namespace *alloc_mnt_ns(struct user_namespace *user_ns)
 	return new_ns;
 }
 
-__latent_entropy
 struct mnt_namespace *copy_mnt_ns(unsigned long flags, struct mnt_namespace *ns,
 		struct user_namespace *user_ns, struct fs_struct *new_fs)
 {
@@ -2925,6 +3032,10 @@ struct mnt_namespace *copy_mnt_ns(unsigned long flags, struct mnt_namespace *ns,
 		get_mnt_ns(ns);
 		return ns;
 	}
+
+	/* Unprivileged creation must set may_detach_mounts in RHEL7 */
+	if (user_ns != &init_user_ns)
+		may_detach_mounts = 1;
 
 	old = ns->root;
 
@@ -3246,6 +3357,7 @@ static void __init init_mount_tree(void)
 
 void __init mnt_init(void)
 {
+	unsigned u;
 	int err;
 
 	mnt_cache = kmem_cache_create("mnt_cache", sizeof(struct mount),
@@ -3254,16 +3366,21 @@ void __init mnt_init(void)
 	mount_hashtable = alloc_large_system_hash("Mount-cache",
 				sizeof(struct hlist_head),
 				mhash_entries, 19,
-				HASH_ZERO,
+				0,
 				&m_hash_shift, &m_hash_mask, 0, 0);
 	mountpoint_hashtable = alloc_large_system_hash("Mountpoint-cache",
 				sizeof(struct hlist_head),
 				mphash_entries, 19,
-				HASH_ZERO,
+				0,
 				&mp_hash_shift, &mp_hash_mask, 0, 0);
 
 	if (!mount_hashtable || !mountpoint_hashtable)
 		panic("Failed to allocate mount hash table\n");
+
+	for (u = 0; u <= m_hash_mask; u++)
+		INIT_HLIST_HEAD(&mount_hashtable[u]);
+	for (u = 0; u <= mp_hash_mask; u++)
+		INIT_HLIST_HEAD(&mountpoint_hashtable[u]);
 
 	kernfs_init();
 
@@ -3276,6 +3393,8 @@ void __init mnt_init(void)
 		printk(KERN_WARNING "%s: kobj create error\n", __func__);
 	init_rootfs();
 	init_mount_tree();
+	if (!register_sysctl("fs", fs_table))
+		printk(KERN_WARNING "%s: failed to register sysctl table\n", __func__);
 }
 
 void put_mnt_ns(struct mnt_namespace *ns)
@@ -3289,7 +3408,7 @@ void put_mnt_ns(struct mnt_namespace *ns)
 struct vfsmount *kern_mount_data(struct file_system_type *type, void *data)
 {
 	struct vfsmount *mnt;
-	mnt = vfs_kern_mount(type, SB_KERNMOUNT, type->name, data);
+	mnt = vfs_kern_mount(type, MS_KERNMOUNT, type->name, data);
 	if (!IS_ERR(mnt)) {
 		/*
 		 * it is a longterm mount, don't release mnt until
@@ -3366,7 +3485,7 @@ static bool mnt_already_visible(struct mnt_namespace *ns, struct vfsmount *new,
 		mnt_flags = mnt->mnt.mnt_flags;
 
 		/* Don't miss readonly hidden in the superblock flags */
-		if (sb_rdonly(mnt->mnt.mnt_sb))
+		if (mnt->mnt.mnt_sb->s_flags & MS_RDONLY)
 			mnt_flags |= MNT_LOCK_READONLY;
 
 		/* Verify the mount flags are equal to or more permissive
@@ -3440,31 +3559,31 @@ bool mnt_may_suid(struct vfsmount *mnt)
 	       current_in_userns(mnt->mnt_sb->s_user_ns);
 }
 
-static struct ns_common *mntns_get(struct task_struct *task)
+static void *mntns_get(struct task_struct *task)
 {
-	struct ns_common *ns = NULL;
+	struct mnt_namespace *ns = NULL;
 	struct nsproxy *nsproxy;
 
 	task_lock(task);
 	nsproxy = task->nsproxy;
 	if (nsproxy) {
-		ns = &nsproxy->mnt_ns->ns;
-		get_mnt_ns(to_mnt_ns(ns));
+		ns = nsproxy->mnt_ns;
+		get_mnt_ns(ns);
 	}
 	task_unlock(task);
 
 	return ns;
 }
 
-static void mntns_put(struct ns_common *ns)
+static void mntns_put(void *ns)
 {
-	put_mnt_ns(to_mnt_ns(ns));
+	put_mnt_ns(ns);
 }
 
-static int mntns_install(struct nsproxy *nsproxy, struct ns_common *ns)
+static int mntns_install(struct nsproxy *nsproxy, void *ns)
 {
 	struct fs_struct *fs = current->fs;
-	struct mnt_namespace *mnt_ns = to_mnt_ns(ns), *old_mnt_ns;
+	struct mnt_namespace *mnt_ns = ns, *old_mnt_ns;
 	struct path root;
 	int err;
 
@@ -3500,9 +3619,10 @@ static int mntns_install(struct nsproxy *nsproxy, struct ns_common *ns)
 	return 0;
 }
 
-static struct user_namespace *mntns_owner(struct ns_common *ns)
+static unsigned int mntns_inum(void *ns)
 {
-	return to_mnt_ns(ns)->user_ns;
+	struct mnt_namespace *mnt_ns = ns;
+	return mnt_ns->proc_inum;
 }
 
 const struct proc_ns_operations mntns_operations = {
@@ -3511,5 +3631,5 @@ const struct proc_ns_operations mntns_operations = {
 	.get		= mntns_get,
 	.put		= mntns_put,
 	.install	= mntns_install,
-	.owner		= mntns_owner,
+	.inum		= mntns_inum,
 };

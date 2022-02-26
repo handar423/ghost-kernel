@@ -66,7 +66,8 @@ void fscache_enqueue_operation(struct fscache_operation *op)
 	ASSERT(op->processor != NULL);
 	ASSERT(fscache_object_is_available(op->object));
 	ASSERTCMP(atomic_read(&op->usage), >, 0);
-	ASSERTCMP(op->state, ==, FSCACHE_OP_ST_IN_PROGRESS);
+	ASSERTIFCMP(op->state != FSCACHE_OP_ST_IN_PROGRESS,
+		    op->state, ==,  FSCACHE_OP_ST_CANCELLED);
 
 	fscache_stat(&fscache_n_op_enqueue);
 	switch (op->flags & FSCACHE_OP_TYPE) {
@@ -167,7 +168,7 @@ int fscache_submit_exclusive_op(struct fscache_object *object,
 	smp_rmb();
 
 	op->state = FSCACHE_OP_ST_PENDING;
-	flags = READ_ONCE(object->flags);
+	flags = ACCESS_ONCE(object->flags);
 	if (unlikely(!(flags & BIT(FSCACHE_OBJECT_IS_LIVE)))) {
 		fscache_stat(&fscache_n_op_rejected);
 		op->cancel(op);
@@ -252,7 +253,7 @@ int fscache_submit_op(struct fscache_object *object,
 	smp_rmb();
 
 	op->state = FSCACHE_OP_ST_PENDING;
-	flags = READ_ONCE(object->flags);
+	flags = ACCESS_ONCE(object->flags);
 	if (unlikely(!(flags & BIT(FSCACHE_OBJECT_IS_LIVE)))) {
 		fscache_stat(&fscache_n_op_rejected);
 		op->cancel(op);
@@ -481,7 +482,8 @@ void fscache_put_operation(struct fscache_operation *op)
 	struct fscache_cache *cache;
 
 	_enter("{OBJ%x OP%x,%d}",
-	       op->object->debug_id, op->debug_id, atomic_read(&op->usage));
+	       op->object ? op->object->debug_id : 0,
+	       op->debug_id, atomic_read(&op->usage));
 
 	ASSERTCMP(atomic_read(&op->usage), >, 0);
 

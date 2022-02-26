@@ -34,7 +34,6 @@
 #include <linux/types.h>
 #include <linux/crypto.h>
 #include <linux/err.h>
-#include <crypto/ablk_helper.h>
 #include <crypto/algapi.h>
 #include <crypto/serpent.h>
 #include <crypto/cryptd.h>
@@ -43,6 +42,7 @@
 #include <crypto/lrw.h>
 #include <crypto/xts.h>
 #include <asm/crypto/serpent-sse2.h>
+#include <asm/crypto/ablk_helper.h>
 #include <asm/crypto/glue_helper.h>
 
 static void serpent_decrypt_cbc_xway(void *ctx, u128 *dst, const u128 *src)
@@ -328,7 +328,7 @@ static int xts_encrypt(struct blkcipher_desc *desc, struct scatterlist *dst,
 		       struct scatterlist *src, unsigned int nbytes)
 {
 	struct serpent_xts_ctx *ctx = crypto_blkcipher_ctx(desc->tfm);
-	le128 buf[SERPENT_PARALLEL_BLOCKS];
+	be128 buf[SERPENT_PARALLEL_BLOCKS];
 	struct crypt_priv crypt_ctx = {
 		.ctx = &ctx->crypt_ctx,
 		.fpu_enabled = false,
@@ -355,7 +355,7 @@ static int xts_decrypt(struct blkcipher_desc *desc, struct scatterlist *dst,
 		       struct scatterlist *src, unsigned int nbytes)
 {
 	struct serpent_xts_ctx *ctx = crypto_blkcipher_ctx(desc->tfm);
-	le128 buf[SERPENT_PARALLEL_BLOCKS];
+	be128 buf[SERPENT_PARALLEL_BLOCKS];
 	struct crypt_priv crypt_ctx = {
 		.ctx = &ctx->crypt_ctx,
 		.fpu_enabled = false,
@@ -600,7 +600,7 @@ static struct crypto_alg serpent_algs[10] = { {
 
 static int __init serpent_sse2_init(void)
 {
-	if (!boot_cpu_has(X86_FEATURE_XMM2)) {
+	if (!cpu_has_xmm2) {
 		printk(KERN_INFO "SSE2 instructions are not detected.\n");
 		return -ENODEV;
 	}

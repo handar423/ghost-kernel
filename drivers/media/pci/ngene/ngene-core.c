@@ -19,8 +19,12 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  *
- * To obtain the license, point your browser to
- * http://www.gnu.org/copyleft/gpl.html
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+ * 02110-1301, USA
+ * Or, point your browser to http://www.gnu.org/copyleft/gpl.html
  */
 
 #include <linux/module.h>
@@ -53,13 +57,15 @@ DVB_DEFINE_MOD_OPT_ADAPTER_NR(adapter_nr);
 
 #define dprintk	if (debug) printk
 
-#define ngwriteb(dat, adr)         writeb((dat), dev->iomem + (adr))
-#define ngwritel(dat, adr)         writel((dat), dev->iomem + (adr))
-#define ngwriteb(dat, adr)         writeb((dat), dev->iomem + (adr))
+#define ngwriteb(dat, adr)         writeb((dat), (char *)(dev->iomem + (adr)))
+#define ngwritel(dat, adr)         writel((dat), (char *)(dev->iomem + (adr)))
+#define ngwriteb(dat, adr)         writeb((dat), (char *)(dev->iomem + (adr)))
 #define ngreadl(adr)               readl(dev->iomem + (adr))
 #define ngreadb(adr)               readb(dev->iomem + (adr))
-#define ngcpyto(adr, src, count)   memcpy_toio(dev->iomem + (adr), (src), (count))
-#define ngcpyfrom(dst, adr, count) memcpy_fromio((dst), dev->iomem + (adr), (count))
+#define ngcpyto(adr, src, count)   memcpy_toio((char *) \
+				   (dev->iomem + (adr)), (src), (count))
+#define ngcpyfrom(dst, adr, count) memcpy_fromio((dst), (char *) \
+				   (dev->iomem + (adr)), (count))
 
 /****************************************************************************/
 /* nGene interrupt handler **************************************************/
@@ -336,9 +342,9 @@ int ngene_command(struct ngene *dev, struct ngene_command *com)
 {
 	int result;
 
-	mutex_lock(&dev->cmd_mutex);
+	down(&dev->cmd_mutex);
 	result = ngene_command_mutex(dev, com);
-	mutex_unlock(&dev->cmd_mutex);
+	up(&dev->cmd_mutex);
 	return result;
 }
 
@@ -560,6 +566,7 @@ static int ngene_command_stream_control(struct ngene *dev, u8 stream,
 	u16 BsSPI = ((stream & 1) ? 0x9800 : 0x9700);
 	u16 BsSDO = 0x9B00;
 
+	down(&dev->stream_mutex);
 	memset(&com, 0, sizeof(com));
 	com.cmd.hdr.Opcode = CMD_CONTROL;
 	com.cmd.hdr.Length = sizeof(struct FW_STREAM_CONTROL) - 2;
@@ -585,13 +592,17 @@ static int ngene_command_stream_control(struct ngene *dev, u8 stream,
 			chan->State = KSSTATE_ACQUIRE;
 			chan->HWState = HWSTATE_STOP;
 			spin_unlock_irq(&chan->state_lock);
-			if (ngene_command(dev, &com) < 0)
+			if (ngene_command(dev, &com) < 0) {
+				up(&dev->stream_mutex);
 				return -1;
+			}
 			/* clear_buffers(chan); */
 			flush_buffers(chan);
+			up(&dev->stream_mutex);
 			return 0;
 		}
 		spin_unlock_irq(&chan->state_lock);
+		up(&dev->stream_mutex);
 		return 0;
 	}
 
@@ -687,9 +698,11 @@ static int ngene_command_stream_control(struct ngene *dev, u8 stream,
 		chan->HWState = HWSTATE_STARTUP;
 	spin_unlock_irq(&chan->state_lock);
 
-	if (ngene_command(dev, &com) < 0)
+	if (ngene_command(dev, &com) < 0) {
+		up(&dev->stream_mutex);
 		return -1;
-
+	}
+	up(&dev->stream_mutex);
 	return 0;
 }
 
@@ -743,11 +756,8 @@ void set_transfer(struct ngene_channel *chan, int state)
 		/* else printk(KERN_INFO DEVICE_NAME ": lock=%08x\n",
 			   ngreadl(0x9310)); */
 
-	mutex_lock(&dev->stream_mutex);
 	ret = ngene_command_stream_control(dev, chan->number,
 					   control, mode, flags);
-	mutex_unlock(&dev->stream_mutex);
-
 	if (!ret)
 		chan->running = state;
 	else
@@ -900,6 +910,7 @@ static int AllocateRingBuffers(struct pci_dev *pci_dev,
 {
 	dma_addr_t tmp;
 	u32 i, j;
+	int status = 0;
 	u32 SCListMemSize = pRingBuffer->NumBuffers
 		* ((Buffer2Length != 0) ? (NUM_SCATTER_GATHER_ENTRIES * 2) :
 		    NUM_SCATTER_GATHER_ENTRIES)
@@ -999,12 +1010,14 @@ static int AllocateRingBuffers(struct pci_dev *pci_dev,
 
 	}
 
-	return 0;
+	return status;
 }
 
 static int FillTSIdleBuffer(struct SRingBufferDescriptor *pIdleBuffer,
 			    struct SRingBufferDescriptor *pRingBuffer)
 {
+	int status = 0;
+
 	/* Copy pointer to scatter gather list in TSRingbuffer
 	   structure for buffer 2
 	   Load number of buffer
@@ -1025,7 +1038,7 @@ static int FillTSIdleBuffer(struct SRingBufferDescriptor *pIdleBuffer,
 			pIdleBuffer->Head->ngeneBuffer.Number_of_entries_1;
 		Cur = Cur->Next;
 	}
-	return 0;
+	return status;
 }
 
 static u32 RingBufferSizes[MAX_STREAM] = {
@@ -1065,11 +1078,12 @@ static int AllocCommonBuffers(struct ngene *dev)
 	dev->ngenetohost = dev->FWInterfaceBuffer + 256;
 	dev->EventBuffer = dev->FWInterfaceBuffer + 512;
 
-	dev->OverflowBuffer = pci_zalloc_consistent(dev->pci_dev,
-						    OVERFLOW_BUFFER_SIZE,
-						    &dev->PAOverflowBuffer);
+	dev->OverflowBuffer = pci_alloc_consistent(dev->pci_dev,
+						   OVERFLOW_BUFFER_SIZE,
+						   &dev->PAOverflowBuffer);
 	if (!dev->OverflowBuffer)
 		return -ENOMEM;
+	memset(dev->OverflowBuffer, 0, OVERFLOW_BUFFER_SIZE);
 
 	for (i = STREAM_VIDEOIN1; i < MAX_STREAM; i++) {
 		int type = dev->card_info->io_type[i];
@@ -1279,7 +1293,7 @@ static int ngene_load_firm(struct ngene *dev)
 
 static void ngene_stop(struct ngene *dev)
 {
-	mutex_destroy(&dev->cmd_mutex);
+	down(&dev->cmd_mutex);
 	i2c_del_adapter(&(dev->channel[0].i2c_adapter));
 	i2c_del_adapter(&(dev->channel[1].i2c_adapter));
 	ngwritel(0, NGENE_INT_ENABLE);
@@ -1342,10 +1356,10 @@ static int ngene_start(struct ngene *dev)
 	init_waitqueue_head(&dev->cmd_wq);
 	init_waitqueue_head(&dev->tx_wq);
 	init_waitqueue_head(&dev->rx_wq);
-	mutex_init(&dev->cmd_mutex);
-	mutex_init(&dev->stream_mutex);
+	sema_init(&dev->cmd_mutex, 1);
+	sema_init(&dev->stream_mutex, 1);
 	sema_init(&dev->pll_mutex, 1);
-	mutex_init(&dev->i2c_switch_mutex);
+	sema_init(&dev->i2c_switch_mutex, 1);
 	spin_lock_init(&dev->cmd_lock);
 	for (i = 0; i < MAX_STREAM; i++)
 		spin_lock_init(&dev->channel[i].state_lock);
@@ -1505,7 +1519,7 @@ static int init_channel(struct ngene_channel *chan)
 		set_transfer(&chan->dev->channel[2], 1);
 		dvb_register_device(adapter, &chan->ci_dev,
 				    &ngene_dvbdev_ci, (void *) chan,
-				    DVB_DEVICE_SEC, 0);
+				    DVB_DEVICE_SEC);
 		if (!chan->ci_dev)
 			goto err;
 	}
@@ -1518,12 +1532,10 @@ static int init_channel(struct ngene_channel *chan)
 	if (chan->fe2) {
 		if (dvb_register_frontend(adapter, chan->fe2) < 0)
 			goto err;
-		if (chan->fe) {
-			chan->fe2->tuner_priv = chan->fe->tuner_priv;
-			memcpy(&chan->fe2->ops.tuner_ops,
-			       &chan->fe->ops.tuner_ops,
-			       sizeof(struct dvb_tuner_ops));
-		}
+		chan->fe2->tuner_priv = chan->fe->tuner_priv;
+		memcpy(&chan->fe2->ops.tuner_ops,
+		       &chan->fe->ops.tuner_ops,
+		       sizeof(struct dvb_tuner_ops));
 	}
 
 	if (chan->has_demux) {
@@ -1584,7 +1596,7 @@ static void cxd_detach(struct ngene *dev)
 
 	dvb_ca_en50221_release(ci->en);
 	kfree(ci->en);
-	ci->en = NULL;
+	ci->en = 0;
 }
 
 /***********************************/
@@ -1602,15 +1614,15 @@ static void ngene_unlink(struct ngene *dev)
 	com.in_len = 3;
 	com.out_len = 1;
 
-	mutex_lock(&dev->cmd_mutex);
+	down(&dev->cmd_mutex);
 	ngwritel(0, NGENE_INT_ENABLE);
 	ngene_command_mutex(dev, &com);
-	mutex_unlock(&dev->cmd_mutex);
+	up(&dev->cmd_mutex);
 }
 
 void ngene_shutdown(struct pci_dev *pdev)
 {
-	struct ngene *dev = pci_get_drvdata(pdev);
+	struct ngene *dev = (struct ngene *)pci_get_drvdata(pdev);
 
 	if (!dev || !shutdown_workaround)
 		return;
@@ -1636,6 +1648,7 @@ void ngene_remove(struct pci_dev *pdev)
 		cxd_detach(dev);
 	ngene_stop(dev);
 	ngene_release_buffers(dev);
+	pci_set_drvdata(pdev, NULL);
 	pci_disable_device(pdev);
 }
 
@@ -1689,5 +1702,6 @@ fail1:
 	ngene_release_buffers(dev);
 fail0:
 	pci_disable_device(pci_dev);
+	pci_set_drvdata(pci_dev, NULL);
 	return stat;
 }

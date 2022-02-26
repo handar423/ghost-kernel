@@ -26,7 +26,7 @@
 #include "special.h"
 #include "warn.h"
 
-#define EX_ENTRY_SIZE		12
+#define EX_ENTRY_SIZE		8
 #define EX_ORIG_OFFSET		0
 #define EX_NEW_OFFSET		4
 
@@ -34,7 +34,7 @@
 #define JUMP_ORIG_OFFSET	0
 #define JUMP_NEW_OFFSET		8
 
-#define ALT_ENTRY_SIZE		13
+#define ALT_ENTRY_SIZE		12
 #define ALT_ORIG_OFFSET		0
 #define ALT_NEW_OFFSET		4
 #define ALT_FEATURE_OFFSET	8
@@ -91,16 +91,16 @@ static int get_alt_entry(struct elf *elf, struct special_entry *entry,
 	alt->jump_or_nop = entry->jump_or_nop;
 
 	if (alt->group) {
-		alt->orig_len = *(unsigned char *)(sec->data->d_buf + offset +
+		alt->orig_len = *(unsigned char *)(sec->data + offset +
 						   entry->orig_len);
-		alt->new_len = *(unsigned char *)(sec->data->d_buf + offset +
+		alt->new_len = *(unsigned char *)(sec->data + offset +
 						  entry->new_len);
 	}
 
 	if (entry->feature) {
 		unsigned short feature;
 
-		feature = *(unsigned short *)(sec->data->d_buf + offset +
+		feature = *(unsigned short *)(sec->data + offset +
 					      entry->feature);
 
 		/*

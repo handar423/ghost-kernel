@@ -41,17 +41,15 @@
 #include <linux/module.h>
 #include "core_priv.h"
 
-#include "core_priv.h"
-
 static DEFINE_MUTEX(rdma_nl_mutex);
 static struct sock *nls;
 static struct {
 	const struct rdma_nl_cbs   *cb_table;
 } rdma_nl_types[RDMA_NL_NUM_CLIENTS];
 
-int rdma_nl_chk_listeners(unsigned int group)
+bool rdma_nl_chk_listeners(unsigned int group)
 {
-	return (netlink_has_listeners(nls, group)) ? 0 : -1;
+	return netlink_has_listeners(nls, group);
 }
 EXPORT_SYMBOL(rdma_nl_chk_listeners);
 
@@ -83,15 +81,13 @@ static bool is_nl_valid(unsigned int type, unsigned int op)
 	if (!is_nl_msg_valid(type, op))
 		return false;
 
-	cb_table = rdma_nl_types[type].cb_table;
-#ifdef CONFIG_MODULES
-	if (!cb_table) {
+	if (!rdma_nl_types[type].cb_table) {
 		mutex_unlock(&rdma_nl_mutex);
 		request_module("rdma-netlink-subsys-%d", type);
 		mutex_lock(&rdma_nl_mutex);
-		cb_table = rdma_nl_types[type].cb_table;
 	}
-#endif
+
+	cb_table = rdma_nl_types[type].cb_table;
 
 	if (!cb_table || (!cb_table[op].dump && !cb_table[op].doit))
 		return false;
@@ -158,8 +154,7 @@ int ibnl_put_attr(struct sk_buff *skb, struct nlmsghdr *nlh,
 }
 EXPORT_SYMBOL(ibnl_put_attr);
 
-static int rdma_nl_rcv_msg(struct sk_buff *skb, struct nlmsghdr *nlh,
-			   struct netlink_ext_ack *extack)
+static int rdma_nl_rcv_msg(struct sk_buff *skb, struct nlmsghdr *nlh)
 {
 	int type = nlh->nlmsg_type;
 	unsigned int index = RDMA_NL_GET_CLIENT(type);
@@ -181,7 +176,7 @@ static int rdma_nl_rcv_msg(struct sk_buff *skb, struct nlmsghdr *nlh,
 	 */
 	if (index == RDMA_NL_LS) {
 		if (cb_table[op].doit)
-			return cb_table[op].doit(skb, nlh, extack);
+			return cb_table[op].doit(skb, nlh);
 		return -EINVAL;
 	}
 	/* FIXME: Convert IWCM to properly handle doit callbacks */
@@ -196,7 +191,7 @@ static int rdma_nl_rcv_msg(struct sk_buff *skb, struct nlmsghdr *nlh,
 	}
 
 	if (cb_table[op].doit)
-		return cb_table[op].doit(skb, nlh, extack);
+		return cb_table[op].doit(skb, nlh);
 
 	return 0;
 }
@@ -208,10 +203,8 @@ static int rdma_nl_rcv_msg(struct sk_buff *skb, struct nlmsghdr *nlh,
  * for that consumer only.
  */
 static int rdma_nl_rcv_skb(struct sk_buff *skb, int (*cb)(struct sk_buff *,
-						   struct nlmsghdr *,
-						   struct netlink_ext_ack *))
+						   struct nlmsghdr *))
 {
-	struct netlink_ext_ack extack = {};
 	struct nlmsghdr *nlh;
 	int err;
 
@@ -239,13 +232,13 @@ static int rdma_nl_rcv_skb(struct sk_buff *skb, int (*cb)(struct sk_buff *,
 		if (nlh->nlmsg_type < NLMSG_MIN_TYPE)
 			goto ack;
 
-		err = cb(skb, nlh, &extack);
+		err = cb(skb, nlh);
 		if (err == -EINTR)
 			goto skip;
 
 ack:
 		if (nlh->nlmsg_flags & NLM_F_ACK || err)
-			netlink_ack(skb, nlh, err, &extack);
+			netlink_ack(skb, nlh, err);
 
 skip:
 		msglen = NLMSG_ALIGN(nlh->nlmsg_len);

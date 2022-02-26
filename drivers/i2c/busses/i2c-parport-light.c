@@ -1,7 +1,7 @@
 /* ------------------------------------------------------------------------ *
  * i2c-parport-light.c I2C bus over parallel port                           *
  * ------------------------------------------------------------------------ *
-   Copyright (C) 2003-2010 Jean Delvare <jdelvare@suse.de>
+   Copyright (C) 2003-2010 Jean Delvare <khali@linux-fr.org>
 
    Based on older i2c-velleman.c driver
    Copyright (C) 1995-2000 Simon G. Vogl
@@ -38,11 +38,11 @@
 static struct platform_device *pdev;
 
 static u16 base;
-module_param_hw(base, ushort, ioport, 0);
+module_param(base, ushort, 0);
 MODULE_PARM_DESC(base, "Base I/O address");
 
 static int irq;
-module_param_hw(irq, int, irq, 0);
+module_param(irq, int, 0);
 MODULE_PARM_DESC(irq, "IRQ (optional)");
 
 /* ----- Low-level parallel port access ----------------------------------- */
@@ -123,6 +123,7 @@ static struct i2c_adapter parport_adapter = {
 
 /* SMBus alert support */
 static struct i2c_smbus_alert_setup alert_data = {
+	.alert_edge_triggered	= 1,
 };
 static struct i2c_client *ara;
 static struct lineop parport_ctrl_irq = {
@@ -182,6 +183,7 @@ static int i2c_parport_remove(struct platform_device *pdev)
 
 static struct platform_driver i2c_parport_driver = {
 	.driver = {
+		.owner	= THIS_MODULE,
 		.name	= DRVNAME,
 	},
 	.probe		= i2c_parport_probe,
@@ -267,7 +269,7 @@ static void __exit i2c_parport_exit(void)
 	release_region(base, 3);
 }
 
-MODULE_AUTHOR("Jean Delvare <jdelvare@suse.de>");
+MODULE_AUTHOR("Jean Delvare <khali@linux-fr.org>");
 MODULE_DESCRIPTION("I2C bus over parallel port (light)");
 MODULE_LICENSE("GPL");
 

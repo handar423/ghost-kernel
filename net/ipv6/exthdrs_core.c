@@ -82,7 +82,7 @@ int ipv6_skip_exthdr(const struct sk_buff *skb, int start, u8 *nexthdrp,
 		if (nexthdr == NEXTHDR_NONE)
 			return -1;
 		hp = skb_header_pointer(skb, start, sizeof(_hdr), &_hdr);
-		if (!hp)
+		if (hp == NULL)
 			return -1;
 		if (nexthdr == NEXTHDR_FRAGMENT) {
 			__be16 _frag_off, *fp;
@@ -91,7 +91,7 @@ int ipv6_skip_exthdr(const struct sk_buff *skb, int start, u8 *nexthdrp,
 							       frag_off),
 						sizeof(_frag_off),
 						&_frag_off);
-			if (!fp)
+			if (fp == NULL)
 				return -1;
 
 			*frag_offp = *fp;
@@ -99,7 +99,7 @@ int ipv6_skip_exthdr(const struct sk_buff *skb, int start, u8 *nexthdrp,
 				break;
 			hdrlen = 8;
 		} else if (nexthdr == NEXTHDR_AUTH)
-			hdrlen = ipv6_authlen(hp);
+			hdrlen = (hp->hdrlen+2)<<2;
 		else
 			hdrlen = ipv6_optlen(hp);
 
@@ -112,7 +112,7 @@ int ipv6_skip_exthdr(const struct sk_buff *skb, int start, u8 *nexthdrp,
 }
 EXPORT_SYMBOL(ipv6_skip_exthdr);
 
-int ipv6_find_tlv(const struct sk_buff *skb, int offset, int type)
+int ipv6_find_tlv(struct sk_buff *skb, int offset, int type)
 {
 	const unsigned char *nh = skb_network_header(skb);
 	int packet_len = skb_tail_pointer(skb) - skb_network_header(skb);
@@ -187,6 +187,7 @@ int ipv6_find_hdr(const struct sk_buff *skb, unsigned int *offset,
 {
 	unsigned int start = skb_network_offset(skb) + sizeof(struct ipv6hdr);
 	u8 nexthdr = ipv6_hdr(skb)->nexthdr;
+	unsigned int len;
 	bool found;
 
 	if (fragoff)
@@ -196,13 +197,12 @@ int ipv6_find_hdr(const struct sk_buff *skb, unsigned int *offset,
 		struct ipv6hdr _ip6, *ip6;
 
 		ip6 = skb_header_pointer(skb, *offset, sizeof(_ip6), &_ip6);
-		if (!ip6 || (ip6->version != 6)) {
-			printk(KERN_ERR "IPv6 header not found\n");
+		if (!ip6 || (ip6->version != 6))
 			return -EBADMSG;
-		}
 		start = *offset + sizeof(struct ipv6hdr);
 		nexthdr = ip6->nexthdr;
 	}
+	len = skb->len - start;
 
 	do {
 		struct ipv6_opt_hdr _hdr, *hp;
@@ -216,7 +216,7 @@ int ipv6_find_hdr(const struct sk_buff *skb, unsigned int *offset,
 		}
 
 		hp = skb_header_pointer(skb, start, sizeof(_hdr), &_hdr);
-		if (!hp)
+		if (hp == NULL)
 			return -EBADMSG;
 
 		if (nexthdr == NEXTHDR_ROUTING) {
@@ -224,7 +224,7 @@ int ipv6_find_hdr(const struct sk_buff *skb, unsigned int *offset,
 
 			rh = skb_header_pointer(skb, start, sizeof(_rh),
 						&_rh);
-			if (!rh)
+			if (rh == NULL)
 				return -EBADMSG;
 
 			if (flags && (*flags & IP6_FH_F_SKIP_RH) &&
@@ -243,7 +243,7 @@ int ipv6_find_hdr(const struct sk_buff *skb, unsigned int *offset,
 							       frag_off),
 						sizeof(_frag_off),
 						&_frag_off);
-			if (!fp)
+			if (fp == NULL)
 				return -EBADMSG;
 
 			_frag_off = ntohs(*fp) & ~0x7;
@@ -255,11 +255,7 @@ int ipv6_find_hdr(const struct sk_buff *skb, unsigned int *offset,
 						*fragoff = _frag_off;
 					return hp->nexthdr;
 				}
-				if (!found)
-					return -ENOENT;
-				if (fragoff)
-					*fragoff = _frag_off;
-				break;
+				return -ENOENT;
 			}
 			hdrlen = 8;
 		} else if (nexthdr == NEXTHDR_AUTH) {
@@ -271,6 +267,7 @@ int ipv6_find_hdr(const struct sk_buff *skb, unsigned int *offset,
 
 		if (!found) {
 			nexthdr = hp->nexthdr;
+			len -= hdrlen;
 			start += hdrlen;
 		}
 	} while (!found);

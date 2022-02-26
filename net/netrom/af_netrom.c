@@ -17,7 +17,7 @@
 #include <linux/in.h>
 #include <linux/slab.h>
 #include <linux/kernel.h>
-#include <linux/sched/signal.h>
+#include <linux/sched.h>
 #include <linux/timer.h>
 #include <linux/string.h>
 #include <linux/sockios.h>
@@ -30,7 +30,7 @@
 #include <linux/skbuff.h>
 #include <net/net_namespace.h>
 #include <net/sock.h>
-#include <linux/uaccess.h>
+#include <asm/uaccess.h>
 #include <linux/fcntl.h>
 #include <linux/termios.h>	/* For TIOCINQ/OUTQ */
 #include <linux/mm.h>
@@ -241,9 +241,9 @@ void nr_destroy_socket(struct sock *);
 /*
  *	Handler for deferred kills.
  */
-static void nr_destroy_timer(struct timer_list *t)
+static void nr_destroy_timer(unsigned long data)
 {
-	struct sock *sk = from_timer(sk, t, sk_timer);
+	struct sock *sk=(struct sock *)data;
 	bh_lock_sock(sk);
 	sock_hold(sk);
 	nr_destroy_socket(sk);
@@ -433,7 +433,7 @@ static int nr_create(struct net *net, struct socket *sock, int protocol,
 	if (sock->type != SOCK_SEQPACKET || protocol != 0)
 		return -ESOCKTNOSUPPORT;
 
-	sk = sk_alloc(net, PF_NETROM, GFP_ATOMIC, &nr_proto, kern);
+	sk = sk_alloc(net, PF_NETROM, GFP_ATOMIC, &nr_proto);
 	if (sk  == NULL)
 		return -ENOMEM;
 
@@ -476,7 +476,7 @@ static struct sock *nr_make_new(struct sock *osk)
 	if (osk->sk_type != SOCK_SEQPACKET)
 		return NULL;
 
-	sk = sk_alloc(sock_net(osk), PF_NETROM, GFP_ATOMIC, osk->sk_prot, 0);
+	sk = sk_alloc(sock_net(osk), PF_NETROM, GFP_ATOMIC, osk->sk_prot);
 	if (sk == NULL)
 		return NULL;
 
@@ -765,8 +765,7 @@ out_release:
 	return err;
 }
 
-static int nr_accept(struct socket *sock, struct socket *newsock, int flags,
-		     bool kern)
+static int nr_accept(struct socket *sock, struct socket *newsock, int flags)
 {
 	struct sk_buff *skb;
 	struct sock *newsk;
@@ -1012,7 +1011,7 @@ int nr_rx_frame(struct sk_buff *skb, struct net_device *dev)
 	skb_queue_head(&sk->sk_receive_queue, skb);
 
 	if (!sock_flag(sk, SOCK_DEAD))
-		sk->sk_data_ready(sk);
+		sk->sk_data_ready(sk, skb->len);
 
 	bh_unlock_sock(sk);
 
@@ -1024,11 +1023,12 @@ int nr_rx_frame(struct sk_buff *skb, struct net_device *dev)
 	return 1;
 }
 
-static int nr_sendmsg(struct socket *sock, struct msghdr *msg, size_t len)
+static int nr_sendmsg(struct kiocb *iocb, struct socket *sock,
+		      struct msghdr *msg, size_t len)
 {
 	struct sock *sk = sock->sk;
 	struct nr_sock *nr = nr_sk(sk);
-	DECLARE_SOCKADDR(struct sockaddr_ax25 *, usax, msg->msg_name);
+	struct sockaddr_ax25 *usax = (struct sockaddr_ax25 *)msg->msg_name;
 	int err;
 	struct sockaddr_ax25 sax;
 	struct sk_buff *skb;
@@ -1133,11 +1133,11 @@ out:
 	return err;
 }
 
-static int nr_recvmsg(struct socket *sock, struct msghdr *msg, size_t size,
-		      int flags)
+static int nr_recvmsg(struct kiocb *iocb, struct socket *sock,
+		      struct msghdr *msg, size_t size, int flags)
 {
 	struct sock *sk = sock->sk;
-	DECLARE_SOCKADDR(struct sockaddr_ax25 *, sax, msg->msg_name);
+	struct sockaddr_ax25 *sax = (struct sockaddr_ax25 *)msg->msg_name;
 	size_t copied;
 	struct sk_buff *skb;
 	int er;
@@ -1167,7 +1167,7 @@ static int nr_recvmsg(struct socket *sock, struct msghdr *msg, size_t size,
 		msg->msg_flags |= MSG_TRUNC;
 	}
 
-	er = skb_copy_datagram_msg(skb, 0, msg, copied);
+	er = skb_copy_datagram_iovec(skb, 0, msg->msg_iov, copied);
 	if (er < 0) {
 		skb_free_datagram(sk, skb);
 		release_sock(sk);
@@ -1418,7 +1418,7 @@ static int __init nr_proto_init(void)
 		struct net_device *dev;
 
 		sprintf(name, "nr%d", i);
-		dev = alloc_netdev(0, name, NET_NAME_UNKNOWN, nr_setup);
+		dev = alloc_netdev(0, name, nr_setup);
 		if (!dev) {
 			printk(KERN_ERR "NET/ROM: nr_proto_init - unable to allocate device structure\n");
 			goto fail;
@@ -1439,7 +1439,7 @@ static int __init nr_proto_init(void)
 		goto fail;
 	}
 
-	register_netdevice_notifier(&nr_dev_notifier);
+	register_netdevice_notifier_rh(&nr_dev_notifier);
 
 	ax25_register_pid(&nr_pid);
 	ax25_linkfail_register(&nr_linkfail_notifier);
@@ -1494,7 +1494,7 @@ static void __exit nr_exit(void)
 	ax25_linkfail_release(&nr_linkfail_notifier);
 	ax25_protocol_release(AX25_P_NETROM);
 
-	unregister_netdevice_notifier(&nr_dev_notifier);
+	unregister_netdevice_notifier_rh(&nr_dev_notifier);
 
 	sock_unregister(PF_NETROM);
 

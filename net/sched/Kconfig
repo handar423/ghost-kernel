@@ -521,7 +521,6 @@ config NET_CLS_FLOW
 config NET_CLS_CGROUP
 	tristate "Control Group Classifier"
 	select NET_CLS
-	select CGROUP_NET_CLASSID
 	depends on CGROUPS
 	---help---
 	  Say Y here if you want to classify packets based on the control
@@ -795,17 +794,16 @@ config NET_ACT_VLAN
 	  To compile this code as a module, choose M here: the
 	  module will be called act_vlan.
 
-config NET_ACT_BPF
-        tristate "BPF based action"
+config NET_ACT_TUNNEL_KEY
+        tristate "IP tunnel metadata manipulation"
         depends on NET_CLS_ACT
         ---help---
-	  Say Y here to execute BPF code on packets. The BPF code will decide
-	  if the packet should be dropped or not.
+	  Say Y here to set/release ip tunnel metadata.
 
 	  If unsure, say N.
 
 	  To compile this code as a module, choose M here: the
-	  module will be called act_bpf.
+	  module will be called act_tunnel_key.
 
 config NET_ACT_CONNMARK
         tristate "Netfilter Connection Mark Retriever"
@@ -842,17 +840,6 @@ config NET_ACT_IFE
 
 	  To compile this code as a module, choose M here: the
 	  module will be called act_ife.
-
-config NET_ACT_TUNNEL_KEY
-        tristate "IP tunnel metadata manipulation"
-        depends on NET_CLS_ACT
-        ---help---
-	  Say Y here to set/release ip tunnel metadata.
-
-	  If unsure, say N.
-
-	  To compile this code as a module, choose M here: the
-	  module will be called act_tunnel_key.
 
 config NET_IFE_SKBMARK
         tristate "Support to encoding decoding skb mark on IFE action"

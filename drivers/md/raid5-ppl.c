@@ -22,6 +22,9 @@
 #include "md.h"
 #include "raid5.h"
 
+#define STRIPE_SIZE		PAGE_SIZE
+#define STRIPE_SECTORS		(STRIPE_SIZE>>9)
+
 /*
  * PPL consists of a 4KB header (struct ppl_header) and at least 128KB for
  * partial parity data. The header contains an array of entries
@@ -150,6 +153,7 @@ struct ppl_io_unit {
 
 	/* inline bio and its biovec for submitting the iounit */
 	struct bio bio;
+	struct bio_aux bio_aux;
 	struct bio_vec biovec[PPL_IO_INLINE_BVECS];
 };
 
@@ -249,7 +253,11 @@ static struct ppl_io_unit *ppl_new_iounit(struct ppl_log *log,
 	INIT_LIST_HEAD(&io->log_sibling);
 	INIT_LIST_HEAD(&io->stripe_list);
 	atomic_set(&io->pending_stripes, 0);
-	bio_init(&io->bio, io->biovec, PPL_IO_INLINE_BVECS);
+	bio_init(&io->bio);
+	io->bio.bio_aux = &io->bio_aux;
+	atomic_set(&io->bio.bio_aux->__bi_remaining, 1);
+	io->bio.bi_io_vec = io->biovec;
+	io->bio.bi_max_vecs = PPL_IO_INLINE_BVECS;
 
 	pplhdr = page_address(io->header_page);
 	clear_page(pplhdr);
@@ -393,7 +401,7 @@ int ppl_write_stripe(struct r5conf *conf, struct stripe_head *sh)
 	return 0;
 }
 
-static void ppl_log_endio(struct bio *bio)
+static void ppl_log_endio(struct bio *bio, int error)
 {
 	struct ppl_io_unit *io = bio->bi_private;
 	struct ppl_log *log = io->log;
@@ -402,7 +410,7 @@ static void ppl_log_endio(struct bio *bio)
 
 	pr_debug("%s: seq: %llu\n", __func__, io->seq);
 
-	if (bio->bi_status)
+	if (error)
 		md_error(ppl_conf->mddev, log->rdev);
 
 	list_for_each_entry_safe(sh, next, &io->stripe_list, log_list) {
@@ -418,11 +426,11 @@ static void ppl_submit_iounit_bio(struct ppl_io_unit *io, struct bio *bio)
 	char b[BDEVNAME_SIZE];
 
 	pr_debug("%s: seq: %llu size: %u sector: %llu dev: %s\n",
-		 __func__, io->seq, bio->bi_iter.bi_size,
-		 (unsigned long long)bio->bi_iter.bi_sector,
-		 bio_devname(bio, b));
+		 __func__, io->seq, bio->bi_size,
+		 (unsigned long long)bio->bi_sector,
+		 bdevname(bio->bi_bdev, b));
 
-	submit_bio(bio);
+	submit_bio(bio->bi_rw, bio);
 }
 
 static void ppl_submit_iounit(struct ppl_io_unit *io)
@@ -437,7 +445,7 @@ static void ppl_submit_iounit(struct ppl_io_unit *io)
 	bio->bi_private = io;
 
 	if (!log->rdev || test_bit(Faulty, &log->rdev->flags)) {
-		ppl_log_endio(bio);
+		ppl_log_endio(bio,0);
 		return;
 	}
 
@@ -464,9 +472,9 @@ static void ppl_submit_iounit(struct ppl_io_unit *io)
 
 
 	bio->bi_end_io = ppl_log_endio;
-	bio->bi_opf = REQ_OP_WRITE | REQ_FUA;
-	bio_set_dev(bio, log->rdev->bdev);
-	bio->bi_iter.bi_sector = log->next_io_sector;
+	bio->bi_rw = WRITE_FUA;
+	bio->bi_bdev = log->rdev->bdev;
+	bio->bi_sector = log->next_io_sector;
 	bio_add_page(bio, io->header_page, PAGE_SIZE, 0);
 
 	pr_debug("%s: log->current_io_sector: %llu\n", __func__,
@@ -485,9 +493,9 @@ static void ppl_submit_iounit(struct ppl_io_unit *io)
 
 			bio = bio_alloc_bioset(GFP_NOIO, BIO_MAX_PAGES,
 					       ppl_conf->bs);
-			bio->bi_opf = prev->bi_opf;
-			bio_copy_dev(bio, prev);
-			bio->bi_iter.bi_sector = bio_end_sector(prev);
+			bio->bi_rw = prev->bi_rw;
+			bio->bi_bdev = prev->bi_bdev;
+			bio->bi_sector = bio_end_sector(prev);
 			bio_add_page(bio, sh->ppl_page, PAGE_SIZE, 0);
 
 			bio_chain(bio, prev);
@@ -770,7 +778,7 @@ static int ppl_recover_entry(struct ppl_log *log, struct ppl_header_entry *e,
 				 __func__, indent, "", bdevname(rdev->bdev, b),
 				 (unsigned long long)sector);
 			if (!sync_page_io(rdev, sector, block_size, page2,
-					REQ_OP_READ, 0, false)) {
+					  READ, false)) {
 				md_error(mddev, rdev);
 				pr_debug("%s:%*s read failed!\n", __func__,
 					 indent, "");
@@ -792,8 +800,7 @@ static int ppl_recover_entry(struct ppl_log *log, struct ppl_header_entry *e,
 				 (unsigned long long)(ppl_sector + i));
 			if (!sync_page_io(log->rdev,
 					ppl_sector - log->rdev->data_offset + i,
-					block_size, page2, REQ_OP_READ, 0,
-					false)) {
+					block_size, page2, READ, false)) {
 				pr_debug("%s:%*s read failed!\n", __func__,
 					 indent, "");
 				md_error(mddev, log->rdev);
@@ -816,7 +823,7 @@ static int ppl_recover_entry(struct ppl_log *log, struct ppl_header_entry *e,
 			 (unsigned long long)parity_sector,
 			 bdevname(parity_rdev->bdev, b));
 		if (!sync_page_io(parity_rdev, parity_sector, block_size,
-				page1, REQ_OP_WRITE, 0, false)) {
+				  page1, WRITE, false)) {
 			pr_debug("%s:%*s parity write error!\n", __func__,
 				 indent, "");
 			md_error(mddev, parity_rdev);
@@ -868,7 +875,7 @@ static int ppl_recover(struct ppl_log *log, struct ppl_header *pplhdr,
 			int s = pp_size > PAGE_SIZE ? PAGE_SIZE : pp_size;
 
 			if (!sync_page_io(rdev, sector - rdev->data_offset,
-					s, page, REQ_OP_READ, 0, false)) {
+					s, page, READ, false)) {
 				md_error(mddev, rdev);
 				ret = -EIO;
 				goto out;
@@ -925,14 +932,13 @@ static int ppl_write_empty_header(struct ppl_log *log)
 	pplhdr = page_address(page);
 	/* zero out PPL space to avoid collision with old PPLs */
 	blkdev_issue_zeroout(rdev->bdev, rdev->ppl.sector,
-			    log->rdev->ppl.size, GFP_NOIO, 0);
+			    log->rdev->ppl.size, GFP_NOIO);
 	memset(pplhdr->reserved, 0xff, PPL_HDR_RESERVED);
 	pplhdr->signature = cpu_to_le32(log->ppl_conf->signature);
 	pplhdr->checksum = cpu_to_le32(~crc32c_le(~0, pplhdr, PAGE_SIZE));
 
 	if (!sync_page_io(rdev, rdev->ppl.sector - rdev->data_offset,
-			  PPL_HEADER_SIZE, page, REQ_OP_WRITE | REQ_SYNC |
-			  REQ_FUA, 0, false)) {
+			  PPL_HEADER_SIZE, page, WRITE_FUA, false)) {
 		md_error(rdev->mddev, rdev);
 		ret = -EIO;
 	}
@@ -969,8 +975,8 @@ static int ppl_load_distributed(struct ppl_log *log)
 	while (pplhdr_offset < rdev->ppl.size - (PPL_HEADER_SIZE >> 9)) {
 		if (!sync_page_io(rdev,
 				  rdev->ppl.sector - rdev->data_offset +
-				  pplhdr_offset, PAGE_SIZE, page, REQ_OP_READ,
-				  0, false)) {
+				  pplhdr_offset, PAGE_SIZE, page, READ,
+				  false)) {
 			md_error(mddev, rdev);
 			ret = -EIO;
 			/* if not able to read - don't recover any PPL */
@@ -1238,7 +1244,7 @@ int ppl_init_log(struct r5conf *conf)
 		goto err;
 	}
 
-	ppl_conf->bs = bioset_create(conf->raid_disks, 0, BIOSET_NEED_BVECS);
+	ppl_conf->bs = bioset_create(conf->raid_disks, 0);
 	if (!ppl_conf->bs) {
 		ret = -ENOMEM;
 		goto err;
@@ -1282,7 +1288,7 @@ int ppl_init_log(struct r5conf *conf)
 				goto err;
 
 			q = bdev_get_queue(rdev->bdev);
-			if (test_bit(QUEUE_FLAG_WC, &q->queue_flags))
+			if (q->flush_flags)
 				need_cache_flush = true;
 			ppl_init_child_log(log, rdev);
 		}
@@ -1305,7 +1311,7 @@ int ppl_init_log(struct r5conf *conf)
 		 * without any issues, set the array as clean.
 		 */
 		mddev->recovery_cp = MaxSector;
-		set_bit(MD_SB_CHANGE_CLEAN, &mddev->sb_flags);
+		set_bit(MD_SB_CHANGE_CLEAN, &mddev->flags);
 	} else if (mddev->pers && ppl_conf->mismatch_count > 0) {
 		/* no mismatch allowed when enabling PPL for a running array */
 		ret = -EINVAL;

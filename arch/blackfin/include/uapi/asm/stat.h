@@ -1,12 +1,11 @@
-/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 /*
  * Copyright 2004-2006 Analog Devices Inc.
  *
  * Licensed under the GPL-2.
  */
 
-#ifndef _UAPI_BFIN_STAT_H
-#define _UAPI_BFIN_STAT_H
+#ifndef _BFIN_STAT_H
+#define _BFIN_STAT_H
 
 struct stat {
 	unsigned short st_dev;
@@ -67,4 +66,4 @@ struct stat64 {
 	unsigned long long st_ino;
 };
 
-#endif /* _UAPI_BFIN_STAT_H */
+#endif				/* _BFIN_STAT_H */

@@ -12,6 +12,7 @@
 #include <linux/device.h>
 #include <linux/input.h>
 #include <linux/input/mt.h>
+#include <linux/kconfig.h>
 #include <linux/rmi.h>
 #include <linux/slab.h>
 #include <linux/of.h>
@@ -1075,13 +1076,7 @@ static int rmi_f11_initialize(struct rmi_function *fn)
 	if (!f11)
 		return -ENOMEM;
 
-	if (fn->dev.of_node) {
-		rc = rmi_2d_sensor_of_probe(&fn->dev, &f11->sensor_pdata);
-		if (rc)
-			return rc;
-	} else {
-		f11->sensor_pdata = pdata->sensor_pdata;
-	}
+	f11->sensor_pdata = pdata->sensor_pdata;
 
 	f11->rezero_wait_ms = f11->sensor_pdata.rezero_wait;
 

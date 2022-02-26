@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  *  linux/fs/nfs/file.c
  *
@@ -56,7 +55,7 @@ nfs4_file_open(struct inode *inode, struct file *filp)
 	openflags &= ~(O_CREAT|O_EXCL);
 
 	parent = dget_parent(dentry);
-	dir = d_inode(parent);
+	dir = parent->d_inode;
 
 	ctx = alloc_nfs_open_context(file_dentry(filp), filp->f_mode, filp);
 	err = PTR_ERR(ctx);
@@ -67,7 +66,7 @@ nfs4_file_open(struct inode *inode, struct file *filp)
 	if (openflags & O_TRUNC) {
 		attr.ia_valid |= ATTR_SIZE;
 		attr.ia_size = 0;
-		filemap_write_and_wait(inode->i_mapping);
+		nfs_sync_inode(inode);
 	}
 
 	inode = NFS_PROTO(dir)->open_context(dir, ctx, openflags, &attr, NULL);
@@ -84,7 +83,7 @@ nfs4_file_open(struct inode *inode, struct file *filp)
 			goto out_drop;
 		}
 	}
-	if (inode != d_inode(dentry))
+	if (inode != dentry->d_inode)
 		goto out_drop;
 
 	nfs_set_verifier(dentry, nfs_save_change_attribute(dir));
@@ -134,9 +133,10 @@ static ssize_t nfs4_copy_file_range(struct file *file_in, loff_t pos_in,
 				    struct file *file_out, loff_t pos_out,
 				    size_t count, unsigned int flags)
 {
+	if (!nfs_server_capable(file_inode(file_out), NFS_CAP_COPY))
+		return -EOPNOTSUPP;
 	if (file_inode(file_in) == file_inode(file_out))
-		return -EINVAL;
-
+		return -EOPNOTSUPP;
 	return nfs42_proc_copy(file_in, pos_in, file_out, pos_out, count);
 }
 
@@ -199,13 +199,13 @@ static int nfs42_clone_file_range(struct file *src_file, loff_t src_off,
 
 	/* XXX: do we lock at all? what if server needs CB_RECALL_LAYOUT? */
 	if (same_inode) {
-		inode_lock(src_inode);
+		mutex_lock(&src_inode->i_mutex);
 	} else if (dst_inode < src_inode) {
-		inode_lock_nested(dst_inode, I_MUTEX_PARENT);
-		inode_lock_nested(src_inode, I_MUTEX_CHILD);
+		mutex_lock_nested(&dst_inode->i_mutex, I_MUTEX_PARENT);
+		mutex_lock_nested(&src_inode->i_mutex, I_MUTEX_CHILD);
 	} else {
-		inode_lock_nested(src_inode, I_MUTEX_PARENT);
-		inode_lock_nested(dst_inode, I_MUTEX_CHILD);
+		mutex_lock_nested(&src_inode->i_mutex, I_MUTEX_PARENT);
+		mutex_lock_nested(&dst_inode->i_mutex, I_MUTEX_CHILD);
 	}
 
 	/* flush all pending writes on both src and dst so that server
@@ -226,39 +226,43 @@ static int nfs42_clone_file_range(struct file *src_file, loff_t src_off,
 
 out_unlock:
 	if (same_inode) {
-		inode_unlock(src_inode);
+		mutex_unlock(&src_inode->i_mutex);
 	} else if (dst_inode < src_inode) {
-		inode_unlock(src_inode);
-		inode_unlock(dst_inode);
+		mutex_unlock(&src_inode->i_mutex);
+		mutex_unlock(&dst_inode->i_mutex);
 	} else {
-		inode_unlock(dst_inode);
-		inode_unlock(src_inode);
+		mutex_unlock(&dst_inode->i_mutex);
+		mutex_unlock(&src_inode->i_mutex);
 	}
 out:
 	return ret;
 }
 #endif /* CONFIG_NFS_V4_2 */
 
-const struct file_operations nfs4_file_operations = {
-	.read_iter	= nfs_file_read,
-	.write_iter	= nfs_file_write,
-	.mmap		= nfs_file_mmap,
-	.open		= nfs4_file_open,
-	.flush		= nfs4_file_flush,
-	.release	= nfs_file_release,
-	.fsync		= nfs_file_fsync,
-	.lock		= nfs_lock,
-	.flock		= nfs_flock,
-	.splice_read	= generic_file_splice_read,
-	.splice_write	= iter_file_splice_write,
-	.check_flags	= nfs_check_flags,
-	.setlease	= simple_nosetlease,
+const struct file_operations_extend nfs4_file_operations = {
+	.kabi_fops = {
+		.read		= do_sync_read,
+		.write		= do_sync_write,
+		.aio_read	= nfs_file_read,
+		.aio_write	= nfs_file_write,
+		.mmap		= nfs_file_mmap,
+		.open		= nfs4_file_open,
+		.flush		= nfs4_file_flush,
+		.release	= nfs_file_release,
+		.fsync		= nfs_file_fsync,
+		.lock		= nfs_lock,
+		.flock		= nfs_flock,
+		.splice_read	= nfs_file_splice_read,
+		.splice_write	= nfs_file_splice_write,
+		.check_flags	= nfs_check_flags,
+		.setlease	= nfs_setlease,
 #ifdef CONFIG_NFS_V4_2
-	.copy_file_range = nfs4_copy_file_range,
-	.llseek		= nfs4_file_llseek,
-	.fallocate	= nfs42_fallocate,
-	.clone_file_range = nfs42_clone_file_range,
+		.llseek		= nfs4_file_llseek,
+		.fallocate	= nfs42_fallocate,
 #else
-	.llseek		= nfs_file_llseek,
+		.llseek		= nfs_file_llseek,
 #endif
+	},
+	.copy_file_range = nfs4_copy_file_range,
+	.clone_file_range = nfs42_clone_file_range,
 };

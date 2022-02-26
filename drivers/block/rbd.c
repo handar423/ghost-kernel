@@ -124,11 +124,13 @@ static int atomic_dec_return_safe(atomic_t *v)
 #define RBD_FEATURE_STRIPINGV2		(1ULL<<1)
 #define RBD_FEATURE_EXCLUSIVE_LOCK	(1ULL<<2)
 #define RBD_FEATURE_DATA_POOL		(1ULL<<7)
+#define RBD_FEATURE_OPERATIONS		(1ULL<<8)
 
 #define RBD_FEATURES_ALL	(RBD_FEATURE_LAYERING |		\
 				 RBD_FEATURE_STRIPINGV2 |	\
 				 RBD_FEATURE_EXCLUSIVE_LOCK |	\
-				 RBD_FEATURE_DATA_POOL)
+				 RBD_FEATURE_DATA_POOL |	\
+				 RBD_FEATURE_OPERATIONS)
 
 /* Features supported by this (client software) implementation. */
 
@@ -281,7 +283,6 @@ struct rbd_obj_request {
 	int			result;
 
 	rbd_obj_callback_t	callback;
-	struct completion	completion;
 
 	struct kref		kref;
 };
@@ -441,8 +442,6 @@ static DEFINE_SPINLOCK(rbd_client_list_lock);
 static struct kmem_cache	*rbd_img_request_cache;
 static struct kmem_cache	*rbd_obj_request_cache;
 
-static struct bio_set		*rbd_bio_clone;
-
 static int rbd_major;
 static DEFINE_IDA(rbd_dev_id_ida);
 
@@ -466,7 +465,27 @@ static ssize_t rbd_add_single_major(struct bus_type *bus, const char *buf,
 static ssize_t rbd_remove_single_major(struct bus_type *bus, const char *buf,
 				       size_t count);
 static int rbd_dev_image_probe(struct rbd_device *rbd_dev, int depth);
-static void rbd_spec_put(struct rbd_spec *spec);
+
+static ssize_t rbd_supported_features_show(struct bus_type *bus, char *buf)
+{
+	return sprintf(buf, "0x%llx\n", RBD_FEATURES_SUPPORTED);
+}
+
+static struct bus_attribute rbd_bus_attrs[] = {
+	__ATTR(add, S_IWUSR, NULL, rbd_add),
+	__ATTR(remove, S_IWUSR, NULL, rbd_remove),
+	__ATTR(supported_features, S_IRUGO, rbd_supported_features_show, NULL),
+	__ATTR_NULL
+};
+
+static struct bus_attribute rbd_bus_attrs_single_major[] = {
+	__ATTR(add, S_IWUSR, NULL, rbd_add),
+	__ATTR(remove, S_IWUSR, NULL, rbd_remove),
+	__ATTR(add_single_major, S_IWUSR, NULL, rbd_add_single_major),
+	__ATTR(remove_single_major, S_IWUSR, NULL, rbd_remove_single_major),
+	__ATTR(supported_features, S_IRUGO, rbd_supported_features_show, NULL),
+	__ATTR_NULL
+};
 
 static int rbd_dev_id_to_minor(int dev_id)
 {
@@ -494,46 +513,9 @@ static bool rbd_is_lock_owner(struct rbd_device *rbd_dev)
 	return is_lock_owner;
 }
 
-static ssize_t rbd_supported_features_show(struct bus_type *bus, char *buf)
-{
-	return sprintf(buf, "0x%llx\n", RBD_FEATURES_SUPPORTED);
-}
-
-static BUS_ATTR(add, S_IWUSR, NULL, rbd_add);
-static BUS_ATTR(remove, S_IWUSR, NULL, rbd_remove);
-static BUS_ATTR(add_single_major, S_IWUSR, NULL, rbd_add_single_major);
-static BUS_ATTR(remove_single_major, S_IWUSR, NULL, rbd_remove_single_major);
-static BUS_ATTR(supported_features, S_IRUGO, rbd_supported_features_show, NULL);
-
-static struct attribute *rbd_bus_attrs[] = {
-	&bus_attr_add.attr,
-	&bus_attr_remove.attr,
-	&bus_attr_add_single_major.attr,
-	&bus_attr_remove_single_major.attr,
-	&bus_attr_supported_features.attr,
-	NULL,
-};
-
-static umode_t rbd_bus_is_visible(struct kobject *kobj,
-				  struct attribute *attr, int index)
-{
-	if (!single_major &&
-	    (attr == &bus_attr_add_single_major.attr ||
-	     attr == &bus_attr_remove_single_major.attr))
-		return 0;
-
-	return attr->mode;
-}
-
-static const struct attribute_group rbd_bus_group = {
-	.attrs = rbd_bus_attrs,
-	.is_visible = rbd_bus_is_visible,
-};
-__ATTRIBUTE_GROUPS(rbd_bus);
-
 static struct bus_type rbd_bus_type = {
 	.name		= "rbd",
-	.bus_groups	= rbd_bus_groups,
+	.bus_attrs	= rbd_bus_attrs,
 };
 
 static void rbd_root_dev_release(struct device *dev)
@@ -766,6 +748,7 @@ static struct rbd_client *rbd_client_find(struct ceph_options *ceph_opts)
  */
 enum {
 	Opt_queue_depth,
+	Opt_lock_timeout,
 	Opt_last_int,
 	/* int args above */
 	Opt_last_string,
@@ -774,11 +757,13 @@ enum {
 	Opt_read_write,
 	Opt_lock_on_read,
 	Opt_exclusive,
+	Opt_notrim,
 	Opt_err
 };
 
 static match_table_t rbd_opts_tokens = {
 	{Opt_queue_depth, "queue_depth=%d"},
+	{Opt_lock_timeout, "lock_timeout=%d"},
 	/* int args above */
 	/* string args above */
 	{Opt_read_only, "read_only"},
@@ -787,20 +772,25 @@ static match_table_t rbd_opts_tokens = {
 	{Opt_read_write, "rw"},		/* Alternate spelling */
 	{Opt_lock_on_read, "lock_on_read"},
 	{Opt_exclusive, "exclusive"},
+	{Opt_notrim, "notrim"},
 	{Opt_err, NULL}
 };
 
 struct rbd_options {
 	int	queue_depth;
+	unsigned long	lock_timeout;
 	bool	read_only;
 	bool	lock_on_read;
 	bool	exclusive;
+	bool	trim;
 };
 
 #define RBD_QUEUE_DEPTH_DEFAULT	BLKDEV_MAX_RQ
+#define RBD_LOCK_TIMEOUT_DEFAULT 0  /* no timeout */
 #define RBD_READ_ONLY_DEFAULT	false
 #define RBD_LOCK_ON_READ_DEFAULT false
 #define RBD_EXCLUSIVE_DEFAULT	false
+#define RBD_TRIM_DEFAULT	true
 
 static int parse_rbd_opts_token(char *c, void *private)
 {
@@ -830,6 +820,14 @@ static int parse_rbd_opts_token(char *c, void *private)
 		}
 		rbd_opts->queue_depth = intval;
 		break;
+	case Opt_lock_timeout:
+		/* 0 is "wait forever" (i.e. infinite timeout) */
+		if (intval < 0 || intval > INT_MAX / 1000) {
+			pr_err("lock_timeout out of range\n");
+			return -EINVAL;
+		}
+		rbd_opts->lock_timeout = msecs_to_jiffies(intval * 1000);
+		break;
 	case Opt_read_only:
 		rbd_opts->read_only = true;
 		break;
@@ -841,6 +839,9 @@ static int parse_rbd_opts_token(char *c, void *private)
 		break;
 	case Opt_exclusive:
 		rbd_opts->exclusive = true;
+		break;
+	case Opt_notrim:
+		rbd_opts->trim = false;
 		break;
 	default:
 		/* libceph prints "bad option" msg */
@@ -862,26 +863,6 @@ static char* obj_op_name(enum obj_operation_type op_type)
 	default:
 		return "???";
 	}
-}
-
-/*
- * Get a ceph client with specific addr and configuration, if one does
- * not exist create it.  Either way, ceph_opts is consumed by this
- * function.
- */
-static struct rbd_client *rbd_get_client(struct ceph_options *ceph_opts)
-{
-	struct rbd_client *rbdc;
-
-	mutex_lock_nested(&client_mutex, SINGLE_DEPTH_NESTING);
-	rbdc = rbd_client_find(ceph_opts);
-	if (rbdc)	/* using an existing client */
-		ceph_destroy_options(ceph_opts);
-	else
-		rbdc = rbd_client_create(ceph_opts);
-	mutex_unlock(&client_mutex);
-
-	return rbdc;
 }
 
 /*
@@ -910,6 +891,56 @@ static void rbd_put_client(struct rbd_client *rbdc)
 {
 	if (rbdc)
 		kref_put(&rbdc->kref, rbd_client_release);
+}
+
+static int wait_for_latest_osdmap(struct ceph_client *client)
+{
+	u64 newest_epoch;
+	int ret;
+
+	ret = ceph_monc_get_version(&client->monc, "osdmap", &newest_epoch);
+	if (ret)
+		return ret;
+
+	if (client->osdc.osdmap->epoch >= newest_epoch)
+		return 0;
+
+	ceph_osdc_maybe_request_map(&client->osdc);
+	return ceph_monc_wait_osdmap(&client->monc, newest_epoch,
+				     client->options->mount_timeout);
+}
+
+/*
+ * Get a ceph client with specific addr and configuration, if one does
+ * not exist create it.  Either way, ceph_opts is consumed by this
+ * function.
+ */
+static struct rbd_client *rbd_get_client(struct ceph_options *ceph_opts)
+{
+	struct rbd_client *rbdc;
+	int ret;
+
+	mutex_lock_nested(&client_mutex, SINGLE_DEPTH_NESTING);
+	rbdc = rbd_client_find(ceph_opts);
+	if (rbdc) {
+		ceph_destroy_options(ceph_opts);
+
+		/*
+		 * Using an existing client.  Make sure ->pg_pools is up to
+		 * date before we look up the pool id in do_rbd_add().
+		 */
+		ret = wait_for_latest_osdmap(rbdc->client);
+		if (ret) {
+			rbd_warn(NULL, "failed to get latest osdmap: %d", ret);
+			rbd_put_client(rbdc);
+			rbdc = ERR_PTR(ret);
+		}
+	} else {
+		rbdc = rbd_client_create(ceph_opts);
+	}
+	mutex_unlock(&client_mutex);
+
+	return rbdc;
 }
 
 static bool rbd_image_format_valid(u32 image_format)
@@ -1272,23 +1303,23 @@ static void bio_chain_put(struct bio *chain)
  */
 static void zero_bio_chain(struct bio *chain, int start_ofs)
 {
-	struct bio_vec bv;
-	struct bvec_iter iter;
+	struct bio_vec *bv;
 	unsigned long flags;
 	void *buf;
+	int i;
 	int pos = 0;
 
 	while (chain) {
-		bio_for_each_segment(bv, chain, iter) {
-			if (pos + bv.bv_len > start_ofs) {
+		bio_for_each_segment(bv, chain, i) {
+			if (pos + bv->bv_len > start_ofs) {
 				int remainder = max(start_ofs - pos, 0);
-				buf = bvec_kmap_irq(&bv, &flags);
+				buf = bvec_kmap_irq(bv, &flags);
 				memset(buf + remainder, 0,
-				       bv.bv_len - remainder);
-				flush_dcache_page(bv.bv_page);
+				       bv->bv_len - remainder);
+				flush_dcache_page(bv->bv_page);
 				bvec_kunmap_irq(buf, &flags);
 			}
-			pos += bv.bv_len;
+			pos += bv->bv_len;
 		}
 
 		chain = chain->bi_next;
@@ -1336,14 +1367,74 @@ static struct bio *bio_clone_range(struct bio *bio_src,
 					unsigned int len,
 					gfp_t gfpmask)
 {
+	struct bio_vec *bv;
+	unsigned int resid;
+	unsigned short idx;
+	unsigned int voff;
+	unsigned short end_idx;
+	unsigned short vcnt;
 	struct bio *bio;
 
-	bio = bio_clone_fast(bio_src, gfpmask, rbd_bio_clone);
+	/* Handle the easy case for the caller */
+
+	if (!offset && len == bio_src->bi_size)
+		return bio_clone(bio_src, gfpmask);
+
+	if (WARN_ON_ONCE(!len))
+		return NULL;
+	if (WARN_ON_ONCE(len > bio_src->bi_size))
+		return NULL;
+	if (WARN_ON_ONCE(offset > bio_src->bi_size - len))
+		return NULL;
+
+	/* Find first affected segment... */
+
+	resid = offset;
+	bio_for_each_segment(bv, bio_src, idx) {
+		if (resid < bv->bv_len)
+			break;
+		resid -= bv->bv_len;
+	}
+	voff = resid;
+
+	/* ...and the last affected segment */
+
+	resid += len;
+	__bio_for_each_segment(bv, bio_src, end_idx, idx) {
+		if (resid <= bv->bv_len)
+			break;
+		resid -= bv->bv_len;
+	}
+	vcnt = end_idx - idx + 1;
+
+	/* Build the clone */
+
+	bio = bio_alloc(gfpmask, (unsigned int) vcnt);
 	if (!bio)
 		return NULL;	/* ENOMEM */
 
-	bio_advance(bio, offset);
-	bio->bi_iter.bi_size = len;
+	bio->bi_bdev = bio_src->bi_bdev;
+	bio->bi_sector = bio_src->bi_sector + (offset >> SECTOR_SHIFT);
+	bio->bi_rw = bio_src->bi_rw;
+	bio->bi_flags |= 1 << BIO_CLONED;
+
+	/*
+	 * Copy over our part of the bio_vec, then update the first
+	 * and last (or only) entries.
+	 */
+	memcpy(&bio->bi_io_vec[0], &bio_src->bi_io_vec[idx],
+			vcnt * sizeof (struct bio_vec));
+	bio->bi_io_vec[0].bv_offset += voff;
+	if (vcnt > 1) {
+		bio->bi_io_vec[0].bv_len -= voff;
+		bio->bi_io_vec[vcnt - 1].bv_len = resid;
+	} else {
+		bio->bi_io_vec[0].bv_len = len;
+	}
+
+	bio->bi_vcnt = vcnt;
+	bio->bi_size = len;
+	bio->bi_idx = 0;
 
 	return bio;
 }
@@ -1374,7 +1465,7 @@ static struct bio *bio_chain_clone_range(struct bio **bio_src,
 
 	/* Build up a chain of clone bios up to the limit */
 
-	if (!bi || off >= bi->bi_iter.bi_size || !len)
+	if (!bi || off >= bi->bi_size || !len)
 		return NULL;		/* Nothing to clone */
 
 	end = &chain;
@@ -1386,7 +1477,7 @@ static struct bio *bio_chain_clone_range(struct bio **bio_src,
 			rbd_warn(NULL, "bio_chain exhausted with %u left", len);
 			goto out_err;	/* EINVAL; ran out of bio's */
 		}
-		bi_size = min_t(unsigned int, bi->bi_iter.bi_size - off, len);
+		bi_size = min_t(unsigned int, bi->bi_size - off, len);
 		bio = bio_clone_range(bi, off, bi_size, gfpmask);
 		if (!bio)
 			goto out_err;	/* ENOMEM */
@@ -1395,7 +1486,7 @@ static struct bio *bio_chain_clone_range(struct bio **bio_src,
 		end = &bio->bi_next;
 
 		off += bi_size;
-		if (off == bi->bi_iter.bi_size) {
+		if (off == bi->bi_size) {
 			bi = bi->bi_next;
 			off = 0;
 		}
@@ -1734,10 +1825,7 @@ static void rbd_obj_request_complete(struct rbd_obj_request *obj_request)
 {
 	dout("%s: obj %p cb %p\n", __func__, obj_request,
 		obj_request->callback);
-	if (obj_request->callback)
-		obj_request->callback(obj_request);
-	else
-		complete_all(&obj_request->completion);
+	obj_request->callback(obj_request);
 }
 
 static void rbd_obj_request_error(struct rbd_obj_request *obj_request, int err)
@@ -1898,7 +1986,7 @@ static void rbd_osd_req_format_write(struct rbd_obj_request *obj_request)
 {
 	struct ceph_osd_request *osd_req = obj_request->osd_req;
 
-	ktime_get_real_ts(&osd_req->r_mtime);
+	osd_req->r_mtime = CURRENT_TIME;
 	osd_req->r_data_offset = obj_request->offset;
 }
 
@@ -2013,7 +2101,6 @@ rbd_obj_request_create(enum obj_request_type type)
 	obj_request->which = BAD_WHICH;
 	obj_request->type = type;
 	INIT_LIST_HEAD(&obj_request->links);
-	init_completion(&obj_request->completion);
 	kref_init(&obj_request->kref);
 
 	dout("%s %p\n", __func__, obj_request);
@@ -2129,15 +2216,13 @@ static struct rbd_img_request *rbd_img_request_create(
 {
 	struct rbd_img_request *img_request;
 
-	img_request = kmem_cache_alloc(rbd_img_request_cache, GFP_NOIO);
+	img_request = kmem_cache_zalloc(rbd_img_request_cache, GFP_NOIO);
 	if (!img_request)
 		return NULL;
 
-	img_request->rq = NULL;
 	img_request->rbd_dev = rbd_dev;
 	img_request->offset = offset;
 	img_request->length = length;
-	img_request->flags = 0;
 	if (op_type == OBJ_OP_DISCARD) {
 		img_request_discard_set(img_request);
 		img_request->snapc = snapc;
@@ -2149,11 +2234,8 @@ static struct rbd_img_request *rbd_img_request_create(
 	}
 	if (rbd_dev_parent_get(rbd_dev))
 		img_request_layered_set(img_request);
+
 	spin_lock_init(&img_request->completion_lock);
-	img_request->next_completion = 0;
-	img_request->callback = NULL;
-	img_request->result = 0;
-	img_request->obj_request_count = 0;
 	INIT_LIST_HEAD(&img_request->obj_requests);
 	kref_init(&img_request->kref);
 
@@ -2268,13 +2350,11 @@ static bool rbd_img_obj_end_request(struct rbd_obj_request *obj_request)
 		rbd_assert(img_request->obj_request != NULL);
 		more = obj_request->which < img_request->obj_request_count - 1;
 	} else {
-		blk_status_t status = errno_to_blk_status(result);
-
 		rbd_assert(img_request->rq != NULL);
 
-		more = blk_update_request(img_request->rq, status, xferred);
+		more = blk_update_request(img_request->rq, result, xferred);
 		if (!more)
-			__blk_mq_end_request(img_request->rq, status);
+			__blk_mq_end_request(img_request->rq, result);
 	}
 
 	return more;
@@ -2419,8 +2499,7 @@ static int rbd_img_request_fill(struct rbd_img_request *img_request,
 
 	if (type == OBJ_REQUEST_BIO) {
 		bio_list = data_desc;
-		rbd_assert(img_offset ==
-			   bio_list->bi_iter.bi_sector << SECTOR_SHIFT);
+		rbd_assert(img_offset == bio_list->bi_sector << SECTOR_SHIFT);
 	} else if (type == OBJ_REQUEST_PAGES) {
 		pages = data_desc;
 	}
@@ -2692,8 +2771,6 @@ static int rbd_img_obj_parent_read_full(struct rbd_obj_request *obj_request)
 
 	parent_request->copyup_pages = NULL;
 	parent_request->copyup_page_count = 0;
-	parent_request->obj_request = NULL;
-	rbd_obj_request_put(obj_request);
 out_err:
 	if (pages)
 		ceph_release_page_vector(pages, page_count);
@@ -3110,8 +3187,8 @@ static int __rbd_notify_op_lock(struct rbd_device *rbd_dev,
 {
 	struct ceph_osd_client *osdc = &rbd_dev->rbd_client->client->osdc;
 	struct rbd_client_id cid = rbd_get_cid(rbd_dev);
-	int buf_size = 4 + 8 + 8 + CEPH_ENCODING_START_BLK_LEN;
-	char buf[buf_size];
+	char buf[4 + 8 + 8 + CEPH_ENCODING_START_BLK_LEN];
+	int buf_size = sizeof(buf);
 	void *p = buf;
 
 	dout("%s rbd_dev %p notify_op %d\n", __func__, rbd_dev, notify_op);
@@ -3629,8 +3706,8 @@ static void __rbd_acknowledge_notify(struct rbd_device *rbd_dev,
 				     u64 notify_id, u64 cookie, s32 *result)
 {
 	struct ceph_osd_client *osdc = &rbd_dev->rbd_client->client->osdc;
-	int buf_size = 4 + CEPH_ENCODING_START_BLK_LEN;
-	char buf[buf_size];
+	char buf[4 + CEPH_ENCODING_START_BLK_LEN];
+	int buf_size = sizeof(buf);
 	int ret;
 
 	if (result) {
@@ -3671,7 +3748,7 @@ static void rbd_watch_cb(void *arg, u64 notify_id, u64 cookie,
 	struct rbd_device *rbd_dev = arg;
 	void *p = data;
 	void *const end = p + data_len;
-	u8 struct_v = 0;
+	u8 struct_v = 0; /* shut up gcc */
 	u32 len;
 	u32 notify_op;
 	int ret;
@@ -3906,7 +3983,7 @@ static void rbd_reregister_watch(struct work_struct *work)
 
 	ret = rbd_dev_refresh(rbd_dev);
 	if (ret)
-		rbd_warn(rbd_dev, "reregisteration refresh failed: %d", ret);
+		rbd_warn(rbd_dev, "reregistration refresh failed: %d", ret);
 }
 
 /*
@@ -3969,9 +4046,22 @@ static int rbd_obj_method_sync(struct rbd_device *rbd_dev,
 /*
  * lock_rwsem must be held for read
  */
-static void rbd_wait_state_locked(struct rbd_device *rbd_dev)
+static int rbd_wait_state_locked(struct rbd_device *rbd_dev, bool may_acquire)
 {
 	DEFINE_WAIT(wait);
+	unsigned long timeout;
+	int ret = 0;
+
+	if (test_bit(RBD_DEV_FLAG_BLACKLISTED, &rbd_dev->flags))
+		return -EBLACKLISTED;
+
+	if (rbd_dev->lock_state == RBD_LOCK_STATE_LOCKED)
+		return 0;
+
+	if (!may_acquire) {
+		rbd_warn(rbd_dev, "exclusive lock required");
+		return -EROFS;
+	}
 
 	do {
 		/*
@@ -3983,12 +4073,22 @@ static void rbd_wait_state_locked(struct rbd_device *rbd_dev)
 		prepare_to_wait_exclusive(&rbd_dev->lock_waitq, &wait,
 					  TASK_UNINTERRUPTIBLE);
 		up_read(&rbd_dev->lock_rwsem);
-		schedule();
+		timeout = schedule_timeout(ceph_timeout_jiffies(
+						rbd_dev->opts->lock_timeout));
 		down_read(&rbd_dev->lock_rwsem);
-	} while (rbd_dev->lock_state != RBD_LOCK_STATE_LOCKED &&
-		 !test_bit(RBD_DEV_FLAG_BLACKLISTED, &rbd_dev->flags));
+		if (test_bit(RBD_DEV_FLAG_BLACKLISTED, &rbd_dev->flags)) {
+			ret = -EBLACKLISTED;
+			break;
+		}
+		if (!timeout) {
+			rbd_warn(rbd_dev, "timed out waiting for lock");
+			ret = -ETIMEDOUT;
+			break;
+		}
+	} while (rbd_dev->lock_state != RBD_LOCK_STATE_LOCKED);
 
 	finish_wait(&rbd_dev->lock_waitq, &wait);
+	return ret;
 }
 
 static void rbd_queue_workfn(struct work_struct *work)
@@ -4004,22 +4104,19 @@ static void rbd_queue_workfn(struct work_struct *work)
 	bool must_be_locked;
 	int result;
 
-	switch (req_op(rq)) {
-	case REQ_OP_DISCARD:
-	case REQ_OP_WRITE_ZEROES:
-		op_type = OBJ_OP_DISCARD;
-		break;
-	case REQ_OP_WRITE:
-		op_type = OBJ_OP_WRITE;
-		break;
-	case REQ_OP_READ:
-		op_type = OBJ_OP_READ;
-		break;
-	default:
-		dout("%s: non-fs request type %d\n", __func__, req_op(rq));
+	if (rq->cmd_type != REQ_TYPE_FS) {
+		dout("%s: non-fs request type %d\n", __func__,
+			(int) rq->cmd_type);
 		result = -EIO;
 		goto err;
 	}
+
+	if (rq->cmd_flags & REQ_DISCARD)
+		op_type = OBJ_OP_DISCARD;
+	else if (rq->cmd_flags & REQ_WRITE)
+		op_type = OBJ_OP_WRITE;
+	else
+		op_type = OBJ_OP_READ;
 
 	/* Ignore/skip any zero-length requests */
 
@@ -4074,19 +4171,10 @@ static void rbd_queue_workfn(struct work_struct *work)
 	    (op_type != OBJ_OP_READ || rbd_dev->opts->lock_on_read);
 	if (must_be_locked) {
 		down_read(&rbd_dev->lock_rwsem);
-		if (rbd_dev->lock_state != RBD_LOCK_STATE_LOCKED &&
-		    !test_bit(RBD_DEV_FLAG_BLACKLISTED, &rbd_dev->flags)) {
-			if (rbd_dev->opts->exclusive) {
-				rbd_warn(rbd_dev, "exclusive lock required");
-				result = -EROFS;
-				goto err_unlock;
-			}
-			rbd_wait_state_locked(rbd_dev);
-		}
-		if (test_bit(RBD_DEV_FLAG_BLACKLISTED, &rbd_dev->flags)) {
-			result = -EBLACKLISTED;
+		result = rbd_wait_state_locked(rbd_dev,
+					       !rbd_dev->opts->exclusive);
+		if (result)
 			goto err_unlock;
-		}
 	}
 
 	img_request = rbd_img_request_create(rbd_dev, offset, length, op_type,
@@ -4126,17 +4214,63 @@ err_rq:
 			 obj_op_name(op_type), length, offset, result);
 	ceph_put_snap_context(snapc);
 err:
-	blk_mq_end_request(rq, errno_to_blk_status(result));
+	blk_mq_end_request(rq, result);
 }
 
-static blk_status_t rbd_queue_rq(struct blk_mq_hw_ctx *hctx,
+static int rbd_queue_rq(struct blk_mq_hw_ctx *hctx,
 		const struct blk_mq_queue_data *bd)
 {
 	struct request *rq = bd->rq;
 	struct work_struct *work = blk_mq_rq_to_pdu(rq);
 
 	queue_work(rbd_wq, work);
-	return BLK_STS_OK;
+	return BLK_MQ_RQ_QUEUE_OK;
+}
+
+/*
+ * a queue callback. Makes sure that we don't create a bio that spans across
+ * multiple osd objects. One exception would be with a single page bios,
+ * which we handle later at bio_chain_clone_range()
+ */
+static int rbd_merge_bvec(struct request_queue *q, struct bvec_merge_data *bmd,
+			  struct bio_vec *bvec)
+{
+	struct rbd_device *rbd_dev = q->queuedata;
+	sector_t sector_offset;
+	sector_t sectors_per_obj;
+	sector_t obj_sector_offset;
+	int ret;
+
+	/*
+	 * Find how far into its rbd object the partition-relative
+	 * bio start sector is to offset relative to the enclosing
+	 * device.
+	 */
+	sector_offset = get_start_sect(bmd->bi_bdev) + bmd->bi_sector;
+	sectors_per_obj = 1 << (rbd_dev->header.obj_order - SECTOR_SHIFT);
+	obj_sector_offset = sector_offset & (sectors_per_obj - 1);
+
+	/*
+	 * Compute the number of bytes from that offset to the end
+	 * of the object.  Account for what's already used by the bio.
+	 */
+	ret = (int) (sectors_per_obj - obj_sector_offset) << SECTOR_SHIFT;
+	if (ret > bmd->bi_size)
+		ret -= bmd->bi_size;
+	else
+		ret = 0;
+
+	/*
+	 * Don't send back more than was asked for.  And if the bio
+	 * was empty, let the whole thing through because:  "Note
+	 * that a block device *must* allow a single page to be
+	 * added to an empty bio."
+	 */
+	rbd_assert(bvec->bv_len <= PAGE_SIZE);
+	if (ret > (int) bvec->bv_len || !bmd->bi_size)
+		ret = (int) bvec->bv_len;
+
+	return ret;
 }
 
 static void rbd_free_disk(struct rbd_device *rbd_dev)
@@ -4334,7 +4468,7 @@ static int rbd_init_request(struct blk_mq_tag_set *set, struct request *rq,
 	return 0;
 }
 
-static const struct blk_mq_ops rbd_mq_ops = {
+static struct blk_mq_ops rbd_mq_ops = {
 	.queue_rq	= rbd_queue_rq,
 	.init_request	= rbd_init_request,
 };
@@ -4388,18 +4522,21 @@ static int rbd_init_disk(struct rbd_device *rbd_dev)
 	blk_queue_max_hw_sectors(q, segment_size / SECTOR_SIZE);
 	q->limits.max_sectors = queue_max_hw_sectors(q);
 	blk_queue_max_segments(q, USHRT_MAX);
-	blk_queue_max_segment_size(q, segment_size);
+	blk_queue_max_segment_size(q, UINT_MAX);
 	blk_queue_io_min(q, segment_size);
 	blk_queue_io_opt(q, segment_size);
 
-	/* enable the discard support */
-	queue_flag_set_unlocked(QUEUE_FLAG_DISCARD, q);
-	q->limits.discard_granularity = segment_size;
-	blk_queue_max_discard_sectors(q, segment_size / SECTOR_SIZE);
-	blk_queue_max_write_zeroes_sectors(q, segment_size / SECTOR_SIZE);
+	if (rbd_dev->opts->trim) {
+		queue_flag_set_unlocked(QUEUE_FLAG_DISCARD, q);
+		q->limits.discard_granularity = segment_size;
+		q->limits.max_discard_sectors = segment_size / SECTOR_SIZE;
+		q->limits.discard_zeroes_data = 1;
+	}
+
+	blk_queue_merge_bvec(q, rbd_merge_bvec);
 
 	if (!ceph_test_opt(rbd_dev->rbd_client->client, NOCRC))
-		q->backing_dev_info->capabilities |= BDI_CAP_STABLE_WRITES;
+		q->backing_dev_info.capabilities |= BDI_CAP_STABLE_WRITES;
 
 	/*
 	 * disk_release() expects a queue ref from add_disk() and will
@@ -5645,8 +5782,10 @@ static int rbd_add_parse_args(const char *buf,
 
 	rbd_opts->read_only = RBD_READ_ONLY_DEFAULT;
 	rbd_opts->queue_depth = RBD_QUEUE_DEPTH_DEFAULT;
+	rbd_opts->lock_timeout = RBD_LOCK_TIMEOUT_DEFAULT;
 	rbd_opts->lock_on_read = RBD_LOCK_ON_READ_DEFAULT;
 	rbd_opts->exclusive = RBD_EXCLUSIVE_DEFAULT;
+	rbd_opts->trim = RBD_TRIM_DEFAULT;
 
 	copts = ceph_parse_options(options, mon_addrs,
 					mon_addrs + mon_addrs_size - 1,
@@ -5672,39 +5811,6 @@ out_err:
 	return ret;
 }
 
-/*
- * Return pool id (>= 0) or a negative error code.
- */
-static int rbd_add_get_pool_id(struct rbd_client *rbdc, const char *pool_name)
-{
-	struct ceph_options *opts = rbdc->client->options;
-	u64 newest_epoch;
-	int tries = 0;
-	int ret;
-
-again:
-	ret = ceph_pg_poolid_by_name(rbdc->client->osdc.osdmap, pool_name);
-	if (ret == -ENOENT && tries++ < 1) {
-		ret = ceph_monc_get_version(&rbdc->client->monc, "osdmap",
-					    &newest_epoch);
-		if (ret < 0)
-			return ret;
-
-		if (rbdc->client->osdc.osdmap->epoch < newest_epoch) {
-			ceph_osdc_maybe_request_map(&rbdc->client->osdc);
-			(void) ceph_monc_wait_osdmap(&rbdc->client->monc,
-						     newest_epoch,
-						     opts->mount_timeout);
-			goto again;
-		} else {
-			/* the osdmap we have is new enough */
-			return -ENOENT;
-		}
-	}
-
-	return ret;
-}
-
 static void rbd_dev_image_unlock(struct rbd_device *rbd_dev)
 {
 	down_write(&rbd_dev->lock_rwsem);
@@ -5715,6 +5821,8 @@ static void rbd_dev_image_unlock(struct rbd_device *rbd_dev)
 
 static int rbd_add_acquire_lock(struct rbd_device *rbd_dev)
 {
+	int ret;
+
 	if (!(rbd_dev->header.features & RBD_FEATURE_EXCLUSIVE_LOCK)) {
 		rbd_warn(rbd_dev, "exclusive-lock feature is not enabled");
 		return -EINVAL;
@@ -5722,9 +5830,9 @@ static int rbd_add_acquire_lock(struct rbd_device *rbd_dev)
 
 	/* FIXME: "rbd map --exclusive" should be in interruptible */
 	down_read(&rbd_dev->lock_rwsem);
-	rbd_wait_state_locked(rbd_dev);
+	ret = rbd_wait_state_locked(rbd_dev, true);
 	up_read(&rbd_dev->lock_rwsem);
-	if (test_bit(RBD_DEV_FLAG_BLACKLISTED, &rbd_dev->flags)) {
+	if (ret) {
 		rbd_warn(rbd_dev, "failed to acquire exclusive lock");
 		return -EROFS;
 	}
@@ -6133,7 +6241,7 @@ static ssize_t do_rbd_add(struct bus_type *bus,
 	}
 
 	/* pick the pool */
-	rc = rbd_add_get_pool_id(rbdc, spec->pool_name);
+	rc = ceph_pg_poolid_by_name(rbdc->client->osdc.osdmap, spec->pool_name);
 	if (rc < 0) {
 		if (rc == -ENOENT)
 			pr_info("pool %s does not exist\n", spec->pool_name);
@@ -6385,16 +6493,8 @@ static int rbd_slab_init(void)
 	if (!rbd_obj_request_cache)
 		goto out_err;
 
-	rbd_assert(!rbd_bio_clone);
-	rbd_bio_clone = bioset_create(BIO_POOL_SIZE, 0, 0);
-	if (!rbd_bio_clone)
-		goto out_err_clone;
-
 	return 0;
 
-out_err_clone:
-	kmem_cache_destroy(rbd_obj_request_cache);
-	rbd_obj_request_cache = NULL;
 out_err:
 	kmem_cache_destroy(rbd_img_request_cache);
 	rbd_img_request_cache = NULL;
@@ -6410,10 +6510,6 @@ static void rbd_slab_exit(void)
 	rbd_assert(rbd_img_request_cache);
 	kmem_cache_destroy(rbd_img_request_cache);
 	rbd_img_request_cache = NULL;
-
-	rbd_assert(rbd_bio_clone);
-	bioset_free(rbd_bio_clone);
-	rbd_bio_clone = NULL;
 }
 
 static int __init rbd_init(void)
@@ -6439,12 +6535,14 @@ static int __init rbd_init(void)
 		goto err_out_slab;
 	}
 
+	rbd_bus_type.bus_attrs = rbd_bus_attrs;
 	if (single_major) {
 		rbd_major = register_blkdev(0, RBD_DRV_NAME);
 		if (rbd_major < 0) {
 			rc = rbd_major;
 			goto err_out_wq;
 		}
+		rbd_bus_type.bus_attrs = rbd_bus_attrs_single_major;
 	}
 
 	rc = rbd_sysfs_init();

@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 /*
  *  S390 version
  *    Copyright IBM Corp. 1999
@@ -14,6 +13,33 @@
 #include <asm/page.h>
 #include <asm/pci_io.h>
 
+/*
+ * Change virtual addresses to physical addresses and vv.
+ * These are pretty trivial
+ */
+static inline unsigned long virt_to_phys(volatile void * address)
+{
+	unsigned long real_address;
+	asm volatile(
+		 "	lra	%0,0(%1)\n"
+		 "	jz	0f\n"
+		 "	la	%0,0\n"
+		 "0:"
+		 : "=a" (real_address) : "a" (address) : "cc");
+	return real_address;
+}
+#define virt_to_phys virt_to_phys
+
+static inline void * phys_to_virt(unsigned long address)
+{
+	return (void *) address;
+}
+/*
+ * RHEL specific: It is for prevent build fail because in rhel missing commit:
+ * 92820a5f9974 ("s390: remove virt_to_phys implementation")
+ */
+#define phys_to_virt phys_to_virt
+
 #define xlate_dev_mem_ptr xlate_dev_mem_ptr
 void *xlate_dev_mem_ptr(phys_addr_t phys);
 #define unxlate_dev_mem_ptr unxlate_dev_mem_ptr
@@ -26,9 +52,10 @@ void unxlate_dev_mem_ptr(phys_addr_t phys, void *addr);
 
 #define IO_SPACE_LIMIT 0
 
+#ifdef CONFIG_PCI
+
 #define ioremap_nocache(addr, size)	ioremap(addr, size)
 #define ioremap_wc			ioremap_nocache
-#define ioremap_wt			ioremap_nocache
 
 static inline void __iomem *ioremap(unsigned long offset, unsigned long size)
 {
@@ -39,17 +66,6 @@ static inline void iounmap(volatile void __iomem *addr)
 {
 }
 
-static inline void __iomem *ioport_map(unsigned long port, unsigned int nr)
-{
-	return NULL;
-}
-
-static inline void ioport_unmap(void __iomem *p)
-{
-}
-
-#ifdef CONFIG_PCI
-
 /*
  * s390 needs a private implementation of pci_iomap since ioremap with its
  * offset parameter isn't sufficient. That's because BAR spaces are not
@@ -58,8 +74,6 @@ static inline void ioport_unmap(void __iomem *p)
  */
 #define pci_iomap pci_iomap
 #define pci_iounmap pci_iounmap
-#define pci_iomap_wc pci_iomap
-#define pci_iomap_wc_range pci_iomap_range
 
 #define memcpy_fromio(dst, src, count)	zpci_memcpy_fromio(dst, src, count)
 #define memcpy_toio(dst, src, count)	zpci_memcpy_toio(dst, src, count)
@@ -73,6 +87,11 @@ static inline void ioport_unmap(void __iomem *p)
 #define __raw_writew	zpci_write_u16
 #define __raw_writel	zpci_write_u32
 #define __raw_writeq	zpci_write_u64
+
+#define readb_relaxed	readb
+#define readw_relaxed	readw
+#define readl_relaxed	readl
+#define readq_relaxed	readq
 
 #endif /* CONFIG_PCI */
 

@@ -16,6 +16,11 @@
  * NON INFRINGEMENT.  See the GNU General Public License for more
  * details.
  *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ *
+ *
  * ACPI based HotPlug driver that supports Memory Hotplug
  * This driver fields notifications from firmware for memory add
  * and remove operations and alerts the VM of the affected memory
@@ -39,13 +44,6 @@
 
 ACPI_MODULE_NAME("acpi_memhotplug");
 
-static const struct acpi_device_id memory_device_ids[] = {
-	{ACPI_MEMORY_DEVICE_HID, 0},
-	{"", 0},
-};
-
-#ifdef CONFIG_ACPI_HOTPLUG_MEMORY
-
 /* Memory Device States */
 #define MEMORY_INVALID_STATE	0
 #define MEMORY_POWER_ON_STATE	1
@@ -54,6 +52,11 @@ static const struct acpi_device_id memory_device_ids[] = {
 static int acpi_memory_device_add(struct acpi_device *device,
 				  const struct acpi_device_id *not_used);
 static void acpi_memory_device_remove(struct acpi_device *device);
+
+static const struct acpi_device_id memory_device_ids[] = {
+	{ACPI_MEMORY_DEVICE_HID, 0},
+	{"", 0},
+};
 
 static struct acpi_scan_handler memory_device_handler = {
 	.ids = memory_device_ids,
@@ -361,11 +364,9 @@ static bool __initdata acpi_no_memhotplug;
 
 void __init acpi_memory_hotplug_init(void)
 {
-	if (acpi_no_memhotplug) {
-		memory_device_handler.attach = NULL;
-		acpi_scan_add_handler(&memory_device_handler);
+	if (acpi_no_memhotplug)
 		return;
-	}
+
 	acpi_scan_add_handler_with_hotplug(&memory_device_handler, "memory");
 }
 
@@ -375,16 +376,3 @@ static int __init disable_acpi_memory_hotplug(char *str)
 	return 1;
 }
 __setup("acpi_no_memhotplug", disable_acpi_memory_hotplug);
-
-#else
-
-static struct acpi_scan_handler memory_device_handler = {
-	.ids = memory_device_ids,
-};
-
-void __init acpi_memory_hotplug_init(void)
-{
-	acpi_scan_add_handler(&memory_device_handler);
-}
-
-#endif /* CONFIG_ACPI_HOTPLUG_MEMORY */

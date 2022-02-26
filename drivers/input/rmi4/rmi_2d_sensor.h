@@ -71,9 +71,6 @@ struct rmi_2d_sensor {
 	enum rmi_reg_state palm_detect;
 };
 
-int rmi_2d_sensor_of_probe(struct device *dev,
-				struct rmi_2d_sensor_platform_data *pdata);
-
 void rmi_2d_sensor_abs_process(struct rmi_2d_sensor *sensor,
 				struct rmi_2d_sensor_abs_object *obj,
 				int slot);

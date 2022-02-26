@@ -37,9 +37,6 @@
 #include "xfs_alloc_btree.h"
 #include "xfs_ialloc_btree.h"
 #include "xfs_log.h"
-#include "xfs_rmap_btree.h"
-#include "xfs_bmap.h"
-#include "xfs_refcount_btree.h"
 
 /*
  * Physical superblock buffer manipulations. Shared with libxfs in userspace.
@@ -116,6 +113,9 @@ xfs_mount_validate_sb(
 	bool		check_inprogress,
 	bool		check_version)
 {
+	uint32_t	agcount = 0;
+	uint32_t	rem;
+
 	if (sbp->sb_magicnum != XFS_SB_MAGIC) {
 		xfs_warn(mp, "bad magic number");
 		return -EWRONGFS;
@@ -226,6 +226,13 @@ xfs_mount_validate_sb(
 		return -EINVAL;
 	}
 
+	/* Compute agcount for this number of dblocks and agblocks */
+	if (sbp->sb_agblocks) {
+		agcount = div_u64_rem(sbp->sb_dblocks, sbp->sb_agblocks, &rem);
+		if (rem)
+			agcount++;
+	}
+
 	/*
 	 * More sanity checking.  Most of these were stolen directly from
 	 * xfs_repair.
@@ -250,6 +257,10 @@ xfs_mount_validate_sb(
 	    sbp->sb_inodesize != (1 << sbp->sb_inodelog)		||
 	    sbp->sb_logsunit > XLOG_MAX_RECORD_BSIZE			||
 	    sbp->sb_inopblock != howmany(sbp->sb_blocksize,sbp->sb_inodesize) ||
+	    XFS_FSB_TO_B(mp, sbp->sb_agblocks) < XFS_MIN_AG_BYTES	||
+	    XFS_FSB_TO_B(mp, sbp->sb_agblocks) > XFS_MAX_AG_BYTES	||
+	    sbp->sb_agblklog != xfs_highbit32(sbp->sb_agblocks - 1) + 1	||
+	    agcount == 0 || agcount != sbp->sb_agcount			||
 	    (sbp->sb_blocklog - sbp->sb_inodelog != sbp->sb_inopblog)	||
 	    (sbp->sb_rextsize * sbp->sb_blocksize > XFS_MAX_RTEXTSIZE)	||
 	    (sbp->sb_rextsize * sbp->sb_blocksize < XFS_MIN_RTEXTSIZE)	||
@@ -640,11 +651,10 @@ xfs_sb_read_verify(
 	error = xfs_sb_verify(bp, true);
 
 out_error:
-	if (error) {
+	if (error == -EFSCORRUPTED || error == -EFSBADCRC)
+		xfs_verifier_error(bp, error, __this_address);
+	else if (error)
 		xfs_buf_ioerror(bp, error);
-		if (error == -EFSCORRUPTED || error == -EFSBADCRC)
-			xfs_verifier_error(bp);
-	}
 }
 
 /*
@@ -678,8 +688,7 @@ xfs_sb_write_verify(
 
 	error = xfs_sb_verify(bp, false);
 	if (error) {
-		xfs_buf_ioerror(bp, error);
-		xfs_verifier_error(bp);
+		xfs_verifier_error(bp, error, __this_address);
 		return;
 	}
 
@@ -717,7 +726,6 @@ xfs_sb_mount_common(
 	struct xfs_sb	*sbp)
 {
 	mp->m_agfrotor = mp->m_agirotor = 0;
-	spin_lock_init(&mp->m_agirotor_lock);
 	mp->m_maxagi = mp->m_sb.sb_agcount;
 	mp->m_blkbit_log = sbp->sb_blocklog + XFS_NBBYLOG;
 	mp->m_blkbb_log = sbp->sb_blocklog - BBSHIFT;
@@ -742,18 +750,6 @@ xfs_sb_mount_common(
 	mp->m_bmap_dmxr[1] = xfs_bmbt_maxrecs(mp, sbp->sb_blocksize, 0);
 	mp->m_bmap_dmnr[0] = mp->m_bmap_dmxr[0] / 2;
 	mp->m_bmap_dmnr[1] = mp->m_bmap_dmxr[1] / 2;
-
-	mp->m_rmap_mxr[0] = xfs_rmapbt_maxrecs(mp, sbp->sb_blocksize, 1);
-	mp->m_rmap_mxr[1] = xfs_rmapbt_maxrecs(mp, sbp->sb_blocksize, 0);
-	mp->m_rmap_mnr[0] = mp->m_rmap_mxr[0] / 2;
-	mp->m_rmap_mnr[1] = mp->m_rmap_mxr[1] / 2;
-
-	mp->m_refc_mxr[0] = xfs_refcountbt_maxrecs(mp, sbp->sb_blocksize,
-			true);
-	mp->m_refc_mxr[1] = xfs_refcountbt_maxrecs(mp, sbp->sb_blocksize,
-			false);
-	mp->m_refc_mnr[0] = mp->m_refc_mxr[0] / 2;
-	mp->m_refc_mnr[1] = mp->m_refc_mxr[1] / 2;
 
 	mp->m_bsize = XFS_FSB_TO_BB(mp, 1);
 	mp->m_ialloc_inos = (int)MAX((uint16_t)XFS_INODES_PER_CHUNK,
@@ -875,4 +871,109 @@ xfs_sync_sb(
 	if (wait)
 		xfs_trans_set_sync(tp);
 	return xfs_trans_commit(tp);
+}
+
+/*
+ * Update all the secondary superblocks to match the new state of the primary.
+ * Because we are completely overwriting all the existing fields in the
+ * secondary superblock buffers, there is no need to read them in from disk.
+ * Just get a new buffer, stamp it and write it.
+ *
+ * The sb buffers need to be cached here so that we serialise against other
+ * operations that access the secondary superblocks, but we don't want to keep
+ * them in memory once it is written so we mark it as a one-shot buffer.
+ */
+int
+xfs_update_secondary_sbs(
+	struct xfs_mount	*mp)
+{
+	xfs_agnumber_t		agno;
+	int			saved_error = 0;
+	int			error = 0;
+	LIST_HEAD		(buffer_list);
+
+	/* update secondary superblocks. */
+	for (agno = 1; agno < mp->m_sb.sb_agcount; agno++) {
+		struct xfs_buf		*bp;
+
+		bp = xfs_buf_get(mp->m_ddev_targp,
+				 XFS_AG_DADDR(mp, agno, XFS_SB_DADDR),
+				 XFS_FSS_TO_BB(mp, 1), 0);
+		/*
+		 * If we get an error reading or writing alternate superblocks,
+		 * continue.  xfs_repair chooses the "best" superblock based
+		 * on most matches; if we break early, we'll leave more
+		 * superblocks un-updated than updated, and xfs_repair may
+		 * pick them over the properly-updated primary.
+		 */
+		if (!bp) {
+			xfs_warn(mp,
+		"error allocating secondary superblock for ag %d",
+				agno);
+			if (!saved_error)
+				saved_error = -ENOMEM;
+			continue;
+		}
+
+		bp->b_ops = &xfs_sb_buf_ops;
+		xfs_buf_oneshot(bp);
+		xfs_buf_zero(bp, 0, BBTOB(bp->b_length));
+		xfs_sb_to_disk(XFS_BUF_TO_SBP(bp), &mp->m_sb);
+		xfs_buf_delwri_queue(bp, &buffer_list);
+		xfs_buf_relse(bp);
+
+		/* don't hold too many buffers at once */
+		if (agno % 16)
+			continue;
+
+		error = xfs_buf_delwri_submit(&buffer_list);
+		if (error) {
+			xfs_warn(mp,
+		"write error %d updating a secondary superblock near ag %d",
+				error, agno);
+			if (!saved_error)
+				saved_error = error;
+			continue;
+		}
+	}
+	error = xfs_buf_delwri_submit(&buffer_list);
+	if (error) {
+		xfs_warn(mp,
+		"write error %d updating a secondary superblock near ag %d",
+			error, agno);
+	}
+
+	return saved_error ? saved_error : error;
+}
+
+/*
+ * Same behavior as xfs_sync_sb, except that it is always synchronous and it
+ * also writes the superblock buffer to disk sector 0 immediately.
+ */
+int
+xfs_sync_sb_buf(
+	struct xfs_mount	*mp)
+{
+	struct xfs_trans	*tp;
+	struct xfs_buf		*bp;
+	int			error;
+
+	error = xfs_trans_alloc(mp, &M_RES(mp)->tr_sb, 0, 0, 0, &tp);
+	if (error)
+		return error;
+
+	bp = xfs_trans_getsb(tp, mp, 0);
+	xfs_log_sb(tp);
+	xfs_trans_bhold(tp, bp);
+	xfs_trans_set_sync(tp);
+	error = xfs_trans_commit(tp);
+	if (error)
+		goto out;
+	/*
+	 * write out the sb buffer to get the changes to disk
+	 */
+	error = xfs_bwrite(bp);
+out:
+	xfs_buf_relse(bp);
+	return error;
 }

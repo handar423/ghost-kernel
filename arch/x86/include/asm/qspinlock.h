@@ -1,8 +1,6 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_X86_QSPINLOCK_H
 #define _ASM_X86_QSPINLOCK_H
 
-#include <linux/jump_label.h>
 #include <asm/cpufeature.h>
 #include <asm-generic/qspinlock_types.h>
 #include <asm/paravirt.h>
@@ -34,12 +32,6 @@ static inline void queued_spin_unlock(struct qspinlock *lock)
 {
 	pv_queued_spin_unlock(lock);
 }
-
-#define vcpu_is_preempted vcpu_is_preempted
-static inline bool vcpu_is_preempted(long cpu)
-{
-	return pv_vcpu_is_preempted(cpu);
-}
 #else
 static inline void queued_spin_unlock(struct qspinlock *lock)
 {
@@ -47,15 +39,20 @@ static inline void queued_spin_unlock(struct qspinlock *lock)
 }
 #endif
 
-#ifdef CONFIG_PARAVIRT
-DECLARE_STATIC_KEY_TRUE(virt_spin_lock_key);
-
-void native_pv_lock_init(void) __init;
-
 #define virt_spin_lock virt_spin_lock
+
+/*
+ * RHEL7 specific:
+ * To provide backward compatibility with pre-7.4 kernel modules that
+ * inlines the ticket spinlock unlock code. The virt_spin_lock() function
+ * will have to recognize both a lock value of 0 or _Q_UNLOCKED_VAL as
+ * being in an unlocked state.
+ */
 static inline bool virt_spin_lock(struct qspinlock *lock)
 {
-	if (!static_branch_likely(&virt_spin_lock_key))
+	int lockval;
+
+	if (!static_cpu_has(X86_FEATURE_HYPERVISOR))
 		return false;
 
 	/*
@@ -65,17 +62,13 @@ static inline bool virt_spin_lock(struct qspinlock *lock)
 	 */
 
 	do {
-		while (atomic_read(&lock->val) != 0)
+		while ((lockval = atomic_read(&lock->val)) &&
+		       (lockval != _Q_UNLOCKED_VAL))
 			cpu_relax();
-	} while (atomic_cmpxchg(&lock->val, 0, _Q_LOCKED_VAL) != 0);
+	} while (atomic_cmpxchg(&lock->val, lockval, _Q_LOCKED_VAL) != lockval);
 
 	return true;
 }
-#else
-static inline void native_pv_lock_init(void)
-{
-}
-#endif /* CONFIG_PARAVIRT */
 
 #include <asm-generic/qspinlock.h>
 

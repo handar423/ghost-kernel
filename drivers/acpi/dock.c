@@ -1,9 +1,7 @@
 /*
  *  dock.c - ACPI dock station driver
  *
- *  Copyright (C) 2006, 2014, Intel Corp.
- *  Author: Kristen Carlson Accardi <kristen.c.accardi@intel.com>
- *          Rafael J. Wysocki <rafael.j.wysocki@intel.com>
+ *  Copyright (C) 2006 Kristen Carlson Accardi <kristen.c.accardi@intel.com>
  *
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  *
@@ -17,11 +15,15 @@
  *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  *  General Public License for more details.
  *
+ *  You should have received a copy of the GNU General Public License along
+ *  with this program; if not, write to the Free Software Foundation, Inc.,
+ *  59 Temple Place, Suite 330, Boston, MA 02111-1307 USA.
+ *
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  */
 
 #include <linux/kernel.h>
-#include <linux/moduleparam.h>
+#include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/types.h>
@@ -30,10 +32,17 @@
 #include <linux/jiffies.h>
 #include <linux/stddef.h>
 #include <linux/acpi.h>
+#include <acpi/acpi_bus.h>
+#include <acpi/acpi_drivers.h>
 
 #include "internal.h"
 
+#define ACPI_DOCK_DRIVER_DESCRIPTION "ACPI Dock Station Driver"
+
 ACPI_MODULE_NAME("dock");
+MODULE_AUTHOR("Kristen Carlson Accardi");
+MODULE_DESCRIPTION(ACPI_DOCK_DRIVER_DESCRIPTION);
+MODULE_LICENSE("GPL");
 
 static bool immediate_undock = 1;
 module_param(immediate_undock, bool, 0644);
@@ -41,6 +50,12 @@ MODULE_PARM_DESC(immediate_undock, "1 (default) will cause the driver to "
 	"undock immediately when the undock button is pressed, 0 will cause"
 	" the driver to wait for userspace to write the undock sysfs file "
 	" before undocking");
+
+static const struct acpi_device_id dock_device_ids[] = {
+	{"LNXDOCK", 0},
+	{"", 0},
+};
+MODULE_DEVICE_TABLE(acpi, dock_device_ids);
 
 struct dock_station {
 	acpi_handle handle;
@@ -53,10 +68,15 @@ struct dock_station {
 };
 static LIST_HEAD(dock_stations);
 static int dock_station_count;
+static DEFINE_MUTEX(hotplug_lock);
 
 struct dock_dependent_device {
 	struct list_head list;
 	struct acpi_device *adev;
+	const struct acpi_dock_ops *hp_ops;
+	void *hp_context;
+	unsigned int hp_refcount;
+	void (*hp_release)(void *);
 };
 
 #define DOCK_DOCKING	0x00000001
@@ -99,15 +119,80 @@ static int add_dock_dependent_device(struct dock_station *ds,
 	return 0;
 }
 
+static void remove_dock_dependent_devices(struct dock_station *ds)
+{
+	struct dock_dependent_device *dd, *aux;
+
+	list_for_each_entry_safe(dd, aux, &ds->dependent_devices, list) {
+		list_del(&dd->list);
+		kfree(dd);
+	}
+}
+
+/**
+ * dock_init_hotplug - Initialize a hotplug device on a docking station.
+ * @dd: Dock-dependent device.
+ * @ops: Dock operations to attach to the dependent device.
+ * @context: Data to pass to the @ops callbacks and @release.
+ * @init: Optional initialization routine to run after setting up context.
+ * @release: Optional release routine to run on removal.
+ */
+static int dock_init_hotplug(struct dock_dependent_device *dd,
+			     const struct acpi_dock_ops *ops, void *context,
+			     void (*init)(void *), void (*release)(void *))
+{
+	int ret = 0;
+
+	mutex_lock(&hotplug_lock);
+	if (WARN_ON(dd->hp_context)) {
+		ret = -EEXIST;
+	} else {
+		dd->hp_refcount = 1;
+		dd->hp_ops = ops;
+		dd->hp_context = context;
+		dd->hp_release = release;
+		if (init)
+			init(context);
+	}
+	mutex_unlock(&hotplug_lock);
+	return ret;
+}
+
+/**
+ * dock_release_hotplug - Decrement hotplug reference counter of dock device.
+ * @dd: Dock-dependent device.
+ *
+ * Decrement the reference counter of @dd and if 0, detach its hotplug
+ * operations from it, reset its context pointer and run the optional release
+ * routine if present.
+ */
+static void dock_release_hotplug(struct dock_dependent_device *dd)
+{
+	mutex_lock(&hotplug_lock);
+	if (dd->hp_context && !--dd->hp_refcount) {
+		void (*release)(void *) = dd->hp_release;
+		void *context = dd->hp_context;
+
+		dd->hp_ops = NULL;
+		dd->hp_context = NULL;
+		dd->hp_release = NULL;
+		if (release)
+			release(context);
+	}
+	mutex_unlock(&hotplug_lock);
+}
+
 static void dock_hotplug_event(struct dock_dependent_device *dd, u32 event,
 			       enum dock_callback_type cb_type)
 {
 	struct acpi_device *adev = dd->adev;
+	acpi_notify_handler cb = NULL;
+	bool run = false;
 
 	acpi_lock_hp_context();
 
 	if (!adev->hp)
-		goto out;
+		goto no_context;
 
 	if (cb_type == DOCK_CALL_FIXUP) {
 		void (*fixup)(struct acpi_device *);
@@ -138,8 +223,37 @@ static void dock_hotplug_event(struct dock_dependent_device *dd, u32 event,
 		}
 	}
 
- out:
+ no_context:
 	acpi_unlock_hp_context();
+
+	mutex_lock(&hotplug_lock);
+
+	if (dd->hp_context) {
+		run = true;
+		dd->hp_refcount++;
+		if (dd->hp_ops) {
+			switch (cb_type) {
+			case DOCK_CALL_FIXUP:
+				cb = dd->hp_ops->fixup;
+				break;
+			case DOCK_CALL_UEVENT:
+				cb = dd->hp_ops->uevent;
+				break;
+			default:
+				cb = dd->hp_ops->handler;
+			}
+		}
+	}
+
+	mutex_unlock(&hotplug_lock);
+
+	if (!run)
+		return;
+
+	if (cb)
+		cb(dd->adev->handle, event, dd->hp_context);
+
+	dock_release_hotplug(dd);
 }
 
 static struct dock_station *find_dock_station(acpi_handle handle)
@@ -329,7 +443,7 @@ static void handle_dock(struct dock_station *ds, int dock)
 	acpi_status status;
 	struct acpi_object_list arg_list;
 	union acpi_object arg;
-	unsigned long long value;
+	struct acpi_buffer buffer = { ACPI_ALLOCATE_BUFFER, NULL };
 
 	acpi_handle_info(ds->handle, "%s\n", dock ? "docking" : "undocking");
 
@@ -338,10 +452,12 @@ static void handle_dock(struct dock_station *ds, int dock)
 	arg_list.pointer = &arg;
 	arg.type = ACPI_TYPE_INTEGER;
 	arg.integer.value = dock;
-	status = acpi_evaluate_integer(ds->handle, "_DCK", &arg_list, &value);
+	status = acpi_evaluate_object(ds->handle, "_DCK", &arg_list, &buffer);
 	if (ACPI_FAILURE(status) && status != AE_NOT_FOUND)
 		acpi_handle_err(ds->handle, "Failed to execute _DCK (0x%x)\n",
 				status);
+
+	kfree(buffer.pointer);
 }
 
 static inline void dock(struct dock_station *ds)
@@ -390,6 +506,80 @@ static int dock_in_progress(struct dock_station *ds)
 		return 1;
 	return 0;
 }
+
+/**
+ * register_hotplug_dock_device - register a hotplug function
+ * @handle: the handle of the device
+ * @ops: handlers to call after docking
+ * @context: device specific data
+ * @init: Optional initialization routine to run after registration
+ * @release: Optional release routine to run on unregistration
+ *
+ * If a driver would like to perform a hotplug operation after a dock
+ * event, they can register an acpi_notifiy_handler to be called by
+ * the dock driver after _DCK is executed.
+ */
+int register_hotplug_dock_device(acpi_handle handle,
+				 const struct acpi_dock_ops *ops, void *context,
+				 void (*init)(void *), void (*release)(void *))
+{
+	struct dock_dependent_device *dd;
+	struct dock_station *dock_station;
+	struct acpi_device *adev;
+	int ret = -EINVAL;
+
+	if (WARN_ON(!context))
+		return -EINVAL;
+
+	if (!dock_station_count)
+		return -ENODEV;
+
+	ret = acpi_bus_get_device(handle, &adev);
+	if (ret)
+		return ret;
+
+	/*
+	 * make sure this handle is for a device dependent on the dock,
+	 * this would include the dock station itself
+	 */
+	list_for_each_entry(dock_station, &dock_stations, sibling) {
+		/*
+		 * An ATA bay can be in a dock and itself can be ejected
+		 * separately, so there are two 'dock stations' which need the
+		 * ops
+		 */
+		dd = find_dock_dependent_device(dock_station, adev);
+		if (dd && !dock_init_hotplug(dd, ops, context, init, release))
+			ret = 0;
+	}
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(register_hotplug_dock_device);
+
+/**
+ * unregister_hotplug_dock_device - remove yourself from the hotplug list
+ * @handle: the acpi handle of the device
+ */
+void unregister_hotplug_dock_device(acpi_handle handle)
+{
+	struct dock_dependent_device *dd;
+	struct dock_station *dock_station;
+	struct acpi_device *adev;
+
+	if (!dock_station_count)
+		return;
+
+	if (acpi_bus_get_device(handle, &adev))
+		return;
+
+	list_for_each_entry(dock_station, &dock_stations, sibling) {
+		dd = find_dock_dependent_device(dock_station, adev);
+		if (dd)
+			dock_release_hotplug(dd);
+	}
+}
+EXPORT_SYMBOL_GPL(unregister_hotplug_dock_device);
 
 /**
  * handle_eject_request - handle an undock request checking for error conditions
@@ -482,7 +672,6 @@ int dock_notify(struct acpi_device *adev, u32 event)
 		surprise_removal = 1;
 		event = ACPI_NOTIFY_EJECT_REQUEST;
 		/* Fall back */
-		/* fall through */
 	case ACPI_NOTIFY_EJECT_REQUEST:
 		begin_undock(ds);
 		if ((immediate_undock && !(ds->flags & DOCK_IS_ATA))
@@ -586,7 +775,7 @@ static struct attribute *dock_attributes[] = {
 	NULL
 };
 
-static const struct attribute_group dock_attribute_group = {
+static struct attribute_group dock_attribute_group = {
 	.attrs = dock_attributes
 };
 
@@ -599,18 +788,12 @@ static const struct attribute_group dock_attribute_group = {
 void acpi_dock_add(struct acpi_device *adev)
 {
 	struct dock_station *dock_station, ds = { NULL, };
-	struct platform_device_info pdevinfo;
 	acpi_handle handle = adev->handle;
 	struct platform_device *dd;
 	int ret;
 
-	memset(&pdevinfo, 0, sizeof(pdevinfo));
-	pdevinfo.name = "dock";
-	pdevinfo.id = dock_station_count;
-	pdevinfo.fwnode = acpi_fwnode_handle(adev);
-	pdevinfo.data = &ds;
-	pdevinfo.size_data = sizeof(ds);
-	dd = platform_device_register_full(&pdevinfo);
+	dd = platform_device_register_data(NULL, "dock", dock_station_count,
+					   &ds, sizeof(ds));
 	if (IS_ERR(dd))
 		return;
 
@@ -630,7 +813,7 @@ void acpi_dock_add(struct acpi_device *adev)
 		dock_station->flags |= DOCK_IS_DOCK;
 	if (acpi_ata_match(handle))
 		dock_station->flags |= DOCK_IS_ATA;
-	if (acpi_device_is_battery(adev))
+	if (acpi_device_is_battery(handle))
 		dock_station->flags |= DOCK_IS_BAT;
 
 	ret = sysfs_create_group(&dd->dev.kobj, &dock_attribute_group);
@@ -650,8 +833,8 @@ void acpi_dock_add(struct acpi_device *adev)
 	return;
 
 err_rmgroup:
+	remove_dock_dependent_devices(dock_station);
 	sysfs_remove_group(&dd->dev.kobj, &dock_attribute_group);
-
 err_unregister:
 	platform_device_unregister(dd);
 	acpi_handle_err(handle, "%s encountered error %d\n", __func__, ret);

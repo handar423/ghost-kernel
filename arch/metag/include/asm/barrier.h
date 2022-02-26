@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_METAG_BARRIER_H
 #define _ASM_METAG_BARRIER_H
 
@@ -14,7 +13,6 @@ static inline void wr_fence(void)
 	volatile int *flushptr = (volatile int *) LINSYSEVENT_WR_FENCE;
 	barrier();
 	*flushptr = 0;
-	barrier();
 }
 
 #else /* CONFIG_METAG_META21 */
@@ -35,7 +33,6 @@ static inline void wr_fence(void)
 	*flushptr = 0;
 	*flushptr = 0;
 	*flushptr = 0;
-	barrier();
 }
 
 #endif /* !CONFIG_METAG_META21 */
@@ -44,6 +41,16 @@ static inline void wr_fence(void)
 #define mb()		wr_fence()
 #define rmb()		barrier()
 #define wmb()		mb()
+
+#define dma_rmb()	rmb()
+#define dma_wmb()	wmb()
+
+#ifndef CONFIG_SMP
+#define fence()		do { } while (0)
+#define smp_mb()        barrier()
+#define smp_rmb()       barrier()
+#define smp_wmb()       barrier()
+#else
 
 #ifdef CONFIG_METAG_SMP_WRITE_REORDERING
 /*
@@ -54,32 +61,26 @@ static inline void wr_fence(void)
  * incoherence). It is therefore ineffective if used after and on the same
  * thread as a write.
  */
-static inline void metag_fence(void)
+static inline void fence(void)
 {
 	volatile int *flushptr = (volatile int *) LINSYSEVENT_WR_ATOMIC_UNLOCK;
 	barrier();
 	*flushptr = 0;
-	barrier();
 }
-#define __smp_mb()	metag_fence()
-#define __smp_rmb()	metag_fence()
-#define __smp_wmb()	barrier()
-#else
-#define metag_fence()	do { } while (0)
-#define __smp_mb()	barrier()
-#define __smp_rmb()	barrier()
-#define __smp_wmb()	barrier()
-#endif
-
-#ifdef CONFIG_SMP
-#define fence()		metag_fence()
+#define smp_mb()        fence()
+#define smp_rmb()       fence()
+#define smp_wmb()       barrier()
 #else
 #define fence()		do { } while (0)
+#define smp_mb()        barrier()
+#define smp_rmb()       barrier()
+#define smp_wmb()       barrier()
+#endif
 #endif
 
-#define __smp_mb__before_atomic()	barrier()
-#define __smp_mb__after_atomic()	barrier()
+#define read_barrier_depends()		do { } while (0)
+#define smp_read_barrier_depends()	do { } while (0)
 
-#include <asm-generic/barrier.h>
+#define smp_store_mb(var, value) do { WRITE_ONCE(var, value); smp_mb(); } while (0)
 
 #endif /* _ASM_METAG_BARRIER_H */

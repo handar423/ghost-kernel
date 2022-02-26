@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 #ifndef _ARPT_MANGLE_H
 #define _ARPT_MANGLE_H
 #include <linux/netfilter_arp/arp_tables.h>
@@ -14,7 +13,7 @@ struct arpt_mangle
 	union {
 		struct in_addr tgt_ip;
 	} u_t;
-	__u8 flags;
+	u_int8_t flags;
 	int target;
 };
 

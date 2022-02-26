@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Copyright (C) 1995, 1996, 1997 Paul M. Antoine and Harald Koerfgen
  * Copyright (C) 2000, 2001, 2002, 2003, 2005  Maciej W. Rozycki
@@ -6,7 +5,7 @@
  * Written by Ralf Baechle and Andreas Busse, modified for DECstation
  * support by Paul Antoine and Harald Koerfgen.
  *
- * completely rewritten:
+ * completly rewritten:
  * Copyright (C) 1998 Harald Koerfgen
  *
  * Rewritten extensively for controller-driven IRQ support
@@ -119,7 +118,7 @@
  *	       7	FPU/R4k timer
  *
  * We handle the IRQ according to _our_ priority (see setup.c),
- * then we just return.  If multiple IRQs are pending then we will
+ * then we just return.	 If multiple IRQs are pending then we will
  * just take another exception, big deal.
  */
 		.align	5
@@ -147,14 +146,7 @@
 		/*
 		 * Find irq with highest priority
 		 */
-		# open coded PTR_LA t1, cpu_mask_nr_tbl
-#if defined(CONFIG_32BIT) || defined(KBUILD_64BIT_SYM32)
-		# open coded la t1, cpu_mask_nr_tbl
-		lui	t1, %hi(cpu_mask_nr_tbl)
-		addiu	t1, %lo(cpu_mask_nr_tbl)
-#else
-#error GCC `-msym32' option required for 64-bit DECstation builds
-#endif
+		 PTR_LA t1,cpu_mask_nr_tbl
 1:		lw	t2,(t1)
 		nop
 		and	t2,t0
@@ -203,14 +195,7 @@
 		/*
 		 * Find irq with highest priority
 		 */
-		# open coded PTR_LA t1,asic_mask_nr_tbl
-#if defined(CONFIG_32BIT) || defined(KBUILD_64BIT_SYM32)
-		# open coded la t1, asic_mask_nr_tbl
-		lui	t1, %hi(asic_mask_nr_tbl)
-		addiu	t1, %lo(asic_mask_nr_tbl)
-#else
-#error GCC `-msym32' option required for 64-bit DECstation builds
-#endif
+		 PTR_LA t1,asic_mask_nr_tbl
 2:		lw	t2,(t1)
 		nop
 		and	t2,t0
@@ -236,7 +221,7 @@
 		FEXPORT(cpu_all_int)		# HALT, timers, software junk
 		li	a0,DEC_CPU_IRQ_BASE
 		srl	t0,CAUSEB_IP
-		li	t1,CAUSEF_IP>>CAUSEB_IP	# mask
+		li	t1,CAUSEF_IP>>CAUSEB_IP # mask
 		b	1f
 		 li	t2,4			# nr of bits / 2
 
@@ -282,13 +267,8 @@ handle_it:
 
 #ifdef CONFIG_32BIT
 fpu:
-		lw	t0,fpu_kstat_irq
-		nop
-		lw	t1,(t0)
-		nop
-		addu	t1,1
 		j	handle_fpe_int
-		 sw	t1,(t0)
+		 nop
 #endif
 
 spurious:

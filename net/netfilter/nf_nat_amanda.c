@@ -19,10 +19,15 @@
 #include <net/netfilter/nf_nat_helper.h>
 #include <linux/netfilter/nf_conntrack_amanda.h>
 
+#define NAT_HELPER_NAME "amanda"
+
 MODULE_AUTHOR("Brian J. Murrell <netfilter@interlinx.bc.ca>");
 MODULE_DESCRIPTION("Amanda NAT helper");
 MODULE_LICENSE("GPL");
-MODULE_ALIAS("ip_nat_amanda");
+MODULE_ALIAS_NF_NAT_HELPER(NAT_HELPER_NAME);
+
+static struct nf_conntrack_nat_helper nat_helper_amanda =
+	NF_CT_NAT_HELPER_INIT(NAT_HELPER_NAME);
 
 static unsigned int help(struct sk_buff *skb,
 			 enum ip_conntrack_info ctinfo,
@@ -33,6 +38,7 @@ static unsigned int help(struct sk_buff *skb,
 {
 	char buffer[sizeof("65535")];
 	u_int16_t port;
+	unsigned int ret;
 
 	/* Connection comes from client. */
 	exp->saved_proto.tcp.port = exp->tuple.dst.u.tcp.port;
@@ -62,18 +68,19 @@ static unsigned int help(struct sk_buff *skb,
 	}
 
 	sprintf(buffer, "%u", port);
-	if (!nf_nat_mangle_udp_packet(skb, exp->master, ctinfo,
-				      protoff, matchoff, matchlen,
-				      buffer, strlen(buffer))) {
+	ret = nf_nat_mangle_udp_packet(skb, exp->master, ctinfo,
+				       protoff, matchoff, matchlen,
+				       buffer, strlen(buffer));
+	if (ret != NF_ACCEPT) {
 		nf_ct_helper_log(skb, exp->master, "cannot mangle packet");
 		nf_ct_unexpect_related(exp);
-		return NF_DROP;
 	}
-	return NF_ACCEPT;
+	return ret;
 }
 
 static void __exit nf_nat_amanda_fini(void)
 {
+	nf_nat_helper_unregister(&nat_helper_amanda);
 	RCU_INIT_POINTER(nf_nat_amanda_hook, NULL);
 	synchronize_rcu();
 }
@@ -81,6 +88,7 @@ static void __exit nf_nat_amanda_fini(void)
 static int __init nf_nat_amanda_init(void)
 {
 	BUG_ON(nf_nat_amanda_hook != NULL);
+	nf_nat_helper_register(&nat_helper_amanda);
 	RCU_INIT_POINTER(nf_nat_amanda_hook, help);
 	return 0;
 }

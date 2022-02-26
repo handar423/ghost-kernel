@@ -24,7 +24,7 @@ static struct sk_buff *gre_gso_segment(struct sk_buff *skb,
 	__be16 protocol = skb->protocol;
 	u16 mac_len = skb->mac_len;
 	int gre_offset, outer_hlen;
-	bool need_csum, gso_partial;
+	bool need_csum, ufo, gso_partial;
 
 	if (!skb->encapsulation)
 		goto out;
@@ -47,7 +47,19 @@ static struct sk_buff *gre_gso_segment(struct sk_buff *skb,
 	need_csum = !!(skb_shinfo(skb)->gso_type & SKB_GSO_GRE_CSUM);
 	skb->encap_hdr_csum = need_csum;
 
+	ufo = !!(skb_shinfo(skb)->gso_type & SKB_GSO_UDP);
+
 	features &= skb->dev->hw_enc_features;
+
+	/* The only checksum offload we care about from here on out is the
+	 * outer one so strip the existing checksum feature flags based
+	 * on the fact that we will be computing our checksum in software.
+	 */
+	if (ufo) {
+		features &= ~NETIF_F_CSUM_MASK;
+		if (!need_csum)
+			features |= NETIF_F_HW_CSUM;
+	}
 
 	/* segment inner packet. */
 	segs = skb_mac_gso_segment(skb, features);
@@ -143,19 +155,11 @@ static struct sk_buff **gre_gro_receive(struct sk_buff **head,
 	if ((greh->flags & ~(GRE_KEY|GRE_CSUM)) != 0)
 		goto out;
 
-	/* We can only support GRE_CSUM if we can track the location of
-	 * the GRE header.  In the case of FOU/GUE we cannot because the
-	 * outer UDP header displaces the GRE header leaving us in a state
-	 * of limbo.
-	 */
-	if ((greh->flags & GRE_CSUM) && NAPI_GRO_CB(skb)->is_fou)
-		goto out;
-
 	type = greh->protocol;
 
 	rcu_read_lock();
 	ptype = gro_find_receive_by_type(type);
-	if (!ptype)
+	if (ptype == NULL)
 		goto out_unlock;
 
 	grehlen = GRE_HEADER_SECTION;
@@ -248,7 +252,7 @@ static int gre_gro_complete(struct sk_buff *skb, int nhoff)
 
 	rcu_read_lock();
 	ptype = gro_find_complete_by_type(type);
-	if (ptype)
+	if (ptype != NULL)
 		err = ptype->callbacks.gro_complete(skb, nhoff + grehlen);
 
 	rcu_read_unlock();

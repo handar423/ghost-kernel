@@ -1,16 +1,9 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __SDHCI_PCI_H
 #define __SDHCI_PCI_H
 
 /*
  * PCI device IDs, sub IDs
  */
-
-#define PCI_DEVICE_ID_O2_SDS0		0x8420
-#define PCI_DEVICE_ID_O2_SDS1		0x8421
-#define PCI_DEVICE_ID_O2_FUJIN2		0x8520
-#define PCI_DEVICE_ID_O2_SEABIRD0	0x8620
-#define PCI_DEVICE_ID_O2_SEABIRD1	0x8621
 
 #define PCI_DEVICE_ID_INTEL_PCH_SDIO0	0x8809
 #define PCI_DEVICE_ID_INTEL_PCH_SDIO1	0x880a
@@ -48,6 +41,8 @@
 #define PCI_DEVICE_ID_INTEL_CNP_EMMC	0x9dc4
 #define PCI_DEVICE_ID_INTEL_CNP_SD	0x9df5
 #define PCI_DEVICE_ID_INTEL_CNPH_SD	0xa375
+#define PCI_DEVICE_ID_INTEL_ICP_EMMC	0x34c4
+#define PCI_DEVICE_ID_INTEL_ICP_SD	0x34f8
 
 #define PCI_DEVICE_ID_SYSKONNECT_8000	0x8000
 #define PCI_DEVICE_ID_VIA_95D0		0x95d0
@@ -145,6 +140,10 @@ struct sdhci_pci_slot {
 	bool			cd_override_level;
 
 	void (*hw_reset)(struct sdhci_host *host);
+	int (*select_drive_strength)(struct sdhci_host *host,
+				     struct mmc_card *card,
+				     unsigned int max_dtr, int host_drv,
+				     int card_drv, int *drv_type);
 	unsigned long		private[0] ____cacheline_aligned;
 };
 
@@ -162,19 +161,13 @@ struct sdhci_pci_chip {
 	struct sdhci_pci_slot	*slots[MAX_SLOTS]; /* Pointers to host slots */
 };
 
-static inline void *sdhci_pci_priv(struct sdhci_pci_slot *slot)
-{
-	return (void *)slot->private;
-}
-
 #ifdef CONFIG_PM_SLEEP
 int sdhci_pci_resume_host(struct sdhci_pci_chip *chip);
 #endif
 
-int sdhci_pci_o2_probe_slot(struct sdhci_pci_slot *slot);
-int sdhci_pci_o2_probe(struct sdhci_pci_chip *chip);
-#ifdef CONFIG_PM_SLEEP
-int sdhci_pci_o2_resume(struct sdhci_pci_chip *chip);
-#endif
+static inline void *sdhci_pci_priv(struct sdhci_pci_slot *slot)
+{
+	return (void *)slot->private;
+}
 
 #endif /* __SDHCI_PCI_H */

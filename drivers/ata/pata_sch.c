@@ -64,7 +64,7 @@ static struct pci_driver sch_pci_driver = {
 	.id_table		= sch_pci_tbl,
 	.probe			= sch_init_one,
 	.remove			= ata_pci_remove_one,
-#ifdef CONFIG_PM_SLEEP
+#ifdef CONFIG_PM
 	.suspend		= ata_pci_device_suspend,
 	.resume			= ata_pci_device_resume,
 #endif
@@ -81,7 +81,7 @@ static struct ata_port_operations sch_pata_ops = {
 	.set_dmamode		= sch_set_dmamode,
 };
 
-static const struct ata_port_info sch_port_info = {
+static struct ata_port_info sch_port_info = {
 	.flags		= ATA_FLAG_SLAVE_POSS,
 	.pio_mask	= ATA_PIO4,
 	.mwdma_mask	= ATA_MWDMA2,

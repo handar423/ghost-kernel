@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
  *
- * Maintained by: Jim Gill <jgill@vmware.com>
+ * Maintained by: Arvind Kumar <arvindkumar@vmware.com>
  *
  */
 
@@ -68,7 +68,10 @@ struct pvscsi_ctx {
 
 struct pvscsi_adapter {
 	char				*mmioBase;
+	unsigned int			irq;
 	u8				rev;
+	bool				use_msi;
+	bool				use_msix;
 	bool				use_msg;
 	bool				use_req_threshold;
 
@@ -520,11 +523,33 @@ static void pvscsi_setup_all_rings(const struct pvscsi_adapter *adapter)
 	}
 }
 
-static int pvscsi_change_queue_depth(struct scsi_device *sdev, int qdepth)
+static int pvscsi_change_queue_depth(struct scsi_device *sdev,
+				     int qdepth,
+				     int reason)
 {
+	int max_depth;
+	struct Scsi_Host *shost = sdev->host;
+
+	if (reason != SCSI_QDEPTH_DEFAULT)
+		/*
+		 * We support only changing default.
+		 */
+		return -EOPNOTSUPP;
+
+	max_depth = shost->can_queue;
 	if (!sdev->tagged_supported)
-		qdepth = 1;
-	return scsi_change_queue_depth(sdev, qdepth);
+		max_depth = 1;
+	if (qdepth > max_depth)
+		qdepth = max_depth;
+	scsi_adjust_queue_depth(sdev, scsi_get_tag_type(sdev), qdepth);
+
+	if (sdev->inquiry_len > 7)
+		sdev_printk(KERN_INFO, sdev,
+			    "qdepth(%d), tagged(%d), simple(%d), ordered(%d), scsi_level(%d), cmd_que(%d)\n",
+			    sdev->queue_depth, sdev->tagged_supported,
+			    sdev->simple_tags, sdev->ordered_tags,
+			    sdev->scsi_level, (sdev->inquiry[7] & 2) >> 1);
+	return sdev->queue_depth;
 }
 
 /*
@@ -561,9 +586,14 @@ static void pvscsi_complete_request(struct pvscsi_adapter *adapter,
 	    (btstat == BTSTAT_SUCCESS ||
 	     btstat == BTSTAT_LINKED_COMMAND_COMPLETED ||
 	     btstat == BTSTAT_LINKED_COMMAND_COMPLETED_WITH_FLAG)) {
-		cmd->result = (DID_OK << 16) | sdstat;
-		if (sdstat == SAM_STAT_CHECK_CONDITION && cmd->sense_buffer)
-			cmd->result |= (DRIVER_SENSE << 24);
+		if (sdstat == SAM_STAT_COMMAND_TERMINATED) {
+			cmd->result = (DID_RESET << 16);
+		} else {
+			cmd->result = (DID_OK << 16) | sdstat;
+			if (sdstat == SAM_STAT_CHECK_CONDITION &&
+			    cmd->sense_buffer)
+				cmd->result |= (DRIVER_SENSE << 24);
+		}
 	} else
 		switch (btstat) {
 		case BTSTAT_SUCCESS:
@@ -609,7 +639,7 @@ static void pvscsi_complete_request(struct pvscsi_adapter *adapter,
 			break;
 
 		case BTSTAT_ABORTQUEUE:
-			cmd->result = (DID_ABORT << 16);
+			cmd->result = (DID_BUS_BUSY << 16);
 			break;
 
 		case BTSTAT_SCSIPARITY:
@@ -723,6 +753,10 @@ static int pvscsi_queue_ring(struct pvscsi_adapter *adapter,
 	memcpy(e->cdb, cmd->cmnd, e->cdbLen);
 
 	e->tag = SIMPLE_QUEUE_TAG;
+	if (sdev->tagged_supported &&
+	    (cmd->tag == HEAD_OF_QUEUE_TAG ||
+	     cmd->tag == ORDERED_QUEUE_TAG))
+		e->tag = cmd->tag;
 
 	if (cmd->sc_data_direction == DMA_FROM_DEVICE)
 		e->flags = PVSCSI_FLAG_CMD_DIR_TOHOST;
@@ -758,6 +792,7 @@ static int pvscsi_queue_lck(struct scsi_cmnd *cmd, void (*done)(struct scsi_cmnd
 	struct pvscsi_adapter *adapter = shost_priv(host);
 	struct pvscsi_ctx *ctx;
 	unsigned long flags;
+	unsigned char op;
 
 	spin_lock_irqsave(&adapter->hw_lock, flags);
 
@@ -770,13 +805,14 @@ static int pvscsi_queue_lck(struct scsi_cmnd *cmd, void (*done)(struct scsi_cmnd
 	}
 
 	cmd->scsi_done = done;
+	op = cmd->cmnd[0];
 
 	dev_dbg(&cmd->device->sdev_gendev,
-		"queued cmd %p, ctx %p, op=%x\n", cmd, ctx, cmd->cmnd[0]);
+		"queued cmd %p, ctx %p, op=%x\n", cmd, ctx, op);
 
 	spin_unlock_irqrestore(&adapter->hw_lock, flags);
 
-	pvscsi_kick_io(adapter, cmd->cmnd[0]);
+	pvscsi_kick_io(adapter, op);
 
 	return 0;
 }
@@ -1139,13 +1175,13 @@ static bool pvscsi_setup_req_threshold(struct pvscsi_adapter *adapter,
 			 PVSCSI_CMD_SETUP_REQCALLTHRESHOLD);
 	val = pvscsi_reg_read(adapter, PVSCSI_REG_OFFSET_COMMAND_STATUS);
 	if (val == -1) {
-		printk(KERN_INFO "vmw_pvscsi: device does not support req_threshold\n");
+		printk(KERN_INFO "pvscsi: device does not support req_threshold\n");
 		return false;
 	} else {
 		struct PVSCSICmdDescSetupReqCall cmd_msg = { 0 };
 		cmd_msg.enable = enable;
 		printk(KERN_INFO
-		       "vmw_pvscsi: %sabling reqCallThreshold\n",
+		       "pvscsi: %sabling reqCallThreshold\n",
 			enable ? "en" : "dis");
 		pvscsi_write_cmd_desc(adapter,
 				      PVSCSI_CMD_SETUP_REQCALLTHRESHOLD,
@@ -1158,26 +1194,30 @@ static bool pvscsi_setup_req_threshold(struct pvscsi_adapter *adapter,
 static irqreturn_t pvscsi_isr(int irq, void *devp)
 {
 	struct pvscsi_adapter *adapter = devp;
-	unsigned long flags;
+	int handled;
 
-	spin_lock_irqsave(&adapter->hw_lock, flags);
-	pvscsi_process_completion_ring(adapter);
-	if (adapter->use_msg && pvscsi_msg_pending(adapter))
-		queue_work(adapter->workqueue, &adapter->work);
-	spin_unlock_irqrestore(&adapter->hw_lock, flags);
+	if (adapter->use_msi || adapter->use_msix)
+		handled = true;
+	else {
+		u32 val = pvscsi_read_intr_status(adapter);
+		handled = (val & PVSCSI_INTR_ALL_SUPPORTED) != 0;
+		if (handled)
+			pvscsi_write_intr_status(devp, val);
+	}
 
-	return IRQ_HANDLED;
-}
+	if (handled) {
+		unsigned long flags;
 
-static irqreturn_t pvscsi_shared_isr(int irq, void *devp)
-{
-	struct pvscsi_adapter *adapter = devp;
-	u32 val = pvscsi_read_intr_status(adapter);
+		spin_lock_irqsave(&adapter->hw_lock, flags);
 
-	if (!(val & PVSCSI_INTR_ALL_SUPPORTED))
-		return IRQ_NONE;
-	pvscsi_write_intr_status(devp, val);
-	return pvscsi_isr(irq, devp);
+		pvscsi_process_completion_ring(adapter);
+		if (adapter->use_msg && pvscsi_msg_pending(adapter))
+			queue_work(adapter->workqueue, &adapter->work);
+
+		spin_unlock_irqrestore(&adapter->hw_lock, flags);
+	}
+
+	return IRQ_RETVAL(handled);
 }
 
 static void pvscsi_free_sgls(const struct pvscsi_adapter *adapter)
@@ -1189,10 +1229,34 @@ static void pvscsi_free_sgls(const struct pvscsi_adapter *adapter)
 		free_pages((unsigned long)ctx->sgl, get_order(SGL_SIZE));
 }
 
+static int pvscsi_setup_msix(const struct pvscsi_adapter *adapter,
+			     unsigned int *irq)
+{
+	struct msix_entry entry = { 0, PVSCSI_VECTOR_COMPLETION };
+	int ret;
+
+	ret = pci_enable_msix(adapter->dev, &entry, 1);
+	if (ret)
+		return ret;
+
+	*irq = entry.vector;
+
+	return 0;
+}
+
 static void pvscsi_shutdown_intr(struct pvscsi_adapter *adapter)
 {
-	free_irq(pci_irq_vector(adapter->dev, 0), adapter);
-	pci_free_irq_vectors(adapter->dev);
+	if (adapter->irq) {
+		free_irq(adapter->irq, adapter);
+		adapter->irq = 0;
+	}
+	if (adapter->use_msi) {
+		pci_disable_msi(adapter->dev);
+		adapter->use_msi = 0;
+	} else if (adapter->use_msix) {
+		pci_disable_msix(adapter->dev);
+		adapter->use_msix = 0;
+	}
 }
 
 static void pvscsi_release_resources(struct pvscsi_adapter *adapter)
@@ -1328,11 +1392,11 @@ exit:
 
 static int pvscsi_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 {
-	unsigned int irq_flag = PCI_IRQ_MSIX | PCI_IRQ_MSI | PCI_IRQ_LEGACY;
 	struct pvscsi_adapter *adapter;
 	struct pvscsi_adapter adapter_temp;
 	struct Scsi_Host *host = NULL;
 	unsigned int i;
+	unsigned long flags = 0;
 	int error;
 	u32 max_id;
 
@@ -1481,33 +1545,30 @@ static int pvscsi_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		goto out_reset_adapter;
 	}
 
-	if (pvscsi_disable_msix)
-		irq_flag &= ~PCI_IRQ_MSIX;
-	if (pvscsi_disable_msi)
-		irq_flag &= ~PCI_IRQ_MSI;
-
-	error = pci_alloc_irq_vectors(adapter->dev, 1, 1, irq_flag);
-	if (error < 0)
-		goto out_reset_adapter;
-
-	adapter->use_req_threshold = pvscsi_setup_req_threshold(adapter, true);
-	printk(KERN_DEBUG "vmw_pvscsi: driver-based request coalescing %sabled\n",
-	       adapter->use_req_threshold ? "en" : "dis");
-
-	if (adapter->dev->msix_enabled || adapter->dev->msi_enabled) {
-		printk(KERN_INFO "vmw_pvscsi: using MSI%s\n",
-			adapter->dev->msix_enabled ? "-X" : "");
-		error = request_irq(pci_irq_vector(pdev, 0), pvscsi_isr,
-				0, "vmw_pvscsi", adapter);
+	if (!pvscsi_disable_msix &&
+	    pvscsi_setup_msix(adapter, &adapter->irq) == 0) {
+		printk(KERN_INFO "vmw_pvscsi: using MSI-X\n");
+		adapter->use_msix = 1;
+	} else if (!pvscsi_disable_msi && pci_enable_msi(pdev) == 0) {
+		printk(KERN_INFO "vmw_pvscsi: using MSI\n");
+		adapter->use_msi = 1;
+		adapter->irq = pdev->irq;
 	} else {
 		printk(KERN_INFO "vmw_pvscsi: using INTx\n");
-		error = request_irq(pci_irq_vector(pdev, 0), pvscsi_shared_isr,
-				IRQF_SHARED, "vmw_pvscsi", adapter);
+		adapter->irq = pdev->irq;
+		flags = IRQF_SHARED;
 	}
 
+	adapter->use_req_threshold = pvscsi_setup_req_threshold(adapter, true);
+	printk(KERN_DEBUG "pvscsi: driver-based request coalescing %sabled\n",
+	       adapter->use_req_threshold ? "en" : "dis");
+
+	error = request_irq(adapter->irq, pvscsi_isr, flags,
+			    "vmw_pvscsi", adapter);
 	if (error) {
 		printk(KERN_ERR
 		       "vmw_pvscsi: unable to request IRQ: %d\n", error);
+		adapter->irq = 0;
 		goto out_reset_adapter;
 	}
 
@@ -1533,6 +1594,7 @@ out_release_resources:
 	pvscsi_release_resources(adapter);
 	scsi_host_put(host);
 out_disable_device:
+	pci_set_drvdata(pdev, NULL);
 	pci_disable_device(pdev);
 
 	return error;
@@ -1576,6 +1638,7 @@ static void pvscsi_remove(struct pci_dev *pdev)
 
 	scsi_host_put(host);
 
+	pci_set_drvdata(pdev, NULL);
 	pci_disable_device(pdev);
 }
 

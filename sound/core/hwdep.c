@@ -25,7 +25,6 @@
 #include <linux/time.h>
 #include <linux/mutex.h>
 #include <linux/module.h>
-#include <linux/sched/signal.h>
 #include <sound/core.h>
 #include <sound/control.h>
 #include <sound/minors.h>
@@ -85,7 +84,7 @@ static int snd_hwdep_open(struct inode *inode, struct file * file)
 	int major = imajor(inode);
 	struct snd_hwdep *hw;
 	int err;
-	wait_queue_entry_t wait;
+	wait_queue_t wait;
 
 	if (major == snd_major) {
 		hw = snd_lookup_minor_data(iminor(inode),
@@ -233,8 +232,6 @@ static int snd_hwdep_dsp_load(struct snd_hwdep *hw,
 	/* check whether the dsp was already loaded */
 	if (hw->dsp_loaded & (1 << info.index))
 		return -EBUSY;
-	if (!access_ok(VERIFY_READ, info.image, info.length))
-		return -EFAULT;
 	err = hw->ops.dsp_load(hw, &info);
 	if (err < 0)
 		return err;

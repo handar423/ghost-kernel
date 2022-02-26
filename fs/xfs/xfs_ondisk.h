@@ -34,7 +34,7 @@ xfs_check_ondisk_structs(void)
 	XFS_CHECK_STRUCT_SIZE(struct xfs_acl,			4);
 	XFS_CHECK_STRUCT_SIZE(struct xfs_acl_entry,		12);
 	XFS_CHECK_STRUCT_SIZE(struct xfs_agf,			224);
-	XFS_CHECK_STRUCT_SIZE(struct xfs_agfl,			36);
+	XFS_CHECK_STRUCT_SIZE(struct xfs_agfl,			40);
 	XFS_CHECK_STRUCT_SIZE(struct xfs_agi,			336);
 	XFS_CHECK_STRUCT_SIZE(struct xfs_bmbt_key,		8);
 	XFS_CHECK_STRUCT_SIZE(struct xfs_bmbt_rec,		16);
@@ -49,17 +49,11 @@ xfs_check_ondisk_structs(void)
 	XFS_CHECK_STRUCT_SIZE(struct xfs_dsymlink_hdr,		56);
 	XFS_CHECK_STRUCT_SIZE(struct xfs_inobt_key,		4);
 	XFS_CHECK_STRUCT_SIZE(struct xfs_inobt_rec,		16);
-	XFS_CHECK_STRUCT_SIZE(struct xfs_refcount_key,		4);
-	XFS_CHECK_STRUCT_SIZE(struct xfs_refcount_rec,		12);
-	XFS_CHECK_STRUCT_SIZE(struct xfs_rmap_key,		20);
-	XFS_CHECK_STRUCT_SIZE(struct xfs_rmap_rec,		24);
 	XFS_CHECK_STRUCT_SIZE(struct xfs_timestamp,		8);
 	XFS_CHECK_STRUCT_SIZE(xfs_alloc_key_t,			8);
 	XFS_CHECK_STRUCT_SIZE(xfs_alloc_ptr_t,			4);
 	XFS_CHECK_STRUCT_SIZE(xfs_alloc_rec_t,			8);
 	XFS_CHECK_STRUCT_SIZE(xfs_inobt_ptr_t,			4);
-	XFS_CHECK_STRUCT_SIZE(xfs_refcount_ptr_t,		4);
-	XFS_CHECK_STRUCT_SIZE(xfs_rmap_ptr_t,			4);
 
 	/* dir/attr trees */
 	XFS_CHECK_STRUCT_SIZE(struct xfs_attr3_leaf_hdr,	80);

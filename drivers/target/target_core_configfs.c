@@ -99,67 +99,6 @@ static ssize_t target_core_item_version_show(struct config_item *item,
 
 CONFIGFS_ATTR_RO(target_core_item_, version);
 
-char db_root[DB_ROOT_LEN] = DB_ROOT_DEFAULT;
-static char db_root_stage[DB_ROOT_LEN];
-
-static ssize_t target_core_item_dbroot_show(struct config_item *item,
-					    char *page)
-{
-	return sprintf(page, "%s\n", db_root);
-}
-
-static ssize_t target_core_item_dbroot_store(struct config_item *item,
-					const char *page, size_t count)
-{
-	ssize_t read_bytes;
-	struct file *fp;
-
-	mutex_lock(&g_tf_lock);
-	if (!list_empty(&g_tf_list)) {
-		mutex_unlock(&g_tf_lock);
-		pr_err("db_root: cannot be changed: target drivers registered");
-		return -EINVAL;
-	}
-
-	if (count > (DB_ROOT_LEN - 1)) {
-		mutex_unlock(&g_tf_lock);
-		pr_err("db_root: count %d exceeds DB_ROOT_LEN-1: %u\n",
-		       (int)count, DB_ROOT_LEN - 1);
-		return -EINVAL;
-	}
-
-	read_bytes = snprintf(db_root_stage, DB_ROOT_LEN, "%s", page);
-	if (!read_bytes) {
-		mutex_unlock(&g_tf_lock);
-		return -EINVAL;
-	}
-	if (db_root_stage[read_bytes - 1] == '\n')
-		db_root_stage[read_bytes - 1] = '\0';
-
-	/* validate new db root before accepting it */
-	fp = filp_open(db_root_stage, O_RDONLY, 0);
-	if (IS_ERR(fp)) {
-		mutex_unlock(&g_tf_lock);
-		pr_err("db_root: cannot open: %s\n", db_root_stage);
-		return -EINVAL;
-	}
-	if (!S_ISDIR(file_inode(fp)->i_mode)) {
-		filp_close(fp, NULL);
-		mutex_unlock(&g_tf_lock);
-		pr_err("db_root: not a directory: %s\n", db_root_stage);
-		return -EINVAL;
-	}
-	filp_close(fp, NULL);
-
-	strncpy(db_root, db_root_stage, read_bytes);
-
-	mutex_unlock(&g_tf_lock);
-
-	return read_bytes;
-}
-
-CONFIGFS_ATTR(target_core_item_, dbroot);
-
 static struct target_fabric_configfs *target_core_get_fabric(
 	const char *name)
 {
@@ -170,7 +109,10 @@ static struct target_fabric_configfs *target_core_get_fabric(
 
 	mutex_lock(&g_tf_lock);
 	list_for_each_entry(tf, &g_tf_list, tf_list) {
-		if (!strcmp(tf->tf_ops->name, name)) {
+		const char *cmp_name = tf->tf_ops->fabric_alias;
+		if (!cmp_name)
+			cmp_name = tf->tf_ops->fabric_name;
+		if (!strcmp(cmp_name, name)) {
 			atomic_inc(&tf->tf_access_cnt);
 			mutex_unlock(&g_tf_lock);
 			return tf;
@@ -247,7 +189,7 @@ static struct config_group *target_core_register_fabric(
 		return ERR_PTR(-EINVAL);
 	}
 	pr_debug("Target_Core_ConfigFS: REGISTER -> Located fabric:"
-			" %s\n", tf->tf_ops->name);
+			" %s\n", tf->tf_ops->fabric_name);
 	/*
 	 * On a successful target_core_get_fabric() look, the returned
 	 * struct target_fabric_configfs *tf will contain a usage reference.
@@ -280,7 +222,7 @@ static void target_core_deregister_fabric(
 		" tf list\n", config_item_name(item));
 
 	pr_debug("Target_Core_ConfigFS: DEREGISTER -> located fabric:"
-			" %s\n", tf->tf_ops->name);
+			" %s\n", tf->tf_ops->fabric_name);
 	atomic_dec(&tf->tf_access_cnt);
 
 	pr_debug("Target_Core_ConfigFS: DEREGISTER -> Releasing ci"
@@ -300,14 +242,13 @@ static struct configfs_group_operations target_core_fabric_group_ops = {
  */
 static struct configfs_attribute *target_core_fabric_item_attrs[] = {
 	&target_core_item_attr_version,
-	&target_core_item_attr_dbroot,
 	NULL,
 };
 
 /*
  * Provides Fabrics Groups and Item Attributes for /sys/kernel/config/target/
  */
-static const struct config_item_type target_core_fabrics_item = {
+static struct config_item_type target_core_fabrics_item = {
 	.ct_group_ops	= &target_core_fabric_group_ops,
 	.ct_attrs	= target_core_fabric_item_attrs,
 	.ct_owner	= THIS_MODULE,
@@ -340,17 +281,20 @@ EXPORT_SYMBOL(target_undepend_item);
 
 static int target_fabric_tf_ops_check(const struct target_core_fabric_ops *tfo)
 {
-	if (!tfo->name) {
-		pr_err("Missing tfo->name\n");
+	if (tfo->fabric_alias) {
+		if (strlen(tfo->fabric_alias) >= TARGET_FABRIC_NAME_SIZE) {
+			pr_err("Passed alias: %s exceeds "
+				"TARGET_FABRIC_NAME_SIZE\n", tfo->fabric_alias);
+			return -EINVAL;
+		}
+	}
+	if (!tfo->fabric_name) {
+		pr_err("Missing tfo->fabric_name\n");
 		return -EINVAL;
 	}
-	if (strlen(tfo->name) >= TARGET_FABRIC_NAME_SIZE) {
-		pr_err("Passed name: %s exceeds TARGET_FABRIC"
-			"_NAME_SIZE\n", tfo->name);
-		return -EINVAL;
-	}
-	if (!tfo->get_fabric_name) {
-		pr_err("Missing tfo->get_fabric_name()\n");
+	if (strlen(tfo->fabric_name) >= TARGET_FABRIC_NAME_SIZE) {
+		pr_err("Passed name: %s exceeds "
+			"TARGET_FABRIC_NAME_SIZE\n", tfo->fabric_name);
 		return -EINVAL;
 	}
 	if (!tfo->tpg_get_wwn) {
@@ -484,7 +428,7 @@ void target_unregister_template(const struct target_core_fabric_ops *fo)
 
 	mutex_lock(&g_tf_lock);
 	list_for_each_entry(t, &g_tf_list, tf_list) {
-		if (!strcmp(t->tf_ops->name, fo->name)) {
+		if (!strcmp(t->tf_ops->fabric_name, fo->fabric_name)) {
 			BUG_ON(atomic_read(&t->tf_access_cnt));
 			list_del(&t->tf_list);
 			mutex_unlock(&g_tf_lock);
@@ -530,9 +474,9 @@ DEF_CONFIGFS_ATTRIB_SHOW(emulate_tpu);
 DEF_CONFIGFS_ATTRIB_SHOW(emulate_tpws);
 DEF_CONFIGFS_ATTRIB_SHOW(emulate_caw);
 DEF_CONFIGFS_ATTRIB_SHOW(emulate_3pc);
+DEF_CONFIGFS_ATTRIB_SHOW(emulate_pr);
 DEF_CONFIGFS_ATTRIB_SHOW(pi_prot_type);
 DEF_CONFIGFS_ATTRIB_SHOW(hw_pi_prot_type);
-DEF_CONFIGFS_ATTRIB_SHOW(pi_prot_format);
 DEF_CONFIGFS_ATTRIB_SHOW(pi_prot_verify);
 DEF_CONFIGFS_ATTRIB_SHOW(enforce_pr_isids);
 DEF_CONFIGFS_ATTRIB_SHOW(is_nonrot);
@@ -590,6 +534,7 @@ static ssize_t _name##_store(struct config_item *item, const char *page,	\
 DEF_CONFIGFS_ATTRIB_STORE_BOOL(emulate_fua_write);
 DEF_CONFIGFS_ATTRIB_STORE_BOOL(emulate_caw);
 DEF_CONFIGFS_ATTRIB_STORE_BOOL(emulate_3pc);
+DEF_CONFIGFS_ATTRIB_STORE_BOOL(emulate_pr);
 DEF_CONFIGFS_ATTRIB_STORE_BOOL(enforce_pr_isids);
 DEF_CONFIGFS_ATTRIB_STORE_BOOL(is_nonrot);
 
@@ -808,7 +753,7 @@ static ssize_t pi_prot_type_store(struct config_item *item,
 		       dev->transport->name);
 		return -ENOSYS;
 	}
-	if (!(dev->dev_flags & DF_CONFIGURED)) {
+	if (!target_dev_configured(dev)) {
 		pr_err("DIF protection requires device to be configured\n");
 		return -ENODEV;
 	}
@@ -837,6 +782,12 @@ static ssize_t pi_prot_type_store(struct config_item *item,
 	return count;
 }
 
+/* always zero, but attr needs to remain RW to avoid userspace breakage */
+static ssize_t pi_prot_format_show(struct config_item *item, char *page)
+{
+	return snprintf(page, PAGE_SIZE, "0\n");
+}
+
 static ssize_t pi_prot_format_store(struct config_item *item,
 		const char *page, size_t count)
 {
@@ -857,7 +808,7 @@ static ssize_t pi_prot_format_store(struct config_item *item,
 		       dev->transport->name);
 		return -ENOSYS;
 	}
-	if (!(dev->dev_flags & DF_CONFIGURED)) {
+	if (!target_dev_configured(dev)) {
 		pr_err("DIF protection format requires device to be configured\n");
 		return -ENODEV;
 	}
@@ -1114,6 +1065,7 @@ CONFIGFS_ATTR(, emulate_tpu);
 CONFIGFS_ATTR(, emulate_tpws);
 CONFIGFS_ATTR(, emulate_caw);
 CONFIGFS_ATTR(, emulate_3pc);
+CONFIGFS_ATTR(, emulate_pr);
 CONFIGFS_ATTR(, pi_prot_type);
 CONFIGFS_ATTR_RO(, hw_pi_prot_type);
 CONFIGFS_ATTR(, pi_prot_format);
@@ -1154,6 +1106,7 @@ struct configfs_attribute *sbc_attrib_attrs[] = {
 	&attr_emulate_tpws,
 	&attr_emulate_caw,
 	&attr_emulate_3pc,
+	&attr_emulate_pr,
 	&attr_pi_prot_type,
 	&attr_hw_pi_prot_type,
 	&attr_pi_prot_format,
@@ -1197,6 +1150,7 @@ struct configfs_attribute *passthrough_attrib_attrs[] = {
 EXPORT_SYMBOL(passthrough_attrib_attrs);
 
 TB_CIT_SETUP_DRV(dev_attrib, NULL, NULL);
+TB_CIT_SETUP_DRV(dev_action, NULL, NULL);
 
 /* End functions for struct config_item_type tb_dev_attrib_cit */
 
@@ -1397,7 +1351,7 @@ static ssize_t target_core_dev_pr_show_spc3_res(struct se_device *dev,
 	core_pr_dump_initiator_port(pr_reg, i_buf, PR_REG_ISID_ID_LEN);
 
 	return sprintf(page, "SPC-3 Reservation: %s Initiator: %s%s\n",
-		se_nacl->se_tpg->se_tpg_tfo->get_fabric_name(),
+		se_nacl->se_tpg->se_tpg_tfo->fabric_name,
 		se_nacl->initiatorname, i_buf);
 }
 
@@ -1411,7 +1365,7 @@ static ssize_t target_core_dev_pr_show_spc2_res(struct se_device *dev,
 	if (se_nacl) {
 		len = sprintf(page,
 			      "SPC-2 Reservation: %s Initiator: %s\n",
-			      se_nacl->se_tpg->se_tpg_tfo->get_fabric_name(),
+			      se_nacl->se_tpg->se_tpg_tfo->fabric_name,
 			      se_nacl->initiatorname);
 	} else {
 		len = sprintf(page, "No SPC-2 Reservation holder\n");
@@ -1423,6 +1377,9 @@ static ssize_t target_pr_res_holder_show(struct config_item *item, char *page)
 {
 	struct se_device *dev = pr_to_dev(item);
 	int ret;
+
+	if (!dev->dev_attrib.emulate_pr)
+		return sprintf(page, "SPC_RESERVATIONS_DISABLED\n");
 
 	if (dev->transport->transport_flags & TRANSPORT_FLAG_PASSTHROUGH_PGR)
 		return sprintf(page, "Passthrough\n");
@@ -1486,13 +1443,13 @@ static ssize_t target_pr_res_pr_holder_tg_port_show(struct config_item *item,
 	tfo = se_tpg->se_tpg_tfo;
 
 	len += sprintf(page+len, "SPC-3 Reservation: %s"
-		" Target Node Endpoint: %s\n", tfo->get_fabric_name(),
+		" Target Node Endpoint: %s\n", tfo->fabric_name,
 		tfo->tpg_get_wwn(se_tpg));
 	len += sprintf(page+len, "SPC-3 Reservation: Relative Port"
 		" Identifier Tag: %hu %s Portal Group Tag: %hu"
 		" %s Logical Unit: %llu\n", pr_reg->tg_pt_sep_rtpi,
-		tfo->get_fabric_name(), tfo->tpg_get_tag(se_tpg),
-		tfo->get_fabric_name(), pr_reg->pr_aptpl_target_lun);
+		tfo->fabric_name, tfo->tpg_get_tag(se_tpg),
+		tfo->fabric_name, pr_reg->pr_aptpl_target_lun);
 
 out_unlock:
 	spin_unlock(&dev->dev_reservation_lock);
@@ -1523,7 +1480,7 @@ static ssize_t target_pr_res_pr_registered_i_pts_show(struct config_item *item,
 		core_pr_dump_initiator_port(pr_reg, i_buf,
 					PR_REG_ISID_ID_LEN);
 		sprintf(buf, "%s Node: %s%s Key: 0x%016Lx PRgen: 0x%08x\n",
-			tfo->get_fabric_name(),
+			tfo->fabric_name,
 			pr_reg->pr_reg_nacl->initiatorname, i_buf, pr_reg->pr_res_key,
 			pr_reg->pr_res_generation);
 
@@ -1564,12 +1521,14 @@ static ssize_t target_pr_res_type_show(struct config_item *item, char *page)
 {
 	struct se_device *dev = pr_to_dev(item);
 
+	if (!dev->dev_attrib.emulate_pr)
+		return sprintf(page, "SPC_RESERVATIONS_DISABLED\n");
 	if (dev->transport->transport_flags & TRANSPORT_FLAG_PASSTHROUGH_PGR)
 		return sprintf(page, "SPC_PASSTHROUGH\n");
-	else if (dev->dev_reservation_flags & DRF_SPC2_RESERVATIONS)
+	if (dev->dev_reservation_flags & DRF_SPC2_RESERVATIONS)
 		return sprintf(page, "SPC2_RESERVATIONS\n");
-	else
-		return sprintf(page, "SPC3_PERSISTENT_RESERVATIONS\n");
+
+	return sprintf(page, "SPC3_PERSISTENT_RESERVATIONS\n");
 }
 
 static ssize_t target_pr_res_aptpl_active_show(struct config_item *item,
@@ -1577,7 +1536,8 @@ static ssize_t target_pr_res_aptpl_active_show(struct config_item *item,
 {
 	struct se_device *dev = pr_to_dev(item);
 
-	if (dev->transport->transport_flags & TRANSPORT_FLAG_PASSTHROUGH_PGR)
+	if (!dev->dev_attrib.emulate_pr ||
+	    (dev->transport->transport_flags & TRANSPORT_FLAG_PASSTHROUGH_PGR))
 		return 0;
 
 	return sprintf(page, "APTPL Bit Status: %s\n",
@@ -1589,7 +1549,8 @@ static ssize_t target_pr_res_aptpl_metadata_show(struct config_item *item,
 {
 	struct se_device *dev = pr_to_dev(item);
 
-	if (dev->transport->transport_flags & TRANSPORT_FLAG_PASSTHROUGH_PGR)
+	if (!dev->dev_attrib.emulate_pr ||
+	    (dev->transport->transport_flags & TRANSPORT_FLAG_PASSTHROUGH_PGR))
 		return 0;
 
 	return sprintf(page, "Ready to process PR APTPL metadata..\n");
@@ -1635,7 +1596,8 @@ static ssize_t target_pr_res_aptpl_metadata_store(struct config_item *item,
 	u16 tpgt = 0;
 	u8 type = 0;
 
-	if (dev->transport->transport_flags & TRANSPORT_FLAG_PASSTHROUGH_PGR)
+	if (!dev->dev_attrib.emulate_pr ||
+	    (dev->transport->transport_flags & TRANSPORT_FLAG_PASSTHROUGH_PGR))
 		return count;
 	if (dev->dev_reservation_flags & DRF_SPC2_RESERVATIONS)
 		return count;
@@ -1945,7 +1907,7 @@ static ssize_t target_dev_enable_show(struct config_item *item, char *page)
 {
 	struct se_device *dev = to_device(item);
 
-	return snprintf(page, PAGE_SIZE, "%d\n", !!(dev->dev_flags & DF_CONFIGURED));
+	return snprintf(page, PAGE_SIZE, "%d\n", target_dev_configured(dev));
 }
 
 static ssize_t target_dev_enable_store(struct config_item *item,
@@ -2376,7 +2338,7 @@ static struct configfs_item_operations target_core_alua_lu_gp_ops = {
 	.release		= target_core_alua_lu_gp_release,
 };
 
-static const struct config_item_type target_core_alua_lu_gp_cit = {
+static struct config_item_type target_core_alua_lu_gp_cit = {
 	.ct_item_ops		= &target_core_alua_lu_gp_ops,
 	.ct_attrs		= target_core_alua_lu_gp_attrs,
 	.ct_owner		= THIS_MODULE,
@@ -2434,7 +2396,7 @@ static struct configfs_group_operations target_core_alua_lu_gps_group_ops = {
 	.drop_item		= &target_core_alua_drop_lu_gp,
 };
 
-static const struct config_item_type target_core_alua_lu_gps_cit = {
+static struct config_item_type target_core_alua_lu_gps_cit = {
 	.ct_item_ops		= NULL,
 	.ct_group_ops		= &target_core_alua_lu_gps_group_ops,
 	.ct_owner		= THIS_MODULE,
@@ -2470,7 +2432,7 @@ static ssize_t target_tg_pt_gp_alua_access_state_store(struct config_item *item,
 			" tg_pt_gp ID: %hu\n", tg_pt_gp->tg_pt_gp_valid_id);
 		return -EINVAL;
 	}
-	if (!(dev->dev_flags & DF_CONFIGURED)) {
+	if (!target_dev_configured(dev)) {
 		pr_err("Unable to set alua_access_state while device is"
 		       " not configured\n");
 		return -ENODEV;
@@ -2743,7 +2705,7 @@ static ssize_t target_tg_pt_gp_members_show(struct config_item *item,
 		struct se_portal_group *tpg = lun->lun_tpg;
 
 		cur_len = snprintf(buf, TG_PT_GROUP_NAME_BUF, "%s/%s/tpgt_%hu"
-			"/%s\n", tpg->se_tpg_tfo->get_fabric_name(),
+			"/%s\n", tpg->se_tpg_tfo->fabric_name,
 			tpg->se_tpg_tfo->tpg_get_wwn(tpg),
 			tpg->se_tpg_tfo->tpg_get_tag(tpg),
 			config_item_name(&lun->lun_group.cg_item));
@@ -2813,7 +2775,7 @@ static struct configfs_item_operations target_core_alua_tg_pt_gp_ops = {
 	.release		= target_core_alua_tg_pt_gp_release,
 };
 
-static const struct config_item_type target_core_alua_tg_pt_gp_cit = {
+static struct config_item_type target_core_alua_tg_pt_gp_cit = {
 	.ct_item_ops		= &target_core_alua_tg_pt_gp_ops,
 	.ct_attrs		= target_core_alua_tg_pt_gp_attrs,
 	.ct_owner		= THIS_MODULE,
@@ -2884,7 +2846,7 @@ TB_CIT_SETUP(dev_alua_tg_pt_gps, NULL, &target_core_alua_tg_pt_gps_group_ops, NU
  * core/alua/lu_gps and core/alua/tg_pt_gps that are attached to
  * target_core_alua_cit in target_core_init_configfs() below.
  */
-static const struct config_item_type target_core_alua_cit = {
+static struct config_item_type target_core_alua_cit = {
 	.ct_item_ops		= NULL,
 	.ct_attrs		= NULL,
 	.ct_owner		= THIS_MODULE,
@@ -2939,6 +2901,10 @@ static struct config_group *target_core_make_subdev(
 		goto out_unlock;
 
 	config_group_init_type_name(&dev->dev_group, name, &tb->tb_dev_cit);
+
+	config_group_init_type_name(&dev->dev_action_group, "action",
+			&tb->tb_dev_action_cit);
+	configfs_add_default_group(&dev->dev_action_group, &dev->dev_group);
 
 	config_group_init_type_name(&dev->dev_attrib.da_group, "attrib",
 			&tb->tb_dev_attrib_cit);
@@ -3105,7 +3071,7 @@ static struct configfs_item_operations target_core_hba_item_ops = {
 	.release		= target_core_hba_release,
 };
 
-static const struct config_item_type target_core_hba_cit = {
+static struct config_item_type target_core_hba_cit = {
 	.ct_item_ops		= &target_core_hba_item_ops,
 	.ct_group_ops		= &target_core_hba_group_ops,
 	.ct_attrs		= target_core_hba_attrs,
@@ -3188,7 +3154,7 @@ static struct configfs_group_operations target_core_group_ops = {
 	.drop_item	= target_core_call_delhbafromtarget,
 };
 
-static const struct config_item_type target_core_cit = {
+static struct config_item_type target_core_cit = {
 	.ct_item_ops	= NULL,
 	.ct_group_ops	= &target_core_group_ops,
 	.ct_attrs	= NULL,
@@ -3200,6 +3166,7 @@ static const struct config_item_type target_core_cit = {
 void target_setup_backend_cits(struct target_backend *tb)
 {
 	target_core_setup_dev_cit(tb);
+	target_core_setup_dev_action_cit(tb);
 	target_core_setup_dev_attrib_cit(tb);
 	target_core_setup_dev_pr_cit(tb);
 	target_core_setup_dev_wwn_cit(tb);

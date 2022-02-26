@@ -167,7 +167,7 @@ static int onyx_snd_vol_put(struct snd_kcontrol *kcontrol,
 	return 1;
 }
 
-static const struct snd_kcontrol_new volume_control = {
+static struct snd_kcontrol_new volume_control = {
 	.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
 	.name = "Master Playback Volume",
 	.access = SNDRV_CTL_ELEM_ACCESS_READWRITE,
@@ -229,7 +229,7 @@ static int onyx_snd_inputgain_put(struct snd_kcontrol *kcontrol,
 	return n != v;
 }
 
-static const struct snd_kcontrol_new inputgain_control = {
+static struct snd_kcontrol_new inputgain_control = {
 	.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
 	.name = "Master Capture Volume",
 	.access = SNDRV_CTL_ELEM_ACCESS_READWRITE,
@@ -241,9 +241,15 @@ static const struct snd_kcontrol_new inputgain_control = {
 static int onyx_snd_capture_source_info(struct snd_kcontrol *kcontrol,
 	struct snd_ctl_elem_info *uinfo)
 {
-	static const char * const texts[] = { "Line-In", "Microphone" };
+	static char *texts[] = { "Line-In", "Microphone" };
 
-	return snd_ctl_enum_info(uinfo, 1, 2, texts);
+	uinfo->type = SNDRV_CTL_ELEM_TYPE_ENUMERATED;
+	uinfo->count = 1;
+	uinfo->value.enumerated.items = 2;
+	if (uinfo->value.enumerated.item > 1)
+		uinfo->value.enumerated.item = 1;
+	strcpy(uinfo->value.enumerated.name, texts[uinfo->value.enumerated.item]);
+	return 0;
 }
 
 static int onyx_snd_capture_source_get(struct snd_kcontrol *kcontrol,
@@ -284,7 +290,7 @@ static int onyx_snd_capture_source_put(struct snd_kcontrol *kcontrol,
 	return 1;
 }
 
-static const struct snd_kcontrol_new capture_source_control = {
+static struct snd_kcontrol_new capture_source_control = {
 	.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
 	/* If we name this 'Input Source', it properly shows up in
 	 * alsamixer as a selection, * but it's shown under the
@@ -348,7 +354,7 @@ static int onyx_snd_mute_put(struct snd_kcontrol *kcontrol,
 	return !err ? (v != c) : err;
 }
 
-static const struct snd_kcontrol_new mute_control = {
+static struct snd_kcontrol_new mute_control = {
 	.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
 	.name = "Master Playback Switch",
 	.access = SNDRV_CTL_ELEM_ACCESS_READWRITE,
@@ -476,7 +482,7 @@ static int onyx_spdif_mask_get(struct snd_kcontrol *kcontrol,
 	return 0;
 }
 
-static const struct snd_kcontrol_new onyx_spdif_mask = {
+static struct snd_kcontrol_new onyx_spdif_mask = {
 	.access =	SNDRV_CTL_ELEM_ACCESS_READ,
 	.iface =	SNDRV_CTL_ELEM_IFACE_PCM,
 	.name =		SNDRV_CTL_NAME_IEC958("",PLAYBACK,CON_MASK),
@@ -533,7 +539,7 @@ static int onyx_spdif_put(struct snd_kcontrol *kcontrol,
 	return 1;
 }
 
-static const struct snd_kcontrol_new onyx_spdif_ctrl = {
+static struct snd_kcontrol_new onyx_spdif_ctrl = {
 	.access =	SNDRV_CTL_ELEM_ACCESS_READWRITE,
 	.iface =	SNDRV_CTL_ELEM_IFACE_PCM,
 	.name =		SNDRV_CTL_NAME_IEC958("",PLAYBACK,DEFAULT),
@@ -883,7 +889,7 @@ static int onyx_init_codec(struct aoa_codec *codec)
 		return -ENODEV;
 	}
 
-	if (aoa_snd_device_new(SNDRV_DEV_CODEC, onyx, &ops)) {
+	if (aoa_snd_device_new(SNDRV_DEV_LOWLEVEL, onyx, &ops)) {
 		printk(KERN_ERR PFX "failed to create onyx snd device!\n");
 		return -ENODEV;
 	}
@@ -1050,6 +1056,7 @@ MODULE_DEVICE_TABLE(i2c,onyx_i2c_id);
 static struct i2c_driver onyx_driver = {
 	.driver = {
 		.name = "aoa_codec_onyx",
+		.owner = THIS_MODULE,
 	},
 	.probe = onyx_i2c_probe,
 	.remove = onyx_i2c_remove,

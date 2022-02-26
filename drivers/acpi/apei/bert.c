@@ -32,7 +32,8 @@
 #undef pr_fmt
 #define pr_fmt(fmt) "BERT: " fmt
 
-static int bert_disable;
+/* RHEL note: disabled by default, enable with bert_enable */
+static int bert_disable = 1;
 
 static void __init bert_print_all(struct acpi_bert_region *region,
 				  unsigned int region_len)
@@ -42,19 +43,20 @@ static void __init bert_print_all(struct acpi_bert_region *region,
 	int remain = region_len;
 	u32 estatus_len;
 
-	if (!estatus->block_status)
-		return;
-
-	while (remain > sizeof(struct acpi_bert_region)) {
-		if (cper_estatus_check(estatus)) {
-			pr_err(FW_BUG "Invalid error record.\n");
-			return;
-		}
-
+	while (remain >= sizeof(struct acpi_bert_region)) {
 		estatus_len = cper_estatus_len(estatus);
 		if (remain < estatus_len) {
 			pr_err(FW_BUG "Truncated status block (length: %u).\n",
 			       estatus_len);
+			return;
+		}
+
+		/* No more error records. */
+		if (!estatus->block_status)
+			return;
+
+		if (cper_estatus_check(estatus)) {
+			pr_err(FW_BUG "Invalid error record.\n");
 			return;
 		}
 
@@ -70,13 +72,17 @@ static void __init bert_print_all(struct acpi_bert_region *region,
 		estatus->block_status = 0;
 
 		estatus = (void *)estatus + estatus_len;
-		/* No more error records. */
-		if (!estatus->block_status)
-			return;
-
 		remain -= estatus_len;
 	}
 }
+
+static int __init setup_bert_enable(char *str)
+{
+	bert_disable = 0;
+
+	return 0;
+}
+__setup("bert_enable", setup_bert_enable);
 
 static int __init setup_bert_disable(char *str)
 {
@@ -108,7 +114,7 @@ static int __init bert_init(void)
 		return 0;
 
 	if (bert_disable) {
-		pr_info("Boot Error Record Table support is disabled.\n");
+		pr_info("Boot Error Record Table support is disabled. Enable it by using bert_enable as kernel parameter.\n");
 		return 0;
 	}
 

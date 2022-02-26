@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  *  Character device driver for extended error reporting.
  *
@@ -21,7 +20,7 @@
 #include <linux/err.h>
 #include <linux/slab.h>
 
-#include <linux/uaccess.h>
+#include <asm/uaccess.h>
 #include <linux/atomic.h>
 #include <asm/ebcdic.h>
 
@@ -296,7 +295,7 @@ static void dasd_eer_write_standard_trigger(struct dasd_device *device,
 {
 	struct dasd_ccw_req *temp_cqr;
 	int data_size;
-	struct timespec64 ts;
+	struct timeval tv;
 	struct dasd_eer_header header;
 	unsigned long flags;
 	struct eerbuffer *eerb;
@@ -310,9 +309,9 @@ static void dasd_eer_write_standard_trigger(struct dasd_device *device,
 
 	header.total_size = sizeof(header) + data_size + 4; /* "EOR" */
 	header.trigger = trigger;
-	ktime_get_real_ts64(&ts);
-	header.tv_sec = ts.tv_sec;
-	header.tv_usec = ts.tv_nsec / NSEC_PER_USEC;
+	do_gettimeofday(&tv);
+	header.tv_sec = tv.tv_sec;
+	header.tv_usec = tv.tv_usec;
 	strncpy(header.busid, dev_name(&device->cdev->dev),
 		DASD_EER_BUSID_SIZE);
 
@@ -340,7 +339,7 @@ static void dasd_eer_write_snss_trigger(struct dasd_device *device,
 {
 	int data_size;
 	int snss_rc;
-	struct timespec64 ts;
+	struct timeval tv;
 	struct dasd_eer_header header;
 	unsigned long flags;
 	struct eerbuffer *eerb;
@@ -353,9 +352,9 @@ static void dasd_eer_write_snss_trigger(struct dasd_device *device,
 
 	header.total_size = sizeof(header) + data_size + 4; /* "EOR" */
 	header.trigger = DASD_EER_STATECHANGE;
-	ktime_get_real_ts64(&ts);
-	header.tv_sec = ts.tv_sec;
-	header.tv_usec = ts.tv_nsec / NSEC_PER_USEC;
+	do_gettimeofday(&tv);
+	header.tv_sec = tv.tv_sec;
+	header.tv_usec = tv.tv_usec;
 	strncpy(header.busid, dev_name(&device->cdev->dev),
 		DASD_EER_BUSID_SIZE);
 
@@ -455,30 +454,20 @@ static void dasd_eer_snss_cb(struct dasd_ccw_req *cqr, void *data)
  */
 int dasd_eer_enable(struct dasd_device *device)
 {
-	struct dasd_ccw_req *cqr = NULL;
+	struct dasd_ccw_req *cqr;
 	unsigned long flags;
 	struct ccw1 *ccw;
-	int rc = 0;
 
-	spin_lock_irqsave(get_ccwdev_lock(device->cdev), flags);
 	if (device->eer_cqr)
-		goto out;
-	else if (!device->discipline ||
-		 strcmp(device->discipline->name, "ECKD"))
-		rc = -EMEDIUMTYPE;
-	else if (test_bit(DASD_FLAG_OFFLINE, &device->flags))
-		rc = -EBUSY;
+		return 0;
 
-	if (rc)
-		goto out;
+	if (!device->discipline || strcmp(device->discipline->name, "ECKD"))
+		return -EPERM;	/* FIXME: -EMEDIUMTYPE ? */
 
 	cqr = dasd_kmalloc_request(DASD_ECKD_MAGIC, 1 /* SNSS */,
 				   SNSS_DATA_SIZE, device);
-	if (IS_ERR(cqr)) {
-		rc = -ENOMEM;
-		cqr = NULL;
-		goto out;
-	}
+	if (IS_ERR(cqr))
+		return -ENOMEM;
 
 	cqr->startdev = device;
 	cqr->retries = 255;
@@ -496,18 +485,15 @@ int dasd_eer_enable(struct dasd_device *device)
 	cqr->status = DASD_CQR_FILLED;
 	cqr->callback = dasd_eer_snss_cb;
 
+	spin_lock_irqsave(get_ccwdev_lock(device->cdev), flags);
 	if (!device->eer_cqr) {
 		device->eer_cqr = cqr;
 		cqr = NULL;
 	}
-
-out:
 	spin_unlock_irqrestore(get_ccwdev_lock(device->cdev), flags);
-
 	if (cqr)
 		dasd_kfree_request(cqr, device);
-
-	return rc;
+	return 0;
 }
 
 /*

@@ -4,7 +4,7 @@
  * This file may be distributed under the terms of the GNU General Public
  * License version 2.
  *
- * Copyright (c) 2013 by Mauro Carvalho Chehab
+ * Copyright (c) 2013 by Mauro Carvalho Chehab <mchehab@redhat.com>
  *
  * Red Hat Inc. http://www.redhat.com
  */
@@ -14,8 +14,17 @@
 #include <acpi/ghes.h>
 #include <linux/edac.h>
 #include <linux/dmi.h>
-#include "edac_module.h"
+#include "edac_core.h"
 #include <ras/ras_event.h>
+
+#define GHES_EDAC_REVISION " Ver: 1.0.0"
+
+/*
+ * RHEL only: we don't want to swap from other EDAC drivers into GHES during
+ * the same release.
+ */
+bool ghes_edac_enable;
+module_param_named(enable, ghes_edac_enable, bool, 0);
 
 struct ghes_edac_pvt {
 	struct list_head list;
@@ -37,10 +46,6 @@ static struct ghes_edac_pvt *ghes_pvt;
  * "inventive" firmware would do.
  */
 static DEFINE_SPINLOCK(ghes_lock);
-
-/* "ghes_edac.force_load=1" skips the platform check */
-static bool __read_mostly force_load;
-module_param(force_load, bool, 0);
 
 /* Memory Device - Type 17 of SMBIOS spec */
 struct memdev_dmi_entry {
@@ -182,6 +187,9 @@ void ghes_edac_report_mem_error(struct ghes *ghes, int sev,
 	unsigned long flags;
 	char *p;
 	u8 grain_bits;
+
+	if (!ghes_edac_enable)
+		return;
 
 	if (!pvt) {
 		pr_err("Internal error: Can't find EDAC structure\n");
@@ -418,14 +426,7 @@ void ghes_edac_report_mem_error(struct ghes *ghes, int sev,
 	edac_raw_mc_handle_error(type, mci, e);
 	spin_unlock_irqrestore(&ghes_lock, flags);
 }
-
-/*
- * Known systems that are safe to enable this module.
- */
-static struct acpi_platform_list plat_list[] = {
-	{"HPE   ", "Server  ", 0, ACPI_SIG_FADT, all_versions},
-	{ } /* End */
-};
+EXPORT_SYMBOL_GPL(ghes_edac_report_mem_error);
 
 int ghes_edac_register(struct ghes *ghes, struct device *dev)
 {
@@ -434,11 +435,8 @@ int ghes_edac_register(struct ghes *ghes, struct device *dev)
 	struct mem_ctl_info *mci;
 	struct edac_mc_layer layers[1];
 	struct ghes_edac_dimm_fill dimm_fill;
-	int idx;
 
-	/* Check if safe to enable on this system */
-	idx = acpi_match_platform_list(plat_list);
-	if (!force_load && idx < 0)
+	if (!ghes_edac_enable)
 		return 0;
 
 	/*
@@ -475,20 +473,21 @@ int ghes_edac_register(struct ghes *ghes, struct device *dev)
 	mci->edac_ctl_cap = EDAC_FLAG_NONE;
 	mci->edac_cap = EDAC_FLAG_NONE;
 	mci->mod_name = "ghes_edac.c";
+	mci->mod_ver = GHES_EDAC_REVISION;
 	mci->ctl_name = "ghes_edac";
 	mci->dev_name = "ghes";
 
-	if (fake) {
-		pr_info("This system has a very crappy BIOS: It doesn't even list the DIMMS.\n");
-		pr_info("Its SMBIOS info is wrong. It is doubtful that the error report would\n");
-		pr_info("work on such system. Use this driver with caution\n");
-	} else if (idx < 0) {
+	if (!fake) {
 		pr_info("This EDAC driver relies on BIOS to enumerate memory and get error reports.\n");
 		pr_info("Unfortunately, not all BIOSes reflect the memory layout correctly.\n");
 		pr_info("So, the end result of using this driver varies from vendor to vendor.\n");
 		pr_info("If you find incorrect reports, please contact your hardware vendor\n");
 		pr_info("to correct its BIOS.\n");
 		pr_info("This system has %d DIMM sockets.\n", num_dimm);
+	} else {
+		pr_info("This system has a very crappy BIOS: It doesn't even list the DIMMS.\n");
+		pr_info("Its SMBIOS info is wrong. It is doubtful that the error report would\n");
+		pr_info("work on such system. Use this driver with caution\n");
 	}
 
 	if (!fake) {
@@ -512,14 +511,20 @@ int ghes_edac_register(struct ghes *ghes, struct device *dev)
 		edac_mc_free(mci);
 		return -ENODEV;
 	}
+
 	return 0;
 }
+EXPORT_SYMBOL_GPL(ghes_edac_register);
 
 void ghes_edac_unregister(struct ghes *ghes)
 {
 	struct mem_ctl_info *mci;
 
+	if (!ghes_edac_enable)
+		return;
+
 	mci = ghes_pvt->mci;
 	edac_mc_del_mc(mci->pdev);
 	edac_mc_free(mci);
 }
+EXPORT_SYMBOL_GPL(ghes_edac_unregister);

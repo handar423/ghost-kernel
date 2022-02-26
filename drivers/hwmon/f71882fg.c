@@ -72,10 +72,6 @@
 #define F71882FG_REG_IN(nr)		(0x20  + (nr))
 #define F71882FG_REG_IN1_HIGH		0x32 /* f7188x only */
 
-#define F81866_REG_IN_STATUS		0x16 /* F81866 only */
-#define F81866_REG_IN_BEEP			0x17 /* F81866 only */
-#define F81866_REG_IN1_HIGH		0x3a /* F81866 only */
-
 #define F71882FG_REG_FAN(nr)		(0xA0 + (16 * (nr)))
 #define F71882FG_REG_FAN_TARGET(nr)	(0xA2 + (16 * (nr)))
 #define F71882FG_REG_FAN_FULL_SPEED(nr)	(0xA4 + (16 * (nr)))
@@ -390,7 +386,7 @@ static ssize_t show_pwm_auto_point_temp(struct device *dev,
 static ssize_t store_pwm_auto_point_temp(struct device *dev,
 	struct device_attribute *devattr, const char *buf, size_t count);
 /* Sysfs misc */
-static ssize_t name_show(struct device *dev, struct device_attribute *devattr,
+static ssize_t show_name(struct device *dev, struct device_attribute *devattr,
 	char *buf);
 
 static int f71882fg_probe(struct platform_device *pdev);
@@ -398,13 +394,14 @@ static int f71882fg_remove(struct platform_device *pdev);
 
 static struct platform_driver f71882fg_driver = {
 	.driver = {
+		.owner	= THIS_MODULE,
 		.name	= DRVNAME,
 	},
 	.probe		= f71882fg_probe,
 	.remove		= f71882fg_remove,
 };
 
-static DEVICE_ATTR_RO(name);
+static DEVICE_ATTR(name, S_IRUGO, show_name, NULL);
 
 /*
  * Temp attr for the f71858fg, the f71858fg is special as it has its
@@ -517,23 +514,6 @@ static struct sensor_device_attribute_2 fxxxx_temp_beep_attr[3][2] = { {
 		store_temp_beep, 0, 3),
 	SENSOR_ATTR_2(temp3_crit_beep, S_IRUGO|S_IWUSR, show_temp_beep,
 		store_temp_beep, 0, 7),
-} };
-
-static struct sensor_device_attribute_2 f81866_temp_beep_attr[3][2] = { {
-	SENSOR_ATTR_2(temp1_max_beep, S_IRUGO|S_IWUSR, show_temp_beep,
-		store_temp_beep, 0, 0),
-	SENSOR_ATTR_2(temp1_crit_beep, S_IRUGO|S_IWUSR, show_temp_beep,
-		store_temp_beep, 0, 4),
-}, {
-	SENSOR_ATTR_2(temp2_max_beep, S_IRUGO|S_IWUSR, show_temp_beep,
-		store_temp_beep, 0, 1),
-	SENSOR_ATTR_2(temp2_crit_beep, S_IRUGO|S_IWUSR, show_temp_beep,
-		store_temp_beep, 0, 5),
-}, {
-	SENSOR_ATTR_2(temp3_max_beep, S_IRUGO|S_IWUSR, show_temp_beep,
-		store_temp_beep, 0, 2),
-	SENSOR_ATTR_2(temp3_crit_beep, S_IRUGO|S_IWUSR, show_temp_beep,
-		store_temp_beep, 0, 6),
 } };
 
 /*
@@ -1218,21 +1198,10 @@ static struct f71882fg_data *f71882fg_update_device(struct device *dev)
 	if (time_after(jiffies, data->last_limits + 60 * HZ) ||
 			!data->valid) {
 		if (f71882fg_has_in1_alarm[data->type]) {
-			if (data->type == f81866a) {
-				data->in1_max =
-					f71882fg_read8(data,
-						       F81866_REG_IN1_HIGH);
-				data->in_beep =
-					f71882fg_read8(data,
-						       F81866_REG_IN_BEEP);
-			} else {
-				data->in1_max =
-					f71882fg_read8(data,
-						       F71882FG_REG_IN1_HIGH);
-				data->in_beep =
-					f71882fg_read8(data,
-						       F71882FG_REG_IN_BEEP);
-			}
+			data->in1_max =
+				f71882fg_read8(data, F71882FG_REG_IN1_HIGH);
+			data->in_beep =
+				f71882fg_read8(data, F71882FG_REG_IN_BEEP);
 		}
 
 		/* Get High & boundary temps*/
@@ -1356,16 +1325,9 @@ static struct f71882fg_data *f71882fg_update_device(struct device *dev)
 			data->fan[3] = f71882fg_read16(data,
 						F71882FG_REG_FAN(3));
 
-		if (f71882fg_has_in1_alarm[data->type]) {
-			if (data->type == f81866a)
-				data->in_status = f71882fg_read8(data,
-						F81866_REG_IN_STATUS);
-
-			else
-				data->in_status = f71882fg_read8(data,
+		if (f71882fg_has_in1_alarm[data->type])
+			data->in_status = f71882fg_read8(data,
 						F71882FG_REG_IN_STATUS);
-		}
-
 		for (nr = 0; nr < F71882FG_MAX_INS; nr++)
 			if (f71882fg_has_in[data->type][nr])
 				data->in[nr] = f71882fg_read8(data,
@@ -1506,10 +1468,7 @@ static ssize_t store_in_max(struct device *dev, struct device_attribute
 	val = clamp_val(val, 0, 255);
 
 	mutex_lock(&data->update_lock);
-	if (data->type == f81866a)
-		f71882fg_write8(data, F81866_REG_IN1_HIGH, val);
-	else
-		f71882fg_write8(data, F71882FG_REG_IN1_HIGH, val);
+	f71882fg_write8(data, F71882FG_REG_IN1_HIGH, val);
 	data->in1_max = val;
 	mutex_unlock(&data->update_lock);
 
@@ -1540,20 +1499,13 @@ static ssize_t store_in_beep(struct device *dev, struct device_attribute
 		return err;
 
 	mutex_lock(&data->update_lock);
-	if (data->type == f81866a)
-		data->in_beep = f71882fg_read8(data, F81866_REG_IN_BEEP);
-	else
-		data->in_beep = f71882fg_read8(data, F71882FG_REG_IN_BEEP);
-
+	data->in_beep = f71882fg_read8(data, F71882FG_REG_IN_BEEP);
 	if (val)
 		data->in_beep |= 1 << nr;
 	else
 		data->in_beep &= ~(1 << nr);
 
-	if (data->type == f81866a)
-		f71882fg_write8(data, F81866_REG_IN_BEEP, data->in_beep);
-	else
-		f71882fg_write8(data, F71882FG_REG_IN_BEEP, data->in_beep);
+	f71882fg_write8(data, F71882FG_REG_IN_BEEP, data->in_beep);
 	mutex_unlock(&data->update_lock);
 
 	return count;
@@ -2212,7 +2164,7 @@ static ssize_t store_pwm_auto_point_temp(struct device *dev,
 	return count;
 }
 
-static ssize_t name_show(struct device *dev, struct device_attribute *devattr,
+static ssize_t show_name(struct device *dev, struct device_attribute *devattr,
 	char *buf)
 {
 	struct f71882fg_data *data = dev_get_drvdata(dev);
@@ -2342,11 +2294,10 @@ static int f71882fg_create_fan_sysfs_files(
 static int f71882fg_probe(struct platform_device *pdev)
 {
 	struct f71882fg_data *data;
-	struct f71882fg_sio_data *sio_data = dev_get_platdata(&pdev->dev);
+	struct f71882fg_sio_data *sio_data = pdev->dev.platform_data;
 	int nr_fans = f71882fg_nr_fans[sio_data->type];
 	int nr_temps = f71882fg_nr_temps[sio_data->type];
 	int err, i;
-	int size;
 	u8 start_reg, reg;
 
 	data = devm_kzalloc(&pdev->dev, sizeof(struct f71882fg_data),
@@ -2357,8 +2308,7 @@ static int f71882fg_probe(struct platform_device *pdev)
 	data->addr = platform_get_resource(pdev, IORESOURCE_IO, 0)->start;
 	data->type = sio_data->type;
 	data->temp_start =
-	    (data->type == f71858fg || data->type == f8000 ||
-		data->type == f81866a) ? 0 : 1;
+	    (data->type == f71858fg || data->type == f8000) ? 0 : 1;
 	mutex_init(&data->update_lock);
 	platform_set_drvdata(pdev, data);
 
@@ -2400,11 +2350,6 @@ static int f71882fg_probe(struct platform_device *pdev)
 					f8000_temp_attr,
 					ARRAY_SIZE(f8000_temp_attr));
 			break;
-		case f81866a:
-			err = f71882fg_create_sysfs_files(pdev,
-					f71858fg_temp_attr,
-					ARRAY_SIZE(f71858fg_temp_attr));
-			break;
 		default:
 			err = f71882fg_create_sysfs_files(pdev,
 				&fxxxx_temp_attr[0][0],
@@ -2414,18 +2359,10 @@ static int f71882fg_probe(struct platform_device *pdev)
 			goto exit_unregister_sysfs;
 
 		if (f71882fg_temp_has_beep[data->type]) {
-			if (data->type == f81866a) {
-				size = ARRAY_SIZE(f81866_temp_beep_attr[0]);
-				err = f71882fg_create_sysfs_files(pdev,
-						&f81866_temp_beep_attr[0][0],
-						size * nr_temps);
-
-			} else {
-				size = ARRAY_SIZE(fxxxx_temp_beep_attr[0]);
-				err = f71882fg_create_sysfs_files(pdev,
-						&fxxxx_temp_beep_attr[0][0],
-						size * nr_temps);
-			}
+			err = f71882fg_create_sysfs_files(pdev,
+					&fxxxx_temp_beep_attr[0][0],
+					ARRAY_SIZE(fxxxx_temp_beep_attr[0])
+						* nr_temps);
 			if (err)
 				goto exit_unregister_sysfs;
 		}
@@ -2510,6 +2447,7 @@ static int f71882fg_probe(struct platform_device *pdev)
 exit_unregister_sysfs:
 	f71882fg_remove(pdev); /* Will unregister the sysfs files for us */
 	return err; /* f71882fg_remove() also frees our data */
+	return err;
 }
 
 static int f71882fg_remove(struct platform_device *pdev)
@@ -2542,27 +2480,15 @@ static int f71882fg_remove(struct platform_device *pdev)
 					f8000_temp_attr,
 					ARRAY_SIZE(f8000_temp_attr));
 			break;
-		case f81866a:
-			f71882fg_remove_sysfs_files(pdev,
-					f71858fg_temp_attr,
-					ARRAY_SIZE(f71858fg_temp_attr));
-			break;
 		default:
 			f71882fg_remove_sysfs_files(pdev,
 				&fxxxx_temp_attr[0][0],
 				ARRAY_SIZE(fxxxx_temp_attr[0]) * nr_temps);
 		}
 		if (f71882fg_temp_has_beep[data->type]) {
-			if (data->type == f81866a)
-				f71882fg_remove_sysfs_files(pdev,
-					&f81866_temp_beep_attr[0][0],
-					ARRAY_SIZE(f81866_temp_beep_attr[0])
-						* nr_temps);
-			else
-				f71882fg_remove_sysfs_files(pdev,
-					&fxxxx_temp_beep_attr[0][0],
-					ARRAY_SIZE(fxxxx_temp_beep_attr[0])
-						* nr_temps);
+			f71882fg_remove_sysfs_files(pdev,
+			       &fxxxx_temp_beep_attr[0][0],
+			       ARRAY_SIZE(fxxxx_temp_beep_attr[0]) * nr_temps);
 		}
 
 		for (i = 0; i < F71882FG_MAX_INS; i++) {
@@ -2654,9 +2580,11 @@ static int __init f71882fg_find(int sioaddr, struct f71882fg_sio_data *sio_data)
 	case SIO_F71862_ID:
 		sio_data->type = f71862fg;
 		break;
+#if 0	/* RHEL: disable; no hardware to test yet */
 	case SIO_F71868_ID:
 		sio_data->type = f71868a;
 		break;
+#endif
 	case SIO_F71869_ID:
 		sio_data->type = f71869;
 		break;
@@ -2684,9 +2612,11 @@ static int __init f71882fg_find(int sioaddr, struct f71882fg_sio_data *sio_data)
 	case SIO_F81865_ID:
 		sio_data->type = f81865f;
 		break;
+#if 0	/* RHEL: disable; no hardware to test yet */
 	case SIO_F81866_ID:
 		sio_data->type = f81866a;
 		break;
+#endif
 	default:
 		pr_info("Unsupported Fintek device: %04x\n",
 			(unsigned int)devid);

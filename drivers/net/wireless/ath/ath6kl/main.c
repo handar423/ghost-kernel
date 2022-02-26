@@ -105,7 +105,7 @@ static void ath6kl_sta_cleanup(struct ath6kl *ar, u8 i)
 
 	memset(&ar->ap_stats.sta[sta->aid - 1], 0,
 	       sizeof(struct wmi_per_sta_stat));
-	eth_zero_addr(sta->mac);
+	memset(sta->mac, 0, ETH_ALEN);
 	memset(sta->wpa_ie, 0, ATH6KL_MAX_IE);
 	sta->aid = 0;
 	sta->sta_flags = 0;
@@ -225,7 +225,7 @@ int ath6kl_diag_write32(struct ath6kl *ar, u32 address, __le32 value)
 	ret = ath6kl_hif_diag_write32(ar, address, value);
 
 	if (ret) {
-		ath6kl_err("failed to write 0x%x during diagnose window to 0x%x\n",
+		ath6kl_err("failed to write 0x%x during diagnose window to 0x%d\n",
 			   address, value);
 		return ret;
 	}
@@ -488,15 +488,17 @@ void ath6kl_connect_ap_mode_sta(struct ath6kl_vif *vif, u16 aid, u8 *mac_addr,
 
 	sinfo.assoc_req_ies = ies;
 	sinfo.assoc_req_ies_len = ies_len;
+	sinfo.filled |= STATION_INFO_ASSOC_REQ_IES;
 
 	cfg80211_new_sta(vif->ndev, mac_addr, &sinfo, GFP_KERNEL);
 
 	netif_wake_queue(vif->ndev);
 }
 
-void disconnect_timer_handler(struct timer_list *t)
+void disconnect_timer_handler(unsigned long ptr)
 {
-	struct ath6kl_vif *vif = from_timer(vif, t, disconnect_timer);
+	struct net_device *dev = (struct net_device *)ptr;
+	struct ath6kl_vif *vif = netdev_priv(dev);
 
 	ath6kl_init_profile_info(vif);
 	ath6kl_disconnect(vif);
@@ -700,7 +702,6 @@ static void ath6kl_update_target_stats(struct ath6kl_vif *vif, u8 *ptr, u32 len)
 	struct ath6kl *ar = vif->ar;
 	struct target_stats *stats = &vif->target_stats;
 	struct tkip_ccmp_stats *ccmp_stats;
-	s32 rate;
 	u8 ac;
 
 	if (len < sizeof(*tgt_stats))
@@ -730,9 +731,8 @@ static void ath6kl_update_target_stats(struct ath6kl_vif *vif, u8 *ptr, u32 len)
 		le32_to_cpu(tgt_stats->stats.tx.mult_retry_cnt);
 	stats->tx_rts_fail_cnt +=
 		le32_to_cpu(tgt_stats->stats.tx.rts_fail_cnt);
-
-	rate = a_sle32_to_cpu(tgt_stats->stats.tx.ucast_rate);
-	stats->tx_ucast_rate = ath6kl_wmi_get_rate(ar->wmi, rate);
+	stats->tx_ucast_rate =
+	    ath6kl_wmi_get_rate(a_sle32_to_cpu(tgt_stats->stats.tx.ucast_rate));
 
 	stats->rx_pkt += le32_to_cpu(tgt_stats->stats.rx.pkt);
 	stats->rx_byte += le32_to_cpu(tgt_stats->stats.rx.byte);
@@ -749,9 +749,8 @@ static void ath6kl_update_target_stats(struct ath6kl_vif *vif, u8 *ptr, u32 len)
 		le32_to_cpu(tgt_stats->stats.rx.key_cache_miss);
 	stats->rx_decrypt_err += le32_to_cpu(tgt_stats->stats.rx.decrypt_err);
 	stats->rx_dupl_frame += le32_to_cpu(tgt_stats->stats.rx.dupl_frame);
-
-	rate = a_sle32_to_cpu(tgt_stats->stats.rx.ucast_rate);
-	stats->rx_ucast_rate = ath6kl_wmi_get_rate(ar->wmi, rate);
+	stats->rx_ucast_rate =
+	    ath6kl_wmi_get_rate(a_sle32_to_cpu(tgt_stats->stats.rx.ucast_rate));
 
 	ccmp_stats = &tgt_stats->stats.tkip_ccmp_stats;
 
@@ -1112,6 +1111,13 @@ static int ath6kl_close(struct net_device *dev)
 	return 0;
 }
 
+static struct net_device_stats *ath6kl_get_stats(struct net_device *dev)
+{
+	struct ath6kl_vif *vif = netdev_priv(dev);
+
+	return &vif->net_stats;
+}
+
 static int ath6kl_set_features(struct net_device *dev,
 			       netdev_features_t features)
 {
@@ -1277,16 +1283,15 @@ static const struct net_device_ops ath6kl_netdev_ops = {
 	.ndo_open               = ath6kl_open,
 	.ndo_stop               = ath6kl_close,
 	.ndo_start_xmit         = ath6kl_data_tx,
+	.ndo_get_stats          = ath6kl_get_stats,
 	.ndo_set_features       = ath6kl_set_features,
 	.ndo_set_rx_mode	= ath6kl_set_multicast_list,
 };
 
 void init_netdev(struct net_device *dev)
 {
-	struct ath6kl *ar = ath6kl_priv(dev);
-
 	dev->netdev_ops = &ath6kl_netdev_ops;
-	dev->needs_free_netdev = true;
+	dev->destructor = free_netdev;
 	dev->watchdog_timeo = ATH6KL_TX_TIMEOUT;
 
 	dev->needed_headroom = ETH_HLEN;
@@ -1296,9 +1301,7 @@ void init_netdev(struct net_device *dev)
 					WMI_MAX_TX_META_SZ +
 					ATH6KL_HTC_ALIGN_BYTES, 4);
 
-	if (!test_bit(ATH6KL_FW_CAPABILITY_NO_IP_CHECKSUM,
-		      ar->fw_capabilities))
-		dev->hw_features |= NETIF_F_IP_CSUM | NETIF_F_RXCSUM;
+	dev->hw_features |= NETIF_F_IP_CSUM | NETIF_F_RXCSUM;
 
 	return;
 }

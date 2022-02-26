@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  *  linux/fs/pipe.c
  *
@@ -22,9 +21,9 @@
 #include <linux/audit.h>
 #include <linux/syscalls.h>
 #include <linux/fcntl.h>
-#include <linux/memcontrol.h>
+#include <linux/aio.h>
 
-#include <linux/uaccess.h>
+#include <asm/uaccess.h>
 #include <asm/ioctls.h>
 
 #include "internal.h"
@@ -123,6 +122,103 @@ void pipe_wait(struct pipe_inode_info *pipe)
 	pipe_lock(pipe);
 }
 
+static int
+pipe_iov_copy_from_user(void *addr, int *offset, struct iovec *iov,
+			size_t *remaining, int atomic)
+{
+	unsigned long copy;
+
+	while (*remaining > 0) {
+		while (!iov->iov_len)
+			iov++;
+		copy = min_t(unsigned long, *remaining, iov->iov_len);
+
+		if (atomic) {
+			if (__copy_from_user_inatomic(addr + *offset,
+						      iov->iov_base, copy))
+				return -EFAULT;
+		} else {
+			if (copy_from_user(addr + *offset,
+					   iov->iov_base, copy))
+				return -EFAULT;
+		}
+		*offset += copy;
+		*remaining -= copy;
+		iov->iov_base += copy;
+		iov->iov_len -= copy;
+	}
+	return 0;
+}
+
+static int
+pipe_iov_copy_to_user(struct iovec *iov, void *addr, int *offset,
+		      size_t *remaining, int atomic)
+{
+	unsigned long copy;
+
+	while (*remaining > 0) {
+		while (!iov->iov_len)
+			iov++;
+		copy = min_t(unsigned long, *remaining, iov->iov_len);
+
+		if (atomic) {
+			if (__copy_to_user_inatomic(iov->iov_base,
+						    addr + *offset, copy))
+				return -EFAULT;
+		} else {
+			if (copy_to_user(iov->iov_base,
+					 addr + *offset, copy))
+				return -EFAULT;
+		}
+		*offset += copy;
+		*remaining -= copy;
+		iov->iov_base += copy;
+		iov->iov_len -= copy;
+	}
+	return 0;
+}
+
+/*
+ * Attempt to pre-fault in the user memory, so we can use atomic copies.
+ * Returns the number of bytes not faulted in.
+ */
+static int iov_fault_in_pages_write(struct iovec *iov, unsigned long len)
+{
+	while (!iov->iov_len)
+		iov++;
+
+	while (len > 0) {
+		unsigned long this_len;
+
+		this_len = min_t(unsigned long, len, iov->iov_len);
+		if (fault_in_pages_writeable(iov->iov_base, this_len))
+			break;
+
+		len -= this_len;
+		iov++;
+	}
+
+	return len;
+}
+
+/*
+ * Pre-fault in the user memory, so we can use atomic copies.
+ */
+static void iov_fault_in_pages_read(struct iovec *iov, unsigned long len)
+{
+	while (!iov->iov_len)
+		iov++;
+
+	while (len > 0) {
+		unsigned long this_len;
+
+		this_len = min_t(unsigned long, len, iov->iov_len);
+		fault_in_pages_readable(iov->iov_base, this_len);
+		len -= this_len;
+		iov++;
+	}
+}
+
 static void anon_pipe_buf_release(struct pipe_inode_info *pipe,
 				  struct pipe_buffer *buf)
 {
@@ -136,22 +232,54 @@ static void anon_pipe_buf_release(struct pipe_inode_info *pipe,
 	if (page_count(page) == 1 && !pipe->tmp_page)
 		pipe->tmp_page = page;
 	else
-		put_page(page);
+		page_cache_release(page);
 }
 
-static int anon_pipe_buf_steal(struct pipe_inode_info *pipe,
-			       struct pipe_buffer *buf)
+/**
+ * generic_pipe_buf_map - virtually map a pipe buffer
+ * @pipe:	the pipe that the buffer belongs to
+ * @buf:	the buffer that should be mapped
+ * @atomic:	whether to use an atomic map
+ *
+ * Description:
+ *	This function returns a kernel virtual address mapping for the
+ *	pipe_buffer passed in @buf. If @atomic is set, an atomic map is provided
+ *	and the caller has to be careful not to fault before calling
+ *	the unmap function.
+ *
+ *	Note that this function calls kmap_atomic() if @atomic != 0.
+ */
+void *generic_pipe_buf_map(struct pipe_inode_info *pipe,
+			   struct pipe_buffer *buf, int atomic)
 {
-	struct page *page = buf->page;
-
-	if (page_count(page) == 1) {
-		if (memcg_kmem_enabled())
-			memcg_kmem_uncharge(page, 0);
-		__SetPageLocked(page);
-		return 0;
+	if (atomic) {
+		buf->flags |= PIPE_BUF_FLAG_ATOMIC;
+		return kmap_atomic(buf->page);
 	}
-	return 1;
+
+	return kmap(buf->page);
 }
+EXPORT_SYMBOL(generic_pipe_buf_map);
+
+/**
+ * generic_pipe_buf_unmap - unmap a previously mapped pipe buffer
+ * @pipe:	the pipe that the buffer belongs to
+ * @buf:	the buffer that should be unmapped
+ * @map_data:	the data that the mapping function returned
+ *
+ * Description:
+ *	This function undoes the mapping that ->map() provided.
+ */
+void generic_pipe_buf_unmap(struct pipe_inode_info *pipe,
+			    struct pipe_buffer *buf, void *map_data)
+{
+	if (buf->flags & PIPE_BUF_FLAG_ATOMIC) {
+		buf->flags &= ~PIPE_BUF_FLAG_ATOMIC;
+		kunmap_atomic(map_data);
+	} else
+		kunmap(buf->page);
+}
+EXPORT_SYMBOL(generic_pipe_buf_unmap);
 
 /**
  * generic_pipe_buf_steal - attempt to take ownership of a &pipe_buffer
@@ -196,7 +324,7 @@ EXPORT_SYMBOL(generic_pipe_buf_steal);
  */
 void generic_pipe_buf_get(struct pipe_inode_info *pipe, struct pipe_buffer *buf)
 {
-	get_page(buf->page);
+	page_cache_get(buf->page);
 }
 EXPORT_SYMBOL(generic_pipe_buf_get);
 
@@ -227,35 +355,42 @@ EXPORT_SYMBOL(generic_pipe_buf_confirm);
 void generic_pipe_buf_release(struct pipe_inode_info *pipe,
 			      struct pipe_buffer *buf)
 {
-	put_page(buf->page);
+	page_cache_release(buf->page);
 }
 EXPORT_SYMBOL(generic_pipe_buf_release);
 
 static const struct pipe_buf_operations anon_pipe_buf_ops = {
 	.can_merge = 1,
+	.map = generic_pipe_buf_map,
+	.unmap = generic_pipe_buf_unmap,
 	.confirm = generic_pipe_buf_confirm,
 	.release = anon_pipe_buf_release,
-	.steal = anon_pipe_buf_steal,
+	.steal = generic_pipe_buf_steal,
 	.get = generic_pipe_buf_get,
 };
 
 static const struct pipe_buf_operations packet_pipe_buf_ops = {
 	.can_merge = 0,
+	.map = generic_pipe_buf_map,
+	.unmap = generic_pipe_buf_unmap,
 	.confirm = generic_pipe_buf_confirm,
 	.release = anon_pipe_buf_release,
-	.steal = anon_pipe_buf_steal,
+	.steal = generic_pipe_buf_steal,
 	.get = generic_pipe_buf_get,
 };
 
 static ssize_t
-pipe_read(struct kiocb *iocb, struct iov_iter *to)
+pipe_read(struct kiocb *iocb, const struct iovec *_iov,
+	   unsigned long nr_segs, loff_t pos)
 {
-	size_t total_len = iov_iter_count(to);
 	struct file *filp = iocb->ki_filp;
 	struct pipe_inode_info *pipe = filp->private_data;
 	int do_wakeup;
 	ssize_t ret;
+	struct iovec *iov = (struct iovec *)_iov;
+	size_t total_len;
 
+	total_len = iov_length(iov, nr_segs);
 	/* Null read succeeds. */
 	if (unlikely(total_len == 0))
 		return 0;
@@ -268,28 +403,43 @@ pipe_read(struct kiocb *iocb, struct iov_iter *to)
 		if (bufs) {
 			int curbuf = pipe->curbuf;
 			struct pipe_buffer *buf = pipe->bufs + curbuf;
-			size_t chars = buf->len;
-			size_t written;
-			int error;
+			const struct pipe_buf_operations *ops = buf->ops;
+			void *addr;
+			size_t chars = buf->len, remaining;
+			int error, atomic, offset;
 
 			if (chars > total_len)
 				chars = total_len;
 
-			error = pipe_buf_confirm(pipe, buf);
+			error = ops->confirm(pipe, buf);
 			if (error) {
 				if (!ret)
 					ret = error;
 				break;
 			}
 
-			written = copy_page_to_iter(buf->page, buf->offset, chars, to);
-			if (unlikely(written < chars)) {
+			atomic = IS_ENABLED(CONFIG_HIGHMEM) && !iov_fault_in_pages_write(iov, chars);
+			remaining = chars;
+			offset = buf->offset;
+redo:
+			addr = ops->map(pipe, buf, atomic);
+			error = pipe_iov_copy_to_user(iov, addr, &offset,
+						      &remaining, atomic);
+			ops->unmap(pipe, buf, addr);
+			if (unlikely(error)) {
+				/*
+				 * Just retry with the slow path if we failed.
+				 */
+				if (atomic) {
+					atomic = 0;
+					goto redo;
+				}
 				if (!ret)
-					ret = -EFAULT;
+					ret = error;
 				break;
 			}
 			ret += chars;
-			buf->offset += chars;
+			buf->offset = offset;
 			buf->len -= chars;
 
 			/* Was it a packet buffer? Clean up and exit */
@@ -299,7 +449,8 @@ pipe_read(struct kiocb *iocb, struct iov_iter *to)
 			}
 
 			if (!buf->len) {
-				pipe_buf_release(pipe, buf);
+				buf->ops = NULL;
+				ops->release(pipe, buf);
 				curbuf = (curbuf + 1) & (pipe->buffers - 1);
 				pipe->curbuf = curbuf;
 				pipe->nrbufs = --bufs;
@@ -355,19 +506,24 @@ static inline int is_packetized(struct file *file)
 }
 
 static ssize_t
-pipe_write(struct kiocb *iocb, struct iov_iter *from)
+pipe_write(struct kiocb *iocb, const struct iovec *_iov,
+	    unsigned long nr_segs, loff_t ppos)
 {
 	struct file *filp = iocb->ki_filp;
 	struct pipe_inode_info *pipe = filp->private_data;
-	ssize_t ret = 0;
-	int do_wakeup = 0;
-	size_t total_len = iov_iter_count(from);
+	ssize_t ret;
+	int do_wakeup;
+	struct iovec *iov = (struct iovec *)_iov;
+	size_t total_len;
 	ssize_t chars;
 
+	total_len = iov_length(iov, nr_segs);
 	/* Null write succeeds. */
 	if (unlikely(total_len == 0))
 		return 0;
 
+	do_wakeup = 0;
+	ret = 0;
 	__pipe_lock(pipe);
 
 	if (!pipe->readers) {
@@ -382,21 +538,38 @@ pipe_write(struct kiocb *iocb, struct iov_iter *from)
 		int lastbuf = (pipe->curbuf + pipe->nrbufs - 1) &
 							(pipe->buffers - 1);
 		struct pipe_buffer *buf = pipe->bufs + lastbuf;
+		const struct pipe_buf_operations *ops = buf->ops;
 		int offset = buf->offset + buf->len;
 
-		if (buf->ops->can_merge && offset + chars <= PAGE_SIZE) {
-			ret = pipe_buf_confirm(pipe, buf);
-			if (ret)
+		if (ops->can_merge && offset + chars <= PAGE_SIZE) {
+			int error, atomic = IS_ENABLED(CONFIG_HIGHMEM);
+			void *addr;
+			size_t remaining = chars;
+
+			error = ops->confirm(pipe, buf);
+			if (error)
 				goto out;
 
-			ret = copy_page_from_iter(buf->page, offset, chars, from);
-			if (unlikely(ret < chars)) {
-				ret = -EFAULT;
+			if (IS_ENABLED(CONFIG_HIGHMEM))
+				iov_fault_in_pages_read(iov, chars);
+redo1:
+			addr = ops->map(pipe, buf, atomic);
+			error = pipe_iov_copy_from_user(addr, &offset, iov,
+							&remaining, atomic);
+			ops->unmap(pipe, buf, addr);
+			ret = error;
+			do_wakeup = 1;
+			if (error) {
+				if (atomic) {
+					atomic = 0;
+					goto redo1;
+				}
 				goto out;
 			}
-			do_wakeup = 1;
-			buf->len += ret;
-			if (!iov_iter_count(from))
+			buf->len += chars;
+			total_len -= chars;
+			ret = chars;
+			if (!total_len)
 				goto out;
 		}
 	}
@@ -415,10 +588,13 @@ pipe_write(struct kiocb *iocb, struct iov_iter *from)
 			int newbuf = (pipe->curbuf + bufs) & (pipe->buffers-1);
 			struct pipe_buffer *buf = pipe->bufs + newbuf;
 			struct page *page = pipe->tmp_page;
-			int copied;
+			char *src;
+			int error, atomic = IS_ENABLED(CONFIG_HIGHMEM);
+			int offset = 0;
+			size_t remaining;
 
 			if (!page) {
-				page = alloc_page(GFP_HIGHUSER | __GFP_ACCOUNT);
+				page = alloc_page(GFP_HIGHUSER);
 				if (unlikely(!page)) {
 					ret = ret ? : -ENOMEM;
 					break;
@@ -431,19 +607,42 @@ pipe_write(struct kiocb *iocb, struct iov_iter *from)
 			 * FIXME! Is this really true?
 			 */
 			do_wakeup = 1;
-			copied = copy_page_from_iter(page, 0, PAGE_SIZE, from);
-			if (unlikely(copied < PAGE_SIZE && iov_iter_count(from))) {
+			chars = PAGE_SIZE;
+			if (chars > total_len)
+				chars = total_len;
+
+			if (IS_ENABLED(CONFIG_HIGHMEM))
+				iov_fault_in_pages_read(iov, chars);
+			remaining = chars;
+redo2:
+			if (atomic)
+				src = kmap_atomic(page);
+			else
+				src = kmap(page);
+
+			error = pipe_iov_copy_from_user(src, &offset, iov,
+							&remaining, atomic);
+			if (atomic)
+				kunmap_atomic(src);
+			else
+				kunmap(page);
+
+			if (unlikely(error)) {
+				if (atomic) {
+					atomic = 0;
+					goto redo2;
+				}
 				if (!ret)
-					ret = -EFAULT;
+					ret = error;
 				break;
 			}
-			ret += copied;
+			ret += chars;
 
 			/* Insert it into the buffer array */
 			buf->page = page;
 			buf->ops = &anon_pipe_buf_ops;
 			buf->offset = 0;
-			buf->len = copied;
+			buf->len = chars;
 			buf->flags = 0;
 			if (is_packetized(filp)) {
 				buf->ops = &packet_pipe_buf_ops;
@@ -452,7 +651,8 @@ pipe_write(struct kiocb *iocb, struct iov_iter *from)
 			pipe->nrbufs = ++bufs;
 			pipe->tmp_page = NULL;
 
-			if (!iov_iter_count(from))
+			total_len -= chars;
+			if (!total_len)
 				break;
 		}
 		if (bufs < pipe->buffers)
@@ -618,6 +818,11 @@ static bool too_many_pipe_buffers_hard(unsigned long user_bufs)
 	return pipe_user_pages_hard && user_bufs >= pipe_user_pages_hard;
 }
 
+static bool is_unprivileged_user(void)
+{
+	return !capable(CAP_SYS_RESOURCE) && !capable(CAP_SYS_ADMIN);
+}
+
 struct pipe_inode_info *alloc_pipe_info(void)
 {
 	struct pipe_inode_info *pipe;
@@ -625,7 +830,7 @@ struct pipe_inode_info *alloc_pipe_info(void)
 	struct user_struct *user = get_current_user();
 	unsigned long user_bufs;
 
-	pipe = kzalloc(sizeof(struct pipe_inode_info), GFP_KERNEL_ACCOUNT);
+	pipe = kzalloc(sizeof(struct pipe_inode_info), GFP_KERNEL);
 	if (pipe == NULL)
 		goto out_free_uid;
 
@@ -634,16 +839,15 @@ struct pipe_inode_info *alloc_pipe_info(void)
 
 	user_bufs = account_pipe_buffers(user, 0, pipe_bufs);
 
-	if (too_many_pipe_buffers_soft(user_bufs)) {
+	if (too_many_pipe_buffers_soft(user_bufs) && is_unprivileged_user()) {
 		user_bufs = account_pipe_buffers(user, pipe_bufs, 1);
 		pipe_bufs = 1;
 	}
 
-	if (too_many_pipe_buffers_hard(user_bufs))
+	if (too_many_pipe_buffers_hard(user_bufs) && is_unprivileged_user())
 		goto out_revert_acct;
 
-	pipe->bufs = kcalloc(pipe_bufs, sizeof(struct pipe_buffer),
-			     GFP_KERNEL_ACCOUNT);
+	pipe->bufs = kzalloc(sizeof(struct pipe_buffer) * pipe_bufs, GFP_KERNEL);
 
 	if (pipe->bufs) {
 		init_waitqueue_head(&pipe->wait);
@@ -671,7 +875,7 @@ void free_pipe_info(struct pipe_inode_info *pipe)
 	for (i = 0; i < pipe->buffers; i++) {
 		struct pipe_buffer *buf = pipe->bufs + i;
 		if (buf->ops)
-			pipe_buf_release(pipe, buf);
+			buf->ops->release(pipe, buf);
 	}
 	if (pipe->tmp_page)
 		__free_page(pipe->tmp_page);
@@ -687,7 +891,7 @@ static struct vfsmount *pipe_mnt __read_mostly;
 static char *pipefs_dname(struct dentry *dentry, char *buffer, int buflen)
 {
 	return dynamic_dname(dentry, buffer, buflen, "pipe:[%lu]",
-				d_inode(dentry)->i_ino);
+				dentry->d_inode->i_ino);
 }
 
 static const struct dentry_operations pipefs_dentry_operations = {
@@ -723,7 +927,7 @@ static struct inode * get_pipe_inode(void)
 	inode->i_mode = S_IFIFO | S_IRUSR | S_IWUSR;
 	inode->i_uid = current_fsuid();
 	inode->i_gid = current_fsgid();
-	inode->i_atime = inode->i_mtime = inode->i_ctime = current_time(inode);
+	inode->i_atime = inode->i_mtime = inode->i_ctime = CURRENT_TIME;
 
 	return inode;
 
@@ -740,32 +944,30 @@ int create_pipe_files(struct file **res, int flags)
 	struct inode *inode = get_pipe_inode();
 	struct file *f;
 	struct path path;
+	static struct qstr name = { .name = "" };
 
 	if (!inode)
 		return -ENFILE;
 
 	err = -ENOMEM;
-	path.dentry = d_alloc_pseudo(pipe_mnt->mnt_sb, &empty_name);
+	path.dentry = d_alloc_pseudo(pipe_mnt->mnt_sb, &name);
 	if (!path.dentry)
 		goto err_inode;
 	path.mnt = mntget(pipe_mnt);
 
 	d_instantiate(path.dentry, inode);
 
+	err = -ENFILE;
 	f = alloc_file(&path, FMODE_WRITE, &pipefifo_fops);
-	if (IS_ERR(f)) {
-		err = PTR_ERR(f);
+	if (IS_ERR(f))
 		goto err_dentry;
-	}
 
 	f->f_flags = O_WRONLY | (flags & (O_NONBLOCK | O_DIRECT));
 	f->private_data = inode->i_pipe;
 
 	res[0] = alloc_file(&path, FMODE_READ, &pipefifo_fops);
-	if (IS_ERR(res[0])) {
-		err = PTR_ERR(res[0]);
+	if (IS_ERR(res[0]))
 		goto err_file;
-	}
 
 	path_get(&path);
 	res[0]->private_data = inode->i_pipe;
@@ -1008,8 +1210,10 @@ err:
 const struct file_operations pipefifo_fops = {
 	.open		= fifo_open,
 	.llseek		= no_llseek,
-	.read_iter	= pipe_read,
-	.write_iter	= pipe_write,
+	.read		= do_sync_read,
+	.aio_read	= pipe_read,
+	.write		= do_sync_write,
+	.aio_write	= pipe_write,
 	.poll		= pipe_poll,
 	.unlocked_ioctl	= pipe_ioctl,
 	.release	= pipe_release,
@@ -1069,7 +1273,7 @@ static long pipe_set_size(struct pipe_inode_info *pipe, unsigned long arg)
 	if (nr_pages > pipe->buffers &&
 			(too_many_pipe_buffers_hard(user_bufs) ||
 			 too_many_pipe_buffers_soft(user_bufs)) &&
-			!capable(CAP_SYS_RESOURCE) && !capable(CAP_SYS_ADMIN)) {
+			is_unprivileged_user()) {
 		ret = -EPERM;
 		goto out_revert_acct;
 	}
@@ -1085,8 +1289,7 @@ static long pipe_set_size(struct pipe_inode_info *pipe, unsigned long arg)
 		goto out_revert_acct;
 	}
 
-	bufs = kcalloc(nr_pages, sizeof(*bufs),
-		       GFP_KERNEL_ACCOUNT | __GFP_NOWARN);
+	bufs = kcalloc(nr_pages, sizeof(*bufs), GFP_KERNEL | __GFP_NOWARN);
 	if (unlikely(!bufs)) {
 		ret = -ENOMEM;
 		goto out_revert_acct;

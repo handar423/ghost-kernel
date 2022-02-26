@@ -2,14 +2,15 @@
 #define __NET_FIB_NOTIFIER_H
 
 #include <linux/types.h>
+#ifndef __GENKSYMS__
 #include <linux/module.h>
+#endif
 #include <linux/notifier.h>
 #include <net/net_namespace.h>
 
 struct fib_notifier_info {
 	struct net *net;
 	int family;
-	struct netlink_ext_ack  *extack;
 };
 
 enum fib_event_type {

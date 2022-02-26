@@ -32,12 +32,14 @@
 
 
 static int
-xfs_xattr_get(const struct xattr_handler *handler, struct dentry *unused,
-		struct inode *inode, const char *name, void *value, size_t size)
+xfs_xattr_get(struct dentry *dentry, const char *name,
+		void *value, size_t size, int xflags)
 {
-	int xflags = handler->flags;
-	struct xfs_inode *ip = XFS_I(inode);
+	struct xfs_inode *ip = XFS_I(dentry->d_inode);
 	int error, asize = size;
+
+	if (strcmp(name, "") == 0)
+		return -EINVAL;
 
 	/* Convert Linux syscall to XFS internal ATTR flags */
 	if (!size) {
@@ -74,13 +76,14 @@ xfs_forget_acl(
 }
 
 static int
-xfs_xattr_set(const struct xattr_handler *handler, struct dentry *unused,
-		struct inode *inode, const char *name, const void *value,
-		size_t size, int flags)
+xfs_xattr_set(struct dentry *dentry, const char *name, const void *value,
+		size_t size, int flags, int xflags)
 {
-	int			xflags = handler->flags;
-	struct xfs_inode	*ip = XFS_I(inode);
+	struct xfs_inode	*ip = XFS_I(dentry->d_inode);
 	int			error;
+
+	if (strcmp(name, "") == 0)
+		return -EINVAL;
 
 	/* Convert Linux syscall to XFS internal ATTR flags */
 	if (flags & XATTR_CREATE)
@@ -88,12 +91,13 @@ xfs_xattr_set(const struct xattr_handler *handler, struct dentry *unused,
 	if (flags & XATTR_REPLACE)
 		xflags |= ATTR_REPLACE;
 
-	if (!value)
-		return xfs_attr_remove(ip, (unsigned char *)name, xflags);
-	error = xfs_attr_set(ip, (unsigned char *)name,
+	if (value)
+		error = xfs_attr_set(ip, (unsigned char *)name,
 				(void *)value, size, xflags);
+	else
+		error = xfs_attr_remove(ip, (unsigned char *)name, xflags);
 	if (!error)
-		xfs_forget_acl(inode, name, xflags);
+		xfs_forget_acl(dentry->d_inode, name, xflags);
 
 	return error;
 }
@@ -124,8 +128,8 @@ const struct xattr_handler *xfs_xattr_handlers[] = {
 	&xfs_xattr_trusted_handler,
 	&xfs_xattr_security_handler,
 #ifdef CONFIG_XFS_POSIX_ACL
-	&posix_acl_access_xattr_handler,
-	&posix_acl_default_xattr_handler,
+	&xfs_xattr_acl_access_handler,
+	&xfs_xattr_acl_default_handler,
 #endif
 	NULL
 };
@@ -140,6 +144,9 @@ __xfs_xattr_put_listent(
 {
 	char *offset;
 	int arraytop;
+
+	if (context->count < 0 || context->seen_enough)
+		return;
 
 	if (!context->alist)
 		goto compute_size;

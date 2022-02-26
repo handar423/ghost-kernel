@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 #include <linux/kmod.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
@@ -29,7 +28,6 @@ static int dev_ifname(struct net *net, struct ifreq __user *arg)
 
 	if (copy_from_user(&ifr, arg, sizeof(struct ifreq)))
 		return -EFAULT;
-	ifr.ifr_name[IFNAMSIZ-1] = 0;
 
 	error = netdev_get_name(net, ifr.ifr_name, ifr.ifr_ifindex);
 	if (error)
@@ -144,12 +142,10 @@ static int dev_ifsioc_locked(struct net *net, struct ifreq *ifr, unsigned int cm
 
 	case SIOCGIFHWADDR:
 		if (!dev->addr_len)
-			memset(ifr->ifr_hwaddr.sa_data, 0,
-			       sizeof(ifr->ifr_hwaddr.sa_data));
+			memset(ifr->ifr_hwaddr.sa_data, 0, sizeof ifr->ifr_hwaddr.sa_data);
 		else
 			memcpy(ifr->ifr_hwaddr.sa_data, dev->dev_addr,
-			       min(sizeof(ifr->ifr_hwaddr.sa_data),
-				   (size_t)dev->addr_len));
+			       min(sizeof ifr->ifr_hwaddr.sa_data, (size_t) dev->addr_len));
 		ifr->ifr_hwaddr.sa_family = dev->type;
 		return 0;
 
@@ -264,16 +260,13 @@ static int dev_ifsioc(struct net *net, struct ifreq *ifr, unsigned int cmd)
 		return dev_set_mtu(dev, ifr->ifr_mtu);
 
 	case SIOCSIFHWADDR:
-		if (dev->addr_len > sizeof(struct sockaddr))
-			return -EINVAL;
 		return dev_set_mac_address(dev, &ifr->ifr_hwaddr);
 
 	case SIOCSIFHWBROADCAST:
 		if (ifr->ifr_hwaddr.sa_family != dev->type)
 			return -EINVAL;
 		memcpy(dev->broadcast, ifr->ifr_hwaddr.sa_data,
-		       min(sizeof(ifr->ifr_hwaddr.sa_data),
-			   (size_t)dev->addr_len));
+		       min(sizeof ifr->ifr_hwaddr.sa_data, (size_t) dev->addr_len));
 		call_netdevice_notifiers(NETDEV_CHANGEADDR, dev);
 		return 0;
 
@@ -304,18 +297,7 @@ static int dev_ifsioc(struct net *net, struct ifreq *ifr, unsigned int cmd)
 	case SIOCSIFTXQLEN:
 		if (ifr->ifr_qlen < 0)
 			return -EINVAL;
-		if (dev->tx_queue_len ^ ifr->ifr_qlen) {
-			unsigned int orig_len = dev->tx_queue_len;
-
-			dev->tx_queue_len = ifr->ifr_qlen;
-			err = call_netdevice_notifiers(
-					NETDEV_CHANGE_TX_QUEUE_LEN, dev);
-			err = notifier_to_errno(err);
-			if (err) {
-				dev->tx_queue_len = orig_len;
-				return err;
-			}
-		}
+		dev->tx_queue_len = ifr->ifr_qlen;
 		return 0;
 
 	case SIOCSIFNAME:
@@ -384,8 +366,11 @@ void dev_load(struct net *net, const char *name)
 	no_module = !dev;
 	if (no_module && capable(CAP_NET_ADMIN))
 		no_module = request_module("netdev-%s", name);
-	if (no_module && capable(CAP_SYS_MODULE))
-		request_module("%s", name);
+	if (no_module && capable(CAP_SYS_MODULE)) {
+		if (!request_module("%s", name))
+			pr_warn("Loading kernel module for a network device with CAP_SYS_MODULE (deprecated).  Use CAP_NET_ADMIN and alias netdev-%s instead.\n",
+				name);
+	}
 }
 EXPORT_SYMBOL(dev_load);
 
@@ -425,24 +410,6 @@ int dev_ioctl(struct net *net, unsigned int cmd, void __user *arg)
 	}
 	if (cmd == SIOCGIFNAME)
 		return dev_ifname(net, (struct ifreq __user *)arg);
-
-	/*
-	 * Take care of Wireless Extensions. Unfortunately struct iwreq
-	 * isn't a proper subset of struct ifreq (it's 8 byte shorter)
-	 * so we need to treat it specially, otherwise applications may
-	 * fault if the struct they're passing happens to land at the
-	 * end of a mapped page.
-	 */
-	if (cmd >= SIOCIWFIRST && cmd <= SIOCIWLAST) {
-		struct iwreq iwr;
-
-		if (copy_from_user(&iwr, arg, sizeof(iwr)))
-			return -EFAULT;
-
-		iwr.ifr_name[sizeof(iwr.ifr_name) - 1] = 0;
-
-		return wext_handle_ioctl(net, &iwr, cmd, arg);
-	}
 
 	if (copy_from_user(&ifr, arg, sizeof(struct ifreq)))
 		return -EFAULT;
@@ -593,6 +560,9 @@ int dev_ioctl(struct net *net, unsigned int cmd, void __user *arg)
 				ret = -EFAULT;
 			return ret;
 		}
+		/* Take care of Wireless Extensions */
+		if (cmd >= SIOCIWFIRST && cmd <= SIOCIWLAST)
+			return wext_handle_ioctl(net, &ifr, cmd, arg);
 		return -ENOTTY;
 	}
 }

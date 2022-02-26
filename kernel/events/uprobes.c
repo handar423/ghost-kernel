@@ -19,7 +19,7 @@
  * Authors:
  *	Srikar Dronamraju
  *	Jim Keniston
- * Copyright (C) 2011-2012 Red Hat, Inc., Peter Zijlstra
+ * Copyright (C) 2011-2012 Red Hat, Inc., Peter Zijlstra <pzijlstr@redhat.com>
  */
 
 #include <linux/kernel.h>
@@ -27,8 +27,6 @@
 #include <linux/pagemap.h>	/* read_mapping_page */
 #include <linux/slab.h>
 #include <linux/sched.h>
-#include <linux/sched/mm.h>
-#include <linux/sched/coredump.h>
 #include <linux/export.h>
 #include <linux/rmap.h>		/* anon_vma_prepare */
 #include <linux/mmu_notifier.h>	/* set_pte_at_notify */
@@ -38,7 +36,6 @@
 #include "../../mm/internal.h"	/* munlock_vma_page */
 #include <linux/percpu-rwsem.h>
 #include <linux/task_work.h>
-#include <linux/shmem_fs.h>
 
 #include <linux/uprobes.h>
 
@@ -74,42 +71,7 @@ struct uprobe {
 	struct inode		*inode;		/* Also hold a ref to inode */
 	loff_t			offset;
 	unsigned long		flags;
-
-	/*
-	 * The generic code assumes that it has two members of unknown type
-	 * owned by the arch-specific code:
-	 *
-	 * 	insn -	copy_insn() saves the original instruction here for
-	 *		arch_uprobe_analyze_insn().
-	 *
-	 *	ixol -	potentially modified instruction to execute out of
-	 *		line, copied to xol_area by xol_get_insn_slot().
-	 */
 	struct arch_uprobe	arch;
-};
-
-/*
- * Execute out of line area: anonymous executable mapping installed
- * by the probed task to execute the copy of the original instruction
- * mangled by set_swbp().
- *
- * On a breakpoint hit, thread contests for a slot.  It frees the
- * slot after singlestep. Currently a fixed number of slots are
- * allocated.
- */
-struct xol_area {
-	wait_queue_head_t 		wq;		/* if all slots are busy */
-	atomic_t 			slot_count;	/* number of in-use slots */
-	unsigned long 			*bitmap;	/* 0 = free slot */
-
-	struct vm_special_mapping	xol_mapping;
-	struct page 			*pages[2];
-	/*
-	 * We keep the vma's vm_start rather than a pointer to the vma
-	 * itself.  The probed process or a naughty kernel module could make
-	 * the vma go away, and we must handle that reasonably gracefully.
-	 */
-	unsigned long 			vaddr;		/* Page(s) of instruction slots */
 };
 
 /*
@@ -122,7 +84,7 @@ struct xol_area {
  */
 static bool valid_vma(struct vm_area_struct *vma, bool is_register)
 {
-	vm_flags_t flags = VM_HUGETLB | VM_MAYEXEC | VM_MAYSHARE;
+	vm_flags_t flags = VM_HUGETLB | VM_MAYEXEC | VM_SHARED;
 
 	if (is_register)
 		flags |= VM_WRITE;
@@ -152,66 +114,50 @@ static loff_t vaddr_to_offset(struct vm_area_struct *vma, unsigned long vaddr)
  * Returns 0 on success, -EFAULT on failure.
  */
 static int __replace_page(struct vm_area_struct *vma, unsigned long addr,
-				struct page *old_page, struct page *new_page)
+				struct page *page, struct page *kpage)
 {
 	struct mm_struct *mm = vma->vm_mm;
-	struct page_vma_mapped_walk pvmw = {
-		.page = old_page,
-		.vma = vma,
-		.address = addr,
-	};
+	spinlock_t *ptl;
+	pte_t *ptep;
 	int err;
 	/* For mmu_notifiers */
 	const unsigned long mmun_start = addr;
 	const unsigned long mmun_end   = addr + PAGE_SIZE;
-	struct mem_cgroup *memcg;
-
-	VM_BUG_ON_PAGE(PageTransHuge(old_page), old_page);
-
-	err = mem_cgroup_try_charge(new_page, vma->vm_mm, GFP_KERNEL, &memcg,
-			false);
-	if (err)
-		return err;
 
 	/* For try_to_free_swap() and munlock_vma_page() below */
-	lock_page(old_page);
+	lock_page(page);
 
 	mmu_notifier_invalidate_range_start(mm, mmun_start, mmun_end);
 	err = -EAGAIN;
-	if (!page_vma_mapped_walk(&pvmw)) {
-		mem_cgroup_cancel_charge(new_page, memcg, false);
+	ptep = page_check_address(page, mm, addr, &ptl, 0);
+	if (!ptep)
 		goto unlock;
-	}
-	VM_BUG_ON_PAGE(addr != pvmw.address, old_page);
 
-	get_page(new_page);
-	page_add_new_anon_rmap(new_page, vma, addr, false);
-	mem_cgroup_commit_charge(new_page, memcg, false, false);
-	lru_cache_add_active_or_unevictable(new_page, vma);
+	get_page(kpage);
+	page_add_new_anon_rmap(kpage, vma, addr);
 
-	if (!PageAnon(old_page)) {
-		dec_mm_counter(mm, mm_counter_file(old_page));
+	if (!PageAnon(page)) {
+		dec_mm_counter(mm, mm_counter_file(page));
 		inc_mm_counter(mm, MM_ANONPAGES);
 	}
 
-	flush_cache_page(vma, addr, pte_pfn(*pvmw.pte));
-	ptep_clear_flush_notify(vma, addr, pvmw.pte);
-	set_pte_at_notify(mm, addr, pvmw.pte,
-			mk_pte(new_page, vma->vm_page_prot));
+	flush_cache_page(vma, addr, pte_pfn(*ptep));
+	ptep_clear_flush_notify(vma, addr, ptep);
+	set_pte_at_notify(mm, addr, ptep, mk_pte(kpage, vma->vm_page_prot));
 
-	page_remove_rmap(old_page, false);
-	if (!page_mapped(old_page))
-		try_to_free_swap(old_page);
-	page_vma_mapped_walk_done(&pvmw);
+	page_remove_rmap(page);
+	if (!page_mapped(page))
+		try_to_free_swap(page);
+	pte_unmap_unlock(ptep, ptl);
 
 	if (vma->vm_flags & VM_LOCKED)
-		munlock_vma_page(old_page);
-	put_page(old_page);
+		munlock_vma_page(page);
+	put_page(page);
 
 	err = 0;
  unlock:
 	mmu_notifier_invalidate_range_end(mm, mmun_start, mmun_end);
-	unlock_page(old_page);
+	unlock_page(page);
 	return err;
 }
 
@@ -288,18 +234,23 @@ static int verify_opcode(struct page *page, unsigned long vaddr, uprobe_opcode_t
  * the architecture. If an arch has variable length instruction and the
  * breakpoint instruction is not of the smallest length instruction
  * supported by that architecture then we need to modify is_trap_at_addr and
- * uprobe_write_opcode accordingly. This would never be a problem for archs
- * that have fixed length instructions.
- *
- * uprobe_write_opcode - write the opcode at a given virtual address.
+ * write_opcode accordingly. This would never be a problem for archs that
+ * have fixed length instructions.
+ */
+
+/*
+ * write_opcode - write the opcode at a given virtual address.
  * @mm: the probed process address space.
  * @vaddr: the virtual address to store the opcode.
  * @opcode: opcode to be written at @vaddr.
  *
- * Called with mm->mmap_sem held for write.
+ * Called with mm->mmap_sem held (for read and with a reference to
+ * mm).
+ *
+ * For mm @mm, write the opcode at @vaddr.
  * Return 0 (success) or a negative errno.
  */
-int uprobe_write_opcode(struct mm_struct *mm, unsigned long vaddr,
+static int write_opcode(struct mm_struct *mm, unsigned long vaddr,
 			uprobe_opcode_t opcode)
 {
 	struct page *old_page, *new_page;
@@ -308,17 +259,12 @@ int uprobe_write_opcode(struct mm_struct *mm, unsigned long vaddr,
 
 retry:
 	/* Read the page with vaddr into memory */
-	ret = get_user_pages_remote(NULL, mm, vaddr, 1,
-			FOLL_FORCE | FOLL_SPLIT, &old_page, &vma, NULL);
+	ret = get_user_pages_remote(NULL, mm, vaddr, 1, 0, 1, &old_page, &vma);
 	if (ret <= 0)
 		return ret;
 
 	ret = verify_opcode(old_page, vaddr, &opcode);
 	if (ret <= 0)
-		goto put_old;
-
-	ret = anon_vma_prepare(vma);
-	if (ret)
 		goto put_old;
 
 	ret = -ENOMEM;
@@ -327,11 +273,18 @@ retry:
 		goto put_old;
 
 	__SetPageUptodate(new_page);
+
 	copy_highpage(new_page, old_page);
 	copy_to_page(new_page, vaddr, &opcode, UPROBE_SWBP_INSN_SIZE);
 
+	ret = anon_vma_prepare(vma);
+	if (ret)
+		goto put_new;
+
 	ret = __replace_page(vma, vaddr, old_page, new_page);
-	put_page(new_page);
+
+put_new:
+	page_cache_release(new_page);
 put_old:
 	put_page(old_page);
 
@@ -351,7 +304,7 @@ put_old:
  */
 int __weak set_swbp(struct arch_uprobe *auprobe, struct mm_struct *mm, unsigned long vaddr)
 {
-	return uprobe_write_opcode(mm, vaddr, UPROBE_SWBP_INSN);
+	return write_opcode(mm, vaddr, UPROBE_SWBP_INSN);
 }
 
 /**
@@ -366,7 +319,7 @@ int __weak set_swbp(struct arch_uprobe *auprobe, struct mm_struct *mm, unsigned 
 int __weak
 set_orig_insn(struct arch_uprobe *auprobe, struct mm_struct *mm, unsigned long vaddr)
 {
-	return uprobe_write_opcode(mm, vaddr, *(uprobe_opcode_t *)&auprobe->insn);
+	return write_opcode(mm, vaddr, *(uprobe_opcode_t *)&auprobe->insn);
 }
 
 static struct uprobe *get_uprobe(struct uprobe *uprobe)
@@ -543,20 +496,19 @@ static int __copy_insn(struct address_space *mapping, struct file *filp,
 			void *insn, int nbytes, loff_t offset)
 {
 	struct page *page;
+
+	if (!mapping->a_ops->readpage)
+		return -EIO;
 	/*
-	 * Ensure that the page that has the original instruction is populated
-	 * and in page-cache. If ->readpage == NULL it must be shmem_mapping(),
-	 * see uprobe_register().
+	 * Ensure that the page that has the original instruction is
+	 * populated and in page-cache.
 	 */
-	if (mapping->a_ops->readpage)
-		page = read_mapping_page(mapping, offset >> PAGE_SHIFT, filp);
-	else
-		page = shmem_read_mapping_page(mapping, offset >> PAGE_SHIFT);
+	page = read_mapping_page(mapping, offset >> PAGE_CACHE_SHIFT, filp);
 	if (IS_ERR(page))
 		return PTR_ERR(page);
 
 	copy_from_page(page, offset, insn, nbytes);
-	put_page(page);
+	page_cache_release(page);
 
 	return 0;
 }
@@ -612,7 +564,7 @@ static int prepare_uprobe(struct uprobe *uprobe, struct file *file,
 	if (ret)
 		goto out;
 
-	/* uprobe_write_opcode() assumes we don't cross page boundary */
+	/* write_opcode() assumes we don't cross page boundary */
 	BUG_ON((uprobe->offset & ~PAGE_MASK) +
 			UPROBE_SWBP_INSN_SIZE > PAGE_SIZE);
 
@@ -729,14 +681,14 @@ build_map_info(struct address_space *mapping, loff_t offset, bool is_register)
 	int more = 0;
 
  again:
-	i_mmap_lock_read(mapping);
+	mutex_lock(&mapping->i_mmap_mutex);
 	vma_interval_tree_foreach(vma, &mapping->i_mmap, pgoff, pgoff) {
 		if (!valid_vma(vma, is_register))
 			continue;
 
 		if (!prev && !more) {
 			/*
-			 * Needs GFP_NOWAIT to avoid i_mmap_rwsem recursion through
+			 * Needs GFP_NOWAIT to avoid i_mmap_mutex recursion through
 			 * reclaim. This is optimistic, no harm done if it fails.
 			 */
 			prev = kmalloc(sizeof(struct map_info),
@@ -749,7 +701,7 @@ build_map_info(struct address_space *mapping, loff_t offset, bool is_register)
 			continue;
 		}
 
-		if (!mmget_not_zero(vma->vm_mm))
+		if (!atomic_inc_not_zero(&vma->vm_mm->mm_users))
 			continue;
 
 		info = prev;
@@ -760,7 +712,7 @@ build_map_info(struct address_space *mapping, loff_t offset, bool is_register)
 		info->mm = vma->vm_mm;
 		info->vaddr = offset_to_vaddr(vma, offset);
 	}
-	i_mmap_unlock_read(mapping);
+	mutex_unlock(&mapping->i_mmap_mutex);
 
 	if (!more)
 		goto out;
@@ -852,7 +804,7 @@ static void __uprobe_unregister(struct uprobe *uprobe, struct uprobe_consumer *u
 {
 	int err;
 
-	if (WARN_ON(!consumer_del(uprobe, uc)))
+	if (!consumer_del(uprobe, uc))	/* WARN? */
 		return;
 
 	err = register_for_each_vma(uprobe, NULL);
@@ -887,9 +839,6 @@ int uprobe_register(struct inode *inode, loff_t offset, struct uprobe_consumer *
 	if (!uc->handler && !uc->ret_handler)
 		return -EINVAL;
 
-	/* copy_insn() uses read_mapping_page() or shmem_read_mapping_page() */
-	if (!inode->i_mapping->a_ops->readpage && !shmem_mapping(inode->i_mapping))
-		return -EIO;
 	/* Racy, just to catch the obvious mistakes */
 	if (offset > i_size_read(inode))
 		return -EINVAL;
@@ -919,7 +868,7 @@ int uprobe_register(struct inode *inode, loff_t offset, struct uprobe_consumer *
 EXPORT_SYMBOL_GPL(uprobe_register);
 
 /*
- * uprobe_apply - unregister a already registered probe.
+ * uprobe_apply - unregister an already registered probe.
  * @inode: the file in which the probe has to be removed.
  * @offset: offset from the start of the file.
  * @uc: consumer which wants to add more or remove some breakpoints
@@ -933,7 +882,7 @@ int uprobe_apply(struct inode *inode, loff_t offset,
 	int ret = -ENOENT;
 
 	uprobe = find_uprobe(inode, offset);
-	if (WARN_ON(!uprobe))
+	if (!uprobe)
 		return ret;
 
 	down_write(&uprobe->register_rwsem);
@@ -948,7 +897,7 @@ int uprobe_apply(struct inode *inode, loff_t offset,
 }
 
 /*
- * uprobe_unregister - unregister a already registered probe.
+ * uprobe_unregister - unregister an already registered probe.
  * @inode: the file in which the probe has to be removed.
  * @offset: offset from the start of the file.
  * @uc: identify which probe if multiple probes are colocated.
@@ -958,7 +907,7 @@ void uprobe_unregister(struct inode *inode, loff_t offset, struct uprobe_consume
 	struct uprobe *uprobe;
 
 	uprobe = find_uprobe(inode, offset);
-	if (WARN_ON(!uprobe))
+	if (!uprobe)
 		return;
 
 	down_write(&uprobe->register_rwsem);
@@ -1137,16 +1086,11 @@ void uprobe_munmap(struct vm_area_struct *vma, unsigned long start, unsigned lon
 /* Slot allocation for XOL */
 static int xol_add_vma(struct mm_struct *mm, struct xol_area *area)
 {
-	struct vm_area_struct *vma;
-	int ret;
+	int ret = -EALREADY;
 
-	if (down_write_killable(&mm->mmap_sem))
-		return -EINTR;
-
-	if (mm->uprobes_state.xol_area) {
-		ret = -EALREADY;
+	down_write(&mm->mmap_sem);
+	if (mm->uprobes_state.xol_area)
 		goto fail;
-	}
 
 	if (!area->vaddr) {
 		/* Try to map as high as possible, this is only a hint. */
@@ -1158,15 +1102,11 @@ static int xol_add_vma(struct mm_struct *mm, struct xol_area *area)
 		}
 	}
 
-	vma = _install_special_mapping(mm, area->vaddr, PAGE_SIZE,
-				VM_EXEC|VM_MAYEXEC|VM_DONTCOPY|VM_IO,
-				&area->xol_mapping);
-	if (IS_ERR(vma)) {
-		ret = PTR_ERR(vma);
+	ret = install_special_mapping(mm, area->vaddr, PAGE_SIZE,
+				VM_EXEC|VM_MAYEXEC|VM_DONTCOPY|VM_IO, &area->page);
+	if (ret)
 		goto fail;
-	}
 
-	ret = 0;
 	smp_wmb();	/* pairs with get_xol_area() */
 	mm->uprobes_state.xol_area = area;
  fail:
@@ -1189,25 +1129,21 @@ static struct xol_area *__create_xol_area(unsigned long vaddr)
 	if (!area->bitmap)
 		goto free_area;
 
-	area->xol_mapping.name = "[uprobes]";
-	area->xol_mapping.fault = NULL;
-	area->xol_mapping.pages = area->pages;
-	area->pages[0] = alloc_page(GFP_HIGHUSER);
-	if (!area->pages[0])
+	area->page = alloc_page(GFP_HIGHUSER);
+	if (!area->page)
 		goto free_bitmap;
-	area->pages[1] = NULL;
 
 	area->vaddr = vaddr;
 	init_waitqueue_head(&area->wq);
 	/* Reserve the 1st slot for get_trampoline_vaddr() */
 	set_bit(0, area->bitmap);
 	atomic_set(&area->slot_count, 1);
-	arch_uprobe_copy_ixol(area->pages[0], 0, &insn, UPROBE_SWBP_INSN_SIZE);
+	copy_to_page(area->page, 0, &insn, UPROBE_SWBP_INSN_SIZE);
 
 	if (!xol_add_vma(mm, area))
 		return area;
 
-	__free_page(area->pages[0]);
+	__free_page(area->page);
  free_bitmap:
 	kfree(area->bitmap);
  free_area:
@@ -1245,7 +1181,7 @@ void uprobe_clear_state(struct mm_struct *mm)
 	if (!area)
 		return;
 
-	put_page(area->pages[0]);
+	put_page(area->page);
 	kfree(area->bitmap);
 	kfree(area);
 }
@@ -1262,6 +1198,8 @@ void uprobe_end_dup_mmap(void)
 
 void uprobe_dup_mmap(struct mm_struct *oldmm, struct mm_struct *newmm)
 {
+	newmm->uprobes_state.xol_area = NULL;
+
 	if (test_bit(MMF_HAS_UPROBES, &oldmm->flags)) {
 		set_bit(MMF_HAS_UPROBES, &newmm->flags);
 		/* unconditionally, dup_mmap() skips VM_DONTCOPY vmas */
@@ -1312,8 +1250,13 @@ static unsigned long xol_get_insn_slot(struct uprobe *uprobe)
 	if (unlikely(!xol_vaddr))
 		return 0;
 
-	arch_uprobe_copy_ixol(area->pages[0], xol_vaddr,
-			      &uprobe->arch.ixol, sizeof(uprobe->arch.ixol));
+	/* Initialize the slot */
+	copy_to_page(area->page, xol_vaddr, &uprobe->arch.insn, MAX_UINSN_BYTES);
+	/*
+	 * We probably need flush_icache_user_range() but it needs vma.
+	 * This should work on supported architectures too.
+	 */
+	flush_dcache_page(area->page);
 
 	return xol_vaddr;
 }
@@ -1349,27 +1292,11 @@ static void xol_free_insn_slot(struct task_struct *tsk)
 
 		clear_bit(slot_nr, area->bitmap);
 		atomic_dec(&area->slot_count);
-		smp_mb__after_atomic(); /* pairs with prepare_to_wait() */
 		if (waitqueue_active(&area->wq))
 			wake_up(&area->wq);
 
 		tsk->utask->xol_vaddr = 0;
 	}
-}
-
-void __weak arch_uprobe_copy_ixol(struct page *page, unsigned long vaddr,
-				  void *src, unsigned long len)
-{
-	/* Initialize the slot */
-	copy_to_page(page, vaddr, src, len);
-
-	/*
-	 * We probably need flush_icache_user_range() but it needs vma.
-	 * This should work on most of architectures by default. If
-	 * architecture needs to do something different it can define
-	 * its own version of the function.
-	 */
-	flush_dcache_page(page);
 }
 
 /**
@@ -1383,16 +1310,6 @@ unsigned long __weak uprobe_get_swbp_addr(struct pt_regs *regs)
 	return instruction_pointer(regs) - UPROBE_SWBP_INSN_SIZE;
 }
 
-unsigned long uprobe_get_trap_addr(struct pt_regs *regs)
-{
-	struct uprobe_task *utask = current->utask;
-
-	if (unlikely(utask && utask->active_uprobe))
-		return utask->vaddr;
-
-	return instruction_pointer(regs);
-}
-
 static struct return_instance *free_ret_instance(struct return_instance *ri)
 {
 	struct return_instance *next = ri->next;
@@ -1403,7 +1320,7 @@ static struct return_instance *free_ret_instance(struct return_instance *ri)
 
 /*
  * Called with no locks held.
- * Called in context of a exiting or a exec-ing thread.
+ * Called in context of an exiting or an exec-ing thread.
  */
 void uprobe_free_utask(struct task_struct *t)
 {
@@ -1476,11 +1393,12 @@ static void uprobe_warn(struct task_struct *t, const char *msg)
 
 static void dup_xol_work(struct callback_head *work)
 {
+	kfree(work);
+
 	if (current->flags & PF_EXITING)
 		return;
 
-	if (!__create_xol_area(current->utask->dup_xol_addr) &&
-			!fatal_signal_pending(current))
+	if (!__create_xol_area(current->utask->vaddr))
 		uprobe_warn(current, "dup xol area");
 }
 
@@ -1491,6 +1409,7 @@ void uprobe_copy_process(struct task_struct *t, unsigned long flags)
 {
 	struct uprobe_task *utask = current->utask;
 	struct mm_struct *mm = current->mm;
+	struct callback_head *work;
 	struct xol_area *area;
 
 	t->utask = NULL;
@@ -1512,9 +1431,14 @@ void uprobe_copy_process(struct task_struct *t, unsigned long flags)
 	if (mm == t->mm)
 		return;
 
-	t->utask->dup_xol_addr = area->vaddr;
-	init_task_work(&t->utask->dup_xol_work, dup_xol_work);
-	task_work_add(t, &t->utask->dup_xol_work, true);
+	/* TODO: move it into the union in uprobe_task */
+	work = kmalloc(sizeof(*work), GFP_KERNEL);
+	if (!work)
+		return uprobe_warn(t, "dup xol area");
+
+	t->utask->vaddr = area->vaddr;
+	init_task_work(work, dup_xol_work);
+	task_work_add(t, work, true);
 }
 
 /*
@@ -1672,6 +1596,7 @@ bool uprobe_deny_signal(void)
 		if (__fatal_signal_pending(t) || arch_uprobe_xol_was_trapped(t)) {
 			utask->state = UTASK_SSTEP_TRAPPED;
 			set_tsk_thread_flag(t, TIF_UPROBE);
+			set_tsk_thread_flag(t, TIF_NOTIFY_RESUME);
 		}
 	}
 
@@ -1705,7 +1630,8 @@ static int is_trap_at_addr(struct mm_struct *mm, unsigned long vaddr)
 	int result;
 
 	pagefault_disable();
-	result = __get_user(opcode, (uprobe_opcode_t __user *)vaddr);
+	result = __copy_from_user_inatomic(&opcode, (void __user*)vaddr,
+							sizeof(opcode));
 	pagefault_enable();
 
 	if (likely(result == 0))
@@ -1717,8 +1643,7 @@ static int is_trap_at_addr(struct mm_struct *mm, unsigned long vaddr)
 	 * but we treat this as a 'remote' access since it is
 	 * essentially a kernel access to the memory.
 	 */
-	result = get_user_pages_remote(NULL, mm, vaddr, 1, FOLL_FORCE, &page,
-			NULL, NULL);
+	result = get_user_pages_remote(NULL, mm, vaddr, 1, 0, 1, &page, NULL);
 	if (result < 0)
 		return result;
 
@@ -1858,11 +1783,6 @@ static void handle_trampoline(struct pt_regs *regs)
 
 }
 
-bool __weak arch_uprobe_ignore(struct arch_uprobe *aup, struct pt_regs *regs)
-{
-	return false;
-}
-
 bool __weak arch_uretprobe_is_alive(struct return_instance *ret, enum rp_check ctx,
 					struct pt_regs *regs)
 {
@@ -1887,7 +1807,7 @@ static void handle_swbp(struct pt_regs *regs)
 	if (!uprobe) {
 		if (is_swbp > 0) {
 			/* No matching uprobe; signal SIGTRAP. */
-			send_sig(SIGTRAP, current, 0);
+			force_sig(SIGTRAP, current);
 		} else {
 			/*
 			 * Either we raced with uprobe_unregister() or we can't
@@ -1918,11 +1838,7 @@ static void handle_swbp(struct pt_regs *regs)
 	if (!get_utask())
 		goto out;
 
-	if (arch_uprobe_ignore(&uprobe->arch, regs))
-		goto out;
-
 	handler_chain(uprobe, regs);
-
 	if (arch_uprobe_skip_sstep(&uprobe->arch, regs))
 		goto out;
 
@@ -2041,4 +1957,9 @@ static int __init init_uprobes(void)
 
 	return register_die_notifier(&uprobe_exception_nb);
 }
-__initcall(init_uprobes);
+module_init(init_uprobes);
+
+static void __exit exit_uprobes(void)
+{
+}
+module_exit(exit_uprobes);

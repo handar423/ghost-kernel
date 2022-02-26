@@ -51,7 +51,6 @@ struct completion;
  */
 enum snd_device_type {
 	SNDRV_DEV_LOWLEVEL,
-	SNDRV_DEV_CONTROL,
 	SNDRV_DEV_INFO,
 	SNDRV_DEV_BUS,
 	SNDRV_DEV_CODEC,
@@ -62,6 +61,7 @@ enum snd_device_type {
 	SNDRV_DEV_SEQUENCER,
 	SNDRV_DEV_HWDEP,
 	SNDRV_DEV_JACK,
+	SNDRV_DEV_CONTROL,	/* NOTE: this must be the last one */
 };
 
 enum snd_device_state {
@@ -120,7 +120,6 @@ struct snd_card {
 	struct list_head ctl_files;	/* active control files */
 
 	struct snd_info_entry *proc_root;	/* root for soundcard specific files */
-	struct snd_info_entry *proc_id;	/* the card id */
 	struct proc_dir_entry *proc_root_link;	/* number link to real id */
 
 	struct list_head files_list;	/* all files associated to this card */
@@ -227,7 +226,6 @@ int copy_from_user_toio(volatile void __iomem *dst, const void __user *src, size
 
 /* init.c */
 
-extern struct snd_card *snd_cards[SNDRV_CARDS];
 int snd_card_locked(int card);
 #if IS_ENABLED(CONFIG_SND_MIXER_OSS)
 #define SND_MIXER_OSS_NOTIFY_REGISTER	0
@@ -252,7 +250,20 @@ int snd_card_add_dev_attr(struct snd_card *card,
 int snd_component_add(struct snd_card *card, const char *component);
 int snd_card_file_add(struct snd_card *card, struct file *file);
 int snd_card_file_remove(struct snd_card *card, struct file *file);
-#define snd_card_unref(card)	put_device(&(card)->card_dev)
+
+struct snd_card *snd_card_ref(int card);
+
+/**
+ * snd_card_unref - Unreference the card object
+ * @card: the card object to unreference
+ *
+ * Call this function for the card object that was obtained via snd_card_ref()
+ * or snd_lookup_minor_data().
+ */
+static inline void snd_card_unref(struct snd_card *card)
+{
+	put_device(&card->card_dev);
+}
 
 #define snd_card_set_dev(card, devptr) ((card)->dev = (devptr))
 
@@ -295,8 +306,8 @@ __printf(4, 5)
 void __snd_printk(unsigned int level, const char *file, int line,
 		  const char *format, ...);
 #else
-#define __snd_printk(level, file, line, format, ...) \
-	printk(format, ##__VA_ARGS__)
+#define __snd_printk(level, file, line, format, args...) \
+	printk(format, ##args)
 #endif
 
 /**
@@ -306,8 +317,8 @@ void __snd_printk(unsigned int level, const char *file, int line,
  * Works like printk() but prints the file and the line of the caller
  * when configured with CONFIG_SND_VERBOSE_PRINTK.
  */
-#define snd_printk(fmt, ...) \
-	__snd_printk(0, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
+#define snd_printk(fmt, args...) \
+	__snd_printk(0, __FILE__, __LINE__, fmt, ##args)
 
 #ifdef CONFIG_SND_DEBUG
 /**
@@ -317,10 +328,10 @@ void __snd_printk(unsigned int level, const char *file, int line,
  * Works like snd_printk() for debugging purposes.
  * Ignored when CONFIG_SND_DEBUG is not set.
  */
-#define snd_printd(fmt, ...) \
-	__snd_printk(1, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
-#define _snd_printd(level, fmt, ...) \
-	__snd_printk(level, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
+#define snd_printd(fmt, args...) \
+	__snd_printk(1, __FILE__, __LINE__, fmt, ##args)
+#define _snd_printd(level, fmt, args...) \
+	__snd_printk(level, __FILE__, __LINE__, fmt, ##args)
 
 /**
  * snd_BUG - give a BUG warning message and stack trace
@@ -370,8 +381,8 @@ static inline bool snd_printd_ratelimit(void) { return false; }
  * Works like snd_printk() for debugging purposes.
  * Ignored when CONFIG_SND_DEBUG_VERBOSE is not set.
  */
-#define snd_printdd(format, ...) \
-	__snd_printk(2, __FILE__, __LINE__, format, ##__VA_ARGS__)
+#define snd_printdd(format, args...) \
+	__snd_printk(2, __FILE__, __LINE__, format, ##args)
 #else
 __printf(1, 2)
 static inline void snd_printdd(const char *format, ...) {}
@@ -387,6 +398,7 @@ static inline void snd_printdd(const char *format, ...) {}
 #define gameport_get_port_data(gp) (gp)->port_data
 #endif
 
+#ifdef CONFIG_PCI
 /* PCI quirk list helper */
 struct snd_pci_quirk {
 	unsigned short subvendor;	/* PCI subvendor ID */
@@ -422,26 +434,12 @@ struct snd_pci_quirk {
 #define snd_pci_quirk_name(q)	""
 #endif
 
-#ifdef CONFIG_PCI
 const struct snd_pci_quirk *
 snd_pci_quirk_lookup(struct pci_dev *pci, const struct snd_pci_quirk *list);
 
 const struct snd_pci_quirk *
 snd_pci_quirk_lookup_id(u16 vendor, u16 device,
 			const struct snd_pci_quirk *list);
-#else
-static inline const struct snd_pci_quirk *
-snd_pci_quirk_lookup(struct pci_dev *pci, const struct snd_pci_quirk *list)
-{
-	return NULL;
-}
-
-static inline const struct snd_pci_quirk *
-snd_pci_quirk_lookup_id(u16 vendor, u16 device,
-			const struct snd_pci_quirk *list)
-{
-	return NULL;
-}
 #endif
 
 #endif /* __SOUND_CORE_H */

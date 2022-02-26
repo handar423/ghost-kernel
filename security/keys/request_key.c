@@ -8,7 +8,7 @@
  * as published by the Free Software Foundation; either version
  * 2 of the License, or (at your option) any later version.
  *
- * See Documentation/security/keys/request-key.rst
+ * See Documentation/security/keys-request-key.txt
  */
 
 #include <linux/module.h>
@@ -72,7 +72,7 @@ static void umh_keys_cleanup(struct subprocess_info *info)
 /*
  * Call a usermode helper with a specific session keyring.
  */
-static int call_usermodehelper_keys(const char *path, char **argv, char **envp,
+static int call_usermodehelper_keys(char *path, char **argv, char **envp,
 					struct key *session_keyring, int wait)
 {
 	struct subprocess_info *info;
@@ -95,7 +95,6 @@ static int call_sbin_request_key(struct key_construction *cons,
 				 const char *op,
 				 void *aux)
 {
-	static char const request_key[] = "/sbin/request-key";
 	const struct cred *cred = current_cred();
 	key_serial_t prkey, sskey;
 	struct key *key = cons->key, *authkey = cons->authkey, *keyring,
@@ -117,7 +116,7 @@ static int call_sbin_request_key(struct key_construction *cons,
 	cred = get_current_cred();
 	keyring = keyring_alloc(desc, cred->fsuid, cred->fsgid, cred,
 				KEY_POS_ALL | KEY_USR_VIEW | KEY_USR_READ,
-				KEY_ALLOC_QUOTA_OVERRUN, NULL, NULL);
+				KEY_ALLOC_QUOTA_OVERRUN, NULL);
 	put_cred(cred);
 	if (IS_ERR(keyring)) {
 		ret = PTR_ERR(keyring);
@@ -162,7 +161,7 @@ static int call_sbin_request_key(struct key_construction *cons,
 
 	/* set up the argument list */
 	i = 0;
-	argv[i++] = (char *)request_key;
+	argv[i++] = "/sbin/request-key";
 	argv[i++] = (char *) op;
 	argv[i++] = key_str;
 	argv[i++] = uid_str;
@@ -173,7 +172,7 @@ static int call_sbin_request_key(struct key_construction *cons,
 	argv[i] = NULL;
 
 	/* do it */
-	ret = call_usermodehelper_keys(request_key, argv, envp, keyring,
+	ret = call_usermodehelper_keys(argv[0], argv, envp, keyring,
 				       UMH_WAIT_PROC);
 	kdebug("usermode -> 0x%x", ret);
 	if (ret >= 0) {
@@ -275,7 +274,7 @@ static int construct_get_dest_keyring(struct key **_dest_keyring)
 			if (cred->request_key_auth) {
 				authkey = cred->request_key_auth;
 				down_read(&authkey->sem);
-				rka = authkey->payload.data[0];
+				rka = authkey->payload.data;
 				if (!test_bit(KEY_FLAG_REVOKED,
 					      &authkey->flags))
 					dest_keyring =
@@ -331,7 +330,7 @@ static int construct_get_dest_keyring(struct key **_dest_keyring)
 		 */
 		if (dest_keyring && do_perm_check) {
 			ret = key_permission(make_key_ref(dest_keyring, 1),
-					     KEY_NEED_WRITE);
+					     KEY_WRITE);
 			if (ret) {
 				key_put(dest_keyring);
 				return ret;
@@ -379,7 +378,7 @@ static int construct_alloc_key(struct keyring_search_context *ctx,
 
 	key = key_alloc(ctx->index_key.type, ctx->index_key.description,
 			ctx->cred->fsuid, ctx->cred->fsgid, ctx->cred,
-			perm, flags, NULL);
+			perm, flags);
 	if (IS_ERR(key))
 		goto alloc_failed;
 
@@ -546,10 +545,10 @@ struct key *request_key_and_link(struct key_type *type,
 		.index_key.type		= type,
 		.index_key.description	= description,
 		.cred			= current_cred(),
-		.match_data.cmp		= key_default_cmp,
-		.match_data.raw_data	= description,
-		.match_data.lookup_type	= KEYRING_SEARCH_LOOKUP_DIRECT,
-		.flags			= (KEYRING_SEARCH_DO_STATE_CHECK |
+		.match			= type->match,
+		.match_data		= description,
+		.flags			= (KEYRING_SEARCH_LOOKUP_DIRECT |
+					   KEYRING_SEARCH_DO_STATE_CHECK |
 					   KEYRING_SEARCH_SKIP_EXPIRED),
 	};
 	struct key *key;
@@ -560,13 +559,8 @@ struct key *request_key_and_link(struct key_type *type,
 	       ctx.index_key.type->name, ctx.index_key.description,
 	       callout_info, callout_len, aux, dest_keyring, flags);
 
-	if (type->match_preparse) {
-		ret = type->match_preparse(&ctx.match_data);
-		if (ret < 0) {
-			key = ERR_PTR(ret);
-			goto error;
-		}
-	}
+	if (!ctx.match)
+		return ERR_PTR(-EINVAL);
 
 	/* search all the process keyrings for a key */
 	key_ref = search_process_keyrings(&ctx);
@@ -578,7 +572,7 @@ struct key *request_key_and_link(struct key_type *type,
 			if (ret < 0) {
 				key_put(key);
 				key = ERR_PTR(ret);
-				goto error_free;
+				goto error;
 			}
 		}
 	} else if (PTR_ERR(key_ref) != -EAGAIN) {
@@ -588,15 +582,12 @@ struct key *request_key_and_link(struct key_type *type,
 		 * should consult userspace if we can */
 		key = ERR_PTR(-ENOKEY);
 		if (!callout_info)
-			goto error_free;
+			goto error;
 
 		key = construct_key_and_link(&ctx, callout_info, callout_len,
 					     aux, dest_keyring, flags);
 	}
 
-error_free:
-	if (type->match_free)
-		type->match_free(&ctx.match_data);
 error:
 	kleave(" = %p", key);
 	return key;

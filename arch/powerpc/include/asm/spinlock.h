@@ -28,6 +28,8 @@
 #include <asm/synch.h>
 #include <asm/ppc-opcode.h>
 
+#define smp_mb__after_unlock_lock()	smp_mb()  /* Full ordering for lock. */
+
 #ifdef CONFIG_PPC64
 /* use 0x800000yy when locked, where yy == CPU number */
 #ifdef __BIG_ENDIAN__
@@ -50,14 +52,6 @@
 #else
 #define CLEAR_IO_SYNC
 #define SYNC_IO
-#endif
-
-#ifdef CONFIG_PPC_PSERIES
-#define vcpu_is_preempted vcpu_is_preempted
-static inline bool vcpu_is_preempted(int cpu)
-{
-	return !!(be32_to_cpu(lppaca_of(cpu).yield_count) & 1);
-}
 #endif
 
 static __always_inline int arch_spin_value_unlocked(arch_spinlock_t lock)
@@ -161,7 +155,6 @@ void arch_spin_lock_flags(arch_spinlock_t *lock, unsigned long flags)
 		local_irq_restore(flags_dis);
 	}
 }
-#define arch_spin_lock_flags arch_spin_lock_flags
 
 static inline void arch_spin_unlock(arch_spinlock_t *lock)
 {
@@ -170,6 +163,13 @@ static inline void arch_spin_unlock(arch_spinlock_t *lock)
 				PPC_RELEASE_BARRIER: : :"memory");
 	lock->slock = 0;
 }
+
+#ifdef CONFIG_PPC64
+extern void arch_spin_unlock_wait(arch_spinlock_t *lock);
+#else
+#define arch_spin_unlock_wait(lock) \
+	do { while (arch_spin_is_locked(lock)) cpu_relax(); } while (0)
+#endif
 
 /*
  * Read-write spinlocks, allowing multiple readers
@@ -181,6 +181,9 @@ static inline void arch_spin_unlock(arch_spinlock_t *lock)
  * irq-safe write-lock, but readers can get non-irqsafe
  * read-locks.
  */
+
+#define arch_read_can_lock(rw)		((rw)->lock >= 0)
+#define arch_write_can_lock(rw)	(!(rw)->lock)
 
 #ifdef CONFIG_PPC64
 #define __DO_SIGN_EXTEND	"extsw	%0,%0\n"
@@ -299,6 +302,9 @@ static inline void arch_write_unlock(arch_rwlock_t *rw)
 				PPC_RELEASE_BARRIER: : :"memory");
 	rw->lock = 0;
 }
+
+#define arch_read_lock_flags(lock, flags) arch_read_lock(lock)
+#define arch_write_lock_flags(lock, flags) arch_write_lock(lock)
 
 #define arch_spin_relax(lock)	__spin_yield(lock)
 #define arch_read_relax(lock)	__rw_yield(lock)

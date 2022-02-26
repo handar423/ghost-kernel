@@ -18,19 +18,23 @@
 #include <net/ip.h>
 #include <net/netfilter/nf_tables_ipv4.h>
 
-static unsigned int nft_do_chain_ipv4(void *priv,
+static unsigned int nft_do_chain_ipv4(const struct nf_hook_ops *ops,
 				      struct sk_buff *skb,
+				      const struct net_device *in,
+				      const struct net_device *out,
 				      const struct nf_hook_state *state)
 {
 	struct nft_pktinfo pkt;
 
 	nft_set_pktinfo_ipv4(&pkt, skb, state);
 
-	return nft_do_chain(&pkt, priv);
+	return nft_do_chain(&pkt, ops);
 }
 
-static unsigned int nft_ipv4_output(void *priv,
+static unsigned int nft_ipv4_output(const struct nf_hook_ops *ops,
 				    struct sk_buff *skb,
+				    const struct net_device *in,
+				    const struct net_device *out,
 				    const struct nf_hook_state *state)
 {
 	if (unlikely(skb->len < sizeof(struct iphdr) ||
@@ -41,7 +45,7 @@ static unsigned int nft_ipv4_output(void *priv,
 		return NF_ACCEPT;
 	}
 
-	return nft_do_chain_ipv4(priv, skb, state);
+	return nft_do_chain_ipv4(ops, skb, state->in, state->out, state);
 }
 
 struct nft_af_info nft_af_ipv4 __read_mostly = {
@@ -103,10 +107,7 @@ static int __init nf_tables_ipv4_init(void)
 {
 	int ret;
 
-	ret = nft_register_chain_type(&filter_ipv4);
-	if (ret < 0)
-		return ret;
-
+	nft_register_chain_type(&filter_ipv4);
 	ret = register_pernet_subsys(&nf_tables_ipv4_net_ops);
 	if (ret < 0)
 		nft_unregister_chain_type(&filter_ipv4);

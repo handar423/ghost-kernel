@@ -240,8 +240,8 @@ int iser_fast_reg_fmr(struct iscsi_iser_task *iser_task,
 	page_vec->npages = 0;
 	page_vec->fake_mr.page_size = SIZE_4K;
 	plen = ib_sg_to_pages(&page_vec->fake_mr, mem->sg,
-			      mem->size, NULL, iser_set_page);
-	if (unlikely(plen < mem->size)) {
+			      mem->dma_nents, NULL, iser_set_page);
+	if (unlikely(plen < mem->dma_nents)) {
 		iser_err("page vec too short to hold this SG\n");
 		iser_data_buf_dump(mem, device->ib_device);
 		iser_dump_page_vec(page_vec);
@@ -310,8 +310,8 @@ iser_set_dif_domain(struct scsi_cmnd *sc, struct ib_sig_attrs *sig_attrs,
 		    struct ib_sig_domain *domain)
 {
 	domain->sig_type = IB_SIG_TYPE_T10_DIF;
-	domain->sig.dif.pi_interval = scsi_prot_interval(sc);
-	domain->sig.dif.ref_tag = scsi_prot_ref_tag(sc);
+	domain->sig.dif.pi_interval = sc->device->sector_size;
+	domain->sig.dif.ref_tag = scsi_get_lba(sc) & 0xffffffff;
 	/*
 	 * At the moment we hard code those, but in the future
 	 * we will take them from sc.
@@ -319,7 +319,8 @@ iser_set_dif_domain(struct scsi_cmnd *sc, struct ib_sig_attrs *sig_attrs,
 	domain->sig.dif.apptag_check_mask = 0xffff;
 	domain->sig.dif.app_escape = true;
 	domain->sig.dif.ref_escape = true;
-	if (sc->prot_flags & SCSI_PROT_REF_INCREMENT)
+	if (scsi_get_prot_type(sc) == SCSI_PROT_DIF_TYPE1 ||
+	    scsi_get_prot_type(sc) == SCSI_PROT_DIF_TYPE2)
 		domain->sig.dif.ref_remap = true;
 };
 
@@ -337,16 +338,26 @@ iser_set_sig_attrs(struct scsi_cmnd *sc, struct ib_sig_attrs *sig_attrs)
 	case SCSI_PROT_WRITE_STRIP:
 		sig_attrs->wire.sig_type = IB_SIG_TYPE_NONE;
 		iser_set_dif_domain(sc, sig_attrs, &sig_attrs->mem);
-		sig_attrs->mem.sig.dif.bg_type = sc->prot_flags & SCSI_PROT_IP_CHECKSUM ?
-						IB_T10DIF_CSUM : IB_T10DIF_CRC;
+		/*
+		 * At the moment we use this modparam to tell what is
+		 * the memory bg_type, in the future we will take it
+		 * from sc.
+		 */
+		sig_attrs->mem.sig.dif.bg_type = iser_pi_guard ? IB_T10DIF_CSUM :
+						 IB_T10DIF_CRC;
 		break;
 	case SCSI_PROT_READ_PASS:
 	case SCSI_PROT_WRITE_PASS:
 		iser_set_dif_domain(sc, sig_attrs, &sig_attrs->wire);
 		sig_attrs->wire.sig.dif.bg_type = IB_T10DIF_CRC;
 		iser_set_dif_domain(sc, sig_attrs, &sig_attrs->mem);
-		sig_attrs->mem.sig.dif.bg_type = sc->prot_flags & SCSI_PROT_IP_CHECKSUM ?
-						IB_T10DIF_CSUM : IB_T10DIF_CRC;
+		/*
+		 * At the moment we use this modparam to tell what is
+		 * the memory bg_type, in the future we will take it
+		 * from sc.
+		 */
+		sig_attrs->mem.sig.dif.bg_type = iser_pi_guard ? IB_T10DIF_CSUM :
+						 IB_T10DIF_CRC;
 		break;
 	default:
 		iser_err("Unsupported PI operation %d\n",
@@ -357,14 +368,27 @@ iser_set_sig_attrs(struct scsi_cmnd *sc, struct ib_sig_attrs *sig_attrs)
 	return 0;
 }
 
-static inline void
+static int
 iser_set_prot_checks(struct scsi_cmnd *sc, u8 *mask)
 {
-	*mask = 0;
-	if (sc->prot_flags & SCSI_PROT_REF_CHECK)
-		*mask |= ISER_CHECK_REFTAG;
-	if (sc->prot_flags & SCSI_PROT_GUARD_CHECK)
-		*mask |= ISER_CHECK_GUARD;
+	switch (scsi_get_prot_type(sc)) {
+	case SCSI_PROT_DIF_TYPE0:
+		*mask = 0x0;
+		break;
+	case SCSI_PROT_DIF_TYPE1:
+	case SCSI_PROT_DIF_TYPE2:
+		*mask = ISER_CHECK_GUARD | ISER_CHECK_REFTAG;
+		break;
+	case SCSI_PROT_DIF_TYPE3:
+		*mask = ISER_CHECK_GUARD;
+		break;
+	default:
+		iser_err("Unsupported protection type %d\n",
+			 scsi_get_prot_type(sc));
+		return -EINVAL;
+	}
+
+	return 0;
 }
 
 static inline void
@@ -398,14 +422,17 @@ iser_reg_sig_mr(struct iscsi_iser_task *iser_task,
 	if (ret)
 		goto err;
 
-	iser_set_prot_checks(iser_task->sc, &sig_attrs->check_mask);
+	ret = iser_set_prot_checks(iser_task->sc, &sig_attrs->check_mask);
+	if (ret)
+		goto err;
 
 	if (pi_ctx->sig_mr_valid)
 		iser_inv_rkey(iser_tx_next_wr(tx_desc), mr, cqe);
 
 	ib_update_fast_reg_key(mr, ib_inc_rkey(mr->rkey));
 
-	wr = sig_handover_wr(iser_tx_next_wr(tx_desc));
+	wr = container_of(iser_tx_next_wr(tx_desc), struct ib_sig_handover_wr,
+			  wr);
 	wr->wr.opcode = IB_WR_REG_SIG_MR;
 	wr->wr.wr_cqe = cqe;
 	wr->wr.sg_list = &data_reg->sge;
@@ -450,14 +477,14 @@ static int iser_fast_reg_mr(struct iscsi_iser_task *iser_task,
 
 	ib_update_fast_reg_key(mr, ib_inc_rkey(mr->rkey));
 
-	n = ib_map_mr_sg(mr, mem->sg, mem->size, NULL, SIZE_4K);
-	if (unlikely(n != mem->size)) {
+	n = ib_map_mr_sg(mr, mem->sg, mem->dma_nents, NULL, SIZE_4K);
+	if (unlikely(n != mem->dma_nents)) {
 		iser_err("failed to map sg (%d/%d)\n",
-			 n, mem->size);
+			 n, mem->dma_nents);
 		return n < 0 ? n : -EINVAL;
 	}
 
-	wr = reg_wr(iser_tx_next_wr(tx_desc));
+	wr = container_of(iser_tx_next_wr(tx_desc), struct ib_reg_wr, wr);
 	wr->wr.opcode = IB_WR_REG_MR;
 	wr->wr.wr_cqe = cqe;
 	wr->wr.send_flags = 0;

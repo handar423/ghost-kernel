@@ -1,11 +1,10 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_X86_HUGETLB_H
 #define _ASM_X86_HUGETLB_H
 
 #include <asm/page.h>
 #include <asm-generic/hugetlb.h>
+#include <asm/mm_track.h>
 
-#define hugepages_supported() boot_cpu_has(X86_FEATURE_PSE)
 
 static inline int is_hugepage_only_range(struct mm_struct *mm,
 					 unsigned long addr,
@@ -28,6 +27,9 @@ static inline int prepare_hugepage_range(struct file *file,
 	return 0;
 }
 
+static inline void hugetlb_prefault_arch_hook(struct mm_struct *mm) {
+}
+
 static inline void hugetlb_free_pgd_range(struct mmu_gather *tlb,
 					  unsigned long addr, unsigned long end,
 					  unsigned long floor,
@@ -39,12 +41,14 @@ static inline void hugetlb_free_pgd_range(struct mmu_gather *tlb,
 static inline void set_huge_pte_at(struct mm_struct *mm, unsigned long addr,
 				   pte_t *ptep, pte_t pte)
 {
+	mm_track_pmd((pmd_t *)ptep);
 	set_pte_at(mm, addr, ptep, pte);
 }
 
 static inline pte_t huge_ptep_get_and_clear(struct mm_struct *mm,
 					    unsigned long addr, pte_t *ptep)
 {
+	mm_track_pmd((pmd_t *)ptep);
 	return ptep_get_and_clear(mm, addr, ptep);
 }
 
@@ -82,12 +86,17 @@ static inline pte_t huge_ptep_get(pte_t *ptep)
 	return *ptep;
 }
 
-static inline void arch_clear_hugepage_flags(struct page *page)
+static inline int arch_prepare_hugepage(struct page *page)
+{
+	return 0;
+}
+
+static inline void arch_release_hugepage(struct page *page)
 {
 }
 
-#ifdef CONFIG_ARCH_HAS_GIGANTIC_PAGE
-static inline bool gigantic_page_supported(void) { return true; }
-#endif
+static inline void arch_clear_hugepage_flags(struct page *page)
+{
+}
 
 #endif /* _ASM_X86_HUGETLB_H */

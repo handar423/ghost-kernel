@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * This header is used to share core functionality between the
  * standalone connection tracking module, and the compatibility layer's use
@@ -52,6 +51,9 @@ bool nf_ct_invert_tuple(struct nf_conntrack_tuple *inverse,
 			const struct nf_conntrack_l3proto *l3proto,
 			const struct nf_conntrack_l4proto *l4proto);
 
+void nf_conntrack_get_ht(struct net *net, struct hlist_nulls_head **hash,
+			 unsigned int *hsize);
+
 /* Find a connection corresponding to a tuple. */
 struct nf_conntrack_tuple_hash *
 nf_conntrack_find_get(struct net *net,
@@ -66,7 +68,7 @@ static inline int nf_conntrack_confirm(struct sk_buff *skb)
 	struct nf_conn *ct = (struct nf_conn *)skb_nfct(skb);
 	int ret = NF_ACCEPT;
 
-	if (ct) {
+	if (ct && !nf_ct_is_untracked(ct)) {
 		if (!nf_ct_is_confirmed(ct))
 			ret = __nf_conntrack_confirm(skb);
 		if (likely(ret == NF_ACCEPT))
@@ -75,15 +77,17 @@ static inline int nf_conntrack_confirm(struct sk_buff *skb)
 	return ret;
 }
 
-void
+int
 print_tuple(struct seq_file *s, const struct nf_conntrack_tuple *tuple,
             const struct nf_conntrack_l3proto *l3proto,
             const struct nf_conntrack_l4proto *proto);
 
-#define CONNTRACK_LOCKS 1024
-
+#ifdef CONFIG_LOCKDEP
+# define CONNTRACK_LOCKS 8
+#else
+# define CONNTRACK_LOCKS 1024
+#endif
 extern spinlock_t nf_conntrack_locks[CONNTRACK_LOCKS];
-void nf_conntrack_lock(spinlock_t *lock);
 
 extern spinlock_t nf_conntrack_expect_lock;
 

@@ -1,11 +1,5 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef TARGET_CORE_INTERNAL_H
 #define TARGET_CORE_INTERNAL_H
-
-#include <linux/configfs.h>
-#include <linux/list.h>
-#include <linux/types.h>
-#include <target/target_core_base.h>
 
 #define TARGET_CORE_NAME_MAX_LEN	64
 #define TARGET_FABRIC_NAME_SIZE		32
@@ -17,6 +11,7 @@ struct target_backend {
 
 	struct config_item_type tb_dev_cit;
 	struct config_item_type tb_dev_attrib_cit;
+	struct config_item_type tb_dev_action_cit;
 	struct config_item_type tb_dev_pr_cit;
 	struct config_item_type tb_dev_wwn_cit;
 	struct config_item_type tb_dev_alua_tg_pt_gps_cit;
@@ -161,11 +156,5 @@ void	target_stat_setup_mappedlun_default_groups(struct se_lun_acl *);
 
 /* target_core_xcopy.c */
 extern struct se_portal_group xcopy_pt_tpg;
-
-/* target_core_configfs.c */
-#define DB_ROOT_LEN		4096
-#define	DB_ROOT_DEFAULT		"/var/target"
-
-extern char db_root[];
 
 #endif /* TARGET_CORE_INTERNAL_H */

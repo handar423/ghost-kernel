@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * linux/fs/lockd/mon.c
  *
@@ -43,7 +42,7 @@ struct nsm_args {
 	u32			proc;
 
 	char			*mon_name;
-	const char		*nodename;
+	char			*nodename;
 };
 
 struct nsm_res {
@@ -87,18 +86,69 @@ static struct rpc_clnt *nsm_create(struct net *net, const char *nodename)
 	return rpc_create(&args);
 }
 
+static struct rpc_clnt *nsm_client_set(struct lockd_net *ln,
+		struct rpc_clnt *clnt)
+{
+	spin_lock(&ln->nsm_clnt_lock);
+	if (ln->nsm_users == 0) {
+		if (clnt == NULL)
+			goto out;
+		ln->nsm_clnt = clnt;
+	}
+	clnt = ln->nsm_clnt;
+	ln->nsm_users++;
+out:
+	spin_unlock(&ln->nsm_clnt_lock);
+	return clnt;
+}
+
+static struct rpc_clnt *nsm_client_get(struct net *net, const char *nodename)
+{
+	struct rpc_clnt	*clnt, *new;
+	struct lockd_net *ln = net_generic(net, lockd_net_id);
+
+	clnt = nsm_client_set(ln, NULL);
+	if (clnt != NULL)
+		goto out;
+
+	clnt = new = nsm_create(net, nodename);
+	if (IS_ERR(clnt))
+		goto out;
+
+	clnt = nsm_client_set(ln, new);
+	if (clnt != new)
+		rpc_shutdown_client(new);
+out:
+	return clnt;
+}
+
+static void nsm_client_put(struct net *net)
+{
+	struct lockd_net *ln = net_generic(net, lockd_net_id);
+	struct rpc_clnt	*clnt = NULL;
+
+	spin_lock(&ln->nsm_clnt_lock);
+	ln->nsm_users--;
+	if (ln->nsm_users == 0) {
+		clnt = ln->nsm_clnt;
+		ln->nsm_clnt = NULL;
+	}
+	spin_unlock(&ln->nsm_clnt_lock);
+	if (clnt != NULL)
+		rpc_shutdown_client(clnt);
+}
+
 static int nsm_mon_unmon(struct nsm_handle *nsm, u32 proc, struct nsm_res *res,
-			 const struct nlm_host *host)
+			 struct rpc_clnt *clnt)
 {
 	int		status;
-	struct rpc_clnt *clnt;
 	struct nsm_args args = {
 		.priv		= &nsm->sm_priv,
 		.prog		= NLM_PROGRAM,
 		.vers		= 3,
 		.proc		= NLMPROC_NSM_NOTIFY,
 		.mon_name	= nsm->sm_mon_name,
-		.nodename	= host->nodename,
+		.nodename	= clnt->cl_nodename,
 	};
 	struct rpc_message msg = {
 		.rpc_argp	= &args,
@@ -106,14 +156,6 @@ static int nsm_mon_unmon(struct nsm_handle *nsm, u32 proc, struct nsm_res *res,
 	};
 
 	memset(res, 0, sizeof(*res));
-
-	clnt = nsm_create(host->net, host->nodename);
-	if (IS_ERR(clnt)) {
-		dprintk("lockd: failed to create NSM upcall transport, "
-			"status=%ld, net=%x\n", PTR_ERR(clnt),
-			host->net->ns.inum);
-		return PTR_ERR(clnt);
-	}
 
 	msg.rpc_proc = &clnt->cl_procinfo[proc];
 	status = rpc_call_sync(clnt, &msg, RPC_TASK_SOFTCONN);
@@ -128,8 +170,6 @@ static int nsm_mon_unmon(struct nsm_handle *nsm, u32 proc, struct nsm_res *res,
 				status);
 	else
 		status = 0;
-
-	rpc_shutdown_client(clnt);
 	return status;
 }
 
@@ -149,11 +189,16 @@ int nsm_monitor(const struct nlm_host *host)
 	struct nsm_handle *nsm = host->h_nsmhandle;
 	struct nsm_res	res;
 	int		status;
+	struct rpc_clnt *clnt;
+	const char *nodename = NULL;
 
 	dprintk("lockd: nsm_monitor(%s)\n", nsm->sm_name);
 
 	if (nsm->sm_monitored)
 		return 0;
+
+	if (host->h_rpcclnt)
+		nodename = host->h_rpcclnt->cl_nodename;
 
 	/*
 	 * Choose whether to record the caller_name or IP address of
@@ -161,11 +206,19 @@ int nsm_monitor(const struct nlm_host *host)
 	 */
 	nsm->sm_mon_name = nsm_use_hostnames ? nsm->sm_name : nsm->sm_addrbuf;
 
-	status = nsm_mon_unmon(nsm, NSMPROC_MON, &res, host);
+	clnt = nsm_client_get(host->net, nodename);
+	if (IS_ERR(clnt)) {
+		status = PTR_ERR(clnt);
+		dprintk("lockd: failed to create NSM upcall transport, "
+				"status=%d, net=%p\n", status, host->net);
+		return status;
+	}
+
+	status = nsm_mon_unmon(nsm, NSMPROC_MON, &res, clnt);
 	if (unlikely(res.status != 0))
 		status = -EIO;
 	if (unlikely(status < 0)) {
-		pr_notice_ratelimited("lockd: cannot monitor %s\n", nsm->sm_name);
+		printk(KERN_NOTICE "lockd: cannot monitor %s\n", nsm->sm_name);
 		return status;
 	}
 
@@ -193,9 +246,11 @@ void nsm_unmonitor(const struct nlm_host *host)
 
 	if (atomic_read(&nsm->sm_count) == 1
 	 && nsm->sm_monitored && !nsm->sm_sticky) {
+		struct lockd_net *ln = net_generic(host->net, lockd_net_id);
+
 		dprintk("lockd: nsm_unmonitor(%s)\n", nsm->sm_name);
 
-		status = nsm_mon_unmon(nsm, NSMPROC_UNMON, &res, host);
+		status = nsm_mon_unmon(nsm, NSMPROC_UNMON, &res, ln->nsm_clnt);
 		if (res.status != 0)
 			status = -EIO;
 		if (status < 0)
@@ -203,6 +258,8 @@ void nsm_unmonitor(const struct nlm_host *host)
 					nsm->sm_name);
 		else
 			nsm->sm_monitored = 0;
+
+		nsm_client_put(host->net);
 	}
 }
 
@@ -261,9 +318,11 @@ static struct nsm_handle *nsm_lookup_priv(const struct list_head *nsm_handles,
 static void nsm_init_private(struct nsm_handle *nsm)
 {
 	u64 *p = (u64 *)&nsm->sm_priv.data;
+	struct timespec ts;
 	s64 ns;
 
-	ns = ktime_get_ns();
+	ktime_get_ts(&ts);
+	ns = timespec_to_ns(&ts);
 	put_unaligned(ns, p);
 	put_unaligned((unsigned long)nsm, p + 1);
 }
@@ -478,23 +537,22 @@ static void encode_priv(struct xdr_stream *xdr, const struct nsm_args *argp)
 }
 
 static void nsm_xdr_enc_mon(struct rpc_rqst *req, struct xdr_stream *xdr,
-			    const void *argp)
+			    const struct nsm_args *argp)
 {
 	encode_mon_id(xdr, argp);
 	encode_priv(xdr, argp);
 }
 
 static void nsm_xdr_enc_unmon(struct rpc_rqst *req, struct xdr_stream *xdr,
-			      const void *argp)
+			      const struct nsm_args *argp)
 {
 	encode_mon_id(xdr, argp);
 }
 
 static int nsm_xdr_dec_stat_res(struct rpc_rqst *rqstp,
 				struct xdr_stream *xdr,
-				void *data)
+				struct nsm_res *resp)
 {
-	struct nsm_res *resp = data;
 	__be32 *p;
 
 	p = xdr_inline_decode(xdr, 4 + 4);
@@ -510,9 +568,8 @@ static int nsm_xdr_dec_stat_res(struct rpc_rqst *rqstp,
 
 static int nsm_xdr_dec_stat(struct rpc_rqst *rqstp,
 			    struct xdr_stream *xdr,
-			    void *data)
+			    struct nsm_res *resp)
 {
-	struct nsm_res *resp = data;
 	__be32 *p;
 
 	p = xdr_inline_decode(xdr, 4);
@@ -533,11 +590,11 @@ static int nsm_xdr_dec_stat(struct rpc_rqst *rqstp,
 #define SM_monres_sz	2
 #define SM_unmonres_sz	1
 
-static const struct rpc_procinfo nsm_procedures[] = {
+static struct rpc_procinfo	nsm_procedures[] = {
 [NSMPROC_MON] = {
 		.p_proc		= NSMPROC_MON,
-		.p_encode	= nsm_xdr_enc_mon,
-		.p_decode	= nsm_xdr_dec_stat_res,
+		.p_encode	= (kxdreproc_t)nsm_xdr_enc_mon,
+		.p_decode	= (kxdrdproc_t)nsm_xdr_dec_stat_res,
 		.p_arglen	= SM_mon_sz,
 		.p_replen	= SM_monres_sz,
 		.p_statidx	= NSMPROC_MON,
@@ -545,8 +602,8 @@ static const struct rpc_procinfo nsm_procedures[] = {
 	},
 [NSMPROC_UNMON] = {
 		.p_proc		= NSMPROC_UNMON,
-		.p_encode	= nsm_xdr_enc_unmon,
-		.p_decode	= nsm_xdr_dec_stat,
+		.p_encode	= (kxdreproc_t)nsm_xdr_enc_unmon,
+		.p_decode	= (kxdrdproc_t)nsm_xdr_dec_stat,
 		.p_arglen	= SM_mon_id_sz,
 		.p_replen	= SM_unmonres_sz,
 		.p_statidx	= NSMPROC_UNMON,
@@ -554,12 +611,10 @@ static const struct rpc_procinfo nsm_procedures[] = {
 	},
 };
 
-static unsigned int nsm_version1_counts[ARRAY_SIZE(nsm_procedures)];
 static const struct rpc_version nsm_version1 = {
-	.number		= 1,
-	.nrprocs	= ARRAY_SIZE(nsm_procedures),
-	.procs		= nsm_procedures,
-	.counts		= nsm_version1_counts,
+		.number		= 1,
+		.nrprocs	= ARRAY_SIZE(nsm_procedures),
+		.procs		= nsm_procedures
 };
 
 static const struct rpc_version *nsm_version[] = {
@@ -569,9 +624,9 @@ static const struct rpc_version *nsm_version[] = {
 static struct rpc_stat		nsm_stats;
 
 static const struct rpc_program nsm_program = {
-	.name		= "statd",
-	.number		= NSM_PROGRAM,
-	.nrvers		= ARRAY_SIZE(nsm_version),
-	.version	= nsm_version,
-	.stats		= &nsm_stats
+		.name		= "statd",
+		.number		= NSM_PROGRAM,
+		.nrvers		= ARRAY_SIZE(nsm_version),
+		.version	= nsm_version,
+		.stats		= &nsm_stats
 };

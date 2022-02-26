@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0+ */
 /*
  * ipmi_smi.h
  *
@@ -9,26 +10,6 @@
  *
  * Copyright 2002 MontaVista Software Inc.
  *
- *  This program is free software; you can redistribute it and/or modify it
- *  under the terms of the GNU General Public License as published by the
- *  Free Software Foundation; either version 2 of the License, or (at your
- *  option) any later version.
- *
- *
- *  THIS SOFTWARE IS PROVIDED ``AS IS'' AND ANY EXPRESS OR IMPLIED
- *  WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
- *  MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
- *  IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
- *  INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
- *  BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS
- *  OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- *  ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR
- *  TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
- *  USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- *  You should have received a copy of the GNU General Public License along
- *  with this program; if not, write to the Free Software Foundation, Inc.,
- *  675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 #ifndef __LINUX_IPMI_SMI_H
@@ -98,34 +79,23 @@ struct ipmi_smi_handlers {
 	   operation is not allowed to fail.  If an error occurs, it
 	   should report back the error in a received message.  It may
 	   do this in the current call context, since no write locks
-	   are held when this is run.  Message are delivered one at
-	   a time by the message handler, a new message will not be
-	   delivered until the previous message is returned. */
+	   are held when this is run.  If the priority is > 0, the
+	   message will go into a high-priority queue and be sent
+	   first.  Otherwise, it goes into a normal-priority queue. */
 	void (*sender)(void                *send_info,
-		       struct ipmi_smi_msg *msg);
+		       struct ipmi_smi_msg *msg,
+		       int                 priority);
 
 	/* Called by the upper layer to request that we try to get
 	   events from the BMC we are attached to. */
 	void (*request_events)(void *send_info);
-
-	/* Called by the upper layer when some user requires that the
-	   interface watch for events, received messages, watchdog
-	   pretimeouts, or not.  Used by the SMI to know if it should
-	   watch for these.  This may be NULL if the SMI does not
-	   implement it. */
-	void (*set_need_watch)(void *send_info, bool enable);
-
-	/*
-	 * Called when flushing all pending messages.
-	 */
-	void (*flush_messages)(void *send_info);
 
 	/* Called when the interface should go into "run to
 	   completion" mode.  If this call sets the value to true, the
 	   interface should make sure that all messages are flushed
 	   out and that none are pending, and any new requests are run
 	   to completion immediately. */
-	void (*set_run_to_completion)(void *send_info, bool run_to_completion);
+	void (*set_run_to_completion)(void *send_info, int run_to_completion);
 
 	/* Called to poll for work to do.  This is so upper layers can
 	   poll for operations during things like crash dumps. */
@@ -136,7 +106,7 @@ struct ipmi_smi_handlers {
 	   setting.  The message handler does the mode handling.  Note
 	   that this is called from interrupt context, so it cannot
 	   block. */
-	void (*set_maintenance_mode)(void *send_info, bool enable);
+	void (*set_maintenance_mode)(void *send_info, int enable);
 
 	/* Tell the handler that we are using it/not using it.  The
 	   message handler get the modules that this handler belongs
@@ -145,6 +115,37 @@ struct ipmi_smi_handlers {
 	int (*inc_usecount)(void *send_info);
 	void (*dec_usecount)(void *send_info);
 };
+
+/*
+ * shadow struct of ipmi_smi_handlers to manage new fields backported
+ * from upstream.
+ *
+ * *** NOTE: This struct is not kabi protected. ***
+ */
+struct ipmi_shadow_smi_handlers {
+
+	/* Copy of pointer to caller's handlers for sanity checking.
+	 */
+	struct ipmi_smi_handlers *handlers;
+
+	/* Add new fields below this line
+	 * ----------------------------------------------------------
+	 */
+
+	/* Called by the upper layer when some user requires that the
+	   interface watch for events, received messages, watchdog
+	   pretimeouts, or not.  Used by the SMI to know if it should
+	   watch for these.  This may be NULL if the SMI does not
+	   implement it. */
+	void (*set_need_watch)(void *send_info, int enable);
+
+	/*
+	 * Called when flushing all pending messages.
+	 */
+	void (*flush_messages)(void *send_info);
+};
+
+struct ipmi_shadow_smi_handlers *ipmi_get_shadow_smi_handlers(void);
 
 struct ipmi_device_id {
 	unsigned char device_id;
@@ -212,9 +213,11 @@ static inline int ipmi_demangle_device_id(uint8_t netfn, uint8_t cmd,
    upper layer until the start_processing() function in the handlers
    is called, and the lower layer must get the interface from that
    call. */
-int ipmi_register_smi(const struct ipmi_smi_handlers *handlers,
+int ipmi_register_smi(struct ipmi_smi_handlers *handlers,
 		      void                     *send_info,
+		      struct ipmi_device_id    *device_id,
 		      struct device            *dev,
+		      const char               *sysfs_name,
 		      unsigned char            slave_addr);
 
 /*

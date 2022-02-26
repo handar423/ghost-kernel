@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-2.0
+# $Id: Makefile,v 1.6 2004/12/13 12:21:51 starvik Exp $
 #
 # Makefile for the linux kernel.
 #

@@ -25,6 +25,50 @@
 #define mmiowb() do {} while (0)
 #endif
 
+#ifndef __io_br
+#define __io_br()      barrier()
+#endif
+
+/* prevent prefetching of coherent DMA data ahead of a dma-complete */
+#ifndef __io_ar
+#ifdef rmb
+#define __io_ar()      rmb()
+#else
+#define __io_ar()      barrier()
+#endif
+#endif
+
+/* flush writes to coherent DMA data before possibly triggering a DMA read */
+#ifndef __io_bw
+#ifdef wmb
+#define __io_bw()      wmb()
+#else
+#define __io_bw()      barrier()
+#endif
+#endif
+
+/* serialize device access against a spin_unlock, usually handled there. */
+#ifndef __io_aw
+#define __io_aw()      barrier()
+#endif
+
+#ifndef __io_pbw
+#define __io_pbw()     __io_bw()
+#endif
+
+#ifndef __io_paw
+#define __io_paw()     __io_aw()
+#endif
+
+#ifndef __io_pbr
+#define __io_pbr()     __io_br()
+#endif
+
+#ifndef __io_par
+#define __io_par()     __io_ar()
+#endif
+
+
 /*
  * __raw_{read,write}{b,w,l,q}() access memory in native endianness.
  *
@@ -110,7 +154,12 @@ static inline void __raw_writeq(u64 value, volatile void __iomem *addr)
 #define readb readb
 static inline u8 readb(const volatile void __iomem *addr)
 {
-	return __raw_readb(addr);
+	u8 val;
+
+	__io_br();
+	val = __raw_readb(addr);
+	__io_ar();
+	return val;
 }
 #endif
 
@@ -118,7 +167,12 @@ static inline u8 readb(const volatile void __iomem *addr)
 #define readw readw
 static inline u16 readw(const volatile void __iomem *addr)
 {
-	return __le16_to_cpu(__raw_readw(addr));
+	u16 val;
+
+	__io_br();
+	val = __le16_to_cpu(__raw_readw(addr));
+	__io_ar();
+	return val;
 }
 #endif
 
@@ -126,7 +180,12 @@ static inline u16 readw(const volatile void __iomem *addr)
 #define readl readl
 static inline u32 readl(const volatile void __iomem *addr)
 {
-	return __le32_to_cpu(__raw_readl(addr));
+	u32 val;
+
+	__io_br();
+	val = __le32_to_cpu(__raw_readl(addr));
+	__io_ar();
+	return val;
 }
 #endif
 
@@ -135,7 +194,12 @@ static inline u32 readl(const volatile void __iomem *addr)
 #define readq readq
 static inline u64 readq(const volatile void __iomem *addr)
 {
-	return __le64_to_cpu(__raw_readq(addr));
+	u64 val;
+
+	__io_br();
+	val = __le64_to_cpu(__raw_readq(addr));
+	__io_ar();
+	return val;
 }
 #endif
 #endif /* CONFIG_64BIT */
@@ -144,7 +208,9 @@ static inline u64 readq(const volatile void __iomem *addr)
 #define writeb writeb
 static inline void writeb(u8 value, volatile void __iomem *addr)
 {
+	__io_bw();
 	__raw_writeb(value, addr);
+	__io_aw();
 }
 #endif
 
@@ -152,7 +218,9 @@ static inline void writeb(u8 value, volatile void __iomem *addr)
 #define writew writew
 static inline void writew(u16 value, volatile void __iomem *addr)
 {
+	__io_bw();
 	__raw_writew(cpu_to_le16(value), addr);
+	__io_aw();
 }
 #endif
 
@@ -160,7 +228,9 @@ static inline void writew(u16 value, volatile void __iomem *addr)
 #define writel writel
 static inline void writel(u32 value, volatile void __iomem *addr)
 {
+	__io_bw();
 	__raw_writel(__cpu_to_le32(value), addr);
+	__io_aw();
 }
 #endif
 
@@ -169,7 +239,9 @@ static inline void writel(u32 value, volatile void __iomem *addr)
 #define writeq writeq
 static inline void writeq(u64 value, volatile void __iomem *addr)
 {
+	__io_bw();
 	__raw_writeq(__cpu_to_le64(value), addr);
+	__io_aw();
 }
 #endif
 #endif /* CONFIG_64BIT */
@@ -180,35 +252,67 @@ static inline void writeq(u64 value, volatile void __iomem *addr)
  * accesses.
  */
 #ifndef readb_relaxed
-#define readb_relaxed readb
+#define readb_relaxed readb_relaxed
+static inline u8 readb_relaxed(const volatile void __iomem *addr)
+{
+	return __raw_readb(addr);
+}
 #endif
 
 #ifndef readw_relaxed
-#define readw_relaxed readw
+#define readw_relaxed readw_relaxed
+static inline u16 readw_relaxed(const volatile void __iomem *addr)
+{
+	return __le16_to_cpu(__raw_readw(addr));
+}
 #endif
 
 #ifndef readl_relaxed
-#define readl_relaxed readl
+#define readl_relaxed readl_relaxed
+static inline u32 readl_relaxed(const volatile void __iomem *addr)
+{
+	return __le32_to_cpu(__raw_readl(addr));
+}
 #endif
 
-#if defined(readq) && !defined(readq_relaxed)
-#define readq_relaxed readq
+#ifndef readq_relaxed
+#define readq_relaxed readq_relaxed
+static inline u64 readq_relaxed(const volatile void __iomem *addr)
+{
+	return __le64_to_cpu(__raw_readq(addr));
+}
 #endif
 
 #ifndef writeb_relaxed
-#define writeb_relaxed writeb
+#define writeb_relaxed writeb_relaxed
+static inline void writeb_relaxed(u8 value, volatile void __iomem *addr)
+{
+	__raw_writeb(value, addr);
+}
 #endif
 
 #ifndef writew_relaxed
-#define writew_relaxed writew
+#define writew_relaxed writew_relaxed
+static inline void writew_relaxed(u16 value, volatile void __iomem *addr)
+{
+	__raw_writew(cpu_to_le16(value), addr);
+}
 #endif
 
 #ifndef writel_relaxed
-#define writel_relaxed writel
+#define writel_relaxed writel_relaxed
+static inline void writel_relaxed(u32 value, volatile void __iomem *addr)
+{
+	__raw_writel(__cpu_to_le32(value), addr);
+}
 #endif
 
-#if defined(writeq) && !defined(writeq_relaxed)
-#define writeq_relaxed writeq
+#ifndef writeq_relaxed
+#define writeq_relaxed writeq_relaxed
+static inline void writeq_relaxed(u64 value, volatile void __iomem *addr)
+{
+	__raw_writeq(__cpu_to_le64(value), addr);
+}
 #endif
 
 /*
@@ -361,7 +465,12 @@ static inline void writesq(volatile void __iomem *addr, const void *buffer,
 #define inb inb
 static inline u8 inb(unsigned long addr)
 {
-	return readb(PCI_IOBASE + addr);
+	u8 val;
+
+	__io_pbr();
+	val = __raw_readb(PCI_IOBASE + addr);
+	__io_par();
+	return val;
 }
 #endif
 
@@ -369,7 +478,12 @@ static inline u8 inb(unsigned long addr)
 #define inw inw
 static inline u16 inw(unsigned long addr)
 {
-	return readw(PCI_IOBASE + addr);
+	u16 val;
+
+	__io_pbr();
+	val = __le16_to_cpu(__raw_readw(PCI_IOBASE + addr));
+	__io_par();
+	return val;
 }
 #endif
 
@@ -377,7 +491,12 @@ static inline u16 inw(unsigned long addr)
 #define inl inl
 static inline u32 inl(unsigned long addr)
 {
-	return readl(PCI_IOBASE + addr);
+	u32 val;
+
+	__io_pbr();
+	val = __le32_to_cpu(__raw_readl(PCI_IOBASE + addr));
+	__io_par();
+	return val;
 }
 #endif
 
@@ -385,7 +504,9 @@ static inline u32 inl(unsigned long addr)
 #define outb outb
 static inline void outb(u8 value, unsigned long addr)
 {
-	writeb(value, PCI_IOBASE + addr);
+	__io_pbw();
+	__raw_writeb(value, PCI_IOBASE + addr);
+	__io_paw();
 }
 #endif
 
@@ -393,7 +514,9 @@ static inline void outb(u8 value, unsigned long addr)
 #define outw outw
 static inline void outw(u16 value, unsigned long addr)
 {
-	writew(value, PCI_IOBASE + addr);
+	__io_pbw();
+	__raw_writew(cpu_to_le16(value), PCI_IOBASE + addr);
+	__io_paw();
 }
 #endif
 
@@ -401,7 +524,9 @@ static inline void outw(u16 value, unsigned long addr)
 #define outl outl
 static inline void outl(u32 value, unsigned long addr)
 {
-	writel(value, PCI_IOBASE + addr);
+	__io_pbw();
+	__raw_writel(cpu_to_le32(value), PCI_IOBASE + addr);
+	__io_paw();
 }
 #endif
 
@@ -585,16 +710,6 @@ static inline u32 ioread32(const volatile void __iomem *addr)
 }
 #endif
 
-#ifdef CONFIG_64BIT
-#ifndef ioread64
-#define ioread64 ioread64
-static inline u64 ioread64(const volatile void __iomem *addr)
-{
-	return readq(addr);
-}
-#endif
-#endif /* CONFIG_64BIT */
-
 #ifndef iowrite8
 #define iowrite8 iowrite8
 static inline void iowrite8(u8 value, volatile void __iomem *addr)
@@ -619,21 +734,11 @@ static inline void iowrite32(u32 value, volatile void __iomem *addr)
 }
 #endif
 
-#ifdef CONFIG_64BIT
-#ifndef iowrite64
-#define iowrite64 iowrite64
-static inline void iowrite64(u64 value, volatile void __iomem *addr)
-{
-	writeq(value, addr);
-}
-#endif
-#endif /* CONFIG_64BIT */
-
 #ifndef ioread16be
 #define ioread16be ioread16be
 static inline u16 ioread16be(const volatile void __iomem *addr)
 {
-	return swab16(readw(addr));
+	return __be16_to_cpu(__raw_readw(addr));
 }
 #endif
 
@@ -641,25 +746,15 @@ static inline u16 ioread16be(const volatile void __iomem *addr)
 #define ioread32be ioread32be
 static inline u32 ioread32be(const volatile void __iomem *addr)
 {
-	return swab32(readl(addr));
+	return __be32_to_cpu(__raw_readl(addr));
 }
 #endif
-
-#ifdef CONFIG_64BIT
-#ifndef ioread64be
-#define ioread64be ioread64be
-static inline u64 ioread64be(const volatile void __iomem *addr)
-{
-	return swab64(readq(addr));
-}
-#endif
-#endif /* CONFIG_64BIT */
 
 #ifndef iowrite16be
 #define iowrite16be iowrite16be
 static inline void iowrite16be(u16 value, void volatile __iomem *addr)
 {
-	writew(swab16(value), addr);
+	__raw_writew(__cpu_to_be16(value), addr);
 }
 #endif
 
@@ -667,19 +762,9 @@ static inline void iowrite16be(u16 value, void volatile __iomem *addr)
 #define iowrite32be iowrite32be
 static inline void iowrite32be(u32 value, volatile void __iomem *addr)
 {
-	writel(swab32(value), addr);
+	__raw_writel(__cpu_to_be32(value), addr);
 }
 #endif
-
-#ifdef CONFIG_64BIT
-#ifndef iowrite64be
-#define iowrite64be iowrite64be
-static inline void iowrite64be(u64 value, volatile void __iomem *addr)
-{
-	writeq(swab64(value), addr);
-}
-#endif
-#endif /* CONFIG_64BIT */
 
 #ifndef ioread8_rep
 #define ioread8_rep ioread8_rep
@@ -707,17 +792,6 @@ static inline void ioread32_rep(const volatile void __iomem *addr,
 	readsl(addr, buffer, count);
 }
 #endif
-
-#ifdef CONFIG_64BIT
-#ifndef ioread64_rep
-#define ioread64_rep ioread64_rep
-static inline void ioread64_rep(const volatile void __iomem *addr,
-				void *buffer, unsigned int count)
-{
-	readsq(addr, buffer, count);
-}
-#endif
-#endif /* CONFIG_64BIT */
 
 #ifndef iowrite8_rep
 #define iowrite8_rep iowrite8_rep
@@ -748,18 +822,6 @@ static inline void iowrite32_rep(volatile void __iomem *addr,
 	writesl(addr, buffer, count);
 }
 #endif
-
-#ifdef CONFIG_64BIT
-#ifndef iowrite64_rep
-#define iowrite64_rep iowrite64_rep
-static inline void iowrite64_rep(volatile void __iomem *addr,
-				 const void *buffer,
-				 unsigned int count)
-{
-	writesq(addr, buffer, count);
-}
-#endif
-#endif /* CONFIG_64BIT */
 #endif /* CONFIG_GENERIC_IOMAP */
 
 #ifdef __KERNEL__
@@ -799,35 +861,6 @@ static inline void *phys_to_virt(unsigned long address)
 }
 #endif
 
-/**
- * DOC: ioremap() and ioremap_*() variants
- *
- * If you have an IOMMU your architecture is expected to have both ioremap()
- * and iounmap() implemented otherwise the asm-generic helpers will provide a
- * direct mapping.
- *
- * There are ioremap_*() call variants, if you have no IOMMU we naturally will
- * default to direct mapping for all of them, you can override these defaults.
- * If you have an IOMMU you are highly encouraged to provide your own
- * ioremap variant implementation as there currently is no safe architecture
- * agnostic default. To avoid possible improper behaviour default asm-generic
- * ioremap_*() variants all return NULL when an IOMMU is available. If you've
- * defined your own ioremap_*() variant you must then declare your own
- * ioremap_*() variant as defined to itself to avoid the default NULL return.
- */
-
-#ifdef CONFIG_MMU
-
-#ifndef ioremap_uc
-#define ioremap_uc ioremap_uc
-static inline void __iomem *ioremap_uc(phys_addr_t offset, size_t size)
-{
-	return NULL;
-}
-#endif
-
-#else /* !CONFIG_MMU */
-
 /*
  * Change "struct page" to physical address.
  *
@@ -835,6 +868,7 @@ static inline void __iomem *ioremap_uc(phys_addr_t offset, size_t size)
  * you'll need to provide your own definitions.
  */
 
+#ifndef CONFIG_MMU
 #ifndef ioremap
 #define ioremap ioremap
 static inline void __iomem *ioremap(phys_addr_t offset, size_t size)
@@ -860,14 +894,6 @@ static inline void __iomem *ioremap_nocache(phys_addr_t offset, size_t size)
 }
 #endif
 
-#ifndef ioremap_uc
-#define ioremap_uc ioremap_uc
-static inline void __iomem *ioremap_uc(phys_addr_t offset, size_t size)
-{
-	return ioremap_nocache(offset, size);
-}
-#endif
-
 #ifndef ioremap_wc
 #define ioremap_wc ioremap_wc
 static inline void __iomem *ioremap_wc(phys_addr_t offset, size_t size)
@@ -876,24 +902,15 @@ static inline void __iomem *ioremap_wc(phys_addr_t offset, size_t size)
 }
 #endif
 
-#ifndef ioremap_wt
-#define ioremap_wt ioremap_wt
-static inline void __iomem *ioremap_wt(phys_addr_t offset, size_t size)
-{
-	return ioremap_nocache(offset, size);
-}
-#endif
-
 #ifndef iounmap
 #define iounmap iounmap
-
 static inline void iounmap(void __iomem *addr)
 {
 }
 #endif
 #endif /* CONFIG_MMU */
 
-#ifdef CONFIG_HAS_IOPORT_MAP
+#ifdef CONFIG_HAS_IOPORT
 #ifndef CONFIG_GENERIC_IOMAP
 #ifndef ioport_map
 #define ioport_map ioport_map
@@ -913,11 +930,8 @@ static inline void ioport_unmap(void __iomem *p)
 extern void __iomem *ioport_map(unsigned long port, unsigned int nr);
 extern void ioport_unmap(void __iomem *p);
 #endif /* CONFIG_GENERIC_IOMAP */
-#endif /* CONFIG_HAS_IOPORT_MAP */
+#endif /* CONFIG_HAS_IOPORT */
 
-/*
- * Convert a virtual cached pointer to an uncached pointer
- */
 #ifndef xlate_dev_kmem_ptr
 #define xlate_dev_kmem_ptr xlate_dev_kmem_ptr
 static inline void *xlate_dev_kmem_ptr(void *addr)
@@ -957,14 +971,6 @@ static inline void *bus_to_virt(unsigned long address)
 
 #ifndef memset_io
 #define memset_io memset_io
-/**
- * memset_io	Set a range of I/O memory to a constant value
- * @addr:	The beginning of the I/O-memory range to set
- * @val:	The value to set the memory to
- * @count:	The number of bytes to set
- *
- * Set a range of I/O memory to a given value.
- */
 static inline void memset_io(volatile void __iomem *addr, int value,
 			     size_t size)
 {
@@ -974,14 +980,6 @@ static inline void memset_io(volatile void __iomem *addr, int value,
 
 #ifndef memcpy_fromio
 #define memcpy_fromio memcpy_fromio
-/**
- * memcpy_fromio	Copy a block of data from I/O memory
- * @dst:		The (RAM) destination for the copy
- * @src:		The (I/O memory) source for the data
- * @count:		The number of bytes to copy
- *
- * Copy a block of data from I/O memory.
- */
 static inline void memcpy_fromio(void *buffer,
 				 const volatile void __iomem *addr,
 				 size_t size)
@@ -992,14 +990,6 @@ static inline void memcpy_fromio(void *buffer,
 
 #ifndef memcpy_toio
 #define memcpy_toio memcpy_toio
-/**
- * memcpy_toio		Copy a block of data into I/O memory
- * @dst:		The (I/O memory) destination for the copy
- * @src:		The (RAM) source for the data
- * @count:		The number of bytes to copy
- *
- * Copy a block of data to I/O memory.
- */
 static inline void memcpy_toio(volatile void __iomem *addr, const void *buffer,
 			       size_t size)
 {

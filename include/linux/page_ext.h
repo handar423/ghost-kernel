@@ -1,20 +1,14 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __LINUX_PAGE_EXT_H
 #define __LINUX_PAGE_EXT_H
 
 #include <linux/types.h>
 #include <linux/stacktrace.h>
-#include <linux/stackdepot.h>
 
-struct pglist_data;
 struct page_ext_operations {
-	size_t offset;
-	size_t size;
 	bool (*need)(void);
 	void (*init)(void);
 };
 
-#ifdef CONFIG_PAGE_EXTENSION
 
 /*
  * page_ext->flags bits:
@@ -36,6 +30,14 @@ enum page_ext_flags {
 #endif
 };
 
+#ifdef CONFIG_PAGE_OWNER
+struct page_owner {
+	unsigned int order;
+	gfp_t gfp_mask;
+	unsigned int nr_entries;
+	unsigned long trace_entries[8];
+};
+#endif
 /*
  * Page Extension can be considered as an extended mem_map.
  * A page_ext page is associated with every page descriptor. The
@@ -45,42 +47,22 @@ enum page_ext_flags {
  */
 struct page_ext {
 	unsigned long flags;
+#ifdef CONFIG_PAGE_OWNER
+	struct page_owner *owner;
+#endif
 };
 
-extern void pgdat_page_ext_init(struct pglist_data *pgdat);
-
-#ifdef CONFIG_SPARSEMEM
-static inline void page_ext_init_flatmem(void)
-{
-}
-extern void page_ext_init(void);
-#else
-extern void page_ext_init_flatmem(void);
-static inline void page_ext_init(void)
-{
-}
-#endif
-
+#ifdef CONFIG_PAGE_EXTENSION
 struct page_ext *lookup_page_ext(struct page *page);
+void __init invoke_page_ext_init_callbacks(void);
 
 #else /* !CONFIG_PAGE_EXTENSION */
-struct page_ext;
-
-static inline void pgdat_page_ext_init(struct pglist_data *pgdat)
-{
-}
-
 static inline struct page_ext *lookup_page_ext(struct page *page)
 {
 	return NULL;
 }
 
-static inline void page_ext_init(void)
-{
-}
+static inline void invoke_page_ext_init_callbacks(void) { }
 
-static inline void page_ext_init_flatmem(void)
-{
-}
 #endif /* CONFIG_PAGE_EXTENSION */
 #endif /* __LINUX_PAGE_EXT_H */

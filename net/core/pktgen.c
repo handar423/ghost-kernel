@@ -184,25 +184,44 @@
 
 #define func_enter() pr_debug("entering %s\n", __func__);
 
+#define PKT_FLAGS							\
+	pf(IPV6)		/* Interface in IPV6 Mode */		\
+	pf(IPSRC_RND)		/* IP-Src Random  */			\
+	pf(IPDST_RND)		/* IP-Dst Random  */			\
+	pf(TXSIZE_RND)		/* Transmit size is random */		\
+	pf(UDPSRC_RND)		/* UDP-Src Random */			\
+	pf(UDPDST_RND)		/* UDP-Dst Random */			\
+	pf(UDPCSUM)		/* Include UDP checksum */		\
+	pf(NO_TIMESTAMP)	/* Don't timestamp packets (default TS) */ \
+	pf(MPLS_RND)		/* Random MPLS labels */		\
+	pf(QUEUE_MAP_RND)	/* queue map Random */			\
+	pf(QUEUE_MAP_CPU)	/* queue map mirrors smp_processor_id() */ \
+	pf(FLOW_SEQ)		/* Sequential flows */			\
+	pf(IPSEC)		/* ipsec on for flows */		\
+	pf(MACSRC_RND)		/* MAC-Src Random */			\
+	pf(MACDST_RND)		/* MAC-Dst Random */			\
+	pf(VID_RND)		/* Random VLAN ID */			\
+	pf(SVID_RND)		/* Random SVLAN ID */			\
+	pf(NODE)		/* Node memory alloc*/			\
+
+#define pf(flag)		flag##_SHIFT,
+enum pkt_flags {
+	PKT_FLAGS
+};
+#undef pf
+
 /* Device flag bits */
-#define F_IPSRC_RND   (1<<0)	/* IP-Src Random  */
-#define F_IPDST_RND   (1<<1)	/* IP-Dst Random  */
-#define F_UDPSRC_RND  (1<<2)	/* UDP-Src Random */
-#define F_UDPDST_RND  (1<<3)	/* UDP-Dst Random */
-#define F_MACSRC_RND  (1<<4)	/* MAC-Src Random */
-#define F_MACDST_RND  (1<<5)	/* MAC-Dst Random */
-#define F_TXSIZE_RND  (1<<6)	/* Transmit size is random */
-#define F_IPV6        (1<<7)	/* Interface in IPV6 Mode */
-#define F_MPLS_RND    (1<<8)	/* Random MPLS labels */
-#define F_VID_RND     (1<<9)	/* Random VLAN ID */
-#define F_SVID_RND    (1<<10)	/* Random SVLAN ID */
-#define F_FLOW_SEQ    (1<<11)	/* Sequential flows */
-#define F_IPSEC_ON    (1<<12)	/* ipsec on for flows */
-#define F_QUEUE_MAP_RND (1<<13)	/* queue map Random */
-#define F_QUEUE_MAP_CPU (1<<14)	/* queue map mirrors smp_processor_id() */
-#define F_NODE          (1<<15)	/* Node memory alloc*/
-#define F_UDPCSUM       (1<<16)	/* Include UDP checksum */
-#define F_NO_TIMESTAMP  (1<<17)	/* Don't timestamp packets (default TS) */
+#define pf(flag)		static const __u32 F_##flag = (1<<flag##_SHIFT);
+PKT_FLAGS
+#undef pf
+
+#define pf(flag)		__stringify(flag),
+static char *pkt_flag_names[] = {
+	PKT_FLAGS
+};
+#undef pf
+
+#define NR_PKT_FLAGS		ARRAY_SIZE(pkt_flag_names)
 
 /* Thread control flag bits */
 #define T_STOP        (1<<0)	/* Stop run */
@@ -413,7 +432,7 @@ struct pktgen_hdr {
 };
 
 
-static unsigned int pg_net_id __read_mostly;
+static int pg_net_id __read_mostly;
 
 struct pktgen_net {
 	struct net		*net;
@@ -535,6 +554,7 @@ static int pktgen_if_show(struct seq_file *seq, void *v)
 {
 	const struct pktgen_dev *pkt_dev = seq->private;
 	ktime_t stopped;
+	unsigned int i;
 	u64 idle;
 
 	seq_printf(seq,
@@ -596,7 +616,6 @@ static int pktgen_if_show(struct seq_file *seq, void *v)
 		   pkt_dev->src_mac_count, pkt_dev->dst_mac_count);
 
 	if (pkt_dev->nr_labels) {
-		unsigned int i;
 		seq_puts(seq, "     mpls: ");
 		for (i = 0; i < pkt_dev->nr_labels; i++)
 			seq_printf(seq, "%08x%s", ntohl(pkt_dev->labels[i]),
@@ -632,68 +651,21 @@ static int pktgen_if_show(struct seq_file *seq, void *v)
 
 	seq_puts(seq, "     Flags: ");
 
-	if (pkt_dev->flags & F_IPV6)
-		seq_puts(seq, "IPV6  ");
+	for (i = 0; i < NR_PKT_FLAGS; i++) {
+		if (i == F_FLOW_SEQ)
+			if (!pkt_dev->cflows)
+				continue;
 
-	if (pkt_dev->flags & F_IPSRC_RND)
-		seq_puts(seq, "IPSRC_RND  ");
-
-	if (pkt_dev->flags & F_IPDST_RND)
-		seq_puts(seq, "IPDST_RND  ");
-
-	if (pkt_dev->flags & F_TXSIZE_RND)
-		seq_puts(seq, "TXSIZE_RND  ");
-
-	if (pkt_dev->flags & F_UDPSRC_RND)
-		seq_puts(seq, "UDPSRC_RND  ");
-
-	if (pkt_dev->flags & F_UDPDST_RND)
-		seq_puts(seq, "UDPDST_RND  ");
-
-	if (pkt_dev->flags & F_UDPCSUM)
-		seq_puts(seq, "UDPCSUM  ");
-
-	if (pkt_dev->flags & F_NO_TIMESTAMP)
-		seq_puts(seq, "NO_TIMESTAMP  ");
-
-	if (pkt_dev->flags & F_MPLS_RND)
-		seq_puts(seq,  "MPLS_RND  ");
-
-	if (pkt_dev->flags & F_QUEUE_MAP_RND)
-		seq_puts(seq,  "QUEUE_MAP_RND  ");
-
-	if (pkt_dev->flags & F_QUEUE_MAP_CPU)
-		seq_puts(seq,  "QUEUE_MAP_CPU  ");
-
-	if (pkt_dev->cflows) {
-		if (pkt_dev->flags & F_FLOW_SEQ)
-			seq_puts(seq,  "FLOW_SEQ  "); /*in sequence flows*/
-		else
-			seq_puts(seq,  "FLOW_RND  ");
-	}
+		if (pkt_dev->flags & (1 << i))
+			seq_printf(seq, "%s  ", pkt_flag_names[i]);
+		else if (i == F_FLOW_SEQ)
+			seq_puts(seq, "FLOW_RND  ");
 
 #ifdef CONFIG_XFRM
-	if (pkt_dev->flags & F_IPSEC_ON) {
-		seq_puts(seq,  "IPSEC  ");
-		if (pkt_dev->spi)
+		if (i == F_IPSEC && pkt_dev->spi)
 			seq_printf(seq, "spi:%u", pkt_dev->spi);
-	}
 #endif
-
-	if (pkt_dev->flags & F_MACSRC_RND)
-		seq_puts(seq, "MACSRC_RND  ");
-
-	if (pkt_dev->flags & F_MACDST_RND)
-		seq_puts(seq, "MACDST_RND  ");
-
-	if (pkt_dev->flags & F_VID_RND)
-		seq_puts(seq, "VID_RND  ");
-
-	if (pkt_dev->flags & F_SVID_RND)
-		seq_puts(seq, "SVID_RND  ");
-
-	if (pkt_dev->flags & F_NODE)
-		seq_puts(seq, "NODE_ALLOC  ");
+	}
 
 	seq_puts(seq, "\n");
 
@@ -859,6 +831,35 @@ static ssize_t get_labels(const char __user *buffer, struct pktgen_dev *pkt_dev)
 	return i;
 }
 
+static __u32 pktgen_read_flag(const char *f, bool *disable)
+{
+	__u32 i;
+
+	if (f[0] == '!') {
+		*disable = true;
+		f++;
+	}
+
+	for (i = 0; i < NR_PKT_FLAGS; i++) {
+		if (!IS_ENABLED(CONFIG_XFRM) && i == IPSEC_SHIFT)
+			continue;
+
+		/* allow only disabling ipv6 flag */
+		if (!*disable && i == IPV6_SHIFT)
+			continue;
+
+		if (strcmp(f, pkt_flag_names[i]) == 0)
+			return 1 << i;
+	}
+
+	if (strcmp(f, "FLOW_RND") == 0) {
+		*disable = !*disable;
+		return F_FLOW_SEQ;
+	}
+
+	return 0;
+}
+
 static ssize_t pktgen_if_write(struct file *file,
 			       const char __user * user_buffer, size_t count,
 			       loff_t * offset)
@@ -906,13 +907,14 @@ static ssize_t pktgen_if_write(struct file *file,
 	i += len;
 
 	if (debug) {
-		size_t copy = min_t(size_t, count, 1023);
-		char tb[copy + 1];
-		if (copy_from_user(tb, user_buffer, copy))
-			return -EFAULT;
-		tb[copy] = 0;
-		pr_debug("%s,%lu  buffer -:%s:-\n",
-			 name, (unsigned long)count, tb);
+		size_t copy = min_t(size_t, count + 1, 1024);
+		char *tp = strndup_user(user_buffer, copy);
+
+		if (IS_ERR(tp))
+			return PTR_ERR(tp);
+
+		pr_debug("%s,%zu  buffer -:%s:-\n", name, count, tp);
+		kfree(tp);
 	}
 
 	if (!strcmp(name, "min_pkt_size")) {
@@ -1216,7 +1218,10 @@ static ssize_t pktgen_if_write(struct file *file,
 		return count;
 	}
 	if (!strcmp(name, "flag")) {
+		__u32 flag;
 		char f[32];
+		bool disable = false;
+
 		memset(f, 0, 32);
 		len = strn_len(&user_buffer[i], sizeof(f) - 1);
 		if (len < 0)
@@ -1225,107 +1230,15 @@ static ssize_t pktgen_if_write(struct file *file,
 		if (copy_from_user(f, &user_buffer[i], len))
 			return -EFAULT;
 		i += len;
-		if (strcmp(f, "IPSRC_RND") == 0)
-			pkt_dev->flags |= F_IPSRC_RND;
 
-		else if (strcmp(f, "!IPSRC_RND") == 0)
-			pkt_dev->flags &= ~F_IPSRC_RND;
+		flag = pktgen_read_flag(f, &disable);
 
-		else if (strcmp(f, "TXSIZE_RND") == 0)
-			pkt_dev->flags |= F_TXSIZE_RND;
-
-		else if (strcmp(f, "!TXSIZE_RND") == 0)
-			pkt_dev->flags &= ~F_TXSIZE_RND;
-
-		else if (strcmp(f, "IPDST_RND") == 0)
-			pkt_dev->flags |= F_IPDST_RND;
-
-		else if (strcmp(f, "!IPDST_RND") == 0)
-			pkt_dev->flags &= ~F_IPDST_RND;
-
-		else if (strcmp(f, "UDPSRC_RND") == 0)
-			pkt_dev->flags |= F_UDPSRC_RND;
-
-		else if (strcmp(f, "!UDPSRC_RND") == 0)
-			pkt_dev->flags &= ~F_UDPSRC_RND;
-
-		else if (strcmp(f, "UDPDST_RND") == 0)
-			pkt_dev->flags |= F_UDPDST_RND;
-
-		else if (strcmp(f, "!UDPDST_RND") == 0)
-			pkt_dev->flags &= ~F_UDPDST_RND;
-
-		else if (strcmp(f, "MACSRC_RND") == 0)
-			pkt_dev->flags |= F_MACSRC_RND;
-
-		else if (strcmp(f, "!MACSRC_RND") == 0)
-			pkt_dev->flags &= ~F_MACSRC_RND;
-
-		else if (strcmp(f, "MACDST_RND") == 0)
-			pkt_dev->flags |= F_MACDST_RND;
-
-		else if (strcmp(f, "!MACDST_RND") == 0)
-			pkt_dev->flags &= ~F_MACDST_RND;
-
-		else if (strcmp(f, "MPLS_RND") == 0)
-			pkt_dev->flags |= F_MPLS_RND;
-
-		else if (strcmp(f, "!MPLS_RND") == 0)
-			pkt_dev->flags &= ~F_MPLS_RND;
-
-		else if (strcmp(f, "VID_RND") == 0)
-			pkt_dev->flags |= F_VID_RND;
-
-		else if (strcmp(f, "!VID_RND") == 0)
-			pkt_dev->flags &= ~F_VID_RND;
-
-		else if (strcmp(f, "SVID_RND") == 0)
-			pkt_dev->flags |= F_SVID_RND;
-
-		else if (strcmp(f, "!SVID_RND") == 0)
-			pkt_dev->flags &= ~F_SVID_RND;
-
-		else if (strcmp(f, "FLOW_SEQ") == 0)
-			pkt_dev->flags |= F_FLOW_SEQ;
-
-		else if (strcmp(f, "QUEUE_MAP_RND") == 0)
-			pkt_dev->flags |= F_QUEUE_MAP_RND;
-
-		else if (strcmp(f, "!QUEUE_MAP_RND") == 0)
-			pkt_dev->flags &= ~F_QUEUE_MAP_RND;
-
-		else if (strcmp(f, "QUEUE_MAP_CPU") == 0)
-			pkt_dev->flags |= F_QUEUE_MAP_CPU;
-
-		else if (strcmp(f, "!QUEUE_MAP_CPU") == 0)
-			pkt_dev->flags &= ~F_QUEUE_MAP_CPU;
-#ifdef CONFIG_XFRM
-		else if (strcmp(f, "IPSEC") == 0)
-			pkt_dev->flags |= F_IPSEC_ON;
-#endif
-
-		else if (strcmp(f, "!IPV6") == 0)
-			pkt_dev->flags &= ~F_IPV6;
-
-		else if (strcmp(f, "NODE_ALLOC") == 0)
-			pkt_dev->flags |= F_NODE;
-
-		else if (strcmp(f, "!NODE_ALLOC") == 0)
-			pkt_dev->flags &= ~F_NODE;
-
-		else if (strcmp(f, "UDPCSUM") == 0)
-			pkt_dev->flags |= F_UDPCSUM;
-
-		else if (strcmp(f, "!UDPCSUM") == 0)
-			pkt_dev->flags &= ~F_UDPCSUM;
-
-		else if (strcmp(f, "NO_TIMESTAMP") == 0)
-			pkt_dev->flags |= F_NO_TIMESTAMP;
-
-		else if (strcmp(f, "!NO_TIMESTAMP") == 0)
-			pkt_dev->flags &= ~F_NO_TIMESTAMP;
-
-		else {
+		if (flag) {
+			if (disable)
+				pkt_dev->flags &= ~flag;
+			else
+				pkt_dev->flags |= flag;
+		} else {
 			sprintf(pg_result,
 				"Flag -:%s:- unknown\nAvailable flags, (prepend ! to un-set flag):\n%s",
 				f,
@@ -1353,7 +1266,7 @@ static ssize_t pktgen_if_write(struct file *file,
 		buf[len] = 0;
 		if (strcmp(buf, pkt_dev->dst_min) != 0) {
 			memset(pkt_dev->dst_min, 0, sizeof(pkt_dev->dst_min));
-			strncpy(pkt_dev->dst_min, buf, len);
+			strcpy(pkt_dev->dst_min, buf);
 			pkt_dev->daddr_min = in_aton(pkt_dev->dst_min);
 			pkt_dev->cur_daddr = pkt_dev->daddr_min;
 		}
@@ -1368,14 +1281,12 @@ static ssize_t pktgen_if_write(struct file *file,
 		if (len < 0)
 			return len;
 
-
 		if (copy_from_user(buf, &user_buffer[i], len))
 			return -EFAULT;
-
 		buf[len] = 0;
 		if (strcmp(buf, pkt_dev->dst_max) != 0) {
 			memset(pkt_dev->dst_max, 0, sizeof(pkt_dev->dst_max));
-			strncpy(pkt_dev->dst_max, buf, len);
+			strcpy(pkt_dev->dst_max, buf);
 			pkt_dev->daddr_max = in_aton(pkt_dev->dst_max);
 			pkt_dev->cur_daddr = pkt_dev->daddr_max;
 		}
@@ -1484,7 +1395,7 @@ static ssize_t pktgen_if_write(struct file *file,
 		buf[len] = 0;
 		if (strcmp(buf, pkt_dev->src_min) != 0) {
 			memset(pkt_dev->src_min, 0, sizeof(pkt_dev->src_min));
-			strncpy(pkt_dev->src_min, buf, len);
+			strcpy(pkt_dev->src_min, buf);
 			pkt_dev->saddr_min = in_aton(pkt_dev->src_min);
 			pkt_dev->cur_saddr = pkt_dev->saddr_min;
 		}
@@ -1504,7 +1415,7 @@ static ssize_t pktgen_if_write(struct file *file,
 		buf[len] = 0;
 		if (strcmp(buf, pkt_dev->src_max) != 0) {
 			memset(pkt_dev->src_max, 0, sizeof(pkt_dev->src_max));
-			strncpy(pkt_dev->src_max, buf, len);
+			strcpy(pkt_dev->src_max, buf);
 			pkt_dev->saddr_max = in_aton(pkt_dev->src_max);
 			pkt_dev->cur_saddr = pkt_dev->saddr_max;
 		}
@@ -2271,6 +2182,8 @@ static void spin(struct pktgen_dev *pkt_dev, ktime_t spin_until)
 		do {
 			set_current_state(TASK_INTERRUPTIBLE);
 			hrtimer_start_expires(&t.timer, HRTIMER_MODE_ABS);
+			if (!hrtimer_active(&t.timer))
+				t.task = NULL;
 
 			if (likely(t.task))
 				schedule();
@@ -2544,7 +2457,7 @@ static void mod_cur_headers(struct pktgen_dev *pkt_dev)
 				pkt_dev->flows[flow].cur_daddr =
 				    pkt_dev->cur_daddr;
 #ifdef CONFIG_XFRM
-				if (pkt_dev->flags & F_IPSEC_ON)
+				if (pkt_dev->flags & F_IPSEC)
 					get_ipsec_sa(pkt_dev, flow);
 #endif
 				pkt_dev->nflows++;
@@ -2649,7 +2562,7 @@ static void free_SAs(struct pktgen_dev *pkt_dev)
 static int process_ipsec(struct pktgen_dev *pkt_dev,
 			      struct sk_buff *skb, __be16 protocol)
 {
-	if (pkt_dev->flags & F_IPSEC_ON) {
+	if (pkt_dev->flags & F_IPSEC) {
 		struct xfrm_state *x = pkt_dev->flows[pkt_dev->curfl].x;
 		int nhead = 0;
 		if (x) {
@@ -3371,7 +3284,7 @@ static void pktgen_wait_for_skb(struct pktgen_dev *pkt_dev)
 {
 	ktime_t idle_start = ktime_get();
 
-	while (refcount_read(&(pkt_dev->skb->users)) != 1) {
+	while (atomic_read(&(pkt_dev->skb->users)) != 1) {
 		if (signal_pending(current))
 			break;
 
@@ -3385,7 +3298,7 @@ static void pktgen_wait_for_skb(struct pktgen_dev *pkt_dev)
 
 static void pktgen_xmit(struct pktgen_dev *pkt_dev)
 {
-	unsigned int burst = READ_ONCE(pkt_dev->burst);
+	unsigned int burst = ACCESS_ONCE(pkt_dev->burst);
 	struct net_device *odev = pkt_dev->odev;
 	struct netdev_queue *txq;
 	struct sk_buff *skb;
@@ -3428,7 +3341,7 @@ static void pktgen_xmit(struct pktgen_dev *pkt_dev)
 	if (pkt_dev->xmit_mode == M_NETIF_RECEIVE) {
 		skb = pkt_dev->skb;
 		skb->protocol = eth_type_trans(skb, skb->dev);
-		refcount_add(burst, &skb->users);
+		atomic_add(burst, &skb->users);
 		local_bh_disable();
 		do {
 			ret = netif_receive_skb(skb);
@@ -3436,11 +3349,11 @@ static void pktgen_xmit(struct pktgen_dev *pkt_dev)
 				pkt_dev->errors++;
 			pkt_dev->sofar++;
 			pkt_dev->seq_num++;
-			if (refcount_read(&skb->users) != burst) {
+			if (atomic_read(&skb->users) != burst) {
 				/* skb was queued by rps/rfs or taps,
 				 * so cannot reuse this skb
 				 */
-				WARN_ON(refcount_sub_and_test(burst - 1, &skb->users));
+				atomic_sub(burst - 1, &skb->users);
 				/* get out of the loop and wait
 				 * until skb is consumed
 				 */
@@ -3449,12 +3362,14 @@ static void pktgen_xmit(struct pktgen_dev *pkt_dev)
 			/* skb was 'freed' by stack, so clean few
 			 * bits and reuse it
 			 */
-			skb_reset_tc(skb);
+#ifdef CONFIG_NET_CLS_ACT
+			skb->tc_verd = 0; /* reset reclass/redir ttl */
+#endif
 		} while (--burst > 0);
 		goto out; /* Skips xmit_mode M_START_XMIT */
 	} else if (pkt_dev->xmit_mode == M_QUEUE_XMIT) {
 		local_bh_disable();
-		refcount_inc(&pkt_dev->skb->users);
+		atomic_inc(&pkt_dev->skb->users);
 
 		ret = dev_queue_xmit(pkt_dev->skb);
 		switch (ret) {
@@ -3495,7 +3410,7 @@ static void pktgen_xmit(struct pktgen_dev *pkt_dev)
 		pkt_dev->last_ok = 0;
 		goto unlock;
 	}
-	refcount_add(burst, &pkt_dev->skb->users);
+	atomic_add(burst, &pkt_dev->skb->users);
 
 xmit_more:
 	ret = netdev_start_xmit(pkt_dev->skb, odev, txq, --burst > 0);
@@ -3518,14 +3433,15 @@ xmit_more:
 		net_info_ratelimited("%s xmit error: %d\n",
 				     pkt_dev->odevname, ret);
 		pkt_dev->errors++;
-		/* fallthru */
+		/* fall through */
+	case NETDEV_TX_LOCKED:
 	case NETDEV_TX_BUSY:
 		/* Retry it next time */
-		refcount_dec(&(pkt_dev->skb->users));
+		atomic_dec(&(pkt_dev->skb->users));
 		pkt_dev->last_ok = 0;
 	}
 	if (unlikely(burst))
-		WARN_ON(refcount_sub_and_test(burst, &pkt_dev->skb->users));
+		atomic_sub(burst, &pkt_dev->skb->users);
 unlock:
 	HARD_TX_UNLOCK(odev, txq);
 
@@ -3693,7 +3609,8 @@ static int pktgen_add_device(struct pktgen_thread *t, const char *ifname)
 		return -ENOMEM;
 
 	strcpy(pkt_dev->odevname, ifname);
-	pkt_dev->flows = vzalloc_node(MAX_CFLOWS * sizeof(struct flow_state),
+	pkt_dev->flows = vzalloc_node(array_size(MAX_CFLOWS,
+						 sizeof(struct flow_state)),
 				      node);
 	if (pkt_dev->flows == NULL) {
 		kfree(pkt_dev);
@@ -3952,7 +3869,7 @@ static int __init pg_init(void)
 	ret = register_pernet_subsys(&pg_net_ops);
 	if (ret)
 		return ret;
-	ret = register_netdevice_notifier(&pktgen_notifier_block);
+	ret = register_netdevice_notifier_rh(&pktgen_notifier_block);
 	if (ret)
 		unregister_pernet_subsys(&pg_net_ops);
 
@@ -3961,7 +3878,7 @@ static int __init pg_init(void)
 
 static void __exit pg_cleanup(void)
 {
-	unregister_netdevice_notifier(&pktgen_notifier_block);
+	unregister_netdevice_notifier_rh(&pktgen_notifier_block);
 	unregister_pernet_subsys(&pg_net_ops);
 	/* Don't need rcu_barrier() due to use of kfree_rcu() */
 }

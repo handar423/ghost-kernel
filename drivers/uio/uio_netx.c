@@ -1,11 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * UIO driver for Hilscher NetX based fieldbus cards (cifX, comX).
  * See http://www.hilscher.com for details.
  *
  * (C) 2007 Hans J. Koch <hjk@hansjkoch.de>
  * (C) 2008 Manuel Traut <manut@linutronix.de>
- *
- * Licensed under GPL version 2 only.
  *
  */
 
@@ -127,6 +126,7 @@ static void netx_pci_remove(struct pci_dev *dev)
 	uio_unregister_device(info);
 	pci_release_regions(dev);
 	pci_disable_device(dev);
+	pci_set_drvdata(dev, NULL);
 	iounmap(info->mem[0].internal_addr);
 
 	kfree(info);
@@ -173,7 +173,19 @@ static struct pci_driver netx_pci_driver = {
 	.remove = netx_pci_remove,
 };
 
-module_pci_driver(netx_pci_driver);
+static int __init netx_init_module(void)
+{
+	return pci_register_driver(&netx_pci_driver);
+}
+
+static void __exit netx_exit_module(void)
+{
+	pci_unregister_driver(&netx_pci_driver);
+}
+
+module_init(netx_init_module);
+module_exit(netx_exit_module);
+
 MODULE_DEVICE_TABLE(pci, netx_pci_ids);
 MODULE_LICENSE("GPL v2");
 MODULE_AUTHOR("Hans J. Koch, Manuel Traut");

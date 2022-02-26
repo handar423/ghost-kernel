@@ -23,7 +23,7 @@
 #include <linux/sched.h>
 #include <linux/cpumask.h>
 #include <linux/cpuset.h>
-#include <linux/mutex.h>
+#include <asm/mutex.h>
 #include <linux/sched.h>
 #include <linux/sysctl.h>
 #include <linux/nodemask.h>
@@ -132,8 +132,10 @@ int sched_set_itmt_support(void)
 
 	sysctl_sched_itmt_enabled = 1;
 
-	x86_topology_update = true;
-	rebuild_sched_domains();
+	if (sysctl_sched_itmt_enabled) {
+		x86_topology_update = true;
+		rebuild_sched_domains();
+	}
 
 	mutex_unlock(&itmt_update_mutex);
 

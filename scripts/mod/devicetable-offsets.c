@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 #include <linux/kbuild.h>
 #include <linux/mod_devicetable.h>
 
@@ -64,8 +63,6 @@ int main(void)
 
 	DEVID(acpi_device_id);
 	DEVID_FIELD(acpi_device_id, id);
-	DEVID_FIELD(acpi_device_id, cls);
-	DEVID_FIELD(acpi_device_id, cls_msk);
 
 	DEVID(pnp_device_id);
 	DEVID_FIELD(pnp_device_id, id);
@@ -171,28 +168,16 @@ int main(void)
 	DEVID_FIELD(amba_id, id);
 	DEVID_FIELD(amba_id, mask);
 
-	DEVID(mips_cdmm_device_id);
-	DEVID_FIELD(mips_cdmm_device_id, type);
-
 	DEVID(x86_cpu_id);
 	DEVID_FIELD(x86_cpu_id, feature);
 	DEVID_FIELD(x86_cpu_id, family);
 	DEVID_FIELD(x86_cpu_id, model);
 	DEVID_FIELD(x86_cpu_id, vendor);
 
-	DEVID(cpu_feature);
-	DEVID_FIELD(cpu_feature, feature);
-
 	DEVID(mei_cl_device_id);
 	DEVID_FIELD(mei_cl_device_id, name);
 	DEVID_FIELD(mei_cl_device_id, uuid);
 	DEVID_FIELD(mei_cl_device_id, version);
-
-	DEVID(rio_device_id);
-	DEVID_FIELD(rio_device_id, did);
-	DEVID_FIELD(rio_device_id, vid);
-	DEVID_FIELD(rio_device_id, asm_did);
-	DEVID_FIELD(rio_device_id, asm_vid);
 
 	DEVID(ulpi_device_id);
 	DEVID_FIELD(ulpi_device_id, vendor);
@@ -203,16 +188,16 @@ int main(void)
 	DEVID_FIELD(hda_device_id, rev_id);
 	DEVID_FIELD(hda_device_id, api_version);
 
-	DEVID(fsl_mc_device_id);
-	DEVID_FIELD(fsl_mc_device_id, vendor);
-	DEVID_FIELD(fsl_mc_device_id, obj_type);
-
 	DEVID(tb_service_id);
 	DEVID_FIELD(tb_service_id, match_flags);
 	DEVID_FIELD(tb_service_id, protocol_key);
 	DEVID_FIELD(tb_service_id, protocol_id);
 	DEVID_FIELD(tb_service_id, protocol_version);
 	DEVID_FIELD(tb_service_id, protocol_revision);
+
+	DEVID(typec_device_id);
+	DEVID_FIELD(typec_device_id, svid);
+	DEVID_FIELD(typec_device_id, mode);
 
 	return 0;
 }

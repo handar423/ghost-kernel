@@ -275,7 +275,7 @@ static struct notifier_block sel_netif_netdev_notifier = {
 
 static __init int sel_netif_init(void)
 {
-	int i;
+	int i, err;
 
 	if (!selinux_enabled)
 		return 0;
@@ -283,9 +283,9 @@ static __init int sel_netif_init(void)
 	for (i = 0; i < SEL_NETIF_HASH_SIZE; i++)
 		INIT_LIST_HEAD(&sel_netif_hash[i]);
 
-	register_netdevice_notifier(&sel_netif_netdev_notifier);
+	register_netdevice_notifier_rh(&sel_netif_netdev_notifier);
 
-	return 0;
+	return err;
 }
 
 __initcall(sel_netif_init);

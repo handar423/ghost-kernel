@@ -60,7 +60,6 @@
 #include <linux/dma-mapping.h>
 #include <linux/device.h>
 #include <linux/clk.h>
-#include <linux/phy/phy.h>
 #include <linux/platform_device.h>
 #include <linux/ata_platform.h>
 #include <linux/mbus.h>
@@ -305,12 +304,6 @@ enum {
 	MV5_LTMODE		= 0x30,
 	MV5_PHY_CTL		= 0x0C,
 	SATA_IFCFG		= 0x050,
-	LP_PHY_CTL		= 0x058,
-	LP_PHY_CTL_PIN_PU_PLL   = (1 << 0),
-	LP_PHY_CTL_PIN_PU_RX    = (1 << 1),
-	LP_PHY_CTL_PIN_PU_TX    = (1 << 2),
-	LP_PHY_CTL_GEN_TX_3G    = (1 << 5),
-	LP_PHY_CTL_GEN_RX_3G    = (1 << 9),
 
 	MV_M2_PREAMP_MASK	= 0x7e0,
 
@@ -438,7 +431,6 @@ enum {
 	MV_HP_CUT_THROUGH	= (1 << 10),	/* can use EDMA cut-through */
 	MV_HP_FLAG_SOC		= (1 << 11),	/* SystemOnChip, no PCI */
 	MV_HP_QUIRK_LED_BLINK_EN = (1 << 12),	/* is led blinking enabled? */
-	MV_HP_FIX_LP_PHY_CTL	= (1 << 13),	/* fix speed in LP_PHY_CTL ? */
 
 	/* Port private flags (pp_flags) */
 	MV_PP_FLAG_EDMA_EN	= (1 << 0),	/* is EDMA engine enabled? */
@@ -570,12 +562,6 @@ struct mv_host_priv {
 	 */
 	struct clk		*clk;
 	struct clk              **port_clks;
-	/*
-	 * Some devices have a SATA PHY which can be enabled/disabled
-	 * in order to save power. These are optional: if the platform
-	 * devices does not have any phy, they won't be used.
-	 */
-	struct phy		**port_phys;
 	/*
 	 * These consistent DMA memory pools give us guaranteed
 	 * alignment for hardware-accessed data structures,
@@ -986,7 +972,7 @@ static inline void mv_write_cached_reg(void __iomem *addr, u32 *old, u32 new)
 		 * Looks like a lot of fuss, but it avoids an unnecessary
 		 * +1 usec read-after-write delay for unaffected registers.
 		 */
-		laddr = (unsigned long)addr & 0xffff;
+		laddr = (long)addr & 0xffff;
 		if (laddr >= 0x300 && laddr <= 0x33c) {
 			laddr &= 0x000f;
 			if (laddr == 0x4 || laddr == 0xc) {
@@ -1372,7 +1358,6 @@ static int mv_scr_write(struct ata_link *link, unsigned int sc_reg_in, u32 val)
 
 	if (ofs != 0xffffffffU) {
 		void __iomem *addr = mv_ap_base(link->ap) + ofs;
-		struct mv_host_priv *hpriv = link->ap->host->private_data;
 		if (sc_reg_in == SCR_CONTROL) {
 			/*
 			 * Workaround for 88SX60x1 FEr SATA#26:
@@ -1389,25 +1374,6 @@ static int mv_scr_write(struct ata_link *link, unsigned int sc_reg_in, u32 val)
 			 */
 			if ((val & 0xf) == 1 || (readl(addr) & 0xf) == 1)
 				val |= 0xf000;
-
-			if (hpriv->hp_flags & MV_HP_FIX_LP_PHY_CTL) {
-				void __iomem *lp_phy_addr =
-					mv_ap_base(link->ap) + LP_PHY_CTL;
-				/*
-				 * Set PHY speed according to SControl speed.
-				 */
-				u32 lp_phy_val =
-					LP_PHY_CTL_PIN_PU_PLL |
-					LP_PHY_CTL_PIN_PU_RX  |
-					LP_PHY_CTL_PIN_PU_TX;
-
-				if ((val & 0xf0) != 0x10)
-					lp_phy_val |=
-						LP_PHY_CTL_GEN_TX_3G |
-						LP_PHY_CTL_GEN_RX_3G;
-
-				writelfl(lp_phy_val, lp_phy_addr);
-			}
 		}
 		writelfl(val, addr);
 		return 0;
@@ -1727,13 +1693,15 @@ static int mv_port_start(struct ata_port *ap)
 		return -ENOMEM;
 	ap->private_data = pp;
 
-	pp->crqb = dma_pool_zalloc(hpriv->crqb_pool, GFP_KERNEL, &pp->crqb_dma);
+	pp->crqb = dma_pool_alloc(hpriv->crqb_pool, GFP_KERNEL, &pp->crqb_dma);
 	if (!pp->crqb)
 		return -ENOMEM;
+	memset(pp->crqb, 0, MV_CRQB_Q_SZ);
 
-	pp->crpb = dma_pool_zalloc(hpriv->crpb_pool, GFP_KERNEL, &pp->crpb_dma);
+	pp->crpb = dma_pool_alloc(hpriv->crpb_pool, GFP_KERNEL, &pp->crpb_dma);
 	if (!pp->crpb)
 		goto out_port_free_dma_mem;
+	memset(pp->crpb, 0, MV_CRPB_Q_SZ);
 
 	/* 6041/6081 Rev. "C0" (and newer) are okay with async notify */
 	if (hpriv->hp_flags & MV_HP_ERRATA_60X1C0)
@@ -2387,7 +2355,7 @@ static unsigned int mv_qc_issue(struct ata_queued_cmd *qc)
 				      ": attempting PIO w/multiple DRQ: "
 				      "this may fail due to h/w errata\n");
 		}
-		/* fall through */
+		/* drop through */
 	case ATA_PROT_NODATA:
 	case ATAPI_PROT_PIO:
 	case ATAPI_PROT_NODATA:
@@ -2478,18 +2446,20 @@ static unsigned int mv_get_err_pmp_map(struct ata_port *ap)
 
 static void mv_pmp_eh_prep(struct ata_port *ap, unsigned int pmp_map)
 {
+	struct ata_eh_info *ehi;
 	unsigned int pmp;
 
 	/*
 	 * Initialize EH info for PMPs which saw device errors
 	 */
+	ehi = &ap->link.eh_info;
 	for (pmp = 0; pmp_map != 0; pmp++) {
 		unsigned int this_pmp = (1 << pmp);
 		if (pmp_map & this_pmp) {
 			struct ata_link *link = &ap->pmp_link[pmp];
-			struct ata_eh_info *ehi = &link->eh_info;
 
 			pmp_map &= ~this_pmp;
+			ehi = &link->eh_info;
 			ata_ehi_clear_desc(ehi);
 			ata_ehi_push_desc(ehi, "dev err");
 			ehi->err_mask |= AC_ERR_DEV;
@@ -3875,7 +3845,7 @@ static int mv_chip_id(struct ata_host *host, unsigned int board_idx)
 				" and avoid the final two gigabytes on"
 				" all RocketRAID BIOS initialized drives.\n");
 		}
-		/* fall through */
+		/* drop through */
 	case chip_6042:
 		hpriv->ops = &mv6xxx_ops;
 		hp_flags |= MV_HP_GEN_IIE;
@@ -4088,20 +4058,7 @@ static int mv_platform_probe(struct platform_device *pdev)
 
 	/* allocate host */
 	if (pdev->dev.of_node) {
-		rc = of_property_read_u32(pdev->dev.of_node, "nr-ports",
-					   &n_ports);
-		if (rc) {
-			dev_err(&pdev->dev,
-				"error parsing nr-ports property: %d\n", rc);
-			return rc;
-		}
-
-		if (n_ports <= 0) {
-			dev_err(&pdev->dev, "nr-ports must be positive: %d\n",
-				n_ports);
-			return -EINVAL;
-		}
-
+		of_property_read_u32(pdev->dev.of_node, "nr-ports", &n_ports);
 		irq = irq_of_parse_and_map(pdev->dev.of_node, 0);
 	} else {
 		mv_platform_data = dev_get_platdata(&pdev->dev);
@@ -4119,20 +4076,13 @@ static int mv_platform_probe(struct platform_device *pdev)
 					GFP_KERNEL);
 	if (!hpriv->port_clks)
 		return -ENOMEM;
-	hpriv->port_phys = devm_kzalloc(&pdev->dev,
-					sizeof(struct phy *) * n_ports,
-					GFP_KERNEL);
-	if (!hpriv->port_phys)
-		return -ENOMEM;
 	host->private_data = hpriv;
+	hpriv->n_ports = n_ports;
 	hpriv->board_idx = chip_soc;
 
 	host->iomap = NULL;
 	hpriv->base = devm_ioremap(&pdev->dev, res->start,
 				   resource_size(res));
-	if (!hpriv->base)
-		return -ENOMEM;
-
 	hpriv->base -= SATAHC0_REG_BASE;
 
 	hpriv->clk = clk_get(&pdev->dev, NULL);
@@ -4147,25 +4097,7 @@ static int mv_platform_probe(struct platform_device *pdev)
 		hpriv->port_clks[port] = clk_get(&pdev->dev, port_number);
 		if (!IS_ERR(hpriv->port_clks[port]))
 			clk_prepare_enable(hpriv->port_clks[port]);
-
-		sprintf(port_number, "port%d", port);
-		hpriv->port_phys[port] = devm_phy_optional_get(&pdev->dev,
-							       port_number);
-		if (IS_ERR(hpriv->port_phys[port])) {
-			rc = PTR_ERR(hpriv->port_phys[port]);
-			hpriv->port_phys[port] = NULL;
-			if (rc != -EPROBE_DEFER)
-				dev_warn(&pdev->dev, "error getting phy %d", rc);
-
-			/* Cleanup only the initialized ports */
-			hpriv->n_ports = port;
-			goto err;
-		} else
-			phy_power_on(hpriv->port_phys[port]);
 	}
-
-	/* All the ports have been initialized */
-	hpriv->n_ports = n_ports;
 
 	/*
 	 * (Re-)program MBUS remapping windows if we are asked to.
@@ -4177,15 +4109,6 @@ static int mv_platform_probe(struct platform_device *pdev)
 	rc = mv_create_dma_pools(hpriv, &pdev->dev);
 	if (rc)
 		goto err;
-
-	/*
-	 * To allow disk hotplug on Armada 370/XP SoCs, the PHY speed must be
-	 * updated in the LP_PHY_CTL register.
-	 */
-	if (pdev->dev.of_node &&
-		of_device_is_compatible(pdev->dev.of_node,
-					"marvell,armada-370-sata"))
-		hpriv->hp_flags |= MV_HP_FIX_LP_PHY_CTL;
 
 	/* initialize adapter */
 	rc = mv_init_host(host);
@@ -4204,12 +4127,11 @@ err:
 		clk_disable_unprepare(hpriv->clk);
 		clk_put(hpriv->clk);
 	}
-	for (port = 0; port < hpriv->n_ports; port++) {
+	for (port = 0; port < n_ports; port++) {
 		if (!IS_ERR(hpriv->port_clks[port])) {
 			clk_disable_unprepare(hpriv->port_clks[port]);
 			clk_put(hpriv->port_clks[port]);
 		}
-		phy_power_off(hpriv->port_phys[port]);
 	}
 
 	return rc;
@@ -4239,12 +4161,11 @@ static int mv_platform_remove(struct platform_device *pdev)
 			clk_disable_unprepare(hpriv->port_clks[port]);
 			clk_put(hpriv->port_clks[port]);
 		}
-		phy_power_off(hpriv->port_phys[port]);
 	}
 	return 0;
 }
 
-#ifdef CONFIG_PM_SLEEP
+#ifdef CONFIG_PM
 static int mv_platform_suspend(struct platform_device *pdev, pm_message_t state)
 {
 	struct ata_host *host = platform_get_drvdata(pdev);
@@ -4287,8 +4208,7 @@ static int mv_platform_resume(struct platform_device *pdev)
 #endif
 
 #ifdef CONFIG_OF
-static const struct of_device_id mv_sata_dt_ids[] = {
-	{ .compatible = "marvell,armada-370-sata", },
+static struct of_device_id mv_sata_dt_ids[] = {
 	{ .compatible = "marvell,orion-sata", },
 	{},
 };
@@ -4302,6 +4222,7 @@ static struct platform_driver mv_platform_driver = {
 	.resume		= mv_platform_resume,
 	.driver		= {
 		.name = DRV_NAME,
+		.owner = THIS_MODULE,
 		.of_match_table = of_match_ptr(mv_sata_dt_ids),
 	},
 };
@@ -4310,7 +4231,7 @@ static struct platform_driver mv_platform_driver = {
 #ifdef CONFIG_PCI
 static int mv_pci_init_one(struct pci_dev *pdev,
 			   const struct pci_device_id *ent);
-#ifdef CONFIG_PM_SLEEP
+#ifdef CONFIG_PM
 static int mv_pci_device_resume(struct pci_dev *pdev);
 #endif
 
@@ -4320,7 +4241,7 @@ static struct pci_driver mv_pci_driver = {
 	.id_table		= mv_pci_tbl,
 	.probe			= mv_pci_init_one,
 	.remove			= ata_pci_remove_one,
-#ifdef CONFIG_PM_SLEEP
+#ifdef CONFIG_PM
 	.suspend		= ata_pci_device_suspend,
 	.resume			= mv_pci_device_resume,
 #endif
@@ -4332,10 +4253,10 @@ static int pci_go_64(struct pci_dev *pdev)
 {
 	int rc;
 
-	if (!dma_set_mask(&pdev->dev, DMA_BIT_MASK(64))) {
-		rc = dma_set_coherent_mask(&pdev->dev, DMA_BIT_MASK(64));
+	if (!pci_set_dma_mask(pdev, DMA_BIT_MASK(64))) {
+		rc = pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(64));
 		if (rc) {
-			rc = dma_set_coherent_mask(&pdev->dev, DMA_BIT_MASK(32));
+			rc = pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(32));
 			if (rc) {
 				dev_err(&pdev->dev,
 					"64-bit DMA enable failed\n");
@@ -4343,12 +4264,12 @@ static int pci_go_64(struct pci_dev *pdev)
 			}
 		}
 	} else {
-		rc = dma_set_mask(&pdev->dev, DMA_BIT_MASK(32));
+		rc = pci_set_dma_mask(pdev, DMA_BIT_MASK(32));
 		if (rc) {
 			dev_err(&pdev->dev, "32-bit DMA enable failed\n");
 			return rc;
 		}
-		rc = dma_set_coherent_mask(&pdev->dev, DMA_BIT_MASK(32));
+		rc = pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(32));
 		if (rc) {
 			dev_err(&pdev->dev,
 				"32-bit consistent DMA enable failed\n");
@@ -4478,7 +4399,7 @@ static int mv_pci_init_one(struct pci_dev *pdev,
 				 IS_GEN_I(hpriv) ? &mv5_sht : &mv6_sht);
 }
 
-#ifdef CONFIG_PM_SLEEP
+#ifdef CONFIG_PM
 static int mv_pci_device_resume(struct pci_dev *pdev)
 {
 	struct ata_host *host = pci_get_drvdata(pdev);
@@ -4527,7 +4448,7 @@ static void __exit mv_exit(void)
 
 MODULE_AUTHOR("Brett Russ");
 MODULE_DESCRIPTION("SCSI low-level driver for Marvell SATA controllers");
-MODULE_LICENSE("GPL v2");
+MODULE_LICENSE("GPL");
 MODULE_DEVICE_TABLE(pci, mv_pci_tbl);
 MODULE_VERSION(DRV_VERSION);
 MODULE_ALIAS("platform:" DRV_NAME);

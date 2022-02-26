@@ -1,7 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0
 /* Include in trace.c */
 
-#include <uapi/linux/sched/types.h>
 #include <linux/stringify.h>
 #include <linux/kthread.h>
 #include <linux/delay.h>
@@ -60,14 +58,14 @@ static int trace_test_buffer_cpu(struct trace_buffer *buf, int cpu)
  * Test the trace buffer to see if all the elements
  * are still sane.
  */
-static int __maybe_unused trace_test_buffer(struct trace_buffer *buf, unsigned long *count)
+static int trace_test_buffer(struct trace_buffer *buf, unsigned long *count)
 {
 	unsigned long flags, cnt = 0;
 	int cpu, ret = 0;
 
 	/* Don't allow flipping of max traces now */
 	local_irq_save(flags);
-	arch_spin_lock(&buf->tr->max_lock);
+	arch_spin_lock(&ftrace_max_lock);
 
 	cnt = ring_buffer_entries(buf->buffer);
 
@@ -85,7 +83,7 @@ static int __maybe_unused trace_test_buffer(struct trace_buffer *buf, unsigned l
 			break;
 	}
 	tracing_on();
-	arch_spin_unlock(&buf->tr->max_lock);
+	arch_spin_unlock(&ftrace_max_lock);
 	local_irq_restore(flags);
 
 	if (count)
@@ -163,6 +161,11 @@ static struct ftrace_ops test_probe3 = {
 	.flags			= FTRACE_OPS_FL_RECURSION_SAFE,
 };
 
+static struct ftrace_ops test_global = {
+	.func		= trace_selftest_test_global_func,
+	.flags		= FTRACE_OPS_FL_GLOBAL | FTRACE_OPS_FL_RECURSION_SAFE,
+};
+
 static void print_counts(void)
 {
 	printk("(%d %d %d %d %d) ",
@@ -182,7 +185,7 @@ static void reset_counts(void)
 	trace_selftest_test_dyn_cnt = 0;
 }
 
-static int trace_selftest_ops(struct trace_array *tr, int cnt)
+static int trace_selftest_ops(int cnt)
 {
 	int save_ftrace_enabled = ftrace_enabled;
 	struct ftrace_ops *dyn_ops;
@@ -217,11 +220,7 @@ static int trace_selftest_ops(struct trace_array *tr, int cnt)
 	register_ftrace_function(&test_probe1);
 	register_ftrace_function(&test_probe2);
 	register_ftrace_function(&test_probe3);
-	/* First time we are running with main function */
-	if (cnt > 1) {
-		ftrace_init_array_ops(tr, trace_selftest_test_global_func);
-		register_ftrace_function(tr->ops);
-	}
+	register_ftrace_function(&test_global);
 
 	DYN_FTRACE_TEST_NAME();
 
@@ -233,10 +232,8 @@ static int trace_selftest_ops(struct trace_array *tr, int cnt)
 		goto out;
 	if (trace_selftest_test_probe3_cnt != 1)
 		goto out;
-	if (cnt > 1) {
-		if (trace_selftest_test_global_cnt == 0)
-			goto out;
-	}
+	if (trace_selftest_test_global_cnt == 0)
+		goto out;
 
 	DYN_FTRACE_TEST_NAME2();
 
@@ -272,10 +269,8 @@ static int trace_selftest_ops(struct trace_array *tr, int cnt)
 		goto out_free;
 	if (trace_selftest_test_probe3_cnt != 3)
 		goto out_free;
-	if (cnt > 1) {
-		if (trace_selftest_test_global_cnt == 0)
-			goto out_free;
-	}
+	if (trace_selftest_test_global_cnt == 0)
+		goto out;
 	if (trace_selftest_test_dyn_cnt == 0)
 		goto out_free;
 
@@ -300,9 +295,7 @@ static int trace_selftest_ops(struct trace_array *tr, int cnt)
 	unregister_ftrace_function(&test_probe1);
 	unregister_ftrace_function(&test_probe2);
 	unregister_ftrace_function(&test_probe3);
-	if (cnt > 1)
-		unregister_ftrace_function(tr->ops);
-	ftrace_reset_array_ops(tr);
+	unregister_ftrace_function(&test_global);
 
 	/* Make sure everything is off */
 	reset_counts();
@@ -322,9 +315,9 @@ static int trace_selftest_ops(struct trace_array *tr, int cnt)
 }
 
 /* Test dynamic code modification and ftrace filters */
-static int trace_selftest_startup_dynamic_tracing(struct tracer *trace,
-						  struct trace_array *tr,
-						  int (*func)(void))
+int trace_selftest_startup_dynamic_tracing(struct tracer *trace,
+					   struct trace_array *tr,
+					   int (*func)(void))
 {
 	int save_ftrace_enabled = ftrace_enabled;
 	unsigned long count;
@@ -384,8 +377,6 @@ static int trace_selftest_startup_dynamic_tracing(struct tracer *trace,
 
 	/* check the trace buffer */
 	ret = trace_test_buffer(&tr->trace_buffer, &count);
-
-	ftrace_enabled = 1;
 	tracing_start();
 
 	/* we should only have one item */
@@ -397,7 +388,7 @@ static int trace_selftest_startup_dynamic_tracing(struct tracer *trace,
 	}
 
 	/* Test the ops with global tracing running */
-	ret = trace_selftest_ops(tr, 1);
+	ret = trace_selftest_ops(1);
 	trace->reset(tr);
 
  out:
@@ -408,7 +399,7 @@ static int trace_selftest_startup_dynamic_tracing(struct tracer *trace,
 
 	/* Test the ops with global tracing off */
 	if (!ret)
-		ret = trace_selftest_ops(tr, 2);
+		ret = trace_selftest_ops(2);
 
 	return ret;
 }
@@ -649,19 +640,12 @@ out:
  * Enable ftrace, sleep 1/10 second, and then read the trace
  * buffer to see if all is in order.
  */
-__init int
+int
 trace_selftest_startup_function(struct tracer *trace, struct trace_array *tr)
 {
 	int save_ftrace_enabled = ftrace_enabled;
 	unsigned long count;
 	int ret;
-
-#ifdef CONFIG_DYNAMIC_FTRACE
-	if (ftrace_filter_param) {
-		printk(KERN_CONT " ... kernel command line filter set: force PASS ... ");
-		return 0;
-	}
-#endif
 
 	/* make sure msleep has been recorded */
 	msleep(1);
@@ -683,8 +667,6 @@ trace_selftest_startup_function(struct tracer *trace, struct trace_array *tr)
 
 	/* check the trace buffer */
 	ret = trace_test_buffer(&tr->trace_buffer, &count);
-
-	ftrace_enabled = 1;
 	trace->reset(tr);
 	tracing_start();
 
@@ -745,19 +727,12 @@ static int trace_graph_entry_watchdog(struct ftrace_graph_ent *trace)
  * Pretty much the same than for the function tracer from which the selftest
  * has been borrowed.
  */
-__init int
+int
 trace_selftest_startup_function_graph(struct tracer *trace,
 					struct trace_array *tr)
 {
 	int ret;
 	unsigned long count;
-
-#ifdef CONFIG_DYNAMIC_FTRACE
-	if (ftrace_filter_param) {
-		printk(KERN_CONT " ... kernel command line filter set: force PASS ... ");
-		return 0;
-	}
-#endif
 
 	/*
 	 * Simulate the init() callback but we attach a watchdog callback
@@ -1031,12 +1006,6 @@ trace_selftest_startup_nop(struct tracer *trace, struct trace_array *tr)
 #endif
 
 #ifdef CONFIG_SCHED_TRACER
-
-struct wakeup_test_data {
-	struct completion	is_ready;
-	int			go;
-};
-
 static int trace_wakeup_test_thread(void *data)
 {
 	/* Make this a -deadline thread */
@@ -1046,56 +1015,51 @@ static int trace_wakeup_test_thread(void *data)
 		.sched_deadline = 10000000ULL,
 		.sched_period = 10000000ULL
 	};
-	struct wakeup_test_data *x = data;
+	struct completion *x = data;
 
 	sched_setattr(current, &attr);
 
 	/* Make it know we have a new prio */
-	complete(&x->is_ready);
+	complete(x);
 
 	/* now go to sleep and let the test wake us up */
 	set_current_state(TASK_INTERRUPTIBLE);
-	while (!x->go) {
-		schedule();
-		set_current_state(TASK_INTERRUPTIBLE);
-	}
+	schedule();
 
-	complete(&x->is_ready);
-
-	set_current_state(TASK_INTERRUPTIBLE);
+	complete(x);
 
 	/* we are awake, now wait to disappear */
 	while (!kthread_should_stop()) {
-		schedule();
-		set_current_state(TASK_INTERRUPTIBLE);
+		/*
+		 * This will likely be the system top priority
+		 * task, do short sleeps to let others run.
+		 */
+		msleep(100);
 	}
-
-	__set_current_state(TASK_RUNNING);
 
 	return 0;
 }
+
 int
 trace_selftest_startup_wakeup(struct tracer *trace, struct trace_array *tr)
 {
 	unsigned long save_max = tr->max_latency;
 	struct task_struct *p;
-	struct wakeup_test_data data;
+	struct completion is_ready;
 	unsigned long count;
 	int ret;
 
-	memset(&data, 0, sizeof(data));
-
-	init_completion(&data.is_ready);
+	init_completion(&is_ready);
 
 	/* create a -deadline thread */
-	p = kthread_run(trace_wakeup_test_thread, &data, "ftrace-test");
+	p = kthread_run(trace_wakeup_test_thread, &is_ready, "ftrace-test");
 	if (IS_ERR(p)) {
 		printk(KERN_CONT "Failed to create ftrace wakeup test thread ");
 		return -1;
 	}
 
 	/* make sure the thread is running at -deadline policy */
-	wait_for_completion(&data.is_ready);
+	wait_for_completion(&is_ready);
 
 	/* start the tracing */
 	ret = tracer_init(trace, tr);
@@ -1116,20 +1080,18 @@ trace_selftest_startup_wakeup(struct tracer *trace, struct trace_array *tr)
 		msleep(100);
 	}
 
-	init_completion(&data.is_ready);
-
-	data.go = 1;
-	/* memory barrier is in the wake_up_process() */
+	init_completion(&is_ready);
 
 	wake_up_process(p);
 
 	/* Wait for the task to wake up */
-	wait_for_completion(&data.is_ready);
+	wait_for_completion(&is_ready);
 
 	/* stop the tracing. */
 	tracing_stop();
 	/* check both trace buffers */
 	ret = trace_test_buffer(&tr->trace_buffer, NULL);
+	printk("ret = %d\n", ret);
 	if (!ret)
 		ret = trace_test_buffer(&tr->max_buffer, &count);
 
@@ -1150,6 +1112,38 @@ trace_selftest_startup_wakeup(struct tracer *trace, struct trace_array *tr)
 	return ret;
 }
 #endif /* CONFIG_SCHED_TRACER */
+
+#ifdef CONFIG_CONTEXT_SWITCH_TRACER
+int
+trace_selftest_startup_sched_switch(struct tracer *trace, struct trace_array *tr)
+{
+	unsigned long count;
+	int ret;
+
+	/* start the tracing */
+	ret = tracer_init(trace, tr);
+	if (ret) {
+		warn_failed_init_tracer(trace, ret);
+		return ret;
+	}
+
+	/* Sleep for a 1/10 of a second */
+	msleep(100);
+	/* stop the tracing. */
+	tracing_stop();
+	/* check the trace buffer */
+	ret = trace_test_buffer(&tr->trace_buffer, &count);
+	trace->reset(tr);
+	tracing_start();
+
+	if (!ret && !count) {
+		printk(KERN_CONT ".. no entries found ..");
+		ret = -1;
+	}
+
+	return ret;
+}
+#endif /* CONFIG_CONTEXT_SWITCH_TRACER */
 
 #ifdef CONFIG_BRANCH_TRACER
 int

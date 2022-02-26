@@ -29,6 +29,8 @@
 #include <linux/gfp.h>
 #include <asm/device.h>
 
+#include <linux/rh_kabi.h>
+
 struct device;
 struct device_private;
 struct device_driver;
@@ -41,7 +43,6 @@ struct device_node;
 struct fwnode_handle;
 struct iommu_ops;
 struct iommu_group;
-struct iommu_fwspec;
 
 struct bus_attribute {
 	struct attribute	attr;
@@ -66,15 +67,15 @@ extern void bus_remove_file(struct bus_type *, struct bus_attribute *);
  * @name:	The name of the bus.
  * @dev_name:	Used for subsystems to enumerate devices like ("foo%u", dev->id).
  * @dev_root:	Default device to use as the parent.
+ * @bus_attrs:	Default attributes of the bus.
+ * @dev_attrs:	Default attributes of the devices on the bus.
+ * @drv_attrs:	Default attributes of the device drivers on the bus.
  * @bus_groups:	Default attributes of the bus.
  * @dev_groups:	Default attributes of the devices on the bus.
  * @drv_groups: Default attributes of the device drivers on the bus.
  * @match:	Called, perhaps multiple times, whenever a new device or driver
- *		is added for this bus. It should return a positive value if the
- *		given device can be handled by the given driver and zero
- *		otherwise. It may also return error code if determining that
- *		the driver supports the device is not possible. In case of
- *		-EPROBE_DEFER it will queue the device for deferred probing.
+ *		is added for this bus. It should return a nonzero value if the
+ *		given device can be handled by the given driver.
  * @uevent:	Called when a device is added, removed, or a few other things
  *		that generate uevents to add the environment variables.
  * @probe:	Called when a new device or driver add to this bus, and callback
@@ -87,8 +88,6 @@ extern void bus_remove_file(struct bus_type *, struct bus_attribute *);
  *
  * @suspend:	Called when a device on this bus wants to go to sleep mode.
  * @resume:	Called to bring a device on this bus out of sleep mode.
- * @num_vf:	Called to find out how many virtual functions a device on this
- *		bus supports.
  * @pm:		Power management operations of this bus, callback the specific
  *		device driver's pm-ops.
  * @iommu_ops:  IOMMU specific operations for this bus, used to attach IOMMU
@@ -96,9 +95,6 @@ extern void bus_remove_file(struct bus_type *, struct bus_attribute *);
  *              bus-specific setup
  * @p:		The private data of the driver core, only the driver core can
  *		touch this.
- * @lock_key:	Lock class key for use by the lock validator
- * @force_dma:	Assume devices on this bus should be set up by dma_configure()
- * 		even if DMA capability is not explicitly described by firmware.
  *
  * A bus is a channel between the processor and one or more devices. For the
  * purposes of the device model, all devices are connected via a bus, even if
@@ -113,6 +109,9 @@ struct bus_type {
 	const char		*name;
 	const char		*dev_name;
 	struct device		*dev_root;
+	struct bus_attribute	*bus_attrs;	/* use bus_groups instead */
+	struct device_attribute	*dev_attrs;	/* use dev_groups instead */
+	struct driver_attribute	*drv_attrs;	/* use drv_groups instead */
 	const struct attribute_group **bus_groups;
 	const struct attribute_group **dev_groups;
 	const struct attribute_group **drv_groups;
@@ -129,16 +128,12 @@ struct bus_type {
 	int (*suspend)(struct device *dev, pm_message_t state);
 	int (*resume)(struct device *dev);
 
-	int (*num_vf)(struct device *dev);
-
 	const struct dev_pm_ops *pm;
 
-	const struct iommu_ops *iommu_ops;
+	struct iommu_ops *iommu_ops;
 
 	struct subsys_private *p;
 	struct lock_class_key lock_key;
-
-	bool force_dma;
 };
 
 extern int __must_check bus_register(struct bus_type *bus);
@@ -190,49 +185,24 @@ extern int bus_unregister_notifier(struct bus_type *bus,
 /* All 4 notifers below get called with the target struct device *
  * as an argument. Note that those functions are likely to be called
  * with the device lock held in the core, so be careful.
+ *
+ * RHEL7 - Note that the following notifier values differ from upstream.
+ * This was due to KABI and upstream commit 599bad38cf71.
  */
 #define BUS_NOTIFY_ADD_DEVICE		0x00000001 /* device added */
 #define BUS_NOTIFY_DEL_DEVICE		0x00000002 /* device to be removed */
-#define BUS_NOTIFY_REMOVED_DEVICE	0x00000003 /* device removed */
-#define BUS_NOTIFY_BIND_DRIVER		0x00000004 /* driver about to be
+#define BUS_NOTIFY_BIND_DRIVER		0x00000003 /* driver about to be
 						      bound */
-#define BUS_NOTIFY_BOUND_DRIVER		0x00000005 /* driver bound to device */
-#define BUS_NOTIFY_UNBIND_DRIVER	0x00000006 /* driver about to be
+#define BUS_NOTIFY_BOUND_DRIVER		0x00000004 /* driver bound to device */
+#define BUS_NOTIFY_UNBIND_DRIVER	0x00000005 /* driver about to be
 						      unbound */
-#define BUS_NOTIFY_UNBOUND_DRIVER	0x00000007 /* driver is unbound
+#define BUS_NOTIFY_UNBOUND_DRIVER	0x00000006 /* driver is unbound
 						      from the device */
-#define BUS_NOTIFY_DRIVER_NOT_BOUND	0x00000008 /* driver fails to be bound */
+#define BUS_NOTIFY_REMOVED_DEVICE	0x00000007 /* device removed */
+
 
 extern struct kset *bus_get_kset(struct bus_type *bus);
 extern struct klist *bus_get_device_klist(struct bus_type *bus);
-
-/**
- * enum probe_type - device driver probe type to try
- *	Device drivers may opt in for special handling of their
- *	respective probe routines. This tells the core what to
- *	expect and prefer.
- *
- * @PROBE_DEFAULT_STRATEGY: Used by drivers that work equally well
- *	whether probed synchronously or asynchronously.
- * @PROBE_PREFER_ASYNCHRONOUS: Drivers for "slow" devices which
- *	probing order is not essential for booting the system may
- *	opt into executing their probes asynchronously.
- * @PROBE_FORCE_SYNCHRONOUS: Use this to annotate drivers that need
- *	their probe routines to run synchronously with driver and
- *	device registration (with the exception of -EPROBE_DEFER
- *	handling - re-probing always ends up being done asynchronously).
- *
- * Note that the end goal is to switch the kernel to use asynchronous
- * probing by default, so annotating drivers with
- * %PROBE_PREFER_ASYNCHRONOUS is a temporary measure that allows us
- * to speed up boot process while we are validating the rest of the
- * drivers.
- */
-enum probe_type {
-	PROBE_DEFAULT_STRATEGY,
-	PROBE_PREFER_ASYNCHRONOUS,
-	PROBE_FORCE_SYNCHRONOUS,
-};
 
 /**
  * struct device_driver - The basic device driver structure
@@ -241,7 +211,6 @@ enum probe_type {
  * @owner:	The module owner.
  * @mod_name:	Used for built-in modules.
  * @suppress_bind_attrs: Disables bind/unbind via sysfs.
- * @probe_type:	Type of the probe (synchronous or asynchronous) to use.
  * @of_match_table: The open firmware table.
  * @acpi_match_table: The ACPI match table.
  * @probe:	Called to query the existence of a specific device,
@@ -275,7 +244,6 @@ struct device_driver {
 	const char		*mod_name;	/* used for built-in modules */
 
 	bool suppress_bind_attrs;	/* disables bind/unbind via sysfs */
-	enum probe_type probe_type;
 
 	const struct of_device_id	*of_match_table;
 	const struct acpi_device_id	*acpi_match_table;
@@ -290,8 +258,20 @@ struct device_driver {
 	const struct dev_pm_ops *pm;
 
 	struct driver_private *p;
+
+	/* Extension to accomodate future upstream changes to this structure
+	 * yet maintain RHEL7 KABI.  For Red Hat internal use only!
+	 */
+	struct device_driver_rh	*device_driver_rh;
 };
 
+/* RHEL7 specific 'struct device_driver' shadow structure to help maintain
+ * KABI going forward.  This structure will never be under KABI restrictions.
+ */
+struct device_driver_rh {
+#ifndef __GENKSYMS__
+#endif
+};
 
 extern int __must_check driver_register(struct device_driver *drv);
 extern void driver_unregister(struct device_driver *drv);
@@ -311,6 +291,8 @@ struct driver_attribute {
 			 size_t count);
 };
 
+#define DRIVER_ATTR(_name, _mode, _show, _store) \
+	struct driver_attribute driver_attr_##_name = __ATTR(_name, _mode, _show, _store)
 #define DRIVER_ATTR_RW(_name) \
 	struct driver_attribute driver_attr_##_name = __ATTR_RW(_name)
 #define DRIVER_ATTR_RO(_name) \
@@ -365,8 +347,10 @@ int subsys_virtual_register(struct bus_type *subsys,
  * struct class - device classes
  * @name:	Name of the class.
  * @owner:	The module owner.
- * @class_groups: Default attributes of this class.
+ * @class_attrs: Default attributes of this class.
  * @dev_groups:	Default attributes of the devices that belong to the class.
+ * @dev_attrs:	Default attributes of the devices belong to the class.
+ * @dev_bin_attrs: Default binary attributes of the devices belong to the class.
  * @dev_kobj:	The kobject that represents this class and links it into the hierarchy.
  * @dev_uevent:	Called when a device is added, removed from this class, or a
  *		few other things that generate uevents to add the environment
@@ -374,7 +358,9 @@ int subsys_virtual_register(struct bus_type *subsys,
  * @devnode:	Callback to provide the devtmpfs.
  * @class_release: Called to release this class.
  * @dev_release: Called to release the device.
- * @shutdown_pre: Called at shut-down time before driver shutdown.
+ * @suspend:	Used to put the device to sleep mode, usually to a low power
+ *		state.
+ * @resume:	Used to bring the device from the sleep mode.
  * @ns_type:	Callbacks so sysfs can detemine namespaces.
  * @namespace:	Namespace of the device belongs to this class.
  * @pm:		The default device power management operations of this class.
@@ -391,8 +377,10 @@ struct class {
 	const char		*name;
 	struct module		*owner;
 
-	const struct attribute_group	**class_groups;
+	struct class_attribute		*class_attrs;
+	struct device_attribute		*dev_attrs;	/* use dev_groups instead */
 	const struct attribute_group	**dev_groups;
+	struct bin_attribute		*dev_bin_attrs;
 	struct kobject			*dev_kobj;
 
 	int (*dev_uevent)(struct device *dev, struct kobj_uevent_env *env);
@@ -401,7 +389,8 @@ struct class {
 	void (*class_release)(struct class *class);
 	void (*dev_release)(struct device *dev);
 
-	int (*shutdown_pre)(struct device *dev);
+	int (*suspend)(struct device *dev, pm_message_t state);
+	int (*resume)(struct device *dev);
 
 	const struct kobj_ns_type_operations *ns_type;
 	const void *(*namespace)(struct device *dev);
@@ -458,14 +447,15 @@ struct class_attribute {
 			char *buf);
 	ssize_t (*store)(struct class *class, struct class_attribute *attr,
 			const char *buf, size_t count);
+	RH_KABI_DEPRECATE_FN(const void *, namespace, struct class *, const struct class_attribute *)
 };
 
+#define CLASS_ATTR(_name, _mode, _show, _store) \
+	struct class_attribute class_attr_##_name = __ATTR(_name, _mode, _show, _store)
 #define CLASS_ATTR_RW(_name) \
 	struct class_attribute class_attr_##_name = __ATTR_RW(_name)
 #define CLASS_ATTR_RO(_name) \
 	struct class_attribute class_attr_##_name = __ATTR_RO(_name)
-#define CLASS_ATTR_WO(_name) \
-	struct class_attribute class_attr_##_name = __ATTR_WO(_name)
 
 extern int __must_check class_create_file_ns(struct class *class,
 					     const struct class_attribute *attr,
@@ -604,6 +594,12 @@ extern int __must_check device_create_bin_file(struct device *dev,
 					const struct bin_attribute *attr);
 extern void device_remove_bin_file(struct device *dev,
 				   const struct bin_attribute *attr);
+extern int device_schedule_callback_owner(struct device *dev,
+		void (*func)(struct device *dev), struct module *owner);
+
+/* This is a macro to avoid include problems with THIS_MODULE */
+#define device_schedule_callback(dev, func)			\
+	device_schedule_callback_owner(dev, func, THIS_MODULE)
 
 /* device resource management */
 typedef void (*dr_release_t)(struct device *dev, void *res);
@@ -611,14 +607,14 @@ typedef int (*dr_match_t)(struct device *dev, void *res, void *match_data);
 
 #ifdef CONFIG_DEBUG_DEVRES
 extern void *__devres_alloc_node(dr_release_t release, size_t size, gfp_t gfp,
-				 int nid, const char *name) __malloc;
+				 int nid, const char *name);
 #define devres_alloc(release, size, gfp) \
 	__devres_alloc_node(release, size, gfp, NUMA_NO_NODE, #release)
 #define devres_alloc_node(release, size, gfp, nid) \
 	__devres_alloc_node(release, size, gfp, nid, #release)
 #else
 extern void *devres_alloc_node(dr_release_t release, size_t size, gfp_t gfp,
-			       int nid) __malloc;
+			       int nid);
 static inline void *devres_alloc(dr_release_t release, size_t size, gfp_t gfp)
 {
 	return devres_alloc_node(release, size, gfp, NUMA_NO_NODE);
@@ -650,12 +646,11 @@ extern void devres_remove_group(struct device *dev, void *id);
 extern int devres_release_group(struct device *dev, void *id);
 
 /* managed devm_k.alloc/kfree for device drivers */
-extern void *devm_kmalloc(struct device *dev, size_t size, gfp_t gfp) __malloc;
-extern __printf(3, 0)
-char *devm_kvasprintf(struct device *dev, gfp_t gfp, const char *fmt,
-		      va_list ap) __malloc;
-extern __printf(3, 4)
-char *devm_kasprintf(struct device *dev, gfp_t gfp, const char *fmt, ...) __malloc;
+extern void *devm_kmalloc(struct device *dev, size_t size, gfp_t gfp);
+extern char *devm_kvasprintf(struct device *dev, gfp_t gfp, const char *fmt,
+			     va_list ap);
+extern char *devm_kasprintf(struct device *dev, gfp_t gfp,
+			    const char *fmt, ...);
 static inline void *devm_kzalloc(struct device *dev, size_t size, gfp_t gfp)
 {
 	return devm_kmalloc(dev, size, gfp | __GFP_ZERO);
@@ -673,15 +668,13 @@ static inline void *devm_kcalloc(struct device *dev,
 	return devm_kmalloc_array(dev, n, size, flags | __GFP_ZERO);
 }
 extern void devm_kfree(struct device *dev, void *p);
-extern char *devm_kstrdup(struct device *dev, const char *s, gfp_t gfp) __malloc;
+extern char *devm_kstrdup(struct device *dev, const char *s, gfp_t gfp);
 extern void *devm_kmemdup(struct device *dev, const void *src, size_t len,
 			  gfp_t gfp);
 
-extern unsigned long devm_get_free_pages(struct device *dev,
-					 gfp_t gfp_mask, unsigned int order);
-extern void devm_free_pages(struct device *dev, unsigned long addr);
-
 void __iomem *devm_ioremap_resource(struct device *dev, struct resource *res);
+void __iomem *devm_request_and_ioremap(struct device *dev,
+			struct resource *res);
 
 /* allows to add/remove a custom action to devres stack */
 int devm_add_action(struct device *dev, void (*action)(void *), void *data);
@@ -699,25 +692,6 @@ static inline int devm_add_action_or_reset(struct device *dev,
 	return ret;
 }
 
-/**
- * devm_alloc_percpu - Resource-managed alloc_percpu
- * @dev: Device to allocate per-cpu memory for
- * @type: Type to allocate per-cpu memory for
- *
- * Managed alloc_percpu. Per-cpu memory allocated with this function is
- * automatically freed on driver detach.
- *
- * RETURNS:
- * Pointer to allocated memory on success, NULL on failure.
- */
-#define devm_alloc_percpu(dev, type)      \
-	((typeof(type) __percpu *)__devm_alloc_percpu((dev), sizeof(type), \
-						      __alignof__(type)))
-
-void __percpu *__devm_alloc_percpu(struct device *dev, size_t size,
-				   size_t align);
-void devm_free_percpu(struct device *dev, void __percpu *pdata);
-
 struct device_dma_parameters {
 	/*
 	 * a low level driver may set these to teach IOMMU code about
@@ -728,84 +702,34 @@ struct device_dma_parameters {
 };
 
 /**
- * enum device_link_state - Device link states.
- * @DL_STATE_NONE: The presence of the drivers is not being tracked.
- * @DL_STATE_DORMANT: None of the supplier/consumer drivers is present.
- * @DL_STATE_AVAILABLE: The supplier driver is present, but the consumer is not.
- * @DL_STATE_CONSUMER_PROBE: The consumer is probing (supplier driver present).
- * @DL_STATE_ACTIVE: Both the supplier and consumer drivers are present.
- * @DL_STATE_SUPPLIER_UNBIND: The supplier driver is unbinding.
+ * struct device_connection - Device Connection Descriptor
+ * @endpoint: The names of the two devices connected together
+ * @id: Unique identifier for the connection
+ * @list: List head, private, for internal use only
  */
-enum device_link_state {
-	DL_STATE_NONE = -1,
-	DL_STATE_DORMANT = 0,
-	DL_STATE_AVAILABLE,
-	DL_STATE_CONSUMER_PROBE,
-	DL_STATE_ACTIVE,
-	DL_STATE_SUPPLIER_UNBIND,
+struct device_connection {
+	const char		*endpoint[2];
+	const char		*id;
+	struct list_head	list;
 };
 
-/*
- * Device link flags.
- *
- * STATELESS: The core won't track the presence of supplier/consumer drivers.
- * AUTOREMOVE: Remove this link automatically on consumer driver unbind.
- * PM_RUNTIME: If set, the runtime PM framework will use this link.
- * RPM_ACTIVE: Run pm_runtime_get_sync() on the supplier during link creation.
- */
-#define DL_FLAG_STATELESS	BIT(0)
-#define DL_FLAG_AUTOREMOVE	BIT(1)
-#define DL_FLAG_PM_RUNTIME	BIT(2)
-#define DL_FLAG_RPM_ACTIVE	BIT(3)
+void *device_connection_find_match(struct device *dev, const char *con_id,
+				void *data,
+				void *(*match)(struct device_connection *con,
+					       int ep, void *data));
 
-/**
- * struct device_link - Device link representation.
- * @supplier: The device on the supplier end of the link.
- * @s_node: Hook to the supplier device's list of links to consumers.
- * @consumer: The device on the consumer end of the link.
- * @c_node: Hook to the consumer device's list of links to suppliers.
- * @status: The state of the link (with respect to the presence of drivers).
- * @flags: Link flags.
- * @rpm_active: Whether or not the consumer device is runtime-PM-active.
- * @rcu_head: An RCU head to use for deferred execution of SRCU callbacks.
- */
-struct device_link {
-	struct device *supplier;
-	struct list_head s_node;
-	struct device *consumer;
-	struct list_head c_node;
-	enum device_link_state status;
-	u32 flags;
-	bool rpm_active;
-#ifdef CONFIG_SRCU
-	struct rcu_head rcu_head;
+struct device *device_connection_find(struct device *dev, const char *con_id);
+
+void device_connection_add(struct device_connection *con);
+void device_connection_remove(struct device_connection *con);
+
+/* RHEL7: Do not use this struct.  It is only here for KABI purposes. */
+struct acpi_dev_node {
+#ifdef CONFIG_ACPI
+	RH_KABI_REPLACE(void	*handle,
+		          struct acpi_device *companion)
+
 #endif
-};
-
-/**
- * enum dl_dev_state - Device driver presence tracking information.
- * @DL_DEV_NO_DRIVER: There is no driver attached to the device.
- * @DL_DEV_PROBING: A driver is probing.
- * @DL_DEV_DRIVER_BOUND: The driver has been bound to the device.
- * @DL_DEV_UNBINDING: The driver is unbinding from the device.
- */
-enum dl_dev_state {
-	DL_DEV_NO_DRIVER = 0,
-	DL_DEV_PROBING,
-	DL_DEV_DRIVER_BOUND,
-	DL_DEV_UNBINDING,
-};
-
-/**
- * struct dev_links_info - Device data related to device links.
- * @suppliers: List of links to supplier devices.
- * @consumers: List of links to consumer devices.
- * @status: Driver status information.
- */
-struct dev_links_info {
-	struct list_head suppliers;
-	struct list_head consumers;
-	enum dl_dev_state status;
 };
 
 /**
@@ -832,19 +756,14 @@ struct dev_links_info {
  * 		variants, which GPIO pins act in what additional roles, and so
  * 		on.  This shrinks the "Board Support Packages" (BSPs) and
  * 		minimizes board-specific #ifdefs in drivers.
- * @driver_data: Private pointer for driver specific info.
- * @links:	Links to suppliers and consumers of this device.
  * @power:	For device power management.
- *		See Documentation/driver-api/pm/devices.rst for details.
+ * 		See Documentation/power/devices.txt for details.
  * @pm_domain:	Provide callbacks that are executed during system suspend,
  * 		hibernation, system resume and during runtime PM transitions
  * 		along with subsystem-level and driver-level callbacks.
  * @pins:	For device pin management.
- *		See Documentation/driver-api/pinctl.rst for details.
- * @msi_list:	Hosts MSI descriptors
- * @msi_domain: The generic MSI domain this device is using.
+ *		See Documentation/pinctrl.txt for details.
  * @numa_node:	NUMA node this device is close to.
- * @dma_ops:    DMA mapping operations for this device.
  * @dma_mask:	Dma mask (if dma'ble device).
  * @coherent_dma_mask: Like dma_mask, but for alloc_coherent mapping as not all
  * 		hardware supports 64-bit addresses for consistent allocations
@@ -854,7 +773,6 @@ struct dev_links_info {
  * 		segment limitations.
  * @dma_pools:	Dma pools (if dma'ble device).
  * @dma_mem:	Internal for coherent mem override.
- * @cma_area:	Contiguous memory area for dma allocations
  * @archdata:	For arch-specific additions.
  * @of_node:	Associated device tree node.
  * @fwnode:	Associated device node supplied by platform firmware.
@@ -868,9 +786,6 @@ struct dev_links_info {
  * @release:	Callback to free the device after all references have
  * 		gone away. This should be set by the allocator of the
  * 		device (i.e. the bus driver that discovered the device).
- * @iommu_group: IOMMU group the device belongs to.
- * @iommu_fwspec: IOMMU-specific properties supplied by firmware.
- *
  * @offline_disabled: If set, the device is permanently online.
  * @offline:	Set after successful invocation of bus type's .offline().
  * @of_node_reused: Set if the device-tree node is shared with an ancestor
@@ -902,33 +817,18 @@ struct device {
 					   device */
 	void		*platform_data;	/* Platform specific data, device
 					   core doesn't touch it */
-	void		*driver_data;	/* Driver data, set and get with
-					   dev_set/get_drvdata */
-	struct dev_links_info	links;
 	struct dev_pm_info	power;
 	struct dev_pm_domain	*pm_domain;
-
-#ifdef CONFIG_GENERIC_MSI_IRQ_DOMAIN
-	struct irq_domain	*msi_domain;
-#endif
-#ifdef CONFIG_PINCTRL
-	struct dev_pin_info	*pins;
-#endif
-#ifdef CONFIG_GENERIC_MSI_IRQ
-	struct list_head	msi_list;
-#endif
 
 #ifdef CONFIG_NUMA
 	int		numa_node;	/* NUMA node this device is close to */
 #endif
-	const struct dma_map_ops *dma_ops;
 	u64		*dma_mask;	/* dma mask (if dma'able device) */
 	u64		coherent_dma_mask;/* Like dma_mask, but for
 					     alloc_coherent mappings as
 					     not all hardware supports
 					     64 bit addresses for consistent
 					     allocations such descriptors. */
-	unsigned long	dma_pfn_offset;
 
 	struct device_dma_parameters *dma_parms;
 
@@ -944,7 +844,12 @@ struct device {
 	struct dev_archdata	archdata;
 
 	struct device_node	*of_node; /* associated device tree node */
-	struct fwnode_handle	*fwnode; /* firmware device node */
+	/*
+	 * RHEL7: This appears safe to do.  struct acpi_dev_node was
+	 * previously safely modified with a KABI workaround so deprecating
+	 * it should also not be a problem.
+	 */
+	RH_KABI_DEPRECATE(struct acpi_dev_node, acpi_node)
 
 	dev_t			devt;	/* dev_t, creates the sysfs "dev" */
 	u32			id;	/* device instance */
@@ -958,12 +863,38 @@ struct device {
 
 	void	(*release)(struct device *dev);
 	struct iommu_group	*iommu_group;
-	struct iommu_fwspec	*iommu_fwspec;
 
 	bool			offline_disabled:1;
 	bool			offline:1;
-	bool			of_node_reused:1;
+
+	/* Extension to accomodate future upstream changes to this structure
+	 * yet maintain RHEL7 KABI.  For Red Hat internal use only!
+	 */
+	struct device_rh	*device_rh;
 };
+
+/* RHEL7 specific 'struct device_rh' shadow structure to help maintain KABI
+ * going forward.  This structure will never be under KABI restrictions.
+ */
+struct device_rh {
+	RH_KABI_EXTEND(struct dev_pm_info_rh power)
+#ifdef CONFIG_PINCTRL
+	RH_KABI_EXTEND(struct dev_pin_info *pins)
+#endif
+	RH_KABI_EXTEND(struct fwnode_handle *fwnode)
+	RH_KABI_EXTEND(struct dma_map_ops *dma_ops)
+
+	/* RHEL7: due to KABI this can't go into struct class */
+	RH_KABI_EXTEND(int (*class_shutdown_pre)(struct device *dev))
+
+	/* RHEL7: due to KABI this can't go into struct class */
+	RH_KABI_EXTEND(unsigned long  dma_pfn_offset)
+	RH_KABI_EXTEND(bool of_node_reused:1)
+
+};
+/* allocator for device_rh */
+extern void device_rh_alloc(struct device *dev);
+extern void device_rh_free(struct device *dev);
 
 static inline struct device *kobj_to_dev(struct kobject *kobj)
 {
@@ -1004,32 +935,6 @@ static inline void set_dev_node(struct device *dev, int node)
 }
 #endif
 
-static inline struct irq_domain *dev_get_msi_domain(const struct device *dev)
-{
-#ifdef CONFIG_GENERIC_MSI_IRQ_DOMAIN
-	return dev->msi_domain;
-#else
-	return NULL;
-#endif
-}
-
-static inline void dev_set_msi_domain(struct device *dev, struct irq_domain *d)
-{
-#ifdef CONFIG_GENERIC_MSI_IRQ_DOMAIN
-	dev->msi_domain = d;
-#endif
-}
-
-static inline void *dev_get_drvdata(const struct device *dev)
-{
-	return dev->driver_data;
-}
-
-static inline void dev_set_drvdata(struct device *dev, void *data)
-{
-	dev->driver_data = data;
-}
-
 static inline struct pm_subsys_data *dev_to_psd(struct device *dev)
 {
 	return dev ? dev->power.subsys_data : NULL;
@@ -1067,21 +972,16 @@ static inline bool device_async_suspend_enabled(struct device *dev)
 	return !!dev->power.async_suspend;
 }
 
+static inline void pm_suspend_ignore_children(struct device *dev, bool enable)
+{
+	dev->power.ignore_children = enable;
+}
+
 static inline void dev_pm_syscore_device(struct device *dev, bool val)
 {
 #ifdef CONFIG_PM_SLEEP
 	dev->power.syscore = val;
 #endif
-}
-
-static inline void dev_pm_set_driver_flags(struct device *dev, u32 flags)
-{
-	dev->power.driver_flags = flags;
-}
-
-static inline bool dev_pm_test_driver_flags(struct device *dev, u32 flags)
-{
-	return !!(dev->power.driver_flags & flags);
 }
 
 static inline void device_lock(struct device *dev)
@@ -1102,11 +1002,6 @@ static inline int device_trylock(struct device *dev)
 static inline void device_unlock(struct device *dev)
 {
 	mutex_unlock(&dev->mutex);
-}
-
-static inline void device_lock_assert(struct device *dev)
-{
-	lockdep_assert_held(&dev->mutex);
 }
 
 static inline struct device_node *dev_of_node(struct device *dev)
@@ -1138,6 +1033,8 @@ extern int device_move(struct device *dev, struct device *new_parent,
 extern const char *device_get_devnode(struct device *dev,
 				      umode_t *mode, kuid_t *uid, kgid_t *gid,
 				      const char **tmp);
+extern void *dev_get_drvdata(const struct device *dev);
+extern int dev_set_drvdata(struct device *dev, void *data);
 
 static inline bool device_supports_offline(struct device *dev)
 {
@@ -1147,18 +1044,12 @@ static inline bool device_supports_offline(struct device *dev)
 extern void lock_device_hotplug(void);
 extern void unlock_device_hotplug(void);
 extern int lock_device_hotplug_sysfs(void);
+void assert_held_device_hotplug(void);
 extern int device_offline(struct device *dev);
 extern int device_online(struct device *dev);
 extern void set_primary_fwnode(struct device *dev, struct fwnode_handle *fwnode);
 extern void set_secondary_fwnode(struct device *dev, struct fwnode_handle *fwnode);
 void device_set_of_node_from_dev(struct device *dev, const struct device *dev2);
-
-static inline int dev_num_vf(struct device *dev)
-{
-	if (dev->bus && dev->bus->num_vf)
-		return dev->bus->num_vf(dev);
-	return 0;
-}
 
 /*
  * Root device objects for grouping under /sys/devices
@@ -1166,7 +1057,10 @@ static inline int dev_num_vf(struct device *dev)
 extern struct device *__root_device_register(const char *name,
 					     struct module *owner);
 
-/* This is a macro to avoid include problems with THIS_MODULE */
+/*
+ * This is a macro to avoid include problems with THIS_MODULE,
+ * just as per what is done for device_schedule_callback() above.
+ */
 #define root_device_register(name) \
 	__root_device_register(name, THIS_MODULE)
 
@@ -1185,7 +1079,6 @@ extern int __must_check device_bind_driver(struct device *dev);
 extern void device_release_driver(struct device *dev);
 extern int  __must_check device_attach(struct device *dev);
 extern int __must_check driver_attach(struct device_driver *drv);
-extern void device_initial_probe(struct device *dev);
 extern int __must_check device_reprobe(struct device *dev);
 
 extern bool device_is_bound(struct device *dev);
@@ -1193,10 +1086,12 @@ extern bool device_is_bound(struct device *dev);
 /*
  * Easy functions for dynamically creating devices on the fly
  */
-extern __printf(5, 0)
-struct device *device_create_vargs(struct class *cls, struct device *parent,
-				   dev_t devt, void *drvdata,
-				   const char *fmt, va_list vargs);
+extern struct device *device_create_vargs(struct class *cls,
+					  struct device *parent,
+					  dev_t devt,
+					  void *drvdata,
+					  const char *fmt,
+					  va_list vargs);
 extern __printf(5, 6)
 struct device *device_create(struct class *cls, struct device *parent,
 			     dev_t devt, void *drvdata,
@@ -1228,15 +1123,6 @@ static inline void device_remove_group(struct device *dev,
 
 	return device_remove_groups(dev, groups);
 }
-
-extern int __must_check devm_device_add_groups(struct device *dev,
-					const struct attribute_group **groups);
-extern void devm_device_remove_groups(struct device *dev,
-				      const struct attribute_group **groups);
-extern int __must_check devm_device_add_group(struct device *dev,
-					const struct attribute_group *grp);
-extern void devm_device_remove_group(struct device *dev,
-				     const struct attribute_group *grp);
 
 /*
  * Platform "fixup" functions - allow the platform to have their say
@@ -1272,10 +1158,6 @@ extern void device_shutdown(void);
 /* debugging and troubleshooting/diagnostic helpers. */
 extern const char *dev_driver_string(const struct device *dev);
 
-/* Device links interface. */
-struct device_link *device_link_add(struct device *consumer,
-				    struct device *supplier, u32 flags);
-void device_link_del(struct device_link *link);
 
 #ifdef CONFIG_PRINTK
 
@@ -1286,22 +1168,22 @@ extern __printf(3, 4)
 int dev_printk_emit(int level, const struct device *dev, const char *fmt, ...);
 
 extern __printf(3, 4)
-void dev_printk(const char *level, const struct device *dev,
-		const char *fmt, ...);
+int dev_printk(const char *level, const struct device *dev,
+	       const char *fmt, ...);
 extern __printf(2, 3)
-void dev_emerg(const struct device *dev, const char *fmt, ...);
+int dev_emerg(const struct device *dev, const char *fmt, ...);
 extern __printf(2, 3)
-void dev_alert(const struct device *dev, const char *fmt, ...);
+int dev_alert(const struct device *dev, const char *fmt, ...);
 extern __printf(2, 3)
-void dev_crit(const struct device *dev, const char *fmt, ...);
+int dev_crit(const struct device *dev, const char *fmt, ...);
 extern __printf(2, 3)
-void dev_err(const struct device *dev, const char *fmt, ...);
+int dev_err(const struct device *dev, const char *fmt, ...);
 extern __printf(2, 3)
-void dev_warn(const struct device *dev, const char *fmt, ...);
+int dev_warn(const struct device *dev, const char *fmt, ...);
 extern __printf(2, 3)
-void dev_notice(const struct device *dev, const char *fmt, ...);
+int dev_notice(const struct device *dev, const char *fmt, ...);
 extern __printf(2, 3)
-void _dev_info(const struct device *dev, const char *fmt, ...);
+int _dev_info(const struct device *dev, const char *fmt, ...);
 
 #else
 
@@ -1313,35 +1195,35 @@ static inline __printf(3, 4)
 int dev_printk_emit(int level, const struct device *dev, const char *fmt, ...)
 { return 0; }
 
-static inline void __dev_printk(const char *level, const struct device *dev,
-				struct va_format *vaf)
-{}
+static inline int __dev_printk(const char *level, const struct device *dev,
+			       struct va_format *vaf)
+{ return 0; }
 static inline __printf(3, 4)
-void dev_printk(const char *level, const struct device *dev,
-		const char *fmt, ...)
-{}
+int dev_printk(const char *level, const struct device *dev,
+	       const char *fmt, ...)
+{ return 0; }
 
 static inline __printf(2, 3)
-void dev_emerg(const struct device *dev, const char *fmt, ...)
-{}
+int dev_emerg(const struct device *dev, const char *fmt, ...)
+{ return 0; }
 static inline __printf(2, 3)
-void dev_crit(const struct device *dev, const char *fmt, ...)
-{}
+int dev_crit(const struct device *dev, const char *fmt, ...)
+{ return 0; }
 static inline __printf(2, 3)
-void dev_alert(const struct device *dev, const char *fmt, ...)
-{}
+int dev_alert(const struct device *dev, const char *fmt, ...)
+{ return 0; }
 static inline __printf(2, 3)
-void dev_err(const struct device *dev, const char *fmt, ...)
-{}
+int dev_err(const struct device *dev, const char *fmt, ...)
+{ return 0; }
 static inline __printf(2, 3)
-void dev_warn(const struct device *dev, const char *fmt, ...)
-{}
+int dev_warn(const struct device *dev, const char *fmt, ...)
+{ return 0; }
 static inline __printf(2, 3)
-void dev_notice(const struct device *dev, const char *fmt, ...)
-{}
+int dev_notice(const struct device *dev, const char *fmt, ...)
+{ return 0; }
 static inline __printf(2, 3)
-void _dev_info(const struct device *dev, const char *fmt, ...)
-{}
+int _dev_info(const struct device *dev, const char *fmt, ...)
+{ return 0; }
 
 #endif
 
@@ -1367,6 +1249,7 @@ do {						     \
 ({								\
 	if (0)							\
 		dev_printk(KERN_DEBUG, dev, format, ##arg);	\
+	0;							\
 })
 #endif
 
@@ -1403,7 +1286,7 @@ do {									\
 #define dev_info_once(dev, fmt, ...)					\
 	dev_level_once(dev_info, dev, fmt, ##__VA_ARGS__)
 #define dev_dbg_once(dev, fmt, ...)					\
-	dev_level_once(dev_dbg, dev, fmt, ##__VA_ARGS__)
+	dev_level_once(dev_info, dev, fmt, ##__VA_ARGS__)
 
 #define dev_level_ratelimited(dev_level, dev, fmt, ...)			\
 do {									\
@@ -1451,11 +1334,8 @@ do {									\
 		dev_printk(KERN_DEBUG, dev, fmt, ##__VA_ARGS__);	\
 } while (0)
 #else
-#define dev_dbg_ratelimited(dev, fmt, ...)				\
-do {									\
-	if (0)								\
-		dev_printk(KERN_DEBUG, dev, fmt, ##__VA_ARGS__);	\
-} while (0)
+#define dev_dbg_ratelimited(dev, fmt, ...)			\
+	no_printk(KERN_DEBUG pr_fmt(fmt), ##__VA_ARGS__)
 #endif
 
 #ifdef VERBOSE_DEBUG
@@ -1465,19 +1345,21 @@ do {									\
 ({								\
 	if (0)							\
 		dev_printk(KERN_DEBUG, dev, format, ##arg);	\
+	0;							\
 })
 #endif
 
 /*
- * dev_WARN*() acts like dev_printk(), but with the key difference of
- * using WARN/WARN_ONCE to include file/line information and a backtrace.
+ * dev_WARN*() acts like dev_printk(), but with the key difference
+ * of using a WARN/WARN_ON to get the message out, including the
+ * file/line information and a backtrace.
  */
 #define dev_WARN(dev, format, arg...) \
-	WARN(1, "%s %s: " format, dev_driver_string(dev), dev_name(dev), ## arg);
+	WARN(1, "Device: %s\n" format, dev_driver_string(dev), ## arg);
 
 #define dev_WARN_ONCE(dev, condition, format, arg...) \
-	WARN_ONCE(condition, "%s %s: " format, \
-			dev_driver_string(dev), dev_name(dev), ## arg)
+	WARN_ONCE(condition, "Device %s\n" format, \
+			dev_driver_string(dev), ## arg)
 
 /* Create alias, so I can be autoloaded. */
 #define MODULE_ALIAS_CHARDEV(major,minor) \
@@ -1516,27 +1398,5 @@ static void __exit __driver##_exit(void) \
 	__unregister(&(__driver) , ##__VA_ARGS__); \
 } \
 module_exit(__driver##_exit);
-
-/**
- * builtin_driver() - Helper macro for drivers that don't do anything
- * special in init and have no exit. This eliminates some boilerplate.
- * Each driver may only use this macro once, and calling it replaces
- * device_initcall (or in some cases, the legacy __initcall).  This is
- * meant to be a direct parallel of module_driver() above but without
- * the __exit stuff that is not used for builtin cases.
- *
- * @__driver: driver name
- * @__register: register function for this driver type
- * @...: Additional arguments to be passed to __register
- *
- * Use this macro to construct bus specific macros for registering
- * drivers, and do not use it on its own.
- */
-#define builtin_driver(__driver, __register, ...) \
-static int __init __driver##_init(void) \
-{ \
-	return __register(&(__driver) , ##__VA_ARGS__); \
-} \
-device_initcall(__driver##_init);
 
 #endif /* _DEVICE_H_ */

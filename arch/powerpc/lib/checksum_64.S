@@ -16,15 +16,14 @@
 #include <asm/processor.h>
 #include <asm/errno.h>
 #include <asm/ppc_asm.h>
-#include <asm/export.h>
 
 /*
  * Computes the checksum of a memory block at buff, length len,
  * and adds in "sum" (32-bit).
  *
- * __csum_partial(r3=buff, r4=len, r5=sum)
+ * csum_partial(r3=buff, r4=len, r5=sum)
  */
-_GLOBAL(__csum_partial)
+_GLOBAL(csum_partial)
 	addic	r0,r5,0			/* clear carry */
 
 	srdi.	r6,r4,3			/* less than 8 bytes? */
@@ -181,27 +180,38 @@ _GLOBAL(__csum_partial)
 	add	r3,r4,r0
 	srdi	r3,r3,32
 	blr
-EXPORT_SYMBOL(__csum_partial)
 
 
 	.macro srcnr
 100:
-	EX_TABLE(100b,.Lsrc_error_nr)
+	.section __ex_table,"a"
+	.align 3
+	.llong 100b,.Lsrc_error_nr
+	.previous
 	.endm
 
 	.macro source
 150:
-	EX_TABLE(150b,.Lsrc_error)
+	.section __ex_table,"a"
+	.align 3
+	.llong 150b,.Lsrc_error
+	.previous
 	.endm
 
 	.macro dstnr
 200:
-	EX_TABLE(200b,.Ldest_error_nr)
+	.section __ex_table,"a"
+	.align 3
+	.llong 200b,.Ldest_error_nr
+	.previous
 	.endm
 
 	.macro dest
 250:
-	EX_TABLE(250b,.Ldest_error)
+	.section __ex_table,"a"
+	.align 3
+	.llong 250b,.Ldest_error
+	.previous
 	.endm
 
 /*
@@ -428,4 +438,3 @@ dstnr;	stb	r6,0(r4)
 	li	r6,-EFAULT
 	stw	r6,0(r8)
 	blr
-EXPORT_SYMBOL(csum_partial_copy_generic)

@@ -19,19 +19,230 @@
 #include <linux/msi.h>
 #include <linux/pci.h>
 #include <linux/file.h>
+#include <linux/poll.h>
 #include <linux/vfio.h>
 #include <linux/wait.h>
+#include <linux/workqueue.h>
 #include <linux/slab.h>
 
 #include "vfio_pci_private.h"
 
 /*
+ * IRQfd - generic
+ */
+struct virqfd {
+	struct vfio_pci_device	*vdev;
+	struct eventfd_ctx	*eventfd;
+	int			(*handler)(struct vfio_pci_device *, void *);
+	void			(*thread)(struct vfio_pci_device *, void *);
+	void			*data;
+	struct work_struct	inject;
+	wait_queue_t		wait;
+	poll_table		pt;
+	struct work_struct	shutdown;
+	struct virqfd		**pvirqfd;
+};
+
+static struct workqueue_struct *vfio_irqfd_cleanup_wq;
+
+int __init vfio_pci_virqfd_init(void)
+{
+	vfio_irqfd_cleanup_wq =
+		create_singlethread_workqueue("vfio-irqfd-cleanup");
+	if (!vfio_irqfd_cleanup_wq)
+		return -ENOMEM;
+
+	return 0;
+}
+
+void vfio_pci_virqfd_exit(void)
+{
+	destroy_workqueue(vfio_irqfd_cleanup_wq);
+}
+
+static void virqfd_deactivate(struct virqfd *virqfd)
+{
+	queue_work(vfio_irqfd_cleanup_wq, &virqfd->shutdown);
+}
+
+static int virqfd_wakeup(wait_queue_t *wait, unsigned mode, int sync, void *key)
+{
+	struct virqfd *virqfd = container_of(wait, struct virqfd, wait);
+	unsigned long flags = (unsigned long)key;
+
+	if (flags & POLLIN) {
+		/* An event has been signaled, call function */
+		if ((!virqfd->handler ||
+		     virqfd->handler(virqfd->vdev, virqfd->data)) &&
+		    virqfd->thread)
+			schedule_work(&virqfd->inject);
+	}
+
+	if (flags & POLLHUP) {
+		unsigned long flags;
+		spin_lock_irqsave(&virqfd->vdev->irqlock, flags);
+
+		/*
+		 * The eventfd is closing, if the virqfd has not yet been
+		 * queued for release, as determined by testing whether the
+		 * vdev pointer to it is still valid, queue it now.  As
+		 * with kvm irqfds, we know we won't race against the virqfd
+		 * going away because we hold wqh->lock to get here.
+		 */
+		if (*(virqfd->pvirqfd) == virqfd) {
+			*(virqfd->pvirqfd) = NULL;
+			virqfd_deactivate(virqfd);
+		}
+
+		spin_unlock_irqrestore(&virqfd->vdev->irqlock, flags);
+	}
+
+	return 0;
+}
+
+static void virqfd_ptable_queue_proc(struct file *file,
+				     wait_queue_head_t *wqh, poll_table *pt)
+{
+	struct virqfd *virqfd = container_of(pt, struct virqfd, pt);
+	add_wait_queue(wqh, &virqfd->wait);
+}
+
+static void virqfd_shutdown(struct work_struct *work)
+{
+	struct virqfd *virqfd = container_of(work, struct virqfd, shutdown);
+	u64 cnt;
+
+	eventfd_ctx_remove_wait_queue(virqfd->eventfd, &virqfd->wait, &cnt);
+	flush_work(&virqfd->inject);
+	eventfd_ctx_put(virqfd->eventfd);
+
+	kfree(virqfd);
+}
+
+static void virqfd_inject(struct work_struct *work)
+{
+	struct virqfd *virqfd = container_of(work, struct virqfd, inject);
+	if (virqfd->thread)
+		virqfd->thread(virqfd->vdev, virqfd->data);
+}
+
+static int virqfd_enable(struct vfio_pci_device *vdev,
+			 int (*handler)(struct vfio_pci_device *, void *),
+			 void (*thread)(struct vfio_pci_device *, void *),
+			 void *data, struct virqfd **pvirqfd, int fd)
+{
+	struct fd irqfd;
+	struct eventfd_ctx *ctx;
+	struct virqfd *virqfd;
+	int ret = 0;
+	unsigned int events;
+
+	virqfd = kzalloc(sizeof(*virqfd), GFP_KERNEL);
+	if (!virqfd)
+		return -ENOMEM;
+
+	virqfd->pvirqfd = pvirqfd;
+	virqfd->vdev = vdev;
+	virqfd->handler = handler;
+	virqfd->thread = thread;
+	virqfd->data = data;
+
+	INIT_WORK(&virqfd->shutdown, virqfd_shutdown);
+	INIT_WORK(&virqfd->inject, virqfd_inject);
+
+	irqfd = fdget(fd);
+	if (!irqfd.file) {
+		ret = -EBADF;
+		goto err_fd;
+	}
+
+	ctx = eventfd_ctx_fileget(irqfd.file);
+	if (IS_ERR(ctx)) {
+		ret = PTR_ERR(ctx);
+		goto err_ctx;
+	}
+
+	virqfd->eventfd = ctx;
+
+	/*
+	 * virqfds can be released by closing the eventfd or directly
+	 * through ioctl.  These are both done through a workqueue, so
+	 * we update the pointer to the virqfd under lock to avoid
+	 * pushing multiple jobs to release the same virqfd.
+	 */
+	spin_lock_irq(&vdev->irqlock);
+
+	if (*pvirqfd) {
+		spin_unlock_irq(&vdev->irqlock);
+		ret = -EBUSY;
+		goto err_busy;
+	}
+	*pvirqfd = virqfd;
+
+	spin_unlock_irq(&vdev->irqlock);
+
+	/*
+	 * Install our own custom wake-up handling so we are notified via
+	 * a callback whenever someone signals the underlying eventfd.
+	 */
+	init_waitqueue_func_entry(&virqfd->wait, virqfd_wakeup);
+	init_poll_funcptr(&virqfd->pt, virqfd_ptable_queue_proc);
+
+	events = irqfd.file->f_op->poll(irqfd.file, &virqfd->pt);
+
+	/*
+	 * Check if there was an event already pending on the eventfd
+	 * before we registered and trigger it as if we didn't miss it.
+	 */
+	if (events & POLLIN) {
+		if ((!handler || handler(vdev, data)) && thread)
+			schedule_work(&virqfd->inject);
+	}
+
+	/*
+	 * Do not drop the file until the irqfd is fully initialized,
+	 * otherwise we might race against the POLLHUP.
+	 */
+	fdput(irqfd);
+
+	return 0;
+err_busy:
+	eventfd_ctx_put(ctx);
+err_ctx:
+	fdput(irqfd);
+err_fd:
+	kfree(virqfd);
+
+	return ret;
+}
+
+static void virqfd_disable(struct vfio_pci_device *vdev,
+			   struct virqfd **pvirqfd)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&vdev->irqlock, flags);
+
+	if (*pvirqfd) {
+		virqfd_deactivate(*pvirqfd);
+		*pvirqfd = NULL;
+	}
+
+	spin_unlock_irqrestore(&vdev->irqlock, flags);
+
+	/*
+	 * Block until we know all outstanding shutdown jobs have completed.
+	 * Even if we don't queue the job, flush the wq to be sure it's
+	 * been released.
+	 */
+	flush_workqueue(vfio_irqfd_cleanup_wq);
+}
+
+/*
  * INTx
  */
-static void vfio_send_intx_eventfd(void *opaque, void *unused)
+static void vfio_send_intx_eventfd(struct vfio_pci_device *vdev, void *unused)
 {
-	struct vfio_pci_device *vdev = opaque;
-
 	if (likely(is_intx(vdev) && !vdev->virq_disabled))
 		eventfd_signal(vdev->ctx[0].trigger, 1);
 }
@@ -74,9 +285,9 @@ void vfio_pci_intx_mask(struct vfio_pci_device *vdev)
  * a signal is necessary, which can then be handled via a work queue
  * or directly depending on the caller.
  */
-static int vfio_pci_intx_unmask_handler(void *opaque, void *unused)
+static int vfio_pci_intx_unmask_handler(struct vfio_pci_device *vdev,
+					void *unused)
 {
-	struct vfio_pci_device *vdev = opaque;
 	struct pci_dev *pdev = vdev->pdev;
 	unsigned long flags;
 	int ret = 0;
@@ -228,8 +439,8 @@ static int vfio_intx_set_signal(struct vfio_pci_device *vdev, int fd)
 
 static void vfio_intx_disable(struct vfio_pci_device *vdev)
 {
-	vfio_virqfd_disable(&vdev->ctx[0].unmask);
-	vfio_virqfd_disable(&vdev->ctx[0].mask);
+	virqfd_disable(vdev, &vdev->ctx[0].unmask);
+	virqfd_disable(vdev, &vdev->ctx[0].mask);
 	vfio_intx_set_signal(vdev, -1);
 	vdev->irq_type = VFIO_PCI_NUM_IRQS;
 	vdev->num_ctx = 0;
@@ -250,8 +461,8 @@ static irqreturn_t vfio_msihandler(int irq, void *arg)
 static int vfio_msi_enable(struct vfio_pci_device *vdev, int nvec, bool msix)
 {
 	struct pci_dev *pdev = vdev->pdev;
-	unsigned int flag = msix ? PCI_IRQ_MSIX : PCI_IRQ_MSI;
 	int ret;
+	u16 cmd;
 
 	if (!is_irq_none(vdev))
 		return -EINVAL;
@@ -260,13 +471,38 @@ static int vfio_msi_enable(struct vfio_pci_device *vdev, int nvec, bool msix)
 	if (!vdev->ctx)
 		return -ENOMEM;
 
-	/* return the number of supported vectors if we can't get all: */
-	ret = pci_alloc_irq_vectors(pdev, 1, nvec, flag);
-	if (ret < nvec) {
-		if (ret > 0)
-			pci_free_irq_vectors(pdev);
-		kfree(vdev->ctx);
-		return ret;
+	if (msix) {
+		int i;
+
+		vdev->msix = kzalloc(nvec * sizeof(struct msix_entry),
+				     GFP_KERNEL);
+		if (!vdev->msix) {
+			kfree(vdev->ctx);
+			return -ENOMEM;
+		}
+
+		for (i = 0; i < nvec; i++)
+			vdev->msix[i].entry = i;
+
+		cmd = vfio_pci_memory_lock_and_enable(vdev);
+		ret = pci_enable_msix_range(pdev, vdev->msix, 1, nvec);
+		if (ret < nvec) {
+			if (ret > 0)
+				pci_disable_msix(pdev);
+			vfio_pci_memory_unlock_and_restore(vdev, cmd);
+			kfree(vdev->msix);
+			kfree(vdev->ctx);
+			return ret;
+		}
+		vfio_pci_memory_unlock_and_restore(vdev, cmd);
+	} else {
+		ret = pci_enable_msi_range(pdev, 1, nvec);
+		if (ret < nvec) {
+			if (ret > 0)
+				pci_disable_msi(pdev);
+			kfree(vdev->ctx);
+			return ret;
+		}
 	}
 
 	vdev->num_ctx = nvec;
@@ -290,15 +526,20 @@ static int vfio_msi_set_vector_signal(struct vfio_pci_device *vdev,
 	struct pci_dev *pdev = vdev->pdev;
 	struct eventfd_ctx *trigger;
 	int irq, ret;
+	u16 cmd;
 
 	if (vector < 0 || vector >= vdev->num_ctx)
 		return -EINVAL;
 
-	irq = pci_irq_vector(pdev, vector);
+	irq = msix ? vdev->msix[vector].vector : pdev->irq + vector;
 
 	if (vdev->ctx[vector].trigger) {
-		free_irq(irq, vdev->ctx[vector].trigger);
 		irq_bypass_unregister_producer(&vdev->ctx[vector].producer);
+
+		cmd = vfio_pci_memory_lock_and_enable(vdev);
+		free_irq(irq, vdev->ctx[vector].trigger);
+		vfio_pci_memory_unlock_and_restore(vdev, cmd);
+
 		kfree(vdev->ctx[vector].name);
 		eventfd_ctx_put(vdev->ctx[vector].trigger);
 		vdev->ctx[vector].trigger = NULL;
@@ -326,15 +567,17 @@ static int vfio_msi_set_vector_signal(struct vfio_pci_device *vdev,
 	 * such a reset it would be unsuccessful. To avoid this, restore the
 	 * cached value of the message prior to enabling.
 	 */
+	cmd = vfio_pci_memory_lock_and_enable(vdev);
 	if (msix) {
 		struct msi_msg msg;
 
 		get_cached_msi_msg(irq, &msg);
-		pci_write_msi_msg(irq, &msg);
+		write_msi_msg(irq, &msg);
 	}
 
 	ret = request_irq(irq, vfio_msihandler, 0,
 			  vdev->ctx[vector].name, trigger);
+	vfio_pci_memory_unlock_and_restore(vdev, cmd);
 	if (ret) {
 		kfree(vdev->ctx[vector].name);
 		eventfd_ctx_put(trigger);
@@ -379,15 +622,22 @@ static void vfio_msi_disable(struct vfio_pci_device *vdev, bool msix)
 {
 	struct pci_dev *pdev = vdev->pdev;
 	int i;
+	u16 cmd;
 
 	for (i = 0; i < vdev->num_ctx; i++) {
-		vfio_virqfd_disable(&vdev->ctx[i].unmask);
-		vfio_virqfd_disable(&vdev->ctx[i].mask);
+		virqfd_disable(vdev, &vdev->ctx[i].unmask);
+		virqfd_disable(vdev, &vdev->ctx[i].mask);
 	}
 
 	vfio_msi_set_block(vdev, 0, vdev->num_ctx, NULL, msix);
 
-	pci_free_irq_vectors(pdev);
+	if (msix) {
+		cmd = vfio_pci_memory_lock_and_enable(vdev);
+		pci_disable_msix(vdev->pdev);
+		vfio_pci_memory_unlock_and_restore(vdev, cmd);
+		kfree(vdev->msix);
+	} else
+		pci_disable_msi(pdev);
 
 	/*
 	 * Both disable paths above use pci_intx_for_msi() to clear DisINTx
@@ -420,12 +670,11 @@ static int vfio_pci_set_intx_unmask(struct vfio_pci_device *vdev,
 	} else if (flags & VFIO_IRQ_SET_DATA_EVENTFD) {
 		int32_t fd = *(int32_t *)data;
 		if (fd >= 0)
-			return vfio_virqfd_enable((void *) vdev,
-						  vfio_pci_intx_unmask_handler,
-						  vfio_send_intx_eventfd, NULL,
-						  &vdev->ctx[0].unmask, fd);
+			return virqfd_enable(vdev, vfio_pci_intx_unmask_handler,
+					     vfio_send_intx_eventfd, NULL,
+					     &vdev->ctx[0].unmask, fd);
 
-		vfio_virqfd_disable(&vdev->ctx[0].unmask);
+		virqfd_disable(vdev, &vdev->ctx[0].unmask);
 	}
 
 	return 0;

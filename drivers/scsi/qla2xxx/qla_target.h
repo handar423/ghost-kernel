@@ -28,6 +28,7 @@
 #ifndef __QLA_TARGET_H
 #define __QLA_TARGET_H
 
+#include <asm/unaligned.h>
 #include "qla_def.h"
 
 /*
@@ -682,7 +683,7 @@ struct qla_tgt_cmd;
  * target module (tcm_qla2xxx).
  */
 struct qla_tgt_func_tmpl {
-
+	struct qla_tgt_cmd *(*find_cmd_by_tag)(struct fc_port *, uint64_t);
 	int (*handle_cmd)(struct scsi_qla_host *, struct qla_tgt_cmd *,
 			unsigned char *, uint32_t, int, int, int);
 	void (*handle_data)(struct qla_tgt_cmd *);
@@ -863,7 +864,7 @@ enum trace_flags {
 	TRC_CTIO_ERR = BIT_11,
 	TRC_CTIO_DONE = BIT_12,
 	TRC_CTIO_ABORTED =  BIT_13,
-	TRC_CTIO_STRANGE= BIT_14,
+	TRC_CTIO_STRANGE = BIT_14,
 	TRC_CMD_DONE = BIT_15,
 	TRC_CMD_CHK_STOP = BIT_16,
 	TRC_CMD_FREE = BIT_17,
@@ -898,8 +899,7 @@ struct qla_tgt_cmd {
 	unsigned int cmd_sent_to_fw:1;
 	unsigned int cmd_in_wq:1;
 	unsigned int aborted:1;
-	unsigned int data_work:1;
-	unsigned int data_work_free:1;
+	unsigned int released:1;
 
 	struct scatterlist *sg;	/* cmd data buffer SG vector */
 	int sg_cnt;		/* SG segments count */
@@ -908,6 +908,7 @@ struct qla_tgt_cmd {
 	u64 unpacked_lun;
 	enum dma_data_direction dma_data_direction;
 
+	uint16_t ctio_flags;
 	uint16_t vp_idx;
 	uint16_t loop_id;	/* to save extra sess dereferences */
 	struct qla_tgt *tgt;	/* to save extra sess dereferences */
@@ -934,6 +935,8 @@ struct qla_tgt_cmd {
 	uint64_t	lba;
 	uint16_t	a_guard, e_guard, a_app_tag, e_app_tag;
 	uint32_t	a_ref_tag, e_ref_tag;
+#define DIF_BUNDL_DMA_VALID 1
+	uint16_t prot_flags;
 
 	uint64_t jiffies_at_alloc;
 	uint64_t jiffies_at_free;
@@ -956,16 +959,22 @@ struct qla_tgt_sess_work_param {
 };
 
 struct qla_tgt_mgmt_cmd {
+	uint8_t cmd_type;
+	uint8_t pad[3];
 	uint16_t tmr_func;
 	uint8_t fc_tm_rsp;
+	uint8_t abort_io_attr;
 	struct fc_port *sess;
 	struct qla_qpair *qpair;
 	struct scsi_qla_host *vha;
 	struct se_cmd se_cmd;
 	struct work_struct free_work;
 	unsigned int flags;
+#define QLA24XX_MGMT_SEND_NACK	BIT_0
+#define QLA24XX_MGMT_ABORT_IO_ATTR_VALID BIT_1
 	uint32_t reset_count;
-#define QLA24XX_MGMT_SEND_NACK	1
+	struct work_struct work;
+	uint64_t unpacked_lun;
 	union {
 		struct atio_from_isp atio;
 		struct imm_ntfy_from_isp imm_ntfy;
@@ -978,10 +987,10 @@ struct qla_tgt_prm {
 	struct qla_tgt *tgt;
 	void *pkt;
 	struct scatterlist *sg;	/* cmd data buffer SG vector */
-	unsigned char *sense_buffer;
 	int seg_cnt;
 	int req_cnt;
 	uint16_t rq_result;
+	unsigned char *sense_buffer;
 	int sense_buffer_len;
 	int residual;
 	int add_status_pkt;
@@ -993,7 +1002,7 @@ struct qla_tgt_prm {
 
 /* Check for Switch reserved address */
 #define IS_SW_RESV_ADDR(_s_id) \
-	((_s_id.b.domain == 0xff) && (_s_id.b.area == 0xfc))
+	((_s_id.b.domain == 0xff) && ((_s_id.b.area & 0xf0) == 0xf0))
 
 #define QLA_TGT_XMIT_DATA		1
 #define QLA_TGT_XMIT_STATUS		2
@@ -1016,7 +1025,7 @@ extern void qlt_fc_port_deleted(struct scsi_qla_host *, fc_port_t *, int);
 extern int __init qlt_init(void);
 extern void qlt_exit(void);
 extern void qlt_update_vp_map(struct scsi_qla_host *, int);
-
+extern void qlt_free_session_done(struct work_struct *);
 /*
  * This macro is used during early initializations when host->active_mode
  * is not set. Right now, ha value is ignored.
@@ -1072,7 +1081,7 @@ extern void qlt_free_cmd(struct qla_tgt_cmd *cmd);
 extern void qlt_async_event(uint16_t, struct scsi_qla_host *, uint16_t *);
 extern void qlt_enable_vha(struct scsi_qla_host *);
 extern void qlt_vport_create(struct scsi_qla_host *, struct qla_hw_data *);
-extern void qlt_rff_id(struct scsi_qla_host *, struct ct_sns_req *);
+extern u8 qlt_rff_id(struct scsi_qla_host *);
 extern void qlt_init_atio_q_entries(struct scsi_qla_host *);
 extern void qlt_24xx_process_atio_queue(struct scsi_qla_host *, uint8_t);
 extern void qlt_24xx_config_rings(struct scsi_qla_host *);

@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * temp.c	Thermal management for cpu's with Thermal Assist Units
  *
@@ -188,7 +187,7 @@ static void tau_timeout(void * info)
 	local_irq_restore(flags);
 }
 
-static void tau_timeout_smp(struct timer_list *unused)
+static void tau_timeout_smp(unsigned long unused)
 {
 
 	/* schedule ourselves to be run again */
@@ -230,7 +229,8 @@ int __init TAU_init(void)
 
 
 	/* first, set up the window shrinking timer */
-	timer_setup(&tau_timer, tau_timeout_smp, 0);
+	init_timer(&tau_timer);
+	tau_timer.function = tau_timeout_smp;
 	tau_timer.expires = jiffies + shrink_timer;
 	add_timer(&tau_timer);
 

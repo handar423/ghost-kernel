@@ -17,7 +17,6 @@
 #include <linux/export.h>
 #include <linux/stat.h>
 #include <linux/slab.h>
-#include <linux/random.h>
 
 /**
  * kobject_namespace - return @kobj's namespace tag
@@ -206,8 +205,9 @@ static int kobject_add_internal(struct kobject *kobj)
 		return -ENOENT;
 
 	if (!kobj->name || !kobj->name[0]) {
-		WARN(1, "kobject: (%p): attempted to be registered with empty "
-			 "name!\n", kobj);
+		WARN(1,
+		     "kobject: (%p): attempted to be registered with empty name!\n",
+		     kobj);
 		return -EINVAL;
 	}
 
@@ -234,14 +234,12 @@ static int kobject_add_internal(struct kobject *kobj)
 
 		/* be noisy on error issues */
 		if (error == -EEXIST)
-			WARN(1, "%s failed for %s with "
-			     "-EEXIST, don't try to register things with "
-			     "the same name in the same directory.\n",
-			     __func__, kobject_name(kobj));
+			pr_err("%s failed for %s with -EEXIST, don't try to register things with the same name in the same directory.\n",
+			       __func__, kobject_name(kobj));
 		else
-			WARN(1, "%s failed for %s (error: %d parent: %s)\n",
-			     __func__, kobject_name(kobj), error,
-			     parent ? kobject_name(parent) : "'none'");
+			pr_err("%s failed for %s (error: %d parent: %s)\n",
+			       __func__, kobject_name(kobj), error,
+			       parent ? kobject_name(parent) : "'none'");
 	} else
 		kobj->state_in_sysfs = 1;
 
@@ -257,34 +255,23 @@ static int kobject_add_internal(struct kobject *kobj)
 int kobject_set_name_vargs(struct kobject *kobj, const char *fmt,
 				  va_list vargs)
 {
-	const char *s;
+	const char *old_name = kobj->name;
+	char *s;
 
 	if (kobj->name && !fmt)
 		return 0;
 
-	s = kvasprintf_const(GFP_KERNEL, fmt, vargs);
-	if (!s)
+	kobj->name = kvasprintf(GFP_KERNEL, fmt, vargs);
+	if (!kobj->name) {
+		kobj->name = old_name;
 		return -ENOMEM;
-
-	/*
-	 * ewww... some of these buggers have '/' in the name ... If
-	 * that's the case, we need to make sure we have an actual
-	 * allocated copy to modify, since kvasprintf_const may have
-	 * returned something from .rodata.
-	 */
-	if (strchr(s, '/')) {
-		char *t;
-
-		t = kstrdup(s, GFP_KERNEL);
-		kfree_const(s);
-		if (!t)
-			return -ENOMEM;
-		strreplace(t, '/', '!');
-		s = t;
 	}
-	kfree_const(kobj->name);
-	kobj->name = s;
 
+	/* ewww... some of these buggers have '/' in the name ... */
+	while ((s = strchr(kobj->name, '/')))
+		s[0] = '!';
+
+	kfree(old_name);
 	return 0;
 }
 
@@ -336,8 +323,8 @@ void kobject_init(struct kobject *kobj, struct kobj_type *ktype)
 	}
 	if (kobj->state_initialized) {
 		/* do not error out as sometimes we can recover */
-		printk(KERN_ERR "kobject (%p): tried to init an initialized "
-		       "object, something is seriously wrong.\n", kobj);
+		pr_err("kobject (%p): tried to init an initialized object, something is seriously wrong.\n",
+		       kobj);
 		dump_stack();
 	}
 
@@ -346,20 +333,19 @@ void kobject_init(struct kobject *kobj, struct kobj_type *ktype)
 	return;
 
 error:
-	printk(KERN_ERR "kobject (%p): %s\n", kobj, err_str);
+	pr_err("kobject (%p): %s\n", kobj, err_str);
 	dump_stack();
 }
 EXPORT_SYMBOL(kobject_init);
 
-static __printf(3, 0) int kobject_add_varg(struct kobject *kobj,
-					   struct kobject *parent,
-					   const char *fmt, va_list vargs)
+static int kobject_add_varg(struct kobject *kobj, struct kobject *parent,
+			    const char *fmt, va_list vargs)
 {
 	int retval;
 
 	retval = kobject_set_name_vargs(kobj, fmt, vargs);
 	if (retval) {
-		printk(KERN_ERR "kobject: can not set name properly!\n");
+		pr_err("kobject: can not set name properly!\n");
 		return retval;
 	}
 	kobj->parent = parent;
@@ -401,8 +387,7 @@ int kobject_add(struct kobject *kobj, struct kobject *parent,
 		return -EINVAL;
 
 	if (!kobj->state_initialized) {
-		printk(KERN_ERR "kobject '%s' (%p): tried to add an "
-		       "uninitialized object, something is seriously wrong.\n",
+		pr_err("kobject '%s' (%p): tried to add an uninitialized object, something is seriously wrong.\n",
 		       kobject_name(kobj), kobj);
 		dump_stack();
 		return -EINVAL;
@@ -480,7 +465,7 @@ int kobject_rename(struct kobject *kobj, const char *new_name)
 	envp[0] = devpath_string;
 	envp[1] = NULL;
 
-	name = dup_name = kstrdup_const(new_name, GFP_KERNEL);
+	name = dup_name = kstrdup(new_name, GFP_KERNEL);
 	if (!name) {
 		error = -ENOMEM;
 		goto out;
@@ -500,7 +485,7 @@ int kobject_rename(struct kobject *kobj, const char *new_name)
 	kobject_uevent_env(kobj, KOBJ_MOVE, envp);
 
 out:
-	kfree_const(dup_name);
+	kfree(dup_name);
 	kfree(devpath_string);
 	kfree(devpath);
 	kobject_put(kobj);
@@ -560,7 +545,6 @@ out:
 	kfree(devpath);
 	return error;
 }
-EXPORT_SYMBOL_GPL(kobject_move);
 
 /**
  * kobject_del - unlink kobject from hierarchy.
@@ -592,9 +576,9 @@ struct kobject *kobject_get(struct kobject *kobj)
 {
 	if (kobj) {
 		if (!kobj->state_initialized)
-			WARN(1, KERN_WARNING "kobject: '%s' (%p): is not "
-			       "initialized, yet kobject_get() is being "
-			       "called.\n", kobject_name(kobj), kobj);
+			WARN(1, KERN_WARNING
+				"kobject: '%s' (%p): is not initialized, yet kobject_get() is being called.\n",
+			     kobject_name(kobj), kobj);
 		kref_get(&kobj->kref);
 	}
 	return kobj;
@@ -620,12 +604,11 @@ static void kobject_cleanup(struct kobject *kobj)
 	struct kobj_type *t = get_ktype(kobj);
 	const char *name = kobj->name;
 
-	pr_debug("kobject: '%s' (%p): %s, parent %p\n",
-		 kobject_name(kobj), kobj, __func__, kobj->parent);
+	pr_debug("kobject: '%s' (%p): %s\n",
+		 kobject_name(kobj), kobj, __func__);
 
 	if (t && !t->release)
-		pr_debug("kobject: '%s' (%p): does not have a release() "
-			 "function, it is broken and must be fixed.\n",
+		pr_debug("kobject: '%s' (%p): does not have a release() function, it is broken and must be fixed.\n",
 			 kobject_name(kobj), kobj);
 
 	/* send "remove" if the caller did not do it but sent "add" */
@@ -651,31 +634,13 @@ static void kobject_cleanup(struct kobject *kobj)
 	/* free name if we allocated it */
 	if (name) {
 		pr_debug("kobject: '%s': free name\n", name);
-		kfree_const(name);
+		kfree(name);
 	}
 }
 
-#ifdef CONFIG_DEBUG_KOBJECT_RELEASE
-static void kobject_delayed_cleanup(struct work_struct *work)
-{
-	kobject_cleanup(container_of(to_delayed_work(work),
-				     struct kobject, release));
-}
-#endif
-
 static void kobject_release(struct kref *kref)
 {
-	struct kobject *kobj = container_of(kref, struct kobject, kref);
-#ifdef CONFIG_DEBUG_KOBJECT_RELEASE
-	unsigned long delay = HZ + HZ * (get_random_int() & 0x3);
-	pr_info("kobject: '%s' (%p): %s, parent %p (delayed %ld)\n",
-		 kobject_name(kobj), kobj, __func__, kobj->parent, delay);
-	INIT_DELAYED_WORK(&kobj->release, kobject_delayed_cleanup);
-
-	schedule_delayed_work(&kobj->release, delay);
-#else
-	kobject_cleanup(kobj);
-#endif
+	kobject_cleanup(container_of(kref, struct kobject, kref));
 }
 
 /**
@@ -688,9 +653,9 @@ void kobject_put(struct kobject *kobj)
 {
 	if (kobj) {
 		if (!kobj->state_initialized)
-			WARN(1, KERN_WARNING "kobject: '%s' (%p): is not "
-			       "initialized, yet kobject_put() is being "
-			       "called.\n", kobject_name(kobj), kobj);
+			WARN(1, KERN_WARNING
+				"kobject: '%s' (%p): is not initialized, yet kobject_put() is being called.\n",
+			     kobject_name(kobj), kobj);
 		kref_put(&kobj->kref, kobject_release);
 	}
 }
@@ -754,8 +719,7 @@ struct kobject *kobject_create_and_add(const char *name, struct kobject *parent)
 
 	retval = kobject_add(kobj, parent, "%s", name);
 	if (retval) {
-		printk(KERN_WARNING "%s: kobject_add error: %d\n",
-		       __func__, retval);
+		pr_warn("%s: kobject_add error: %d\n", __func__, retval);
 		kobject_put(kobj);
 		kobj = NULL;
 	}
@@ -864,7 +828,6 @@ struct kobject *kset_find_obj(struct kset *kset, const char *name)
 	spin_unlock(&kset->list_lock);
 	return ret;
 }
-EXPORT_SYMBOL_GPL(kset_find_obj);
 
 static void kset_release(struct kobject *kobj)
 {
@@ -1039,6 +1002,7 @@ void *kobj_ns_grab_current(enum kobj_ns_type type)
 
 	return ns;
 }
+EXPORT_SYMBOL_GPL(kobj_ns_grab_current);
 
 const void *kobj_ns_netlink(enum kobj_ns_type type, struct sock *sk)
 {
@@ -1074,3 +1038,4 @@ void kobj_ns_drop(enum kobj_ns_type type, void *ns)
 		kobj_ns_ops_tbl[type]->drop_ns(ns);
 	spin_unlock(&kobj_ns_type_lock);
 }
+EXPORT_SYMBOL_GPL(kobj_ns_drop);

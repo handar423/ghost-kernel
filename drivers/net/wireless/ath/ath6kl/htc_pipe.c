@@ -228,7 +228,8 @@ static int htc_issue_packets(struct htc_target *target,
 		payload_len = packet->act_len;
 
 		/* setup HTC frame header */
-		htc_hdr = skb_push(skb, sizeof(*htc_hdr));
+		htc_hdr = (struct htc_frame_hdr *) skb_push(skb,
+							    sizeof(*htc_hdr));
 		if (!htc_hdr) {
 			WARN_ON_ONCE(1);
 			status = -EINVAL;
@@ -382,7 +383,7 @@ static enum htc_send_queue_result htc_try_send(struct htc_target *target,
 			list_for_each_entry_safe(packet, tmp_pkt,
 						 txq, list) {
 				ath6kl_dbg(ATH6KL_DBG_HTC,
-					   "%s: Indicate overflowed TX pkts: %p\n",
+					   "%s: Indicat overflowed TX pkts: %p\n",
 					   __func__, packet);
 				action = ep->ep_cb.tx_full(ep->target, packet);
 				if (action == HTC_SEND_FULL_DROP) {
@@ -994,7 +995,7 @@ static int ath6kl_htc_pipe_rx_complete(struct ath6kl *ar, struct sk_buff *skb,
 
 	if (netlen < (payload_len + HTC_HDR_LENGTH)) {
 		ath6kl_dbg(ATH6KL_DBG_HTC,
-			   "HTC Rx: insufficient length, got:%d expected =%zu\n",
+			   "HTC Rx: insufficient length, got:%d expected =%u\n",
 			   netlen, payload_len + HTC_HDR_LENGTH);
 		status = -EINVAL;
 		goto free_skb;
@@ -1169,12 +1170,8 @@ static int htc_wait_recv_ctrl_message(struct htc_target *target)
 static void htc_rxctrl_complete(struct htc_target *context,
 				struct htc_packet *packet)
 {
-	struct sk_buff *skb = packet->skb;
-
-	if (packet->endpoint == ENDPOINT_0 &&
-	    packet->status == -ECANCELED &&
-	    skb != NULL)
-		dev_kfree_skb(skb);
+	/* TODO, can't really receive HTC control messages yet.... */
+	ath6kl_dbg(ATH6KL_DBG_HTC, "%s: invalid call function\n", __func__);
 }
 
 /* htc pipe initialization */
@@ -1273,7 +1270,8 @@ static int ath6kl_htc_pipe_conn_service(struct htc_target *target,
 		length = sizeof(struct htc_conn_service_msg);
 
 		/* assemble connect service message */
-		conn_msg = skb_put(skb, length);
+		conn_msg = (struct htc_conn_service_msg *) skb_put(skb,
+								   length);
 		if (conn_msg == NULL) {
 			WARN_ON_ONCE(1);
 			status = -EINVAL;
@@ -1502,7 +1500,8 @@ static int ath6kl_htc_pipe_start(struct htc_target *target)
 	skb = packet->skb;
 
 	/* assemble setup complete message */
-	setup = skb_put(skb, sizeof(*setup));
+	setup = (struct htc_setup_comp_ext_msg *) skb_put(skb,
+							  sizeof(*setup));
 	memset(setup, 0, sizeof(struct htc_setup_comp_ext_msg));
 	setup->msg_id = cpu_to_le16(HTC_MSG_SETUP_COMPLETE_EX_ID);
 
@@ -1679,29 +1678,7 @@ static void ath6kl_htc_pipe_activity_changed(struct htc_target *target,
 
 static void ath6kl_htc_pipe_flush_rx_buf(struct htc_target *target)
 {
-	struct htc_endpoint *endpoint;
-	struct htc_packet *packet, *tmp_pkt;
-	int i;
-
-	for (i = ENDPOINT_0; i < ENDPOINT_MAX; i++) {
-		endpoint = &target->endpoint[i];
-
-		spin_lock_bh(&target->rx_lock);
-
-		list_for_each_entry_safe(packet, tmp_pkt,
-					 &endpoint->rx_bufq, list) {
-			list_del(&packet->list);
-			spin_unlock_bh(&target->rx_lock);
-			ath6kl_dbg(ATH6KL_DBG_HTC,
-				   "htc rx flush pkt 0x%p len %d ep %d\n",
-				   packet, packet->buf_len,
-				   packet->endpoint);
-			dev_kfree_skb(packet->pkt_cntxt);
-			spin_lock_bh(&target->rx_lock);
-		}
-
-		spin_unlock_bh(&target->rx_lock);
-	}
+	/* TODO */
 }
 
 static int ath6kl_htc_pipe_credit_setup(struct htc_target *target,

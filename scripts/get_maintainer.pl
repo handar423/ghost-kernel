@@ -1,4 +1,4 @@
-#!/usr/bin/env perl
+#!/usr/bin/perl -w
 # (c) 2007, Joe Perches <joe@perches.com>
 #           created from checkpatch.pl
 #
@@ -10,22 +10,17 @@
 #
 # Licensed under the terms of the GNU GPL License version 2
 
-use warnings;
 use strict;
 
 my $P = $0;
 my $V = '0.26';
 
 use Getopt::Long qw(:config no_auto_abbrev);
-use Cwd;
-use File::Find;
 
-my $cur_path = fastgetcwd() . '/';
 my $lk_path = "./";
 my $email = 1;
 my $email_usename = 1;
 my $email_maintainer = 1;
-my $email_reviewer = 1;
 my $email_list = 1;
 my $email_subscriber_list = 0;
 my $email_git_penguin_chiefs = 0;
@@ -46,21 +41,17 @@ my $output_multiline = 1;
 my $output_separator = ", ";
 my $output_roles = 0;
 my $output_rolestats = 1;
-my $output_section_maxlen = 50;
 my $scm = 0;
 my $web = 0;
 my $subsystem = 0;
 my $status = 0;
-my $letters = "";
 my $keywords = 1;
 my $sections = 0;
 my $file_emails = 0;
 my $from_filename = 0;
 my $pattern_depth = 0;
-my $self_test = undef;
 my $version = 0;
 my $help = 0;
-my $find_maintainer_files = 0;
 
 my $vcs_used = 0;
 
@@ -104,10 +95,9 @@ my %VCS_cmds;
 
 my %VCS_cmds_git = (
     "execute_cmd" => \&git_execute_cmd,
-    "available" => '(which("git") ne "") && (-e ".git")',
+    "available" => '(which("git") ne "") && (-d ".git")',
     "find_signers_cmd" =>
 	"git log --no-color --follow --since=\$email_git_since " .
-	    '--numstat --no-merges ' .
 	    '--format="GitCommit: %H%n' .
 		      'GitAuthor: %an <%ae>%n' .
 		      'GitDate: %aD%n' .
@@ -116,7 +106,6 @@ my %VCS_cmds_git = (
 	    " -- \$file",
     "find_commit_signers_cmd" =>
 	"git log --no-color " .
-	    '--numstat ' .
 	    '--format="GitCommit: %H%n' .
 		      'GitAuthor: %an <%ae>%n' .
 		      'GitDate: %aD%n' .
@@ -125,7 +114,6 @@ my %VCS_cmds_git = (
 	    " -1 \$commit",
     "find_commit_author_cmd" =>
 	"git log --no-color " .
-	    '--numstat ' .
 	    '--format="GitCommit: %H%n' .
 		      'GitAuthor: %an <%ae>%n' .
 		      'GitDate: %aD%n' .
@@ -137,9 +125,6 @@ my %VCS_cmds_git = (
     "blame_commit_pattern" => "^([0-9a-f]+) ",
     "author_pattern" => "^GitAuthor: (.*)",
     "subject_pattern" => "^GitSubject: (.*)",
-    "stat_pattern" => "^(\\d+)\\t(\\d+)\\t\$file\$",
-    "file_exists_cmd" => "git ls-files \$file",
-    "list_files_cmd" => "git ls-files \$file",
 );
 
 my %VCS_cmds_hg = (
@@ -167,9 +152,6 @@ my %VCS_cmds_hg = (
     "blame_commit_pattern" => "^([ 0-9a-f]+):",
     "author_pattern" => "^HgAuthor: (.*)",
     "subject_pattern" => "^HgSubject: (.*)",
-    "stat_pattern" => "^(\\d+)\t(\\d+)\t\$file\$",
-    "file_exists_cmd" => "hg files \$file",
-    "list_files_cmd" => "hg manifest -R \$file",
 );
 
 my $conf = which_conf(".get_maintainer.conf");
@@ -198,35 +180,6 @@ if (-f $conf) {
     unshift(@ARGV, @conf_args) if @conf_args;
 }
 
-my @ignore_emails = ();
-my $ignore_file = which_conf(".get_maintainer.ignore");
-if (-f $ignore_file) {
-    open(my $ignore, '<', "$ignore_file")
-	or warn "$P: Can't find a readable .get_maintainer.ignore file $!\n";
-    while (<$ignore>) {
-	my $line = $_;
-
-	$line =~ s/\s*\n?$//;
-	$line =~ s/^\s*//;
-	$line =~ s/\s+$//;
-	$line =~ s/#.*$//;
-
-	next if ($line =~ m/^\s*$/);
-	if (rfc822_valid($line)) {
-	    push(@ignore_emails, $line);
-	}
-    }
-    close($ignore);
-}
-
-if ($#ARGV > 0) {
-    foreach (@ARGV) {
-        if ($_ =~ /^-{1,2}self-test(?:=|$)/) {
-            die "$P: using --self-test does not allow any other option or argument\n";
-        }
-    }
-}
-
 if (!GetOptions(
 		'email!' => \$email,
 		'git!' => \$email_git,
@@ -244,7 +197,6 @@ if (!GetOptions(
 		'remove-duplicates!' => \$email_remove_duplicates,
 		'mailmap!' => \$email_use_mailmap,
 		'm!' => \$email_maintainer,
-		'r!' => \$email_reviewer,
 		'n!' => \$email_usename,
 		'l!' => \$email_list,
 		's!' => \$email_subscriber_list,
@@ -256,14 +208,11 @@ if (!GetOptions(
 		'status!' => \$status,
 		'scm!' => \$scm,
 		'web!' => \$web,
-		'letters=s' => \$letters,
 		'pattern-depth=i' => \$pattern_depth,
 		'k|keywords!' => \$keywords,
 		'sections!' => \$sections,
 		'fe|file-emails!' => \$file_emails,
 		'f|file' => \$from_filename,
-		'find-maintainer-files' => \$find_maintainer_files,
-		'self-test:s' => \$self_test,
 		'v|version' => \$version,
 		'h|help|usage' => \$help,
 		)) {
@@ -280,12 +229,6 @@ if ($version != 0) {
     exit 0;
 }
 
-if (defined $self_test) {
-    read_all_maintainer_files();
-    self_test();
-    exit 0;
-}
-
 if (-t STDIN && !@ARGV) {
     # We're talking to a terminal, but have no command line arguments.
     die "$P: missing patchfile or -f file - use --help if necessary\n";
@@ -295,8 +238,7 @@ $output_multiline = 0 if ($output_separator ne ", ");
 $output_rolestats = 1 if ($interactive);
 $output_roles = 1 if ($output_rolestats);
 
-if ($sections || $letters ne "") {
-    $sections = 1;
+if ($sections) {
     $email = 0;
     $email_list = 0;
     $scm = 0;
@@ -313,8 +255,7 @@ if ($sections || $letters ne "") {
 }
 
 if ($email &&
-    ($email_maintainer + $email_reviewer +
-     $email_list + $email_subscriber_list +
+    ($email_maintainer + $email_list + $email_subscriber_list +
      $email_git + $email_git_penguin_chiefs + $email_git_blame) == 0) {
     die "$P: Please select at least 1 email option\n";
 }
@@ -328,84 +269,36 @@ if (!top_of_kernel_tree($lk_path)) {
 
 my @typevalue = ();
 my %keyword_hash;
-my @mfiles = ();
-my @self_test_info = ();
 
-sub read_maintainer_file {
-    my ($file) = @_;
+open (my $maint, '<', "${lk_path}MAINTAINERS")
+    or die "$P: Can't open MAINTAINERS: $!\n";
+while (<$maint>) {
+    my $line = $_;
 
-    open (my $maint, '<', "$file")
-	or die "$P: Can't open MAINTAINERS file '$file': $!\n";
-    my $i = 1;
-    while (<$maint>) {
-	my $line = $_;
-	chomp $line;
+    if ($line =~ m/^(\C):\s*(.*)/) {
+	my $type = $1;
+	my $value = $2;
 
-	if ($line =~ m/^([A-Z]):\s*(.*)/) {
-	    my $type = $1;
-	    my $value = $2;
-
-	    ##Filename pattern matching
-	    if ($type eq "F" || $type eq "X") {
-		$value =~ s@\.@\\\.@g;       ##Convert . to \.
-		$value =~ s/\*/\.\*/g;       ##Convert * to .*
-		$value =~ s/\?/\./g;         ##Convert ? to .
-		##if pattern is a directory and it lacks a trailing slash, add one
-		if ((-d $value)) {
-		    $value =~ s@([^/])$@$1/@;
-		}
-	    } elsif ($type eq "K") {
-		$keyword_hash{@typevalue} = $value;
+	##Filename pattern matching
+	if ($type eq "F" || $type eq "X") {
+	    $value =~ s@\.@\\\.@g;       ##Convert . to \.
+	    $value =~ s/\*/\.\*/g;       ##Convert * to .*
+	    $value =~ s/\?/\./g;         ##Convert ? to .
+	    ##if pattern is a directory and it lacks a trailing slash, add one
+	    if ((-d $value)) {
+		$value =~ s@([^/])$@$1/@;
 	    }
-	    push(@typevalue, "$type:$value");
-	} elsif (!(/^\s*$/ || /^\s*\#/)) {
-	    push(@typevalue, $line);
+	} elsif ($type eq "K") {
+	    $keyword_hash{@typevalue} = $value;
 	}
-	if (defined $self_test) {
-	    push(@self_test_info, {file=>$file, linenr=>$i, line=>$line});
-	}
-	$i++;
-    }
-    close($maint);
-}
-
-sub find_is_maintainer_file {
-    my ($file) = $_;
-    return if ($file !~ m@/MAINTAINERS$@);
-    $file = $File::Find::name;
-    return if (! -f $file);
-    push(@mfiles, $file);
-}
-
-sub find_ignore_git {
-    return grep { $_ !~ /^\.git$/; } @_;
-}
-
-read_all_maintainer_files();
-
-sub read_all_maintainer_files {
-    if (-d "${lk_path}MAINTAINERS") {
-        opendir(DIR, "${lk_path}MAINTAINERS") or die $!;
-        my @files = readdir(DIR);
-        closedir(DIR);
-        foreach my $file (@files) {
-            push(@mfiles, "${lk_path}MAINTAINERS/$file") if ($file !~ /^\./);
-        }
-    }
-
-    if ($find_maintainer_files) {
-        find( { wanted => \&find_is_maintainer_file,
-                preprocess => \&find_ignore_git,
-                no_chdir => 1,
-        }, "${lk_path}");
-    } else {
-        push(@mfiles, "${lk_path}MAINTAINERS") if -f "${lk_path}MAINTAINERS";
-    }
-
-    foreach my $file (@mfiles) {
-        read_maintainer_file("$file");
+	push(@typevalue, "$type:$value");
+    } elsif (!/^(\s)*$/) {
+	$line =~ s/\n$//g;
+	push(@typevalue, $line);
     }
 }
+close($maint);
+
 
 #
 # Read mail address map
@@ -505,9 +398,7 @@ foreach my $file (@ARGV) {
 	    die "$P: file '${file}' not found\n";
 	}
     }
-    if ($from_filename || ($file ne "&STDIN" && vcs_file_exists($file))) {
-	$file =~ s/^\Q${cur_path}\E//;	#strip any absolute path
-	$file =~ s/^\Q${lk_path}\E//;	#or the path to the lk tree
+    if ($from_filename) {
 	push(@files, $file);
 	if ($file ne "MAINTAINERS" && -f $file && ($keywords || $file_emails)) {
 	    open(my $f, '<', $file)
@@ -614,151 +505,12 @@ if ($web) {
 
 exit($exit);
 
-sub self_test {
-    my @lsfiles = ();
-    my @good_links = ();
-    my @bad_links = ();
-    my @section_headers = ();
-    my $index = 0;
-
-    @lsfiles = vcs_list_files($lk_path);
-
-    for my $x (@self_test_info) {
-	$index++;
-
-	## Section header duplication and missing section content
-	if (($self_test eq "" || $self_test =~ /\bsections\b/) &&
-	    $x->{line} =~ /^\S[^:]/ &&
-	    defined $self_test_info[$index] &&
-	    $self_test_info[$index]->{line} =~ /^([A-Z]):\s*\S/) {
-	    my $has_S = 0;
-	    my $has_F = 0;
-	    my $has_ML = 0;
-	    my $status = "";
-	    if (grep(m@^\Q$x->{line}\E@, @section_headers)) {
-		print("$x->{file}:$x->{linenr}: warning: duplicate section header\t$x->{line}\n");
-	    } else {
-		push(@section_headers, $x->{line});
-	    }
-	    my $nextline = $index;
-	    while (defined $self_test_info[$nextline] &&
-		   $self_test_info[$nextline]->{line} =~ /^([A-Z]):\s*(\S.*)/) {
-		my $type = $1;
-		my $value = $2;
-		if ($type eq "S") {
-		    $has_S = 1;
-		    $status = $value;
-		} elsif ($type eq "F" || $type eq "N") {
-		    $has_F = 1;
-		} elsif ($type eq "M" || $type eq "R" || $type eq "L") {
-		    $has_ML = 1;
-		}
-		$nextline++;
-	    }
-	    if (!$has_ML && $status !~ /orphan|obsolete/i) {
-		print("$x->{file}:$x->{linenr}: warning: section without email address\t$x->{line}\n");
-	    }
-	    if (!$has_S) {
-		print("$x->{file}:$x->{linenr}: warning: section without status \t$x->{line}\n");
-	    }
-	    if (!$has_F) {
-		print("$x->{file}:$x->{linenr}: warning: section without file pattern\t$x->{line}\n");
-	    }
-	}
-
-	next if ($x->{line} !~ /^([A-Z]):\s*(.*)/);
-
-	my $type = $1;
-	my $value = $2;
-
-	## Filename pattern matching
-	if (($type eq "F" || $type eq "X") &&
-	    ($self_test eq "" || $self_test =~ /\bpatterns\b/)) {
-	    $value =~ s@\.@\\\.@g;       ##Convert . to \.
-	    $value =~ s/\*/\.\*/g;       ##Convert * to .*
-	    $value =~ s/\?/\./g;         ##Convert ? to .
-	    ##if pattern is a directory and it lacks a trailing slash, add one
-	    if ((-d $value)) {
-		$value =~ s@([^/])$@$1/@;
-	    }
-	    if (!grep(m@^$value@, @lsfiles)) {
-		print("$x->{file}:$x->{linenr}: warning: no file matches\t$x->{line}\n");
-	    }
-
-	## Link reachability
-	} elsif (($type eq "W" || $type eq "Q" || $type eq "B") &&
-		 $value =~ /^https?:/ &&
-		 ($self_test eq "" || $self_test =~ /\blinks\b/)) {
-	    next if (grep(m@^\Q$value\E$@, @good_links));
-	    my $isbad = 0;
-	    if (grep(m@^\Q$value\E$@, @bad_links)) {
-	        $isbad = 1;
-	    } else {
-		my $output = `wget --spider -q --no-check-certificate --timeout 10 --tries 1 $value`;
-		if ($? == 0) {
-		    push(@good_links, $value);
-		} else {
-		    push(@bad_links, $value);
-		    $isbad = 1;
-		}
-	    }
-	    if ($isbad) {
-	        print("$x->{file}:$x->{linenr}: warning: possible bad link\t$x->{line}\n");
-	    }
-
-	## SCM reachability
-	} elsif ($type eq "T" &&
-		 ($self_test eq "" || $self_test =~ /\bscm\b/)) {
-	    next if (grep(m@^\Q$value\E$@, @good_links));
-	    my $isbad = 0;
-	    if (grep(m@^\Q$value\E$@, @bad_links)) {
-	        $isbad = 1;
-            } elsif ($value !~ /^(?:git|quilt|hg)\s+\S/) {
-		print("$x->{file}:$x->{linenr}: warning: malformed entry\t$x->{line}\n");
-	    } elsif ($value =~ /^git\s+(\S+)(\s+([^\(]+\S+))?/) {
-		my $url = $1;
-		my $branch = "";
-		$branch = $3 if $3;
-		my $output = `git ls-remote --exit-code -h "$url" $branch > /dev/null 2>&1`;
-		if ($? == 0) {
-		    push(@good_links, $value);
-		} else {
-		    push(@bad_links, $value);
-		    $isbad = 1;
-		}
-	    } elsif ($value =~ /^(?:quilt|hg)\s+(https?:\S+)/) {
-		my $url = $1;
-		my $output = `wget --spider -q --no-check-certificate --timeout 10 --tries 1 $url`;
-		if ($? == 0) {
-		    push(@good_links, $value);
-		} else {
-		    push(@bad_links, $value);
-		    $isbad = 1;
-		}
-	    }
-	    if ($isbad) {
-		print("$x->{file}:$x->{linenr}: warning: possible bad link\t$x->{line}\n");
-	    }
-	}
-    }
-}
-
-sub ignore_email_address {
-    my ($address) = @_;
-
-    foreach my $ignore (@ignore_emails) {
-	return 1 if ($ignore eq $address);
-    }
-
-    return 0;
-}
-
 sub range_is_maintained {
     my ($start, $end) = @_;
 
     for (my $i = $start; $i < $end; $i++) {
 	my $line = $typevalue[$i];
-	if ($line =~ m/^([A-Z]):\s*(.*)/) {
+	if ($line =~ m/^(\C):\s*(.*)/) {
 	    my $type = $1;
 	    my $value = $2;
 	    if ($type eq 'S') {
@@ -776,7 +528,7 @@ sub range_has_maintainer {
 
     for (my $i = $start; $i < $end; $i++) {
 	my $line = $typevalue[$i];
-	if ($line =~ m/^([A-Z]):\s*(.*)/) {
+	if ($line =~ m/^(\C):\s*(.*)/) {
 	    my $type = $1;
 	    my $value = $2;
 	    if ($type eq 'M') {
@@ -825,7 +577,7 @@ sub get_maintainers {
 
 	    for ($i = $start; $i < $end; $i++) {
 		my $line = $typevalue[$i];
-		if ($line =~ m/^([A-Z]):\s*(.*)/) {
+		if ($line =~ m/^(\C):\s*(.*)/) {
 		    my $type = $1;
 		    my $value = $2;
 		    if ($type eq 'X') {
@@ -840,7 +592,7 @@ sub get_maintainers {
 	    if (!$exclude) {
 		for ($i = $start; $i < $end; $i++) {
 		    my $line = $typevalue[$i];
-		    if ($line =~ m/^([A-Z]):\s*(.*)/) {
+		    if ($line =~ m/^(\C):\s*(.*)/) {
 			my $type = $1;
 			my $value = $2;
 			if ($type eq 'F') {
@@ -884,10 +636,8 @@ sub get_maintainers {
 			$line =~ s/\\\./\./g;       	##Convert \. to .
 			$line =~ s/\.\*/\*/g;       	##Convert .* to *
 		    }
-		    my $count = $line =~ s/^([A-Z]):/$1:\t/g;
-		    if ($letters eq "" || (!$count || $letters =~ /$1/i)) {
-			print("$line\n");
-		    }
+		    $line =~ s/^([A-Z]):/$1:\t/g;
+		    print("$line\n");
 		}
 		print("\n");
 	    }
@@ -991,12 +741,10 @@ MAINTAINER field selection options:
     --git-max-maintainers => maximum maintainers to add (default: $email_git_max_maintainers)
     --git-min-percent => minimum percentage of commits required (default: $email_git_min_percent)
     --git-blame => use git blame to find modified commits for patch or file
-    --git-blame-signatures => when used with --git-blame, also include all commit signers
     --git-since => git history to use (default: $email_git_since)
     --hg-since => hg history to use (default: $email_hg_since)
     --interactive => display a menu (mostly useful if used with the --git option)
     --m => include maintainer(s) if any
-    --r => include reviewer(s) if any
     --n => include name 'Full Name <addr\@domain.tld>'
     --l => include list(s) if any
     --s => include subscriber only list(s) if any
@@ -1018,14 +766,12 @@ Other options:
   --pattern-depth => Number of pattern directory traversals (default: 0 (all))
   --keywords => scan patch for keywords (default: $keywords)
   --sections => print all of the subsystem sections with pattern matches
-  --letters => print all matching 'letter' types from all matching sections
   --mailmap => use .mailmap file (default: $email_use_mailmap)
-  --self-test => show potential issues with MAINTAINERS file content
   --version => show version
   --help => show this help information
 
 Default options:
-  [--email --nogit --git-fallback --m --r --n --l --multiline --pattern-depth=0
+  [--email --nogit --git-fallback --m --n --l --multiline -pattern-depth=0
    --remove-duplicates --rolestats]
 
 Notes:
@@ -1057,9 +803,6 @@ Notes:
       Entries in this file can be any command line argument.
       This file is prepended to any additional command line arguments.
       Multiple lines and # comments are allowed.
-  Most options have both positive and negative forms.
-      The negative forms for --<foo> are --no<foo> and --no-<foo>.
-
 EOT
 }
 
@@ -1072,7 +815,7 @@ sub top_of_kernel_tree {
     if (   (-f "${lk_path}COPYING")
 	&& (-f "${lk_path}CREDITS")
 	&& (-f "${lk_path}Kbuild")
-	&& (-e "${lk_path}MAINTAINERS")
+	&& (-f "${lk_path}MAINTAINERS")
 	&& (-f "${lk_path}Makefile")
 	&& (-f "${lk_path}README")
 	&& (-d "${lk_path}Documentation")
@@ -1149,7 +892,7 @@ sub find_first_section {
 
     while ($index < @typevalue) {
 	my $tv = $typevalue[$index];
-	if (($tv =~ m/^([A-Z]):\s*(.*)/)) {
+	if (($tv =~ m/^(\C):\s*(.*)/)) {
 	    last;
 	}
 	$index++;
@@ -1163,7 +906,7 @@ sub find_starting_index {
 
     while ($index > 0) {
 	my $tv = $typevalue[$index];
-	if (!($tv =~ m/^([A-Z]):\s*(.*)/)) {
+	if (!($tv =~ m/^(\C):\s*(.*)/)) {
 	    last;
 	}
 	$index--;
@@ -1177,27 +920,13 @@ sub find_ending_index {
 
     while ($index < @typevalue) {
 	my $tv = $typevalue[$index];
-	if (!($tv =~ m/^([A-Z]):\s*(.*)/)) {
+	if (!($tv =~ m/^(\C):\s*(.*)/)) {
 	    last;
 	}
 	$index++;
     }
 
     return $index;
-}
-
-sub get_subsystem_name {
-    my ($index) = @_;
-
-    my $start = find_starting_index($index);
-
-    my $subsystem = $typevalue[$start];
-    if ($output_section_maxlen && length($subsystem) > $output_section_maxlen) {
-	$subsystem = substr($subsystem, 0, $output_section_maxlen - 3);
-	$subsystem =~ s/\s*$//;
-	$subsystem = $subsystem . "...";
-    }
-    return $subsystem;
 }
 
 sub get_maintainer_role {
@@ -1208,11 +937,16 @@ sub get_maintainer_role {
     my $end = find_ending_index($index);
 
     my $role = "unknown";
-    my $subsystem = get_subsystem_name($index);
+    my $subsystem = $typevalue[$start];
+    if (length($subsystem) > 20) {
+	$subsystem = substr($subsystem, 0, 17);
+	$subsystem =~ s/\s*$//;
+	$subsystem = $subsystem . "...";
+    }
 
     for ($i = $start + 1; $i < $end; $i++) {
 	my $tv = $typevalue[$i];
-	if ($tv =~ m/^([A-Z]):\s*(.*)/) {
+	if ($tv =~ m/^(\C):\s*(.*)/) {
 	    my $ptype = $1;
 	    my $pvalue = $2;
 	    if ($ptype eq "S") {
@@ -1242,7 +976,16 @@ sub get_maintainer_role {
 sub get_list_role {
     my ($index) = @_;
 
-    my $subsystem = get_subsystem_name($index);
+    my $i;
+    my $start = find_starting_index($index);
+    my $end = find_ending_index($index);
+
+    my $subsystem = $typevalue[$start];
+    if (length($subsystem) > 20) {
+	$subsystem = substr($subsystem, 0, 17);
+	$subsystem =~ s/\s*$//;
+	$subsystem = $subsystem . "...";
+    }
 
     if ($subsystem eq "THE REST") {
 	$subsystem = "";
@@ -1262,7 +1005,7 @@ sub add_categories {
 
     for ($i = $start + 1; $i < $end; $i++) {
 	my $tv = $typevalue[$i];
-	if ($tv =~ m/^([A-Z]):\s*(.*)/) {
+	if ($tv =~ m/^(\C):\s*(.*)/) {
 	    my $ptype = $1;
 	    my $pvalue = $2;
 	    if ($ptype eq "L") {
@@ -1304,7 +1047,7 @@ sub add_categories {
 		if ($name eq "") {
 		    if ($i > 0) {
 			my $tv = $typevalue[$i - 1];
-			if ($tv =~ m/^([A-Z]):\s*(.*)/) {
+			if ($tv =~ m/^(\C):\s*(.*)/) {
 			    if ($1 eq "P") {
 				$name = $2;
 				$pvalue = format_email($name, $address, $email_usename);
@@ -1315,23 +1058,6 @@ sub add_categories {
 		if ($email_maintainer) {
 		    my $role = get_maintainer_role($i);
 		    push_email_addresses($pvalue, $role);
-		}
-	    } elsif ($ptype eq "R") {
-		my ($name, $address) = parse_email($pvalue);
-		if ($name eq "") {
-		    if ($i > 0) {
-			my $tv = $typevalue[$i - 1];
-			if ($tv =~ m/^([A-Z]):\s*(.*)/) {
-			    if ($1 eq "P") {
-				$name = $2;
-				$pvalue = format_email($name, $address, $email_usename);
-			    }
-			}
-		    }
-		}
-		if ($email_reviewer) {
-		    my $subsystem = get_subsystem_name($i);
-		    push_email_addresses($pvalue, "reviewer:$subsystem");
 		}
 	    } elsif ($ptype eq "T") {
 		push(@scm, $pvalue);
@@ -1543,30 +1269,20 @@ sub extract_formatted_signatures {
 }
 
 sub vcs_find_signers {
-    my ($cmd, $file) = @_;
+    my ($cmd) = @_;
     my $commits;
     my @lines = ();
     my @signatures = ();
-    my @authors = ();
-    my @stats = ();
 
     @lines = &{$VCS_cmds{"execute_cmd"}}($cmd);
 
     my $pattern = $VCS_cmds{"commit_pattern"};
-    my $author_pattern = $VCS_cmds{"author_pattern"};
-    my $stat_pattern = $VCS_cmds{"stat_pattern"};
-
-    $stat_pattern =~ s/(\$\w+)/$1/eeg;		#interpolate $stat_pattern
 
     $commits = grep(/$pattern/, @lines);	# of commits
 
-    @authors = grep(/$author_pattern/, @lines);
     @signatures = grep(/^[ \t]*${signature_pattern}.*\@.*$/, @lines);
-    @stats = grep(/$stat_pattern/, @lines);
 
-#    print("stats: <@stats>\n");
-
-    return (0, \@signatures, \@authors, \@stats) if !@signatures;
+    return (0, @signatures) if !@signatures;
 
     save_commits_by_author(@lines) if ($interactive);
     save_commits_by_signer(@lines) if ($interactive);
@@ -1575,10 +1291,9 @@ sub vcs_find_signers {
 	@signatures = grep(!/${penguin_chiefs}/i, @signatures);
     }
 
-    my ($author_ref, $authors_ref) = extract_formatted_signatures(@authors);
     my ($types_ref, $signers_ref) = extract_formatted_signatures(@signatures);
 
-    return ($commits, $signers_ref, $authors_ref, \@stats);
+    return ($commits, @$signers_ref);
 }
 
 sub vcs_find_author {
@@ -2117,7 +1832,6 @@ sub vcs_assign {
 	my $percent = $sign_offs * 100 / $divisor;
 
 	$percent = 100 if ($percent > 100);
-	next if (ignore_email_address($line));
 	$count++;
 	last if ($sign_offs < $email_git_min_signatures ||
 		 $count > $email_git_max_maintainers ||
@@ -2135,12 +1849,7 @@ sub vcs_assign {
 sub vcs_file_signoffs {
     my ($file) = @_;
 
-    my $authors_ref;
-    my $signers_ref;
-    my $stats_ref;
-    my @authors = ();
     my @signers = ();
-    my @stats = ();
     my $commits;
 
     $vcs_used = vcs_exists();
@@ -2149,59 +1858,13 @@ sub vcs_file_signoffs {
     my $cmd = $VCS_cmds{"find_signers_cmd"};
     $cmd =~ s/(\$\w+)/$1/eeg;		# interpolate $cmd
 
-    ($commits, $signers_ref, $authors_ref, $stats_ref) = vcs_find_signers($cmd, $file);
-
-    @signers = @{$signers_ref} if defined $signers_ref;
-    @authors = @{$authors_ref} if defined $authors_ref;
-    @stats = @{$stats_ref} if defined $stats_ref;
-
-#    print("commits: <$commits>\nsigners:<@signers>\nauthors: <@authors>\nstats: <@stats>\n");
+    ($commits, @signers) = vcs_find_signers($cmd);
 
     foreach my $signer (@signers) {
 	$signer = deduplicate_email($signer);
     }
 
     vcs_assign("commit_signer", $commits, @signers);
-    vcs_assign("authored", $commits, @authors);
-    if ($#authors == $#stats) {
-	my $stat_pattern = $VCS_cmds{"stat_pattern"};
-	$stat_pattern =~ s/(\$\w+)/$1/eeg;	#interpolate $stat_pattern
-
-	my $added = 0;
-	my $deleted = 0;
-	for (my $i = 0; $i <= $#stats; $i++) {
-	    if ($stats[$i] =~ /$stat_pattern/) {
-		$added += $1;
-		$deleted += $2;
-	    }
-	}
-	my @tmp_authors = uniq(@authors);
-	foreach my $author (@tmp_authors) {
-	    $author = deduplicate_email($author);
-	}
-	@tmp_authors = uniq(@tmp_authors);
-	my @list_added = ();
-	my @list_deleted = ();
-	foreach my $author (@tmp_authors) {
-	    my $auth_added = 0;
-	    my $auth_deleted = 0;
-	    for (my $i = 0; $i <= $#stats; $i++) {
-		if ($author eq deduplicate_email($authors[$i]) &&
-		    $stats[$i] =~ /$stat_pattern/) {
-		    $auth_added += $1;
-		    $auth_deleted += $2;
-		}
-	    }
-	    for (my $i = 0; $i < $auth_added; $i++) {
-		push(@list_added, $author);
-	    }
-	    for (my $i = 0; $i < $auth_deleted; $i++) {
-		push(@list_deleted, $author);
-	    }
-	}
-	vcs_assign("added_lines", $added, @list_added);
-	vcs_assign("removed_lines", $deleted, @list_deleted);
-    }
 }
 
 sub vcs_file_blame {
@@ -2224,10 +1887,6 @@ sub vcs_file_blame {
     if ($email_git_blame_signatures) {
 	if (vcs_is_hg()) {
 	    my $commit_count;
-	    my $commit_authors_ref;
-	    my $commit_signers_ref;
-	    my $stats_ref;
-	    my @commit_authors = ();
 	    my @commit_signers = ();
 	    my $commit = join(" -r ", @commits);
 	    my $cmd;
@@ -2235,27 +1894,19 @@ sub vcs_file_blame {
 	    $cmd = $VCS_cmds{"find_commit_signers_cmd"};
 	    $cmd =~ s/(\$\w+)/$1/eeg;	#substitute variables in $cmd
 
-	    ($commit_count, $commit_signers_ref, $commit_authors_ref, $stats_ref) = vcs_find_signers($cmd, $file);
-	    @commit_authors = @{$commit_authors_ref} if defined $commit_authors_ref;
-	    @commit_signers = @{$commit_signers_ref} if defined $commit_signers_ref;
+	    ($commit_count, @commit_signers) = vcs_find_signers($cmd);
 
 	    push(@signers, @commit_signers);
 	} else {
 	    foreach my $commit (@commits) {
 		my $commit_count;
-		my $commit_authors_ref;
-		my $commit_signers_ref;
-		my $stats_ref;
-		my @commit_authors = ();
 		my @commit_signers = ();
 		my $cmd;
 
 		$cmd = $VCS_cmds{"find_commit_signers_cmd"};
 		$cmd =~ s/(\$\w+)/$1/eeg;	#substitute variables in $cmd
 
-		($commit_count, $commit_signers_ref, $commit_authors_ref, $stats_ref) = vcs_find_signers($cmd, $file);
-		@commit_authors = @{$commit_authors_ref} if defined $commit_authors_ref;
-		@commit_signers = @{$commit_signers_ref} if defined $commit_signers_ref;
+		($commit_count, @commit_signers) = vcs_find_signers($cmd);
 
 		push(@signers, @commit_signers);
 	    }
@@ -2330,41 +1981,6 @@ sub vcs_file_blame {
 	}
 	vcs_assign("modified commits", $total_commits, @signers);
     }
-}
-
-sub vcs_file_exists {
-    my ($file) = @_;
-
-    my $exists;
-
-    my $vcs_used = vcs_exists();
-    return 0 if (!$vcs_used);
-
-    my $cmd = $VCS_cmds{"file_exists_cmd"};
-    $cmd =~ s/(\$\w+)/$1/eeg;		# interpolate $cmd
-    $cmd .= " 2>&1";
-    $exists = &{$VCS_cmds{"execute_cmd"}}($cmd);
-
-    return 0 if ($? != 0);
-
-    return $exists;
-}
-
-sub vcs_list_files {
-    my ($file) = @_;
-
-    my @lsfiles = ();
-
-    my $vcs_used = vcs_exists();
-    return 0 if (!$vcs_used);
-
-    my $cmd = $VCS_cmds{"list_files_cmd"};
-    $cmd =~ s/(\$\w+)/$1/eeg;   # interpolate $cmd
-    @lsfiles = &{$VCS_cmds{"execute_cmd"}}($cmd);
-
-    return () if ($? != 0);
-
-    return @lsfiles;
 }
 
 sub uniq {

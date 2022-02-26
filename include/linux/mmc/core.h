@@ -8,9 +8,10 @@
 #ifndef LINUX_MMC_CORE_H
 #define LINUX_MMC_CORE_H
 
+#include <linux/interrupt.h>
 #include <linux/completion.h>
-#include <linux/types.h>
 
+struct request;
 struct mmc_data;
 struct mmc_request;
 
@@ -172,11 +173,26 @@ struct mmc_request {
 
 struct mmc_card;
 
-void mmc_wait_for_req(struct mmc_host *host, struct mmc_request *mrq);
-int mmc_wait_for_cmd(struct mmc_host *host, struct mmc_command *cmd,
-		int retries);
+extern void mmc_wait_for_req(struct mmc_host *, struct mmc_request *);
+extern int mmc_wait_for_cmd(struct mmc_host *, struct mmc_command *, int);
+extern int mmc_send_tuning(struct mmc_host *host, u32 opcode, int *cmd_error);
+extern int mmc_abort_tuning(struct mmc_host *host, u32 opcode);
 
-int mmc_hw_reset(struct mmc_host *host);
-void mmc_set_data_timeout(struct mmc_data *data, const struct mmc_card *card);
+#define MMC_ERASE_ARG		0x00000000
+#define MMC_SECURE_ERASE_ARG	0x80000000
+#define MMC_TRIM_ARG		0x00000001
+#define MMC_DISCARD_ARG		0x00000003
+#define MMC_SECURE_TRIM1_ARG	0x80000001
+#define MMC_SECURE_TRIM2_ARG	0x80008000
+
+#define MMC_SECURE_ARGS		0x80000000
+#define MMC_TRIM_ARGS		0x00008001
+
+extern int mmc_hw_reset(struct mmc_host *host);
+extern void mmc_set_data_timeout(struct mmc_data *, const struct mmc_card *);
+
+struct device_node;
+extern u32 mmc_vddrange_to_ocrmask(int vdd_min, int vdd_max);
+extern int mmc_of_parse_voltage(struct device_node *np, u32 *mask);
 
 #endif /* LINUX_MMC_CORE_H */

@@ -41,7 +41,6 @@
 #include <linux/ioctl.h>
 #include <linux/skbuff.h>
 #include <linux/firmware.h>
-#include <linux/serdev.h>
 
 #include <net/bluetooth/bluetooth.h>
 #include <net/bluetooth/hci_core.h>
@@ -115,12 +114,8 @@ static inline struct sk_buff *hci_uart_dequeue(struct hci_uart *hu)
 	struct sk_buff *skb = hu->tx_skb;
 
 	if (!skb) {
-		percpu_down_read(&hu->proto_lock);
-
 		if (test_bit(HCI_UART_PROTO_READY, &hu->flags))
 			skb = hu->proto->dequeue(hu);
-
-		percpu_up_read(&hu->proto_lock);
 	} else {
 		hu->tx_skb = NULL;
 	}
@@ -130,33 +125,20 @@ static inline struct sk_buff *hci_uart_dequeue(struct hci_uart *hu)
 
 int hci_uart_tx_wakeup(struct hci_uart *hu)
 {
-	/* This may be called in an IRQ context, so we can't sleep. Therefore
-	 * we try to acquire the lock only, and if that fails we assume the
-	 * tty is being closed because that is the only time the write lock is
-	 * acquired. If, however, at some point in the future the write lock
-	 * is also acquired in other situations, then this must be revisited.
-	 */
-	if (!percpu_down_read_trylock(&hu->proto_lock))
-		return 0;
-
 	if (!test_bit(HCI_UART_PROTO_READY, &hu->flags))
-		goto no_schedule;
+		return 0;
 
 	if (test_and_set_bit(HCI_UART_SENDING, &hu->tx_state)) {
 		set_bit(HCI_UART_TX_WAKEUP, &hu->tx_state);
-		goto no_schedule;
+		return 0;
 	}
 
 	BT_DBG("");
 
 	schedule_work(&hu->write_work);
 
-no_schedule:
-	percpu_up_read(&hu->proto_lock);
-
 	return 0;
 }
-EXPORT_SYMBOL_GPL(hci_uart_tx_wakeup);
 
 static void hci_uart_write_work(struct work_struct *work)
 {
@@ -254,12 +236,8 @@ static int hci_uart_flush(struct hci_dev *hdev)
 	tty_ldisc_flush(tty);
 	tty_driver_flush_buffer(tty);
 
-	percpu_down_read(&hu->proto_lock);
-
 	if (test_bit(HCI_UART_PROTO_READY, &hu->flags))
 		hu->proto->flush(hu);
-
-	percpu_up_read(&hu->proto_lock);
 
 	return 0;
 }
@@ -282,19 +260,23 @@ static int hci_uart_send_frame(struct hci_dev *hdev, struct sk_buff *skb)
 	BT_DBG("%s: type %d len %d", hdev->name, hci_skb_pkt_type(skb),
 	       skb->len);
 
-	percpu_down_read(&hu->proto_lock);
-
-	if (!test_bit(HCI_UART_PROTO_READY, &hu->flags)) {
-		percpu_up_read(&hu->proto_lock);
+	if (!test_bit(HCI_UART_PROTO_READY, &hu->flags))
 		return -EUNATCH;
-	}
 
 	hu->proto->enqueue(hu, skb);
-	percpu_up_read(&hu->proto_lock);
 
 	hci_uart_tx_wakeup(hu);
 
 	return 0;
+}
+
+/* Check the underlying device or tty has flow control support */
+bool hci_uart_has_flow_control(struct hci_uart *hu)
+{
+	if (hu->tty->driver->ops->tiocmget && hu->tty->driver->ops->tiocmset)
+		return true;
+
+	return false;
 }
 
 /* Flow control or un-flow control the device */
@@ -305,12 +287,6 @@ void hci_uart_set_flow_control(struct hci_uart *hu, bool enable)
 	int status;
 	unsigned int set = 0;
 	unsigned int clear = 0;
-
-	if (hu->serdev) {
-		serdev_device_set_flow_control(hu->serdev, !enable);
-		serdev_device_set_rts(hu->serdev, !enable);
-		return;
-	}
 
 	if (enable) {
 		/* Disable hardware flow control */
@@ -471,8 +447,7 @@ static int hci_uart_tty_open(struct tty_struct *tty)
 	BT_DBG("tty %p", tty);
 
 	/* Error if the tty has no write op instead of leaving an exploitable
-	 * hole
-	 */
+	   hole */
 	if (tty->ops->write == NULL)
 		return -EOPNOTSUPP;
 
@@ -492,8 +467,6 @@ static int hci_uart_tty_open(struct tty_struct *tty)
 
 	INIT_WORK(&hu->init_ready, hci_uart_init_work);
 	INIT_WORK(&hu->write_work, hci_uart_write_work);
-
-	percpu_init_rwsem(&hu->proto_lock);
 
 	/* Flush any pending characters in the driver */
 	tty_driver_flush_buffer(tty);
@@ -523,13 +496,9 @@ static void hci_uart_tty_close(struct tty_struct *tty)
 	if (hdev)
 		hci_uart_close(hdev);
 
-	if (test_bit(HCI_UART_PROTO_READY, &hu->flags)) {
-		percpu_down_write(&hu->proto_lock);
-		clear_bit(HCI_UART_PROTO_READY, &hu->flags);
-		percpu_up_write(&hu->proto_lock);
+	cancel_work_sync(&hu->write_work);
 
-		cancel_work_sync(&hu->write_work);
-
+	if (test_and_clear_bit(HCI_UART_PROTO_READY, &hu->flags)) {
 		if (hdev) {
 			if (test_bit(HCI_UART_REGISTERED, &hu->flags))
 				hci_unregister_dev(hdev);
@@ -588,18 +557,13 @@ static void hci_uart_tty_receive(struct tty_struct *tty, const u8 *data,
 	if (!hu || tty != hu->tty)
 		return;
 
-	percpu_down_read(&hu->proto_lock);
-
-	if (!test_bit(HCI_UART_PROTO_READY, &hu->flags)) {
-		percpu_up_read(&hu->proto_lock);
+	if (!test_bit(HCI_UART_PROTO_READY, &hu->flags))
 		return;
-	}
 
 	/* It does not need a lock here as it is already protected by a mutex in
 	 * tty caller
 	 */
 	hu->proto->recv(hu, data, count);
-	percpu_up_read(&hu->proto_lock);
 
 	if (hu->hdev)
 		hu->hdev->stat.byte_rx += count;
@@ -682,15 +646,14 @@ static int hci_uart_set_proto(struct hci_uart *hu, int id)
 		return err;
 
 	hu->proto = p;
-	set_bit(HCI_UART_PROTO_READY, &hu->flags);
 
 	err = hci_uart_register_dev(hu);
 	if (err) {
-		clear_bit(HCI_UART_PROTO_READY, &hu->flags);
 		p->close(hu);
 		return err;
 	}
 
+	set_bit(HCI_UART_PROTO_READY, &hu->flags);
 	return 0;
 }
 

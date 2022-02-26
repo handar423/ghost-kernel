@@ -25,6 +25,7 @@ static int adis_data_rdy_trigger_set_state(struct iio_trigger *trig,
 }
 
 static const struct iio_trigger_ops adis_trigger_ops = {
+	.owner = THIS_MODULE,
 	.set_trigger_state = &adis_data_rdy_trigger_set_state,
 };
 
@@ -59,7 +60,7 @@ int adis_probe_trigger(struct adis *adis, struct iio_dev *indio_dev)
 	iio_trigger_set_drvdata(adis->trig, adis);
 	ret = iio_trigger_register(adis->trig);
 
-	indio_dev->trig = iio_trigger_get(adis->trig);
+	indio_dev->trig = adis->trig;
 	if (ret)
 		goto error_free_irq;
 

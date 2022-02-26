@@ -38,7 +38,7 @@
 #include <linux/irqbypass.h>
 #include <trace/events/kvm.h>
 
-#include <kvm/iodev.h>
+#include "iodev.h"
 
 #ifdef CONFIG_HAVE_KVM_IRQFD
 
@@ -184,7 +184,7 @@ int __attribute__((weak)) kvm_arch_set_irq_inatomic(
  * Called with wqh->lock held and interrupts disabled
  */
 static int
-irqfd_wakeup(wait_queue_entry_t *wait, unsigned mode, int sync, void *key)
+irqfd_wakeup(wait_queue_t *wait, unsigned mode, int sync, void *key)
 {
 	struct kvm_kernel_irqfd *irqfd =
 		container_of(wait, struct kvm_kernel_irqfd, wait);
@@ -289,9 +289,6 @@ kvm_irqfd_assign(struct kvm *kvm, struct kvm_irqfd *args)
 	int ret;
 	unsigned int events;
 	int idx;
-
-	if (!kvm_arch_intc_initialized(kvm))
-		return -EAGAIN;
 
 	irqfd = kzalloc(sizeof(*irqfd), GFP_KERNEL);
 	if (!irqfd)
@@ -490,7 +487,7 @@ void kvm_register_irq_ack_notifier(struct kvm *kvm,
 	mutex_lock(&kvm->irq_lock);
 	hlist_add_head_rcu(&kian->link, &kvm->irq_ack_notifier_list);
 	mutex_unlock(&kvm->irq_lock);
-	kvm_arch_post_irq_ack_notifier_list_update(kvm);
+	kvm_vcpu_request_scan_ioapic(kvm);
 }
 
 void kvm_unregister_irq_ack_notifier(struct kvm *kvm,
@@ -500,7 +497,7 @@ void kvm_unregister_irq_ack_notifier(struct kvm *kvm,
 	hlist_del_init_rcu(&kian->link);
 	mutex_unlock(&kvm->irq_lock);
 	synchronize_srcu(&kvm->irq_srcu);
-	kvm_arch_post_irq_ack_notifier_list_update(kvm);
+	kvm_vcpu_request_scan_ioapic(kvm);
 }
 #endif
 
@@ -624,12 +621,12 @@ void kvm_irq_routing_update(struct kvm *kvm)
 
 /*
  * create a host-wide workqueue for issuing deferred shutdown requests
- * aggregated from all vm* instances. We need our own isolated
- * queue to ease flushing work items when a VM exits.
+ * aggregated from all vm* instances. We need our own isolated single-thread
+ * queue to prevent deadlock against flushing the normal work-queue.
  */
 int kvm_irqfd_init(void)
 {
-	irqfd_cleanup_wq = alloc_workqueue("kvm-irqfd-cleanup", 0, 0);
+	irqfd_cleanup_wq = create_singlethread_workqueue("kvm-irqfd-cleanup");
 	if (!irqfd_cleanup_wq)
 		return -ENOMEM;
 
@@ -723,8 +720,8 @@ ioeventfd_in_range(struct _ioeventfd *p, gpa_t addr, int len, const void *val)
 
 /* MMIO/PIO writes trigger an event if the addr/val match */
 static int
-ioeventfd_write(struct kvm_vcpu *vcpu, struct kvm_io_device *this, gpa_t addr,
-		int len, const void *val)
+ioeventfd_write(struct kvm_io_device *this, gpa_t addr, int len,
+		const void *val)
 {
 	struct _ioeventfd *p = to_ioeventfd(this);
 
@@ -825,7 +822,7 @@ static int kvm_assign_ioeventfd_idx(struct kvm *kvm,
 	if (ret < 0)
 		goto unlock_fail;
 
-	kvm_get_bus(kvm, bus_idx)->ioeventfd_count++;
+	kvm->buses[bus_idx]->ioeventfd_count++;
 	list_add_tail(&p->list, &kvm->ioeventfds);
 
 	mutex_unlock(&kvm->slots_lock);
@@ -848,7 +845,6 @@ kvm_deassign_ioeventfd_idx(struct kvm *kvm, enum kvm_bus bus_idx,
 {
 	struct _ioeventfd        *p, *tmp;
 	struct eventfd_ctx       *eventfd;
-	struct kvm_io_bus	 *bus;
 	int                       ret = -ENOENT;
 
 	eventfd = eventfd_ctx_fdget(args->fd);
@@ -871,9 +867,7 @@ kvm_deassign_ioeventfd_idx(struct kvm *kvm, enum kvm_bus bus_idx,
 			continue;
 
 		kvm_io_bus_unregister_dev(kvm, bus_idx, &p->dev);
-		bus = kvm_get_bus(kvm, bus_idx);
-		if (bus)
-			bus->ioeventfd_count--;
+		kvm->buses[bus_idx]->ioeventfd_count--;
 		ioeventfd_release(p);
 		ret = 0;
 		break;

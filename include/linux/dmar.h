@@ -26,7 +26,7 @@
 #include <linux/msi.h>
 #include <linux/irqreturn.h>
 #include <linux/rwsem.h>
-#include <linux/rculist.h>
+#include <linux/rcupdate.h>
 
 struct acpi_dmar_header;
 
@@ -265,11 +265,6 @@ static inline void dmar_copy_shared_irte(struct irte *dst, struct irte *src)
 #define PDA_LOW_BIT    26
 #define PDA_HIGH_BIT   32
 
-enum {
-	IRQ_REMAP_XAPIC_MODE,
-	IRQ_REMAP_X2APIC_MODE,
-};
-
 /* Can't use the common MSI interrupt functions
  * since DMAR is not a pci device
  */
@@ -280,7 +275,6 @@ extern void dmar_msi_read(int irq, struct msi_msg *msg);
 extern void dmar_msi_write(int irq, struct msi_msg *msg);
 extern int dmar_set_interrupt(struct intel_iommu *iommu);
 extern irqreturn_t dmar_fault(int irq, void *dev_id);
-extern int dmar_alloc_hwirq(int id, int node, void *arg);
-extern void dmar_free_hwirq(int irq);
+extern int arch_setup_dmar_msi(unsigned int irq);
 
 #endif /* __DMAR_H__ */

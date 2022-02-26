@@ -14,12 +14,13 @@
 #include "blk.h"
 #include "blk-mq.h"
 
-static int cpu_to_queue_index(unsigned int nr_queues, const int cpu)
+static int cpu_to_queue_index(unsigned int nr_queues, const int cpu,
+			      const struct cpumask *online_mask)
 {
 	/*
-	 * Non present CPU will be mapped to queue index 0.
+	 * Non online CPU will be mapped to queue index 0.
 	 */
-	if (!cpu_present(cpu))
+	if (!cpumask_test_cpu(cpu, online_mask))
 		return 0;
 	return cpu % nr_queues;
 }
@@ -39,6 +40,7 @@ int blk_mq_map_queues(struct blk_mq_tag_set *set)
 {
 	unsigned int *map = set->mq_map;
 	unsigned int nr_queues = set->nr_hw_queues;
+	const struct cpumask *online_mask = cpu_online_mask;
 	unsigned int cpu, first_sibling;
 
 	for_each_possible_cpu(cpu) {
@@ -49,11 +51,11 @@ int blk_mq_map_queues(struct blk_mq_tag_set *set)
 		 * performace optimizations.
 		 */
 		if (cpu < nr_queues) {
-			map[cpu] = cpu_to_queue_index(nr_queues, cpu);
+			map[cpu] = cpu_to_queue_index(nr_queues, cpu, online_mask);
 		} else {
 			first_sibling = get_first_sibling(cpu);
 			if (first_sibling == cpu)
-				map[cpu] = cpu_to_queue_index(nr_queues, cpu);
+				map[cpu] = cpu_to_queue_index(nr_queues, cpu, online_mask);
 			else
 				map[cpu] = map[first_sibling];
 		}
@@ -61,7 +63,6 @@ int blk_mq_map_queues(struct blk_mq_tag_set *set)
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(blk_mq_map_queues);
 
 /*
  * We have no quick way of doing reverse lookups. This is only used at

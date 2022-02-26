@@ -1596,7 +1596,8 @@ static void wil_probe_client_handle(struct wil6210_priv *wil,
 	 */
 	bool alive = (sta->status == wil_sta_connected);
 
-	cfg80211_probe_status(ndev, sta->addr, req->cookie, alive, GFP_KERNEL);
+	cfg80211_probe_status(ndev, sta->addr, req->cookie, alive,
+			      0, false, GFP_KERNEL);
 }
 
 static struct list_head *next_probe_client(struct wil6210_priv *wil)
@@ -1918,7 +1919,7 @@ static int wil_rf_sector_get_cfg(struct wiphy *wiphy,
 		return -EOPNOTSUPP;
 
 	rc = nla_parse(tb, QCA_ATTR_DMG_RF_SECTOR_MAX, data, data_len,
-		       wil_rf_sector_policy, NULL);
+		       wil_rf_sector_policy);
 	if (rc) {
 		wil_err(wil, "Invalid rf sector ATTR\n");
 		return rc;
@@ -2036,7 +2037,7 @@ static int wil_rf_sector_set_cfg(struct wiphy *wiphy,
 		return -EOPNOTSUPP;
 
 	rc = nla_parse(tb, QCA_ATTR_DMG_RF_SECTOR_MAX, data, data_len,
-		       wil_rf_sector_policy, NULL);
+		       wil_rf_sector_policy);
 	if (rc) {
 		wil_err(wil, "Invalid rf sector ATTR\n");
 		return rc;
@@ -2069,8 +2070,7 @@ static int wil_rf_sector_set_cfg(struct wiphy *wiphy,
 	nla_for_each_nested(nl_cfg, tb[QCA_ATTR_DMG_RF_SECTOR_CFG],
 			    tmp) {
 		rc = nla_parse_nested(tb2, QCA_ATTR_DMG_RF_SECTOR_CFG_MAX,
-				      nl_cfg, wil_rf_sector_cfg_policy,
-				      NULL);
+				      nl_cfg, wil_rf_sector_cfg_policy);
 		if (rc) {
 			wil_err(wil, "invalid sector cfg\n");
 			return -EINVAL;
@@ -2141,7 +2141,7 @@ static int wil_rf_sector_get_selected(struct wiphy *wiphy,
 		return -EOPNOTSUPP;
 
 	rc = nla_parse(tb, QCA_ATTR_DMG_RF_SECTOR_MAX, data, data_len,
-		       wil_rf_sector_policy, NULL);
+		       wil_rf_sector_policy);
 	if (rc) {
 		wil_err(wil, "Invalid rf sector ATTR\n");
 		return rc;
@@ -2248,7 +2248,7 @@ static int wil_rf_sector_set_selected(struct wiphy *wiphy,
 		return -EOPNOTSUPP;
 
 	rc = nla_parse(tb, QCA_ATTR_DMG_RF_SECTOR_MAX, data, data_len,
-		       wil_rf_sector_policy, NULL);
+		       wil_rf_sector_policy);
 	if (rc) {
 		wil_err(wil, "Invalid rf sector ATTR\n");
 		return rc;

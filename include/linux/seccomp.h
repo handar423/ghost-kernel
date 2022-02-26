@@ -1,11 +1,10 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _LINUX_SECCOMP_H
 #define _LINUX_SECCOMP_H
 
 #include <uapi/linux/seccomp.h>
 
-#define SECCOMP_FILTER_FLAG_MASK	(SECCOMP_FILTER_FLAG_TSYNC | \
-					 SECCOMP_FILTER_FLAG_LOG)
+#define SECCOMP_FILTER_FLAG_MASK	(SECCOMP_FILTER_FLAG_TSYNC |\
+					 SECCOMP_FILTER_FLAG_SPEC_ALLOW)
 
 #ifdef CONFIG_SECCOMP
 
@@ -30,11 +29,11 @@ struct seccomp {
 };
 
 #ifdef CONFIG_HAVE_ARCH_SECCOMP_FILTER
-extern int __secure_computing(const struct seccomp_data *sd);
-static inline int secure_computing(const struct seccomp_data *sd)
+extern int __secure_computing(void);
+static inline int secure_computing(void)
 {
 	if (unlikely(test_thread_flag(TIF_SECCOMP)))
-		return  __secure_computing(sd);
+		return  __secure_computing();
 	return 0;
 }
 #else
@@ -57,7 +56,7 @@ struct seccomp { };
 struct seccomp_filter { };
 
 #ifdef CONFIG_HAVE_ARCH_SECCOMP_FILTER
-static inline int secure_computing(struct seccomp_data *sd) { return 0; }
+static inline int secure_computing(void) { return 0; }
 #else
 static inline void secure_computing_strict(int this_syscall) { return; }
 #endif
@@ -74,13 +73,14 @@ static inline long prctl_set_seccomp(unsigned long arg2, char __user *arg3)
 
 static inline int seccomp_mode(struct seccomp *s)
 {
-	return SECCOMP_MODE_DISABLED;
+	return 0;
 }
 #endif /* CONFIG_SECCOMP */
 
 #ifdef CONFIG_SECCOMP_FILTER
 extern void put_seccomp_filter(struct task_struct *tsk);
 extern void get_seccomp_filter(struct task_struct *tsk);
+extern u32 seccomp_bpf_load(int off);
 #else  /* CONFIG_SECCOMP_FILTER */
 static inline void put_seccomp_filter(struct task_struct *tsk)
 {
@@ -91,15 +91,4 @@ static inline void get_seccomp_filter(struct task_struct *tsk)
 	return;
 }
 #endif /* CONFIG_SECCOMP_FILTER */
-
-#if defined(CONFIG_SECCOMP_FILTER) && defined(CONFIG_CHECKPOINT_RESTORE)
-extern long seccomp_get_filter(struct task_struct *task,
-			       unsigned long filter_off, void __user *data);
-#else
-static inline long seccomp_get_filter(struct task_struct *task,
-				      unsigned long n, void __user *data)
-{
-	return -EINVAL;
-}
-#endif /* CONFIG_SECCOMP_FILTER && CONFIG_CHECKPOINT_RESTORE */
 #endif /* _LINUX_SECCOMP_H */

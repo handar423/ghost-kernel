@@ -354,9 +354,9 @@ static void rsxx_handle_dma_error(struct rsxx_dma_ctrl *ctrl,
 		rsxx_complete_dma(ctrl, dma, status);
 }
 
-static void dma_engine_stalled(struct timer_list *t)
+static void dma_engine_stalled(unsigned long data)
 {
-	struct rsxx_dma_ctrl *ctrl = from_timer(ctrl, t, activity_timer);
+	struct rsxx_dma_ctrl *ctrl = (struct rsxx_dma_ctrl *)data;
 	int cnt;
 
 	if (atomic_read(&ctrl->stats.hw_q_depth) == 0 ||
@@ -611,7 +611,7 @@ static void rsxx_schedule_done(struct work_struct *work)
 	mutex_unlock(&ctrl->work_lock);
 }
 
-static blk_status_t rsxx_queue_discard(struct rsxx_cardinfo *card,
+static int rsxx_queue_discard(struct rsxx_cardinfo *card,
 				  struct list_head *q,
 				  unsigned int laddr,
 				  rsxx_dma_cb cb,
@@ -621,7 +621,7 @@ static blk_status_t rsxx_queue_discard(struct rsxx_cardinfo *card,
 
 	dma = kmem_cache_alloc(rsxx_dma_pool, GFP_KERNEL);
 	if (!dma)
-		return BLK_STS_RESOURCE;
+		return -ENOMEM;
 
 	dma->cmd          = HW_CMD_BLK_DISCARD;
 	dma->laddr        = laddr;
@@ -640,7 +640,7 @@ static blk_status_t rsxx_queue_discard(struct rsxx_cardinfo *card,
 	return 0;
 }
 
-static blk_status_t rsxx_queue_dma(struct rsxx_cardinfo *card,
+static int rsxx_queue_dma(struct rsxx_cardinfo *card,
 			      struct list_head *q,
 			      int dir,
 			      unsigned int dma_off,
@@ -655,7 +655,7 @@ static blk_status_t rsxx_queue_dma(struct rsxx_cardinfo *card,
 
 	dma = kmem_cache_alloc(rsxx_dma_pool, GFP_KERNEL);
 	if (!dma)
-		return BLK_STS_RESOURCE;
+		return -ENOMEM;
 
 	dma->cmd          = dir ? HW_CMD_BLK_WRITE : HW_CMD_BLK_READ;
 	dma->laddr        = laddr;
@@ -677,15 +677,14 @@ static blk_status_t rsxx_queue_dma(struct rsxx_cardinfo *card,
 	return 0;
 }
 
-blk_status_t rsxx_dma_queue_bio(struct rsxx_cardinfo *card,
+int rsxx_dma_queue_bio(struct rsxx_cardinfo *card,
 			   struct bio *bio,
 			   atomic_t *n_dmas,
 			   rsxx_dma_cb cb,
 			   void *cb_data)
 {
 	struct list_head dma_list[RSXX_MAX_TARGETS];
-	struct bio_vec bvec;
-	struct bvec_iter iter;
+	struct bio_vec *bvec;
 	unsigned long long addr8;
 	unsigned int laddr;
 	unsigned int bv_len;
@@ -694,10 +693,10 @@ blk_status_t rsxx_dma_queue_bio(struct rsxx_cardinfo *card,
 	unsigned int dma_len;
 	int dma_cnt[RSXX_MAX_TARGETS];
 	int tgt;
-	blk_status_t st;
+	int st;
 	int i;
 
-	addr8 = bio->bi_iter.bi_sector << 9; /* sectors are 512 bytes */
+	addr8 = bio->bi_sector << 9; /* sectors are 512 bytes */
 	atomic_set(n_dmas, 0);
 
 	for (i = 0; i < card->n_targets; i++) {
@@ -705,8 +704,8 @@ blk_status_t rsxx_dma_queue_bio(struct rsxx_cardinfo *card,
 		dma_cnt[i] = 0;
 	}
 
-	if (bio_op(bio) == REQ_OP_DISCARD) {
-		bv_len = bio->bi_iter.bi_size;
+	if (bio->bi_rw & REQ_DISCARD) {
+		bv_len = bio->bi_size;
 
 		while (bv_len > 0) {
 			tgt   = rsxx_get_dma_tgt(card, addr8);
@@ -723,9 +722,9 @@ blk_status_t rsxx_dma_queue_bio(struct rsxx_cardinfo *card,
 			bv_len -= RSXX_HW_BLK_SIZE;
 		}
 	} else {
-		bio_for_each_segment(bvec, bio, iter) {
-			bv_len = bvec.bv_len;
-			bv_off = bvec.bv_offset;
+		bio_for_each_segment(bvec, bio, i) {
+			bv_len = bvec->bv_len;
+			bv_off = bvec->bv_offset;
 
 			while (bv_len > 0) {
 				tgt   = rsxx_get_dma_tgt(card, addr8);
@@ -737,7 +736,7 @@ blk_status_t rsxx_dma_queue_bio(struct rsxx_cardinfo *card,
 				st = rsxx_queue_dma(card, &dma_list[tgt],
 							bio_data_dir(bio),
 							dma_off, dma_len,
-							laddr, bvec.bv_page,
+							laddr, bvec->bv_page,
 							bv_off, cb, cb_data);
 				if (st)
 					goto bvec_err;
@@ -769,6 +768,7 @@ bvec_err:
 	for (i = 0; i < card->n_targets; i++)
 		rsxx_cleanup_dma_queue(&card->ctrl[i], &dma_list[i],
 					FREE_DMA);
+
 	return st;
 }
 
@@ -838,7 +838,8 @@ static int rsxx_dma_ctrl_init(struct pci_dev *dev,
 	mutex_init(&ctrl->work_lock);
 	INIT_LIST_HEAD(&ctrl->queue);
 
-	timer_setup(&ctrl->activity_timer, dma_engine_stalled, 0);
+	setup_timer(&ctrl->activity_timer, dma_engine_stalled,
+					(unsigned long)ctrl);
 
 	ctrl->issue_wq = alloc_ordered_workqueue(DRIVER_NAME"_issue", 0);
 	if (!ctrl->issue_wq)

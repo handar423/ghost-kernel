@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 #define _LINUX_STRING_H_
 
 #include <linux/compiler.h>	/* for inline */
@@ -33,8 +32,6 @@ extern void error(char *);
 
 /* Not needed, but used in some headers pulled in by decompressors */
 extern char * strstr(const char * s1, const char *s2);
-extern size_t strlen(const char *s);
-extern int memcmp(const void *cs, const void *ct, size_t count);
 
 #ifdef CONFIG_KERNEL_GZIP
 #include "../../../../lib/decompress_inflate.c"
@@ -52,10 +49,6 @@ extern int memcmp(const void *cs, const void *ct, size_t count);
 #define memmove memmove
 #define memcpy memcpy
 #include "../../../../lib/decompress_unxz.c"
-#endif
-
-#ifdef CONFIG_KERNEL_LZ4
-#include "../../../../lib/decompress_unlz4.c"
 #endif
 
 int do_decompress(u8 *input, int len, u8 *output, void (*error)(char *x))

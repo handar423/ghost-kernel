@@ -1,11 +1,10 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * proc_tty.c -- handles /proc/tty
  *
  * Copyright 1997, Theodore Ts'o
  */
 
-#include <linux/uaccess.h>
+#include <asm/uaccess.h>
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/errno.h>
@@ -15,12 +14,11 @@
 #include <linux/tty.h>
 #include <linux/seq_file.h>
 #include <linux/bitops.h>
-#include "internal.h"
 
 /*
  * The /proc/tty directory inodes...
  */
-static struct proc_dir_entry *proc_tty_driver;
+static struct proc_dir_entry *proc_tty_ldisc, *proc_tty_driver;
 
 /*
  * This is the handler for /proc/tty/drivers
@@ -166,7 +164,7 @@ void proc_tty_unregister_driver(struct tty_driver *driver)
 	if (!ent)
 		return;
 		
-	remove_proc_entry(ent->name, proc_tty_driver);
+	remove_proc_entry(driver->driver_name, proc_tty_driver);
 	
 	driver->proc_entry = NULL;
 }
@@ -178,7 +176,7 @@ void __init proc_tty_init(void)
 {
 	if (!proc_mkdir("tty", NULL))
 		return;
-	proc_mkdir("tty/ldisc", NULL);	/* Preserved: it's userspace visible */
+	proc_tty_ldisc = proc_mkdir("tty/ldisc", NULL);
 	/*
 	 * /proc/tty/driver/serial reveals the exact character counts for
 	 * serial links which is just too easy to abuse for inferring

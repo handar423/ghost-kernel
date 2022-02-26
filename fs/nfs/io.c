@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (c) 2016 Trond Myklebust
  *
@@ -30,54 +29,44 @@ static void nfs_block_o_direct(struct nfs_inode *nfsi, struct inode *inode)
  * Declare that a buffered read operation is about to start, and ensure
  * that we block all direct I/O.
  * On exit, the function ensures that the NFS_INO_ODIRECT flag is unset,
- * and holds a shared lock on inode->i_rwsem to ensure that the flag
- * cannot be changed.
- * In practice, this means that buffered read operations are allowed to
- * execute in parallel, thanks to the shared lock, whereas direct I/O
- * operations need to wait to grab an exclusive lock in order to set
- * NFS_INO_ODIRECT.
- * Note that buffered writes and truncates both take a write lock on
- * inode->i_rwsem, meaning that those are serialised w.r.t. the reads.
+ * and holds a lock on inode->i_mutex.
+ * Note that buffered writes and truncates both take i_mutex, meaning that
+ * those are serialised w.r.t. the reads.
  */
 void
 nfs_start_io_read(struct inode *inode)
 {
 	struct nfs_inode *nfsi = NFS_I(inode);
-	/* Be an optimist! */
-	down_read(&inode->i_rwsem);
-	if (test_bit(NFS_INO_ODIRECT, &nfsi->flags) == 0)
-		return;
-	up_read(&inode->i_rwsem);
-	/* Slow path.... */
-	down_write(&inode->i_rwsem);
-	nfs_block_o_direct(nfsi, inode);
-	downgrade_write(&inode->i_rwsem);
+
+	mutex_lock(&inode->i_mutex);
+
+	if (test_bit(NFS_INO_ODIRECT, &nfsi->flags) != 0)
+		nfs_block_o_direct(nfsi, inode);
 }
 
 /**
  * nfs_end_io_read - declare that the buffered read operation is done
  * @inode - file inode
  *
- * Declare that a buffered read operation is done, and release the shared
- * lock on inode->i_rwsem.
+ * Declare that a buffered read operation is done, and release i_mutex.
  */
 void
 nfs_end_io_read(struct inode *inode)
 {
-	up_read(&inode->i_rwsem);
+	mutex_unlock(&inode->i_mutex);
 }
 
 /**
  * nfs_start_io_write - declare the file is being used for buffered writes
  * @inode - file inode
  *
- * Declare that a buffered read operation is about to start, and ensure
+ * Declare that a buffered write operation is about to start, and ensure
  * that we block all direct I/O.
  */
 void
 nfs_start_io_write(struct inode *inode)
 {
-	down_write(&inode->i_rwsem);
+	mutex_lock(&inode->i_mutex);
 	nfs_block_o_direct(NFS_I(inode), inode);
 }
 
@@ -86,20 +75,20 @@ nfs_start_io_write(struct inode *inode)
  * @inode - file inode
  *
  * Declare that a buffered write operation is done, and release the
- * lock on inode->i_rwsem.
+ * locks.
  */
 void
 nfs_end_io_write(struct inode *inode)
 {
-	up_write(&inode->i_rwsem);
+	mutex_unlock(&inode->i_mutex);
 }
 
-/* Call with exclusively locked inode->i_rwsem */
+/* Call with exclusively locked inode->i_mutex */
 static void nfs_block_buffered(struct nfs_inode *nfsi, struct inode *inode)
 {
 	if (!test_bit(NFS_INO_ODIRECT, &nfsi->flags)) {
 		set_bit(NFS_INO_ODIRECT, &nfsi->flags);
-		nfs_wb_all(inode);
+		nfs_sync_mapping(inode->i_mapping);
 	}
 }
 
@@ -110,39 +99,29 @@ static void nfs_block_buffered(struct nfs_inode *nfsi, struct inode *inode)
  * Declare that a direct I/O operation is about to start, and ensure
  * that we block all buffered I/O.
  * On exit, the function ensures that the NFS_INO_ODIRECT flag is set,
- * and holds a shared lock on inode->i_rwsem to ensure that the flag
- * cannot be changed.
- * In practice, this means that direct I/O operations are allowed to
- * execute in parallel, thanks to the shared lock, whereas buffered I/O
- * operations need to wait to grab an exclusive lock in order to clear
- * NFS_INO_ODIRECT.
- * Note that buffered writes and truncates both take a write lock on
- * inode->i_rwsem, meaning that those are serialised w.r.t. O_DIRECT.
+ * and holds a lock on i_mutex to ensure that the flag cannot be
+ * changed.
+ * Note that buffered writes and truncates both take i_mutex,
+ * meaning that those are serialised w.r.t. O_DIRECT.
  */
 void
 nfs_start_io_direct(struct inode *inode)
 {
 	struct nfs_inode *nfsi = NFS_I(inode);
-	/* Be an optimist! */
-	down_read(&inode->i_rwsem);
-	if (test_bit(NFS_INO_ODIRECT, &nfsi->flags) != 0)
-		return;
-	up_read(&inode->i_rwsem);
-	/* Slow path.... */
-	down_write(&inode->i_rwsem);
-	nfs_block_buffered(nfsi, inode);
-	downgrade_write(&inode->i_rwsem);
+
+	mutex_lock(&inode->i_mutex);
+	if (test_bit(NFS_INO_ODIRECT, &nfsi->flags) == 0)
+		nfs_block_buffered(nfsi, inode);
 }
 
 /**
  * nfs_end_io_direct - declare that the direct i/o operation is done
  * @inode - file inode
  *
- * Declare that a direct I/O operation is done, and release the shared
- * lock on inode->i_rwsem.
+ * Declare that a direct I/O operation is done, and release i_mutex
  */
 void
 nfs_end_io_direct(struct inode *inode)
 {
-	up_read(&inode->i_rwsem);
+	mutex_unlock(&inode->i_mutex);
 }

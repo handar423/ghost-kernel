@@ -18,7 +18,7 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/signal.h>
-#include <linux/sched/signal.h>
+#include <linux/sched.h>
 #include <linux/mutex.h>
 #include <linux/errno.h>
 #include <linux/random.h>
@@ -30,6 +30,10 @@
 
 #include "rio500_usb.h"
 
+/*
+ * Version Information
+ */
+#define DRIVER_VERSION "v1.1"
 #define DRIVER_AUTHOR "Cesar Miquel <miquel@df.uba.ar>"
 #define DRIVER_DESC "USB Rio 500 driver"
 

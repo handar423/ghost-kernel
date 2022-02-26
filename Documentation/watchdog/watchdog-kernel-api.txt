@@ -57,7 +57,6 @@ struct watchdog_device {
 	unsigned int min_hw_heartbeat_ms;
 	unsigned int max_hw_heartbeat_ms;
 	struct notifier_block reboot_nb;
-	struct notifier_block restart_nb;
 	void *driver_data;
 	struct watchdog_core_data *wd_data;
 	unsigned long status;
@@ -98,10 +97,6 @@ It contains following fields:
 * reboot_nb: notifier block that is registered for reboot notifications, for
   internal use only. If the driver calls watchdog_stop_on_reboot, watchdog core
   will stop the watchdog on such notifications.
-* restart_nb: notifier block that is registered for machine restart, for
-  internal use only. If a watchdog is capable of restarting the machine, it
-  should define ops->restart. Priority can be changed through
-  watchdog_set_restart_priority.
 * bootstatus: status of the device after booting (reported with watchdog
   WDIOF_* status bits).
 * driver_data: a pointer to the drivers private data of a watchdog device.
@@ -127,7 +122,6 @@ struct watchdog_ops {
 	int (*set_timeout)(struct watchdog_device *, unsigned int);
 	int (*set_pretimeout)(struct watchdog_device *, unsigned int);
 	unsigned int (*get_timeleft)(struct watchdog_device *);
-	int (*restart)(struct watchdog_device *);
 	void (*ref)(struct watchdog_device *) __deprecated;
 	void (*unref)(struct watchdog_device *) __deprecated;
 	long (*ioctl)(struct watchdog_device *, unsigned int, unsigned long);
@@ -211,8 +205,6 @@ they are supported. These optional routines/operations are:
   infrastructure updates the pretimeout value of the watchdog_device internally
   to the requested value.
 * get_timeleft: this routines returns the time that's left before a reset.
-* restart: this routine restarts the machine. It returns 0 on success or a
-  negative errno code for failure.
 * ioctl: if this routine is present then it will be called first before we do
   our own internal ioctl call handling. This routine should return -ENOIOCTLCMD
   if a command is not supported. The parameters that are passed to the ioctl
@@ -285,17 +277,6 @@ the following helper. Note that this will only stop the watchdog if the
 nowayout flag is not set.
 
 static inline void watchdog_stop_on_unregister(struct watchdog_device *wdd);
-
-To change the priority of the restart handler the following helper should be
-used:
-
-void watchdog_set_restart_priority(struct watchdog_device *wdd, int priority);
-
-User should follow the following guidelines for setting the priority:
-* 0: should be called in last resort, has limited restart capabilities
-* 128: default restart handler, use if no other handler is expected to be
-  available, and/or if restart is sufficient to restart the entire system
-* 255: highest priority, will preempt all other restart handlers
 
 To raise a pretimeout notification, the following function should be used:
 

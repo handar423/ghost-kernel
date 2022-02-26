@@ -33,12 +33,12 @@ static inline int should_deliver(const struct net_bridge_port *p,
 		nbp_switchdev_allowed_egress(p, skb);
 }
 
-int br_dev_queue_push_xmit(struct net *net, struct sock *sk, struct sk_buff *skb)
+int br_dev_queue_push_xmit(struct sock *sk, struct sk_buff *skb)
 {
+	skb_push(skb, ETH_HLEN);
 	if (!is_skb_forwardable(skb->dev, skb))
 		goto drop;
 
-	skb_push(skb, ETH_HLEN);
 	br_drop_fake_rtable(skb);
 
 	if (skb->ip_summed == CHECKSUM_PARTIAL &&
@@ -62,10 +62,10 @@ drop:
 }
 EXPORT_SYMBOL_GPL(br_dev_queue_push_xmit);
 
-int br_forward_finish(struct net *net, struct sock *sk, struct sk_buff *skb)
+int br_forward_finish(struct sock *sk, struct sk_buff *skb)
 {
-	return NF_HOOK(NFPROTO_BRIDGE, NF_BR_POST_ROUTING,
-		       net, sk, skb, NULL, skb->dev,
+	return NF_HOOK(NFPROTO_BRIDGE, NF_BR_POST_ROUTING, sk, skb,
+		       NULL, skb->dev,
 		       br_dev_queue_push_xmit);
 
 }
@@ -96,12 +96,11 @@ static void __br_forward(const struct net_bridge_port *to,
 		net = dev_net(indev);
 	} else {
 		if (unlikely(netpoll_tx_running(to->br->dev))) {
-			if (!is_skb_forwardable(skb->dev, skb)) {
+			skb_push(skb, ETH_HLEN);
+			if (!is_skb_forwardable(skb->dev, skb))
 				kfree_skb(skb);
-			} else {
-				skb_push(skb, ETH_HLEN);
+			else
 				br_netpoll_send_skb(to, skb);
-			}
 			return;
 		}
 		br_hook = NF_BR_LOCAL_OUT;
@@ -110,7 +109,7 @@ static void __br_forward(const struct net_bridge_port *to,
 	}
 
 	NF_HOOK(NFPROTO_BRIDGE, br_hook,
-		net, NULL, skb, indev, skb->dev,
+		NULL, skb, indev, skb->dev,
 		br_forward_finish);
 }
 
@@ -204,7 +203,7 @@ void br_flood(struct net_bridge *br, struct sk_buff *skb,
 		/* Do not flood to ports that enable proxy ARP */
 		if (p->flags & BR_PROXYARP)
 			continue;
-		if ((p->flags & (BR_PROXYARP_WIFI | BR_NEIGH_SUPPRESS)) &&
+		if ((p->flags & BR_PROXYARP_WIFI) &&
 		    BR_INPUT_SKB_CB(skb)->proxyarp_replied)
 			continue;
 

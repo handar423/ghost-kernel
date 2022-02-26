@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2017, Intel Corp.
+ * Copyright (C) 2000 - 2014, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -46,32 +46,10 @@
 
 #ifdef __KERNEL__
 
-#ifndef ACPI_USE_NATIVE_DIVIDE
-
-#ifndef ACPI_DIV_64_BY_32
-#define ACPI_DIV_64_BY_32(n_hi, n_lo, d32, q32, r32) \
-	do { \
-		u64 (__n) = ((u64) n_hi) << 32 | (n_lo); \
-		(r32) = do_div ((__n), (d32)); \
-		(q32) = (u32) (__n); \
-	} while (0)
-#endif
-
-#ifndef ACPI_SHIFT_RIGHT_64
-#define ACPI_SHIFT_RIGHT_64(n_hi, n_lo) \
-	do { \
-		(n_lo) >>= 1; \
-		(n_lo) |= (((n_hi) & 1) << 31); \
-		(n_hi) >>= 1; \
-	} while (0)
-#endif
-
-#endif
-
 /*
  * Overrides for in-kernel ACPICA
  */
-acpi_status ACPI_INIT_FUNCTION acpi_os_initialize(void);
+acpi_status __init acpi_os_initialize(void);
 
 acpi_status acpi_os_terminate(void);
 
@@ -124,24 +102,27 @@ static inline acpi_thread_id acpi_os_get_thread_id(void)
 		lock ? AE_OK : AE_NO_MEMORY; \
 	})
 
-static inline u8 acpi_os_readable(void *pointer, acpi_size length)
-{
-	return TRUE;
-}
+#define acpi_os_create_raw_lock(__handle)			\
+({								\
+	raw_spinlock_t *lock = ACPI_ALLOCATE(sizeof(*lock));	\
+								\
+	if (lock) {						\
+		*(__handle) = lock;				\
+		raw_spin_lock_init(*(__handle));		\
+	}							\
+	lock ? AE_OK : AE_NO_MEMORY;				\
+})
 
-static inline acpi_status acpi_os_initialize_debugger(void)
-{
-	return AE_OK;
-}
+#define acpi_os_delete_raw_lock(__handle)	kfree(__handle)
 
-static inline void acpi_os_terminate_debugger(void)
-{
-	return;
-}
+void __iomem *acpi_os_map_memory(acpi_physical_address where, acpi_size length);
+
+void acpi_os_unmap_memory(void __iomem * logical_address, acpi_size size);
 
 /*
  * OSL interfaces added by Linux
  */
+void early_acpi_os_unmap_memory(void __iomem * virt, acpi_size size);
 
 #endif				/* __KERNEL__ */
 

@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 #include "sched.h"
 
 /*
@@ -25,7 +24,7 @@ check_preempt_curr_stop(struct rq *rq, struct task_struct *p, int flags)
 }
 
 static struct task_struct *
-pick_next_task_stop(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
+pick_next_task_stop(struct rq *rq, struct task_struct *prev)
 {
 	struct task_struct *stop = rq->stop;
 
@@ -42,13 +41,13 @@ pick_next_task_stop(struct rq *rq, struct task_struct *prev, struct rq_flags *rf
 static void
 enqueue_task_stop(struct rq *rq, struct task_struct *p, int flags)
 {
-	add_nr_running(rq, 1);
+	inc_nr_running(rq);
 }
 
 static void
 dequeue_task_stop(struct rq *rq, struct task_struct *p, int flags)
 {
-	sub_nr_running(rq, 1);
+	dec_nr_running(rq);
 }
 
 static void yield_task_stop(struct rq *rq)
@@ -65,14 +64,14 @@ static void put_prev_task_stop(struct rq *rq, struct task_struct *prev)
 	if (unlikely((s64)delta_exec < 0))
 		delta_exec = 0;
 
-	schedstat_set(curr->se.statistics.exec_max,
-			max(curr->se.statistics.exec_max, delta_exec));
+	schedstat_set(curr->se.statistics->exec_max,
+			max(curr->se.statistics->exec_max, delta_exec));
 
 	curr->se.sum_exec_runtime += delta_exec;
 	account_group_exec_runtime(curr, delta_exec);
 
 	curr->se.exec_start = rq_clock_task(rq);
-	cgroup_account_cputime(curr, delta_exec);
+	cpuacct_charge(curr, delta_exec);
 }
 
 static void task_tick_stop(struct rq *rq, struct task_struct *curr, int queued)
@@ -111,11 +110,7 @@ static void update_curr_stop(struct rq *rq)
  * Simple, special scheduling class for the per-CPU stop tasks:
  */
 const struct sched_class stop_sched_class = {
-#ifdef CONFIG_SCHED_CLASS_GHOST
-	.next			= &ghost_agent_sched_class,
-#else
 	.next			= &dl_sched_class,
-#endif
 
 	.enqueue_task		= enqueue_task_stop,
 	.dequeue_task		= dequeue_task_stop,
@@ -128,7 +123,6 @@ const struct sched_class stop_sched_class = {
 
 #ifdef CONFIG_SMP
 	.select_task_rq		= select_task_rq_stop,
-	.set_cpus_allowed	= set_cpus_allowed_common,
 #endif
 
 	.set_curr_task          = set_curr_task_stop,

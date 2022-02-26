@@ -24,9 +24,6 @@
  **/
 struct scatterlist *sg_next(struct scatterlist *sg)
 {
-#ifdef CONFIG_DEBUG_SG
-	BUG_ON(sg->sg_magic != SG_MAGIC);
-#endif
 	if (sg_is_last(sg))
 		return NULL;
 
@@ -105,16 +102,17 @@ EXPORT_SYMBOL(sg_nents_for_len);
  **/
 struct scatterlist *sg_last(struct scatterlist *sgl, unsigned int nents)
 {
+#ifndef ARCH_HAS_SG_CHAIN
+	struct scatterlist *ret = &sgl[nents - 1];
+#else
 	struct scatterlist *sg, *ret = NULL;
 	unsigned int i;
 
 	for_each_sg(sgl, sg, nents, i)
 		ret = sg;
 
-#ifdef CONFIG_DEBUG_SG
-	BUG_ON(sgl[0].sg_magic != SG_MAGIC);
-	BUG_ON(!sg_is_last(ret));
 #endif
+	BUG_ON(!sg_is_last(ret));
 	return ret;
 }
 EXPORT_SYMBOL(sg_last);
@@ -132,13 +130,6 @@ EXPORT_SYMBOL(sg_last);
 void sg_init_table(struct scatterlist *sgl, unsigned int nents)
 {
 	memset(sgl, 0, sizeof(*sgl) * nents);
-#ifdef CONFIG_DEBUG_SG
-	{
-		unsigned int i;
-		for (i = 0; i < nents; i++)
-			sgl[i].sg_magic = SG_MAGIC;
-	}
-#endif
 	sg_mark_end(&sgl[nents - 1]);
 }
 EXPORT_SYMBOL(sg_init_table);
@@ -279,14 +270,12 @@ int __sg_alloc_table(struct sg_table *table, unsigned int nents,
 	struct scatterlist *sg, *prv;
 	unsigned int left;
 
-	memset(table, 0, sizeof(*table));
-
-	if (nents == 0)
-		return -EINVAL;
-#ifndef CONFIG_ARCH_HAS_SG_CHAIN
+#ifndef ARCH_HAS_SG_CHAIN
 	if (WARN_ON_ONCE(nents > max_ents))
 		return -EINVAL;
 #endif
+
+	memset(table, 0, sizeof(*table));
 
 	left = nents;
 	prv = NULL;
@@ -639,9 +628,9 @@ EXPORT_SYMBOL(sg_miter_next);
  *
  * Description:
  *   Stops mapping iterator @miter.  @miter should have been started
- *   using sg_miter_start().  A stopped iteration can be resumed by
- *   calling sg_miter_next() on it.  This is useful when resources (kmap)
- *   need to be released during iteration.
+ *   started using sg_miter_start().  A stopped iteration can be
+ *   resumed by calling sg_miter_next() on it.  This is useful when
+ *   resources (kmap) need to be released during iteration.
  *
  * Context:
  *   Preemption disabled if the SG_MITER_ATOMIC is set.  Don't care
@@ -661,7 +650,7 @@ void sg_miter_stop(struct sg_mapping_iter *miter)
 			flush_kernel_dcache_page(miter->page);
 
 		if (miter->__flags & SG_MITER_ATOMIC) {
-			WARN_ON_ONCE(preemptible());
+			WARN_ON_ONCE(!pagefault_disabled());
 			kunmap_atomic(miter->addr);
 		} else
 			kunmap(miter->page);
@@ -692,6 +681,7 @@ size_t sg_copy_buffer(struct scatterlist *sgl, unsigned int nents, void *buf,
 {
 	unsigned int offset = 0;
 	struct sg_mapping_iter miter;
+	unsigned long flags;
 	unsigned int sg_flags = SG_MITER_ATOMIC;
 
 	if (to_buffer)
@@ -704,7 +694,9 @@ size_t sg_copy_buffer(struct scatterlist *sgl, unsigned int nents, void *buf,
 	if (!sg_miter_skip(&miter, skip))
 		return false;
 
-	while ((offset < buflen) && sg_miter_next(&miter)) {
+	local_irq_save_nort(flags);
+
+	while (sg_miter_next(&miter) && offset < buflen) {
 		unsigned int len;
 
 		len = min(miter.length, buflen - offset);
@@ -719,6 +711,7 @@ size_t sg_copy_buffer(struct scatterlist *sgl, unsigned int nents, void *buf,
 
 	sg_miter_stop(&miter);
 
+	local_irq_restore_nort(flags);
 	return offset;
 }
 EXPORT_SYMBOL(sg_copy_buffer);

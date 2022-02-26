@@ -12,8 +12,6 @@
 
 #undef DEBUG
 
-#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
-
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/errno.h>
@@ -24,7 +22,6 @@
 #include <linux/init.h>
 #include <linux/completion.h>
 #include <linux/mutex.h>
-#include <linux/of_device.h>
 #include <asm/prom.h>
 #include <asm/machdep.h>
 #include <asm/irq.h>
@@ -67,9 +64,14 @@
 #define CPUFREQ_LOW                   1
 
 static struct cpufreq_frequency_table g5_cpu_freqs[] = {
-	{0, CPUFREQ_HIGH,	0},
-	{0, CPUFREQ_LOW,	0},
-	{0, 0,			CPUFREQ_TABLE_END},
+	{CPUFREQ_HIGH, 		0},
+	{CPUFREQ_LOW,		0},
+	{0,			CPUFREQ_TABLE_END},
+};
+
+static struct freq_attr* g5_cpu_freqs_attr[] = {
+	&cpufreq_freq_attr_scaling_available_freqs,
+	NULL,
 };
 
 /* Power mode data is an array of the 32 bits PCR values to use for
@@ -80,6 +82,8 @@ static int g5_pmode_cur;
 static void (*g5_switch_volt)(int speed_mode);
 static int (*g5_switch_freq)(int speed_mode);
 static int (*g5_query_freq)(void);
+
+static DEFINE_MUTEX(g5_switch_mutex);
 
 static unsigned long transition_latency;
 
@@ -137,10 +141,10 @@ static void g5_vdnap_switch_volt(int speed_mode)
 		pmf_call_one(pfunc_vdnap0_complete, &args);
 		if (done)
 			break;
-		usleep_range(1000, 1000);
+		msleep(1);
 	}
 	if (done == 0)
-		pr_warn("Timeout in clock slewing !\n");
+		printk(KERN_WARNING "cpufreq: Timeout in clock slewing !\n");
 }
 
 
@@ -236,7 +240,7 @@ static void g5_pfunc_switch_volt(int speed_mode)
 		if (pfunc_cpu1_volt_low)
 			pmf_call_one(pfunc_cpu1_volt_low, NULL);
 	}
-	usleep_range(10000, 10000); /* should be faster , to fix */
+	msleep(10); /* should be faster , to fix */
 }
 
 /*
@@ -268,7 +272,7 @@ static int g5_pfunc_switch_freq(int speed_mode)
 		rc = pmf_call_one(pfunc_cpu_setfreq_low, NULL);
 
 	if (rc)
-		pr_warn("pfunc switch error %d\n", rc);
+		printk(KERN_WARNING "cpufreq: pfunc switch error %d\n", rc);
 
 	/* It's an irq GPIO so we should be able to just block here,
 	 * I'll do that later after I've properly tested the IRQ code for
@@ -281,10 +285,10 @@ static int g5_pfunc_switch_freq(int speed_mode)
 		pmf_call_one(pfunc_slewing_done, &args);
 		if (done)
 			break;
-		usleep_range(500, 500);
+		msleep(1);
 	}
 	if (done == 0)
-		pr_warn("Timeout in clock slewing !\n");
+		printk(KERN_WARNING "cpufreq: Timeout in clock slewing !\n");
 
 	/* If frequency is going down, last ramp the voltage */
 	if (speed_mode > g5_pmode_cur)
@@ -312,9 +316,37 @@ static int g5_pfunc_query_freq(void)
  * Common interface to the cpufreq core
  */
 
-static int g5_cpufreq_target(struct cpufreq_policy *policy, unsigned int index)
+static int g5_cpufreq_verify(struct cpufreq_policy *policy)
 {
-	return g5_switch_freq(index);
+	return cpufreq_frequency_table_verify(policy, g5_cpu_freqs);
+}
+
+static int g5_cpufreq_target(struct cpufreq_policy *policy,
+	unsigned int target_freq, unsigned int relation)
+{
+	unsigned int newstate = 0;
+	struct cpufreq_freqs freqs;
+	int rc;
+
+	if (cpufreq_frequency_table_target(policy, g5_cpu_freqs,
+			target_freq, relation, &newstate))
+		return -EINVAL;
+
+	if (g5_pmode_cur == newstate)
+		return 0;
+
+	mutex_lock(&g5_switch_mutex);
+
+	freqs.old = g5_cpu_freqs[g5_pmode_cur].frequency;
+	freqs.new = g5_cpu_freqs[newstate].frequency;
+
+	cpufreq_notify_transition(policy, &freqs, CPUFREQ_PRECHANGE);
+	rc = g5_switch_freq(newstate);
+	cpufreq_notify_transition(policy, &freqs, CPUFREQ_POSTCHANGE);
+
+	mutex_unlock(&g5_switch_mutex);
+
+	return rc;
 }
 
 static unsigned int g5_cpufreq_get_speed(unsigned int cpu)
@@ -324,24 +356,36 @@ static unsigned int g5_cpufreq_get_speed(unsigned int cpu)
 
 static int g5_cpufreq_cpu_init(struct cpufreq_policy *policy)
 {
-	return cpufreq_generic_init(policy, g5_cpu_freqs, transition_latency);
+	policy->cpuinfo.transition_latency = transition_latency;
+	policy->cur = g5_cpu_freqs[g5_query_freq()].frequency;
+	/* secondary CPUs are tied to the primary one by the
+	 * cpufreq core if in the secondary policy we tell it that
+	 * it actually must be one policy together with all others. */
+	cpumask_copy(policy->cpus, cpu_online_mask);
+	cpufreq_frequency_table_get_attr(g5_cpu_freqs, policy->cpu);
+
+	return cpufreq_frequency_table_cpuinfo(policy,
+		g5_cpu_freqs);
 }
+
 
 static struct cpufreq_driver g5_cpufreq_driver = {
 	.name		= "powermac",
+	.owner		= THIS_MODULE,
 	.flags		= CPUFREQ_CONST_LOOPS,
 	.init		= g5_cpufreq_cpu_init,
-	.verify		= cpufreq_generic_frequency_table_verify,
-	.target_index	= g5_cpufreq_target,
+	.verify		= g5_cpufreq_verify,
+	.target		= g5_cpufreq_target,
 	.get		= g5_cpufreq_get_speed,
-	.attr 		= cpufreq_generic_attr,
+	.attr 		= g5_cpu_freqs_attr,
 };
 
 
 #ifdef CONFIG_PMAC_SMU
 
-static int __init g5_neo2_cpufreq_init(struct device_node *cpunode)
+static int __init g5_neo2_cpufreq_init(struct device_node *cpus)
 {
+	struct device_node *cpunode;
 	unsigned int psize, ssize;
 	unsigned long max_freq;
 	char *freq_method, *volt_method;
@@ -354,13 +398,26 @@ static int __init g5_neo2_cpufreq_init(struct device_node *cpunode)
 	/* Check supported platforms */
 	if (of_machine_is_compatible("PowerMac8,1") ||
 	    of_machine_is_compatible("PowerMac8,2") ||
-	    of_machine_is_compatible("PowerMac9,1") ||
-	    of_machine_is_compatible("PowerMac12,1"))
+	    of_machine_is_compatible("PowerMac9,1"))
 		use_volts_smu = 1;
 	else if (of_machine_is_compatible("PowerMac11,2"))
 		use_volts_vdnap = 1;
 	else
 		return -ENODEV;
+
+	/* Get first CPU node */
+	for (cpunode = NULL;
+	     (cpunode = of_get_next_child(cpus, cpunode)) != NULL;) {
+		const u32 *reg = of_get_property(cpunode, "reg", NULL);
+		if (reg == NULL || (*reg) != 0)
+			continue;
+		if (!strcmp(cpunode->type, "cpu"))
+			break;
+	}
+	if (cpunode == NULL) {
+		printk(KERN_ERR "cpufreq: Can't find any CPU 0 node\n");
+		return -ENODEV;
+	}
 
 	/* Check 970FX for now */
 	valp = of_get_property(cpunode, "cpu-version", NULL);
@@ -370,7 +427,7 @@ static int __init g5_neo2_cpufreq_init(struct device_node *cpunode)
 	}
 	pvr_hi = (*valp) >> 16;
 	if (pvr_hi != 0x3c && pvr_hi != 0x44) {
-		pr_err("Unsupported CPU version\n");
+		printk(KERN_ERR "cpufreq: Unsupported CPU version\n");
 		goto bail_noprops;
 	}
 
@@ -390,8 +447,9 @@ static int __init g5_neo2_cpufreq_init(struct device_node *cpunode)
 		if (!shdr)
 			goto bail_noprops;
 		g5_fvt_table = (struct smu_sdbp_fvt *)&shdr[1];
-		ssize = (shdr->len * sizeof(u32)) - sizeof(*shdr);
-		g5_fvt_count = ssize / sizeof(*g5_fvt_table);
+		ssize = (shdr->len * sizeof(u32)) -
+			sizeof(struct smu_sdbp_header);
+		g5_fvt_count = ssize / sizeof(struct smu_sdbp_fvt);
 		g5_fvt_cur = 0;
 
 		/* Sanity checking */
@@ -405,7 +463,8 @@ static int __init g5_neo2_cpufreq_init(struct device_node *cpunode)
 
 		root = of_find_node_by_path("/");
 		if (root == NULL) {
-			pr_err("Can't find root of device tree\n");
+			printk(KERN_ERR "cpufreq: Can't find root of "
+			       "device tree\n");
 			goto bail_noprops;
 		}
 		pfunc_set_vdnap0 = pmf_find_function(root, "set-vdnap0");
@@ -413,7 +472,8 @@ static int __init g5_neo2_cpufreq_init(struct device_node *cpunode)
 			pmf_find_function(root, "slewing-done");
 		if (pfunc_set_vdnap0 == NULL ||
 		    pfunc_vdnap0_complete == NULL) {
-			pr_err("Can't find required platform function\n");
+			printk(KERN_ERR "cpufreq: Can't find required "
+			       "platform function\n");
 			goto bail_noprops;
 		}
 
@@ -453,10 +513,10 @@ static int __init g5_neo2_cpufreq_init(struct device_node *cpunode)
 	g5_pmode_cur = -1;
 	g5_switch_freq(g5_query_freq());
 
-	pr_info("Registering G5 CPU frequency driver\n");
-	pr_info("Frequency method: %s, Voltage method: %s\n",
-		freq_method, volt_method);
-	pr_info("Low: %d Mhz, High: %d Mhz, Cur: %d MHz\n",
+	printk(KERN_INFO "Registering G5 CPU frequency driver\n");
+	printk(KERN_INFO "Frequency method: %s, Voltage method: %s\n",
+	       freq_method, volt_method);
+	printk(KERN_INFO "Low: %d Mhz, High: %d Mhz, Cur: %d MHz\n",
 		g5_cpu_freqs[1].frequency/1000,
 		g5_cpu_freqs[0].frequency/1000,
 		g5_cpu_freqs[g5_pmode_cur].frequency/1000);
@@ -477,9 +537,9 @@ static int __init g5_neo2_cpufreq_init(struct device_node *cpunode)
 #endif /* CONFIG_PMAC_SMU */
 
 
-static int __init g5_pm72_cpufreq_init(struct device_node *cpunode)
+static int __init g5_pm72_cpufreq_init(struct device_node *cpus)
 {
-	struct device_node *cpuid = NULL, *hwclock = NULL;
+	struct device_node *cpuid = NULL, *hwclock = NULL, *cpunode = NULL;
 	const u8 *eeprom = NULL;
 	const u32 *valp;
 	u64 max_freq, min_freq, ih, il;
@@ -488,18 +548,30 @@ static int __init g5_pm72_cpufreq_init(struct device_node *cpunode)
 	DBG("cpufreq: Initializing for PowerMac7,2, PowerMac7,3 and"
 	    " RackMac3,1...\n");
 
+	/* Get first CPU node */
+	for (cpunode = NULL;
+	     (cpunode = of_get_next_child(cpus, cpunode)) != NULL;) {
+		if (!strcmp(cpunode->type, "cpu"))
+			break;
+	}
+	if (cpunode == NULL) {
+		printk(KERN_ERR "cpufreq: Can't find any CPU node\n");
+		return -ENODEV;
+	}
+
 	/* Lookup the cpuid eeprom node */
         cpuid = of_find_node_by_path("/u3@0,f8000000/i2c@f8001000/cpuid@a0");
 	if (cpuid != NULL)
 		eeprom = of_get_property(cpuid, "cpuid", NULL);
 	if (eeprom == NULL) {
-		pr_err("Can't find cpuid EEPROM !\n");
+		printk(KERN_ERR "cpufreq: Can't find cpuid EEPROM !\n");
 		rc = -ENODEV;
 		goto bail;
 	}
 
 	/* Lookup the i2c hwclock */
-	for_each_node_by_name(hwclock, "i2c-hwclock") {
+	for (hwclock = NULL;
+	     (hwclock = of_find_node_by_name(hwclock, "i2c-hwclock")) != NULL;){
 		const char *loc = of_get_property(hwclock,
 				"hwctrl-location", NULL);
 		if (loc == NULL)
@@ -511,12 +583,12 @@ static int __init g5_pm72_cpufreq_init(struct device_node *cpunode)
 		break;
 	}
 	if (hwclock == NULL) {
-		pr_err("Can't find i2c clock chip !\n");
+		printk(KERN_ERR "cpufreq: Can't find i2c clock chip !\n");
 		rc = -ENODEV;
 		goto bail;
 	}
 
-	DBG("cpufreq: i2c clock chip found: %pOF\n", hwclock);
+	DBG("cpufreq: i2c clock chip found: %s\n", hwclock->full_name);
 
 	/* Now get all the platform functions */
 	pfunc_cpu_getfreq =
@@ -539,7 +611,7 @@ static int __init g5_pm72_cpufreq_init(struct device_node *cpunode)
 	/* Check we have minimum requirements */
 	if (pfunc_cpu_getfreq == NULL || pfunc_cpu_setfreq_high == NULL ||
 	    pfunc_cpu_setfreq_low == NULL || pfunc_slewing_done == NULL) {
-		pr_err("Can't find platform functions !\n");
+		printk(KERN_ERR "cpufreq: Can't find platform functions !\n");
 		rc = -ENODEV;
 		goto bail;
 	}
@@ -567,7 +639,7 @@ static int __init g5_pm72_cpufreq_init(struct device_node *cpunode)
 	/* Get max frequency from device-tree */
 	valp = of_get_property(cpunode, "clock-frequency", NULL);
 	if (!valp) {
-		pr_err("Can't find CPU frequency !\n");
+		printk(KERN_ERR "cpufreq: Can't find CPU frequency !\n");
 		rc = -ENODEV;
 		goto bail;
 	}
@@ -583,7 +655,8 @@ static int __init g5_pm72_cpufreq_init(struct device_node *cpunode)
 
 	/* Check for machines with no useful settings */
 	if (il == ih) {
-		pr_warn("No low frequency mode available on this model !\n");
+		printk(KERN_WARNING "cpufreq: No low frequency mode available"
+		       " on this model !\n");
 		rc = -ENODEV;
 		goto bail;
 	}
@@ -594,17 +667,15 @@ static int __init g5_pm72_cpufreq_init(struct device_node *cpunode)
 
 	/* Sanity check */
 	if (min_freq >= max_freq || min_freq < 1000) {
-		pr_err("Can't calculate low frequency !\n");
+		printk(KERN_ERR "cpufreq: Can't calculate low frequency !\n");
 		rc = -ENXIO;
 		goto bail;
 	}
 	g5_cpu_freqs[0].frequency = max_freq;
 	g5_cpu_freqs[1].frequency = min_freq;
 
-	/* Based on a measurement on Xserve G5, rounded up. */
-	transition_latency = 10 * NSEC_PER_MSEC;
-
 	/* Set callbacks */
+	transition_latency = CPUFREQ_ETERNAL;
 	g5_switch_volt = g5_pfunc_switch_volt;
 	g5_switch_freq = g5_pfunc_switch_freq;
 	g5_query_freq = g5_pfunc_query_freq;
@@ -618,10 +689,10 @@ static int __init g5_pm72_cpufreq_init(struct device_node *cpunode)
 	g5_pmode_cur = -1;
 	g5_switch_freq(g5_query_freq());
 
-	pr_info("Registering G5 CPU frequency driver\n");
-	pr_info("Frequency method: i2c/pfunc, Voltage method: %s\n",
-		has_volt ? "i2c/pfunc" : "none");
-	pr_info("Low: %d Mhz, High: %d Mhz, Cur: %d MHz\n",
+	printk(KERN_INFO "Registering G5 CPU frequency driver\n");
+	printk(KERN_INFO "Frequency method: i2c/pfunc, "
+	       "Voltage method: %s\n", has_volt ? "i2c/pfunc" : "none");
+	printk(KERN_INFO "Low: %d Mhz, High: %d Mhz, Cur: %d MHz\n",
 		g5_cpu_freqs[1].frequency/1000,
 		g5_cpu_freqs[0].frequency/1000,
 		g5_cpu_freqs[g5_pmode_cur].frequency/1000);
@@ -647,25 +718,25 @@ static int __init g5_pm72_cpufreq_init(struct device_node *cpunode)
 
 static int __init g5_cpufreq_init(void)
 {
-	struct device_node *cpunode;
+	struct device_node *cpus;
 	int rc = 0;
 
-	/* Get first CPU node */
-	cpunode = of_cpu_device_node_get(0);
-	if (cpunode == NULL) {
-		pr_err("Can't find any CPU node\n");
+	cpus = of_find_node_by_path("/cpus");
+	if (cpus == NULL) {
+		DBG("No /cpus node !\n");
 		return -ENODEV;
 	}
 
 	if (of_machine_is_compatible("PowerMac7,2") ||
 	    of_machine_is_compatible("PowerMac7,3") ||
 	    of_machine_is_compatible("RackMac3,1"))
-		rc = g5_pm72_cpufreq_init(cpunode);
+		rc = g5_pm72_cpufreq_init(cpus);
 #ifdef CONFIG_PMAC_SMU
 	else
-		rc = g5_neo2_cpufreq_init(cpunode);
+		rc = g5_neo2_cpufreq_init(cpus);
 #endif /* CONFIG_PMAC_SMU */
 
+	of_node_put(cpus);
 	return rc;
 }
 

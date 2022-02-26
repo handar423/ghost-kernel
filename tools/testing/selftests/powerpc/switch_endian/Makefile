@@ -1,16 +1,24 @@
-# SPDX-License-Identifier: GPL-2.0
-TEST_GEN_PROGS := switch_endian_test
+CC := $(CROSS_COMPILE)gcc
+PROGS := switch_endian_test
 
 ASFLAGS += -O2 -Wall -g -nostdlib -m64
 
-EXTRA_CLEAN = $(OUTPUT)/*.o $(OUTPUT)/check-reversed.S
+all: $(PROGS)
 
-include ../../lib.mk
+switch_endian_test: check-reversed.S
 
-$(OUTPUT)/switch_endian_test: $(OUTPUT)/check-reversed.S
-
-$(OUTPUT)/check-reversed.o: $(OUTPUT)/check.o
+check-reversed.o: check.o
 	$(CROSS_COMPILE)objcopy -j .text --reverse-bytes=4 -O binary $< $@
 
-$(OUTPUT)/check-reversed.S: $(OUTPUT)/check-reversed.o
+check-reversed.S: check-reversed.o
 	hexdump -v -e '/1 ".byte 0x%02X\n"' $< > $@
+
+run_tests: all
+	@-for PROG in $(PROGS); do \
+		./$$PROG; \
+	done;
+
+clean:
+	rm -f $(PROGS) *.o check-reversed.S
+
+.PHONY: all run_tests clean

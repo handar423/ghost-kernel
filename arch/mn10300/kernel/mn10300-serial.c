@@ -543,7 +543,7 @@ static void mn10300_serial_receive_interrupt(struct mn10300_serial_port *port)
 
 try_again:
 	/* pull chars out of the hat */
-	ix = READ_ONCE(port->rx_outp);
+	ix = ACCESS_ONCE(port->rx_outp);
 	if (CIRC_CNT(port->rx_inp, ix, MNSC_BUFFER_SIZE) == 0) {
 		if (push && !tport->low_latency)
 			tty_flip_buffer_push(tport);
@@ -985,17 +985,17 @@ static int mn10300_serial_startup(struct uart_port *_port)
 	irq_set_chip(port->tm_irq, &mn10300_serial_pic);
 
 	if (request_irq(port->rx_irq, mn10300_serial_interrupt,
-			IRQF_NOBALANCING,
+			IRQF_DISABLED | IRQF_NOBALANCING,
 			port->rx_name, port) < 0)
 		goto error;
 
 	if (request_irq(port->tx_irq, mn10300_serial_interrupt,
-			IRQF_NOBALANCING,
+			IRQF_DISABLED | IRQF_NOBALANCING,
 			port->tx_name, port) < 0)
 		goto error2;
 
 	if (request_irq(port->tm_irq, mn10300_serial_interrupt,
-			IRQF_NOBALANCING,
+			IRQF_DISABLED | IRQF_NOBALANCING,
 			port->tm_name, port) < 0)
 		goto error3;
 	mn10300_serial_mask_ack(port->tm_irq);
@@ -1724,7 +1724,7 @@ static int mn10300_serial_poll_get_char(struct uart_port *_port)
 	if (mn10300_serial_int_tbl[port->rx_irq].port != NULL) {
 		do {
 			/* pull chars out of the hat */
-			ix = READ_ONCE(port->rx_outp);
+			ix = ACCESS_ONCE(port->rx_outp);
 			if (CIRC_CNT(port->rx_inp, ix, MNSC_BUFFER_SIZE) == 0)
 				return NO_POLL_CHAR;
 

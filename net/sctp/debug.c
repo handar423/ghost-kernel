@@ -22,12 +22,16 @@
  * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with GNU CC; see the file COPYING.  If not, see
- * <http://www.gnu.org/licenses/>.
+ * along with GNU CC; see the file COPYING.  If not, write to
+ * the Free Software Foundation, 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
  *
  * Please send any bug reports or fixes you make to the
  * email address(es):
- *    lksctp developers <linux-sctp@vger.kernel.org>
+ *    lksctp developers <lksctp-developers@lists.sourceforge.net>
+ *
+ * Or submit a bug report through the following website:
+ *    http://www.sf.net/projects/lksctp
  *
  * Written or modified by:
  *    La Monte H.P. Yarroll <piggy@acm.org>
@@ -36,6 +40,9 @@
  *    Jon Grimm             <jgrimm@us.ibm.com>
  *    Daisy Chang	    <daisyc@us.ibm.com>
  *    Sridhar Samudrala	    <sri@us.ibm.com>
+ *
+ * Any bugs reported given to us we will try to fix... any fixes shared will
+ * be incorporated into the next SCTP release.
  */
 
 #include <net/sctp/sctp.h>
@@ -60,7 +67,7 @@ static const char *const sctp_cid_tbl[SCTP_NUM_BASE_CHUNK_TYPES] = {
 };
 
 /* Lookup "chunk type" debug name. */
-const char *sctp_cname(const union sctp_subtype cid)
+const char *sctp_cname(const sctp_subtype_t cid)
 {
 	if (cid.chunk <= SCTP_CID_BASE_MAX)
 		return sctp_cid_tbl[cid.chunk];
@@ -77,9 +84,6 @@ const char *sctp_cname(const union sctp_subtype cid)
 
 	case SCTP_CID_AUTH:
 		return "AUTH";
-
-	case SCTP_CID_RECONF:
-		return "RECONF";
 
 	default:
 		break;
@@ -133,7 +137,7 @@ static const char *const sctp_primitive_tbl[SCTP_NUM_PRIMITIVE_TYPES] = {
 };
 
 /* Lookup primitive debug name. */
-const char *sctp_pname(const union sctp_subtype id)
+const char *sctp_pname(const sctp_subtype_t id)
 {
 	if (id.primitive <= SCTP_EVENT_PRIMITIVE_MAX)
 		return sctp_primitive_tbl[id.primitive];
@@ -146,7 +150,7 @@ static const char *const sctp_other_tbl[] = {
 };
 
 /* Lookup "other" debug name. */
-const char *sctp_oname(const union sctp_subtype id)
+const char *sctp_oname(const sctp_subtype_t id)
 {
 	if (id.other <= SCTP_EVENT_OTHER_MAX)
 		return sctp_other_tbl[id.other];
@@ -162,17 +166,14 @@ static const char *const sctp_timer_tbl[] = {
 	"TIMEOUT_T4_RTO",
 	"TIMEOUT_T5_SHUTDOWN_GUARD",
 	"TIMEOUT_HEARTBEAT",
-	"TIMEOUT_RECONF",
 	"TIMEOUT_SACK",
 	"TIMEOUT_AUTOCLOSE",
 };
 
 /* Lookup timer debug name. */
-const char *sctp_tname(const union sctp_subtype id)
+const char *sctp_tname(const sctp_subtype_t id)
 {
-	BUILD_BUG_ON(SCTP_EVENT_TIMEOUT_MAX + 1 != ARRAY_SIZE(sctp_timer_tbl));
-
-	if (id.timeout < ARRAY_SIZE(sctp_timer_tbl))
+	if (id.timeout <= SCTP_EVENT_TIMEOUT_MAX)
 		return sctp_timer_tbl[id.timeout];
 	return "unknown_timer";
 }

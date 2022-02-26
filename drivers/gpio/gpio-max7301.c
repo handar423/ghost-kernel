@@ -56,7 +56,8 @@ static int max7301_probe(struct spi_device *spi)
 	int ret;
 
 	/* bits_per_word cannot be configured in platform data */
-	spi->bits_per_word = 16;
+	if (spi->dev.platform_data)
+		spi->bits_per_word = 16;
 	ret = spi_setup(spi);
 	if (ret < 0)
 		return ret;
@@ -87,6 +88,7 @@ MODULE_DEVICE_TABLE(spi, max7301_id);
 static struct spi_driver max7301_driver = {
 	.driver = {
 		.name = "max7301",
+		.owner = THIS_MODULE,
 	},
 	.probe = max7301_probe,
 	.remove = max7301_remove,

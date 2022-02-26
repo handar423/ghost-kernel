@@ -22,7 +22,6 @@
 #include <asm/hw_breakpoint.h>
 #include <asm/ptrace.h>
 #include <asm/types.h>
-#include <asm/unified.h>
 
 #ifdef __KERNEL__
 #define STACK_TOP	((current->personality & ADDR_LIMIT_32BIT) ? \
@@ -47,24 +46,15 @@ struct thread_struct {
 
 #define INIT_THREAD  {	}
 
+#ifdef CONFIG_MMU
+#define nommu_start_thread(regs) do { } while (0)
+#else
+#define nommu_start_thread(regs) regs->ARM_r10 = current->mm->start_data
+#endif
+
 #define start_thread(regs,pc,sp)					\
 ({									\
-	unsigned long r7, r8, r9;					\
-									\
-	if (IS_ENABLED(CONFIG_BINFMT_ELF_FDPIC)) {			\
-		r7 = regs->ARM_r7;					\
-		r8 = regs->ARM_r8;					\
-		r9 = regs->ARM_r9;					\
-	}								\
 	memset(regs->uregs, 0, sizeof(regs->uregs));			\
-	if (IS_ENABLED(CONFIG_BINFMT_ELF_FDPIC) &&			\
-	    current->personality & FDPIC_FUNCPTRS) {			\
-		regs->ARM_r7 = r7;					\
-		regs->ARM_r8 = r8;					\
-		regs->ARM_r9 = r9;					\
-		regs->ARM_r10 = current->mm->start_data;		\
-	} else if (!IS_ENABLED(CONFIG_MMU))				\
-		regs->ARM_r10 = current->mm->start_data;		\
 	if (current->personality & ADDR_LIMIT_32BIT)			\
 		regs->ARM_cpsr = USR_MODE;				\
 	else								\
@@ -74,6 +64,7 @@ struct thread_struct {
 	regs->ARM_cpsr |= PSR_ENDSTATE;					\
 	regs->ARM_pc = pc & ~1;		/* pc */			\
 	regs->ARM_sp = sp;		/* sp */			\
+	nommu_start_thread(regs);					\
 })
 
 /* Forward declaration, a strange C thing */
@@ -96,17 +87,6 @@ unsigned long get_wchan(struct task_struct *p);
 #define KSTK_EIP(tsk)	task_pt_regs(tsk)->ARM_pc
 #define KSTK_ESP(tsk)	task_pt_regs(tsk)->ARM_sp
 
-#ifdef CONFIG_SMP
-#define __ALT_SMP_ASM(smp, up)						\
-	"9998:	" smp "\n"						\
-	"	.pushsection \".alt.smp.init\", \"a\"\n"		\
-	"	.long	9998b\n"					\
-	"	" up "\n"						\
-	"	.popsection\n"
-#else
-#define __ALT_SMP_ASM(smp, up)	up
-#endif
-
 /*
  * Prefetching support - only ARMv5.
  */
@@ -117,22 +97,17 @@ static inline void prefetch(const void *ptr)
 {
 	__asm__ __volatile__(
 		"pld\t%a0"
-		:: "p" (ptr));
+		:
+		: "p" (ptr)
+		: "cc");
 }
 
-#if __LINUX_ARM_ARCH__ >= 7 && defined(CONFIG_SMP)
 #define ARCH_HAS_PREFETCHW
-static inline void prefetchw(const void *ptr)
-{
-	__asm__ __volatile__(
-		".arch_extension	mp\n"
-		__ALT_SMP_ASM(
-			WASM(pldw)		"\t%a0",
-			WASM(pld)		"\t%a0"
-		)
-		:: "p" (ptr));
-}
-#endif
+#define prefetchw(ptr)	prefetch(ptr)
+
+#define ARCH_HAS_SPINLOCK_PREFETCH
+#define spin_lock_prefetch(x) do { } while (0)
+
 #endif
 
 #define HAVE_ARCH_PICK_MMAP_LAYOUT

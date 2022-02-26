@@ -15,6 +15,11 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * General Public License for more details.
  *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
+ * 02110-1301 USA
+ *
  * TODO:
  * - Check hardware FSTROBE control when sensor driver add support for this
  *
@@ -26,7 +31,7 @@
 #include <linux/mutex.h>
 #include <linux/slab.h>
 
-#include <media/i2c/as3645a.h>
+#include <media/as3645a.h>
 #include <media/v4l2-ctrls.h>
 #include <media/v4l2-device.h>
 
@@ -294,8 +299,8 @@ static int as3645a_read_fault(struct as3645a *flash)
 		dev_dbg(&client->dev, "Inductor Peak limit fault\n");
 
 	if (rval & AS_FAULT_INFO_INDICATOR_LED)
-		dev_dbg(&client->dev,
-			"Indicator LED fault: Short circuit or open loop\n");
+		dev_dbg(&client->dev, "Indicator LED fault: "
+			"Short circuit or open loop\n");
 
 	dev_dbg(&client->dev, "%u connected LEDs\n",
 		rval & AS_FAULT_INFO_LED_AMOUNT ? 2 : 1);
@@ -310,8 +315,8 @@ static int as3645a_read_fault(struct as3645a *flash)
 		dev_dbg(&client->dev, "Short circuit fault\n");
 
 	if (rval & AS_FAULT_INFO_OVER_VOLTAGE)
-		dev_dbg(&client->dev,
-			"Over voltage fault: Indicates missing capacitor or open connection\n");
+		dev_dbg(&client->dev, "Over voltage fault: "
+			"Indicates missing capacitor or open connection\n");
 
 	return rval;
 }
@@ -583,8 +588,8 @@ static int as3645a_registered(struct v4l2_subdev *sd)
 
 	/* Verify the chip model and version. */
 	if (model != 0x01 || rfu != 0x00) {
-		dev_err(&client->dev,
-			"AS3645A not detected (model %d rfu %d)\n", model, rfu);
+		dev_err(&client->dev, "AS3645A not detected "
+			"(model %d rfu %d)\n", model, rfu);
 		rval = -ENODEV;
 		goto power_off;
 	}
@@ -808,7 +813,7 @@ static int as3645a_probe(struct i2c_client *client,
 	if (client->dev.platform_data == NULL)
 		return -ENODEV;
 
-	flash = devm_kzalloc(&client->dev, sizeof(*flash), GFP_KERNEL);
+	flash = kzalloc(sizeof(*flash), GFP_KERNEL);
 	if (flash == NULL)
 		return -ENOMEM;
 
@@ -822,19 +827,21 @@ static int as3645a_probe(struct i2c_client *client,
 	if (ret < 0)
 		goto done;
 
-	ret = media_entity_pads_init(&flash->subdev.entity, 0, NULL);
+	ret = media_entity_init(&flash->subdev.entity, 0, NULL, 0);
 	if (ret < 0)
 		goto done;
 
-	flash->subdev.entity.function = MEDIA_ENT_F_FLASH;
+	flash->subdev.entity.type = MEDIA_ENT_T_V4L2_SUBDEV_FLASH;
 
 	mutex_init(&flash->power_lock);
 
 	flash->led_mode = V4L2_FLASH_LED_MODE_NONE;
 
 done:
-	if (ret < 0)
+	if (ret < 0) {
 		v4l2_ctrl_handler_free(&flash->ctrls);
+		kfree(flash);
+	}
 
 	return ret;
 }
@@ -848,6 +855,7 @@ static int as3645a_remove(struct i2c_client *client)
 	v4l2_ctrl_handler_free(&flash->ctrls);
 	media_entity_cleanup(&flash->subdev.entity);
 	mutex_destroy(&flash->power_lock);
+	kfree(flash);
 
 	return 0;
 }

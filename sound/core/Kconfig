@@ -12,9 +12,6 @@ config SND_PCM_ELD
 config SND_PCM_IEC958
 	bool
 
-config SND_DMAENGINE_PCM
-	tristate
-
 config SND_HWDEP
 	tristate
 

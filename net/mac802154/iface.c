@@ -591,8 +591,8 @@ ieee802154_setup_sdata(struct ieee802154_sub_if_data *sdata,
 					sdata->dev->dev_addr);
 
 		sdata->dev->header_ops = &mac802154_header_ops;
-		sdata->dev->needs_free_netdev = true;
-		sdata->dev->priv_destructor = mac802154_wpan_free;
+		sdata->dev->extended->needs_free_netdev = true;
+		sdata->dev->extended->priv_destructor = mac802154_wpan_free;
 		sdata->dev->netdev_ops = &mac802154_wpan_ops;
 		sdata->dev->ml_priv = &mac802154_mlme_wpan;
 		wpan_dev->promiscuous_mode = false;
@@ -607,7 +607,7 @@ ieee802154_setup_sdata(struct ieee802154_sub_if_data *sdata,
 
 		break;
 	case NL802154_IFTYPE_MONITOR:
-		sdata->dev->needs_free_netdev = true;
+		sdata->dev->extended->needs_free_netdev = true;
 		sdata->dev->netdev_ops = &mac802154_monitor_ops;
 		wpan_dev->promiscuous_mode = true;
 		break;
@@ -620,8 +620,7 @@ ieee802154_setup_sdata(struct ieee802154_sub_if_data *sdata,
 
 struct net_device *
 ieee802154_if_add(struct ieee802154_local *local, const char *name,
-		  unsigned char name_assign_type, enum nl802154_iftype type,
-		  __le64 extended_addr)
+		  enum nl802154_iftype type, __le64 extended_addr)
 {
 	struct net_device *ndev = NULL;
 	struct ieee802154_sub_if_data *sdata = NULL;
@@ -630,7 +629,7 @@ ieee802154_if_add(struct ieee802154_local *local, const char *name,
 	ASSERT_RTNL();
 
 	ndev = alloc_netdev(sizeof(*sdata), name,
-			    name_assign_type, ieee802154_if_setup);
+			    ieee802154_if_setup);
 	if (!ndev)
 		return ERR_PTR(-ENOMEM);
 
@@ -742,10 +741,10 @@ static struct notifier_block mac802154_netdev_notifier = {
 
 int ieee802154_iface_init(void)
 {
-	return register_netdevice_notifier(&mac802154_netdev_notifier);
+	return register_netdevice_notifier_rh(&mac802154_netdev_notifier);
 }
 
 void ieee802154_iface_exit(void)
 {
-	unregister_netdevice_notifier(&mac802154_netdev_notifier);
+	unregister_netdevice_notifier_rh(&mac802154_netdev_notifier);
 }

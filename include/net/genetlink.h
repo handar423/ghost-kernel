@@ -1,10 +1,11 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __NET_GENERIC_NETLINK_H
 #define __NET_GENERIC_NETLINK_H
 
 #include <linux/genetlink.h>
 #include <net/netlink.h>
 #include <net/net_namespace.h>
+
+#include <linux/rh_kabi.h>
 
 #define GENLMSG_DEFAULT_SIZE (NLMSG_DEFAULT_SIZE - GENL_HDRLEN)
 
@@ -34,12 +35,6 @@ struct genl_info;
  *	do additional, common, filtering and return an error
  * @post_doit: called after an operation's doit callback, it may
  *	undo operations done by pre_doit, for example release locks
- * @mcast_bind: a socket bound to the given multicast group (which
- *	is given as the offset into the groups array)
- * @mcast_unbind: a socket was unbound from the given multicast group.
- *	Note that unbind() will not be called symmetrically if the
- *	generic netlink family is removed while there are still open
- *	sockets.
  * @attrbuf: buffer to store parsed attributes (private)
  * @mcgrps: multicast groups used by this family
  * @n_mcgrps: number of multicast groups
@@ -49,7 +44,7 @@ struct genl_info;
  * @n_ops: number of operations supported by this family
  */
 struct genl_family {
-	int			id;		/* private */
+	RH_KABI_REPLACE(unsigned int id, int id)	/* private */
 	unsigned int		hdrsize;
 	char			name[GENL_NAMSIZ];
 	unsigned int		version;
@@ -62,15 +57,21 @@ struct genl_family {
 	void			(*post_doit)(const struct genl_ops *ops,
 					     struct sk_buff *skb,
 					     struct genl_info *info);
-	int			(*mcast_bind)(struct net *net, int group);
-	void			(*mcast_unbind)(struct net *net, int group);
 	struct nlattr **	attrbuf;	/* private */
 	const struct genl_ops *	ops;
 	const struct genl_multicast_group *mcgrps;
 	unsigned int		n_ops;
 	unsigned int		n_mcgrps;
 	unsigned int		mcgrp_offset;	/* private */
+	RH_KABI_DEPRECATE(struct list_head,	family_list)
 	struct module		*module;
+
+	/* Reserved slots. For Red Hat usage only, modules are required to
+	 * set them to zero. */
+	RH_KABI_RESERVE(1)
+	RH_KABI_RESERVE(2)
+	RH_KABI_RESERVE(3)
+	RH_KABI_RESERVE(4)
 };
 
 struct nlattr **genl_family_attrbuf(const struct genl_family *family);
@@ -85,7 +86,6 @@ struct nlattr **genl_family_attrbuf(const struct genl_family *family);
  * @attrs: netlink attributes
  * @_net: network namespace
  * @user_ptr: user pointers
- * @extack: extended ACK report struct
  */
 struct genl_info {
 	u32			snd_seq;
@@ -96,7 +96,7 @@ struct genl_info {
 	struct nlattr **	attrs;
 	possible_net_t		_net;
 	void *			user_ptr[2];
-	struct netlink_ext_ack *extack;
+	RH_KABI_DEPRECATE(struct sock *, dst_sk)
 };
 
 static inline struct net *genl_info_net(struct genl_info *info)
@@ -109,16 +109,6 @@ static inline void genl_info_net_set(struct genl_info *info, struct net *net)
 	write_pnet(&info->_net, net);
 }
 
-#define GENL_SET_ERR_MSG(info, msg) NL_SET_ERR_MSG((info)->extack, msg)
-
-static inline int genl_err_attr(struct genl_info *info, int err,
-				struct nlattr *attr)
-{
-	info->extack->bad_attr = attr;
-
-	return err;
-}
-
 /**
  * struct genl_ops - generic netlink operations
  * @cmd: command identifier
@@ -126,15 +116,14 @@ static inline int genl_err_attr(struct genl_info *info, int err,
  * @flags: flags
  * @policy: attribute validation policy
  * @doit: standard command callback
- * @start: start callback for dumps
  * @dumpit: callback for dumpers
  * @done: completion callback for dumps
+ * @ops_list: operations list
  */
 struct genl_ops {
 	const struct nla_policy	*policy;
 	int		       (*doit)(struct sk_buff *skb,
 				       struct genl_info *info);
-	int		       (*start)(struct netlink_callback *cb);
 	int		       (*dumpit)(struct sk_buff *skb,
 					 struct netlink_callback *cb);
 	int		       (*done)(struct netlink_callback *cb);
@@ -144,22 +133,25 @@ struct genl_ops {
 };
 
 int genl_register_family(struct genl_family *family);
-int genl_unregister_family(const struct genl_family *family);
+int genl_unregister_family(RH_KABI_CONST struct genl_family *family);
 void genl_notify(const struct genl_family *family, struct sk_buff *skb,
 		 struct genl_info *info, u32 group, gfp_t flags);
 
 void *genlmsg_put(struct sk_buff *skb, u32 portid, u32 seq,
-		  const struct genl_family *family, int flags, u8 cmd);
+		  RH_KABI_CONST struct genl_family *family, int flags, u8 cmd);
 
 /**
  * genlmsg_nlhdr - Obtain netlink header from user specified header
  * @user_hdr: user header as returned from genlmsg_put()
+ * @family: generic netlink family
  *
  * Returns pointer to netlink header.
  */
-static inline struct nlmsghdr *genlmsg_nlhdr(void *user_hdr)
+static inline struct nlmsghdr *
+genlmsg_nlhdr(void *user_hdr, const struct genl_family *family)
 {
 	return (struct nlmsghdr *)((char *)user_hdr -
+				   family->hdrsize -
 				   GENL_HDRLEN -
 				   NLMSG_HDRLEN);
 }
@@ -171,30 +163,30 @@ static inline struct nlmsghdr *genlmsg_nlhdr(void *user_hdr)
  * @tb: destination array with maxtype+1 elements
  * @maxtype: maximum attribute type to be expected
  * @policy: validation policy
- * @extack: extended ACK report struct
- */
+ * */
 static inline int genlmsg_parse(const struct nlmsghdr *nlh,
 				const struct genl_family *family,
 				struct nlattr *tb[], int maxtype,
-				const struct nla_policy *policy,
-				struct netlink_ext_ack *extack)
+				const struct nla_policy *policy)
 {
 	return nlmsg_parse(nlh, family->hdrsize + GENL_HDRLEN, tb, maxtype,
-			   policy, extack);
+			   policy);
 }
 
 /**
  * genl_dump_check_consistent - check if sequence is consistent and advertise if not
  * @cb: netlink callback structure that stores the sequence number
  * @user_hdr: user header as returned from genlmsg_put()
+ * @family: generic netlink family
  *
  * Cf. nl_dump_check_consistent(), this just provides a wrapper to make it
  * simpler to use with generic netlink.
  */
 static inline void genl_dump_check_consistent(struct netlink_callback *cb,
-					      void *user_hdr)
+					      void *user_hdr,
+					      const struct genl_family *family)
 {
-	nl_dump_check_consistent(cb, genlmsg_nlhdr(user_hdr));
+	nl_dump_check_consistent(cb, genlmsg_nlhdr(user_hdr, family));
 }
 
 /**
@@ -370,9 +362,6 @@ static inline int genl_set_err(const struct genl_family *family,
 			       struct net *net, u32 portid,
 			       u32 group, int code)
 {
-	if (WARN_ON_ONCE(group >= family->n_mcgrps))
-		return -EINVAL;
-	group = family->mcgrp_offset + group;
 	return netlink_set_err(net->genl_sock, portid, group, code);
 }
 

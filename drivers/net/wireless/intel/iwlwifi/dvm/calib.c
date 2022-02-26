@@ -16,11 +16,6 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110,
- * USA
- *
  * The full GNU General Public License is included in this distribution
  * in the file called COPYING.
  *
@@ -900,7 +895,11 @@ static void iwlagn_gain_computation(struct iwl_priv *priv,
 
 		/* bound gain by 2 bits value max, 3rd bit is sign */
 		data->delta_gain_code[i] =
+#if 0 /* abs() is different on RHEL */
 			min(abs(delta_g), CHAIN_NOISE_MAX_DELTA_GAIN_CODE);
+#else
+			min(abs(delta_g), (long) CHAIN_NOISE_MAX_DELTA_GAIN_CODE);
+#endif
 
 		if (delta_g < 0)
 			/*

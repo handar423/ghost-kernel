@@ -1578,7 +1578,7 @@ int bt_convert__perf2ctf(const char *input, const char *path,
 {
 	struct perf_session *session;
 	struct perf_data data = {
-		.file.path = input,
+		.file      = { .path = input, .fd = -1 },
 		.mode      = PERF_DATA_MODE_READ,
 		.force     = opts->force,
 	};
@@ -1593,7 +1593,6 @@ int bt_convert__perf2ctf(const char *input, const char *path,
 			.lost            = perf_event__process_lost,
 			.tracing_data    = perf_event__process_tracing_data,
 			.build_id        = perf_event__process_build_id,
-			.namespaces      = perf_event__process_namespaces,
 			.ordered_events  = true,
 			.ordering_requires_timestamps = true,
 		},

@@ -23,12 +23,16 @@
  * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with GNU CC; see the file COPYING.  If not, see
- * <http://www.gnu.org/licenses/>.
+ * along with GNU CC; see the file COPYING.  If not, write to
+ * the Free Software Foundation, 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
  *
  * Please send any bug reports or fixes you make to the
  * email address(es):
- *    lksctp developers <linux-sctp@vger.kernel.org>
+ *    lksctp developers <lksctp-developers@lists.sourceforge.net>
+ *
+ * Or submit a bug report through the following website:
+ *    http://www.sf.net/projects/lksctp
  *
  * Written or modified by:
  *    La Monte H.P. Yarroll <piggy@acm.org>
@@ -36,12 +40,16 @@
  *    Jon Grimm <jgrimm@austin.ibm.com>
  *    Daisy Chang <daisyc@us.ibm.com>
  *    Dajiang Zhang <dajiang.zhang@nokia.com>
+ *
+ * Any bugs reported given to us we will try to fix... any fixes shared will
+ * be incorporated into the next SCTP release.
  */
 
 #include <linux/types.h>
 #include <linux/slab.h>
 #include <linux/in.h>
 #include <linux/random.h>	/* get_random_bytes() */
+#include <linux/crypto.h>
 #include <net/sock.h>
 #include <net/ipv6.h>
 #include <net/sctp/sctp.h>
@@ -73,13 +81,13 @@ static struct sctp_endpoint *sctp_endpoint_init(struct sctp_endpoint *ep,
 		 * variables.  There are arrays that we encode directly
 		 * into parameters to make the rest of the operations easier.
 		 */
-		auth_hmacs = kzalloc(sizeof(*auth_hmacs) +
-				     sizeof(__u16) * SCTP_AUTH_NUM_HMACS, gfp);
+		auth_hmacs = kzalloc(sizeof(sctp_hmac_algo_param_t) +
+				sizeof(__u16) * SCTP_AUTH_NUM_HMACS, gfp);
 		if (!auth_hmacs)
 			goto nomem;
 
-		auth_chunks = kzalloc(sizeof(*auth_chunks) +
-				      SCTP_NUM_CHUNK_TYPES, gfp);
+		auth_chunks = kzalloc(sizeof(sctp_chunks_param_t) +
+					SCTP_NUM_CHUNK_TYPES, gfp);
 		if (!auth_chunks)
 			goto nomem;
 
@@ -90,13 +98,12 @@ static struct sctp_endpoint *sctp_endpoint_init(struct sctp_endpoint *ep,
 		 */
 		auth_hmacs->param_hdr.type = SCTP_PARAM_HMAC_ALGO;
 		auth_hmacs->param_hdr.length =
-					htons(sizeof(struct sctp_paramhdr) + 2);
+					htons(sizeof(sctp_paramhdr_t) + 2);
 		auth_hmacs->hmac_ids[0] = htons(SCTP_AUTH_HMAC_ID_SHA1);
 
 		/* Initialize the CHUNKS parameter */
 		auth_chunks->param_hdr.type = SCTP_PARAM_CHUNKS;
-		auth_chunks->param_hdr.length =
-					htons(sizeof(struct sctp_paramhdr));
+		auth_chunks->param_hdr.length = htons(sizeof(sctp_paramhdr_t));
 
 		/* If the Add-IP functionality is enabled, we must
 		 * authenticate, ASCONF and ASCONF-ACK chunks
@@ -105,8 +112,15 @@ static struct sctp_endpoint *sctp_endpoint_init(struct sctp_endpoint *ep,
 			auth_chunks->chunks[0] = SCTP_CID_ASCONF;
 			auth_chunks->chunks[1] = SCTP_CID_ASCONF_ACK;
 			auth_chunks->param_hdr.length =
-					htons(sizeof(struct sctp_paramhdr) + 2);
+					htons(sizeof(sctp_paramhdr_t) + 2);
 		}
+
+		/* Allocate and initialize transorms arrays for supported
+		 * HMACs.
+		 */
+		err = sctp_auth_init_hmacs(ep, gfp);
+		if (err)
+			goto nomem;
 	}
 
 	/* Initialize the base structure. */
@@ -114,7 +128,7 @@ static struct sctp_endpoint *sctp_endpoint_init(struct sctp_endpoint *ep,
 	ep->base.type = SCTP_EP_TYPE_SOCKET;
 
 	/* Initialize the basic object fields. */
-	refcount_set(&ep->base.refcnt, 1);
+	atomic_set(&ep->base.refcnt, 1);
 	ep->base.dead = false;
 
 	/* Create an input queue.  */
@@ -125,10 +139,6 @@ static struct sctp_endpoint *sctp_endpoint_init(struct sctp_endpoint *ep,
 
 	/* Initialize the bind addr area */
 	sctp_bind_addr_init(&ep->base.bind_addr, 0);
-
-	/* Remember who we are attached to.  */
-	ep->base.sk = sk;
-	sock_hold(ep->base.sk);
 
 	/* Create the lists of associations.  */
 	INIT_LIST_HEAD(&ep->asocs);
@@ -150,14 +160,9 @@ static struct sctp_endpoint *sctp_endpoint_init(struct sctp_endpoint *ep,
 	INIT_LIST_HEAD(&ep->endpoint_shared_keys);
 	null_key = sctp_auth_shkey_create(0, gfp);
 	if (!null_key)
-		goto nomem;
+		goto nomem_shkey;
 
 	list_add(&null_key->key_list, &ep->endpoint_shared_keys);
-
-	/* Allocate and initialize transorms arrays for supported HMACs. */
-	err = sctp_auth_init_hmacs(ep, gfp);
-	if (err)
-		goto nomem_hmacs;
 
 	/* Add the null key to the endpoint shared keys list and
 	 * set the hmcas and chunks pointers.
@@ -165,12 +170,16 @@ static struct sctp_endpoint *sctp_endpoint_init(struct sctp_endpoint *ep,
 	ep->auth_hmacs_list = auth_hmacs;
 	ep->auth_chunk_list = auth_chunks;
 	ep->prsctp_enable = net->sctp.prsctp_enable;
-	ep->reconf_enable = net->sctp.reconf_enable;
+
+	/* Remember who we are attached to.  */
+	ep->base.sk = sk;
+	ep->base.net = sock_net(sk);
+	sock_hold(ep->base.sk);
 
 	return ep;
 
-nomem_hmacs:
-	sctp_auth_destroy_keys(&ep->endpoint_shared_keys);
+nomem_shkey:
+	sctp_auth_destroy_hmacs(ep->auth_hmacs);
 nomem:
 	/* Free all allocations */
 	kfree(auth_hmacs);
@@ -269,14 +278,16 @@ static void sctp_endpoint_destroy(struct sctp_endpoint *ep)
 
 	memset(ep->secret_key, 0, sizeof(ep->secret_key));
 
+	/* Give up our hold on the sock. */
 	sk = ep->base.sk;
-	/* Remove and free the port */
-	if (sctp_sk(sk)->bind_hash)
-		sctp_put_port(sk);
+	if (sk != NULL) {
+		/* Remove and free the port */
+		if (sctp_sk(sk)->bind_hash)
+			sctp_put_port(sk);
 
-	sctp_sk(sk)->ep = NULL;
-	/* Give up our hold on the sock */
-	sock_put(sk);
+		sctp_sk(sk)->ep = NULL;
+		sock_put(sk);
+	}
 
 	kfree(ep);
 	SCTP_DBG_OBJCNT_DEC(ep);
@@ -285,7 +296,7 @@ static void sctp_endpoint_destroy(struct sctp_endpoint *ep)
 /* Hold a reference to an endpoint. */
 void sctp_endpoint_hold(struct sctp_endpoint *ep)
 {
-	refcount_inc(&ep->base.refcnt);
+	atomic_inc(&ep->base.refcnt);
 }
 
 /* Release a reference to an endpoint and clean up if there are
@@ -293,7 +304,7 @@ void sctp_endpoint_hold(struct sctp_endpoint *ep)
  */
 void sctp_endpoint_put(struct sctp_endpoint *ep)
 {
-	if (refcount_dec_and_test(&ep->base.refcnt))
+	if (atomic_dec_and_test(&ep->base.refcnt))
 		sctp_endpoint_destroy(ep);
 }
 
@@ -382,8 +393,8 @@ static void sctp_endpoint_bh_rcv(struct work_struct *work)
 	struct sctp_transport *transport;
 	struct sctp_chunk *chunk;
 	struct sctp_inq *inqueue;
-	union sctp_subtype subtype;
-	enum sctp_state state;
+	sctp_subtype_t subtype;
+	sctp_state_t state;
 	int error = 0;
 	int first_time = 1;	/* is this the first time through the loop */
 

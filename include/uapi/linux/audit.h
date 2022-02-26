@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0+ WITH Linux-syscall-note */
 /* audit.h -- Auditing support
  *
  * Copyright 2003-2004 Red Hat Inc., Durham, North Carolina.
@@ -133,8 +132,6 @@
 #define AUDIT_MAC_IPSEC_EVENT	1415	/* Audit an IPSec event */
 #define AUDIT_MAC_UNLBL_STCADD	1416	/* NetLabel: add a static label */
 #define AUDIT_MAC_UNLBL_STCDEL	1417	/* NetLabel: del a static label */
-#define AUDIT_MAC_CALIPSO_ADD	1418	/* NetLabel: add CALIPSO DOI entry */
-#define AUDIT_MAC_CALIPSO_DEL	1419	/* NetLabel: del CALIPSO DOI entry */
 
 #define AUDIT_FIRST_KERN_ANOM_MSG   1700
 #define AUDIT_LAST_KERN_ANOM_MSG    1799
@@ -330,11 +327,9 @@ enum {
 #define AUDIT_STATUS_PID		0x0004
 #define AUDIT_STATUS_RATE_LIMIT		0x0008
 #define AUDIT_STATUS_BACKLOG_LIMIT	0x0010
-#define AUDIT_STATUS_BACKLOG_WAIT_TIME	0x0020
 #define AUDIT_STATUS_LOST		0x0040
 
 #define AUDIT_FEATURE_BITMAP_BACKLOG_LIMIT	0x00000001
-#define AUDIT_FEATURE_BITMAP_BACKLOG_WAIT_TIME	0x00000002
 #define AUDIT_FEATURE_BITMAP_EXECUTABLE_PATH	0x00000004
 #define AUDIT_FEATURE_BITMAP_EXCLUDE_EXTEND	0x00000008
 #define AUDIT_FEATURE_BITMAP_SESSIONID_FILTER	0x00000010
@@ -342,9 +337,9 @@ enum {
 #define AUDIT_FEATURE_BITMAP_FILTER_FS		0x00000040
 
 #define AUDIT_FEATURE_BITMAP_ALL (AUDIT_FEATURE_BITMAP_BACKLOG_LIMIT | \
-				  AUDIT_FEATURE_BITMAP_BACKLOG_WAIT_TIME | \
 				  AUDIT_FEATURE_BITMAP_EXECUTABLE_PATH | \
 				  AUDIT_FEATURE_BITMAP_EXCLUDE_EXTEND | \
+				  AUDIT_FEATURE_BITMAP_EXECUTABLE_PATH | \
 				  AUDIT_FEATURE_BITMAP_SESSIONID_FILTER | \
 				  AUDIT_FEATURE_BITMAP_LOST_RESET | \
 				  AUDIT_FEATURE_BITMAP_FILTER_FS)
@@ -352,30 +347,21 @@ enum {
 /* deprecated: AUDIT_VERSION_* */
 #define AUDIT_VERSION_LATEST 		AUDIT_FEATURE_BITMAP_ALL
 #define AUDIT_VERSION_BACKLOG_LIMIT	AUDIT_FEATURE_BITMAP_BACKLOG_LIMIT
-#define AUDIT_VERSION_BACKLOG_WAIT_TIME	AUDIT_FEATURE_BITMAP_BACKLOG_WAIT_TIME
 
 				/* Failure-to-log actions */
 #define AUDIT_FAIL_SILENT	0
 #define AUDIT_FAIL_PRINTK	1
 #define AUDIT_FAIL_PANIC	2
 
-/*
- * These bits disambiguate different calling conventions that share an
- * ELF machine type, bitness, and endianness
- */
-#define __AUDIT_ARCH_CONVENTION_MASK 0x30000000
-#define __AUDIT_ARCH_CONVENTION_MIPS64_N32 0x20000000
-
 /* distinguish syscall tables */
 #define __AUDIT_ARCH_64BIT 0x80000000
 #define __AUDIT_ARCH_LE	   0x40000000
-
-#define AUDIT_ARCH_AARCH64	(EM_AARCH64|__AUDIT_ARCH_64BIT|__AUDIT_ARCH_LE)
 #define AUDIT_ARCH_ALPHA	(EM_ALPHA|__AUDIT_ARCH_64BIT|__AUDIT_ARCH_LE)
 #define AUDIT_ARCH_ARM		(EM_ARM|__AUDIT_ARCH_LE)
 #define AUDIT_ARCH_ARMEB	(EM_ARM)
 #define AUDIT_ARCH_CRIS		(EM_CRIS|__AUDIT_ARCH_LE)
 #define AUDIT_ARCH_FRV		(EM_FRV)
+#define AUDIT_ARCH_H8300	(EM_H8_300)
 #define AUDIT_ARCH_I386		(EM_386|__AUDIT_ARCH_LE)
 #define AUDIT_ARCH_IA64		(EM_IA_64|__AUDIT_ARCH_64BIT|__AUDIT_ARCH_LE)
 #define AUDIT_ARCH_M32R		(EM_M32R)
@@ -384,11 +370,7 @@ enum {
 #define AUDIT_ARCH_MIPS		(EM_MIPS)
 #define AUDIT_ARCH_MIPSEL	(EM_MIPS|__AUDIT_ARCH_LE)
 #define AUDIT_ARCH_MIPS64	(EM_MIPS|__AUDIT_ARCH_64BIT)
-#define AUDIT_ARCH_MIPS64N32	(EM_MIPS|__AUDIT_ARCH_64BIT|\
-				 __AUDIT_ARCH_CONVENTION_MIPS64_N32)
 #define AUDIT_ARCH_MIPSEL64	(EM_MIPS|__AUDIT_ARCH_64BIT|__AUDIT_ARCH_LE)
-#define AUDIT_ARCH_MIPSEL64N32	(EM_MIPS|__AUDIT_ARCH_64BIT|__AUDIT_ARCH_LE|\
-				 __AUDIT_ARCH_CONVENTION_MIPS64_N32)
 #define AUDIT_ARCH_OPENRISC	(EM_OPENRISC)
 #define AUDIT_ARCH_PARISC	(EM_PARISC)
 #define AUDIT_ARCH_PARISC64	(EM_PARISC|__AUDIT_ARCH_64BIT)
@@ -404,29 +386,12 @@ enum {
 #define AUDIT_ARCH_SHEL64	(EM_SH|__AUDIT_ARCH_64BIT|__AUDIT_ARCH_LE)
 #define AUDIT_ARCH_SPARC	(EM_SPARC)
 #define AUDIT_ARCH_SPARC64	(EM_SPARCV9|__AUDIT_ARCH_64BIT)
-#define AUDIT_ARCH_TILEGX	(EM_TILEGX|__AUDIT_ARCH_64BIT|__AUDIT_ARCH_LE)
-#define AUDIT_ARCH_TILEGX32	(EM_TILEGX|__AUDIT_ARCH_LE)
-#define AUDIT_ARCH_TILEPRO	(EM_TILEPRO|__AUDIT_ARCH_LE)
 #define AUDIT_ARCH_X86_64	(EM_X86_64|__AUDIT_ARCH_64BIT|__AUDIT_ARCH_LE)
 
 #define AUDIT_PERM_EXEC		1
 #define AUDIT_PERM_WRITE	2
 #define AUDIT_PERM_READ		4
 #define AUDIT_PERM_ATTR		8
-
-/* MAX_AUDIT_MESSAGE_LENGTH is set in audit:lib/libaudit.h as:
- * 8970 // PATH_MAX*2+CONTEXT_SIZE*2+11+256+1
- * max header+body+tailer: 44 + 29 + 32 + 262 + 7 + pad
- */
-#define AUDIT_MESSAGE_TEXT_MAX	8560
-
-/* Multicast Netlink socket groups (default up to 32) */
-enum audit_nlgrps {
-	AUDIT_NLGRP_NONE,	/* Group 0 not used */
-	AUDIT_NLGRP_READLOG,	/* "best effort" read only socket */
-	__AUDIT_NLGRP_MAX
-};
-#define AUDIT_NLGRP_MAX                (__AUDIT_NLGRP_MAX - 1)
 
 struct audit_status {
 	__u32		mask;		/* Bit mask for valid entries */
@@ -441,7 +406,6 @@ struct audit_status {
 		__u32	version;	/* deprecated: audit api version num */
 		__u32	feature_bitmap;	/* bitmap of kernel audit features */
 	};
-	__u32		backlog_wait_time;/* message queue wait timeout */
 };
 
 struct audit_features {
@@ -480,6 +444,19 @@ struct audit_rule_data {
 	__u32		fieldflags[AUDIT_MAX_FIELDS];
 	__u32		buflen;	/* total length of string fields */
 	char		buf[0];	/* string fields buffer */
+};
+
+/* audit_rule is supported to maintain backward compatibility with
+ * userspace.  It supports integer fields only and corresponds to
+ * AUDIT_ADD, AUDIT_DEL and AUDIT_LIST requests.
+ */
+struct audit_rule {		/* for AUDIT_LIST, AUDIT_ADD, and AUDIT_DEL */
+	__u32		flags;	/* AUDIT_PER_{TASK,CALL}, AUDIT_PREPEND */
+	__u32		action;	/* AUDIT_NEVER, AUDIT_POSSIBLE, AUDIT_ALWAYS */
+	__u32		field_count;
+	__u32		mask[AUDIT_BITMASK_SIZE];
+	__u32		fields[AUDIT_MAX_FIELDS];
+	__u32		values[AUDIT_MAX_FIELDS];
 };
 
 #endif /* _UAPI_LINUX_AUDIT_H_ */

@@ -34,7 +34,7 @@ static const struct genl_multicast_group psample_nl_mcgrps[] = {
 	[PSAMPLE_NL_MCGRP_SAMPLE] = { .name = PSAMPLE_NL_MCGRP_SAMPLE_NAME },
 };
 
-static struct genl_family psample_nl_family __ro_after_init;
+static struct genl_family psample_nl_family;
 
 static int psample_group_nl_fill(struct sk_buff *msg,
 				 struct psample_group *group,
@@ -105,7 +105,7 @@ static const struct genl_ops psample_nl_ops[] = {
 	}
 };
 
-static struct genl_family psample_nl_family __ro_after_init = {
+static struct genl_family psample_nl_family = {
 	.name		= PSAMPLE_GENL_NAME,
 	.version	= PSAMPLE_GENL_VERSION,
 	.maxattr	= PSAMPLE_ATTR_MAX,
@@ -156,7 +156,7 @@ static void psample_group_destroy(struct psample_group *group)
 {
 	psample_group_notify(group, PSAMPLE_CMD_DEL_GROUP);
 	list_del(&group->list);
-	kfree(group);
+	kfree_rcu(group, rcu);
 }
 
 static struct psample_group *
@@ -223,7 +223,7 @@ void psample_sample_packet(struct psample_group *group, struct sk_buff *skb,
 		data_len = PSAMPLE_MAX_PACKET_SIZE - meta_len - NLA_HDRLEN
 			    - NLA_ALIGNTO;
 
-	nl_skb = genlmsg_new(meta_len + data_len, GFP_ATOMIC);
+	nl_skb = genlmsg_new(meta_len + nla_total_size(data_len), GFP_ATOMIC);
 	if (unlikely(!nl_skb))
 		return;
 
@@ -264,7 +264,7 @@ void psample_sample_packet(struct psample_group *group, struct sk_buff *skb,
 		int nla_len = nla_total_size(data_len);
 		struct nlattr *nla;
 
-		nla = skb_put(nl_skb, nla_len);
+		nla = (struct nlattr *)skb_put(nl_skb, nla_len);
 		nla->nla_type = PSAMPLE_ATTR_DATA;
 		nla->nla_len = nla_attr_size(data_len);
 
@@ -296,6 +296,6 @@ static void __exit psample_module_exit(void)
 module_init(psample_module_init);
 module_exit(psample_module_exit);
 
-MODULE_AUTHOR("Yotam Gigi <yotam.gi@gmail.com>");
+MODULE_AUTHOR("Yotam Gigi <yotamg@mellanox.com>");
 MODULE_DESCRIPTION("netlink channel for packet sampling");
 MODULE_LICENSE("GPL v2");

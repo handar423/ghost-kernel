@@ -25,7 +25,6 @@
 #include <linux/ioport.h>
 #include <linux/cache.h>
 #include <linux/slab.h>
-#include <linux/acpi.h>
 #include "pci.h"
 
 unsigned int pci_flags;
@@ -105,8 +104,17 @@ static struct pci_dev_resource *res_to_dev_res(struct list_head *head,
 	struct pci_dev_resource *dev_res;
 
 	list_for_each_entry(dev_res, head, list) {
-		if (dev_res->res == res)
+		if (dev_res->res == res) {
+			int idx = res - &dev_res->dev->resource[0];
+
+			dev_printk(KERN_DEBUG, &dev_res->dev->dev,
+				 "res[%d]=%pR res_to_dev_res add_size %llx min_align %llx\n",
+				 idx, dev_res->res,
+				 (unsigned long long)dev_res->add_size,
+				 (unsigned long long)dev_res->min_align);
+
 			return dev_res;
+		}
 	}
 
 	return NULL;
@@ -687,16 +695,11 @@ static void __pci_setup_bridge(struct pci_bus *bus, unsigned long type)
 	pci_write_config_word(bridge, PCI_BRIDGE_CONTROL, bus->bridge_ctl);
 }
 
-void __weak pcibios_setup_bridge(struct pci_bus *bus, unsigned long type)
-{
-}
-
 void pci_setup_bridge(struct pci_bus *bus)
 {
 	unsigned long type = IORESOURCE_IO | IORESOURCE_MEM |
 				  IORESOURCE_PREFETCH;
 
-	pcibios_setup_bridge(bus, type);
 	__pci_setup_bridge(bus, type);
 }
 
@@ -740,57 +743,20 @@ int pci_claim_bridge_resource(struct pci_dev *bridge, int i)
    base/limit registers must be read-only and read as 0. */
 static void pci_bridge_check_ranges(struct pci_bus *bus)
 {
-	u16 io;
-	u32 pmem;
 	struct pci_dev *bridge = bus->self;
-	struct resource *b_res;
+	struct resource *b_res = &bridge->resource[PCI_BRIDGE_RESOURCES];
 
-	b_res = &bridge->resource[PCI_BRIDGE_RESOURCES];
 	b_res[1].flags |= IORESOURCE_MEM;
 
-	pci_read_config_word(bridge, PCI_IO_BASE, &io);
-	if (!io) {
-		pci_write_config_word(bridge, PCI_IO_BASE, 0xe0f0);
-		pci_read_config_word(bridge, PCI_IO_BASE, &io);
-		pci_write_config_word(bridge, PCI_IO_BASE, 0x0);
-	}
-	if (io)
+	if (bridge->io_window)
 		b_res[0].flags |= IORESOURCE_IO;
 
-	/*  DECchip 21050 pass 2 errata: the bridge may miss an address
-	    disconnect boundary by one PCI data phase.
-	    Workaround: do not use prefetching on this device. */
-	if (bridge->vendor == PCI_VENDOR_ID_DEC && bridge->device == 0x0001)
-		return;
-
-	pci_read_config_dword(bridge, PCI_PREF_MEMORY_BASE, &pmem);
-	if (!pmem) {
-		pci_write_config_dword(bridge, PCI_PREF_MEMORY_BASE,
-					       0xffe0fff0);
-		pci_read_config_dword(bridge, PCI_PREF_MEMORY_BASE, &pmem);
-		pci_write_config_dword(bridge, PCI_PREF_MEMORY_BASE, 0x0);
-	}
-	if (pmem) {
+	if (bridge->pref_window) {
 		b_res[2].flags |= IORESOURCE_MEM | IORESOURCE_PREFETCH;
-		if ((pmem & PCI_PREF_RANGE_TYPE_MASK) ==
-		    PCI_PREF_RANGE_TYPE_64) {
+		if (bridge->pref_64_window) {
 			b_res[2].flags |= IORESOURCE_MEM_64;
 			b_res[2].flags |= PCI_PREF_RANGE_TYPE_64;
 		}
-	}
-
-	/* double check if bridge does support 64 bit pref */
-	if (b_res[2].flags & IORESOURCE_MEM_64) {
-		u32 mem_base_hi, tmp;
-		pci_read_config_dword(bridge, PCI_PREF_BASE_UPPER32,
-					 &mem_base_hi);
-		pci_write_config_dword(bridge, PCI_PREF_BASE_UPPER32,
-					       0xffffffff);
-		pci_read_config_dword(bridge, PCI_PREF_BASE_UPPER32, &tmp);
-		if (!tmp)
-			b_res[2].flags &= ~IORESOURCE_MEM_64;
-		pci_write_config_dword(bridge, PCI_PREF_BASE_UPPER32,
-				       mem_base_hi);
 	}
 }
 
@@ -1420,74 +1386,6 @@ void pci_bus_assign_resources(const struct pci_bus *bus)
 }
 EXPORT_SYMBOL(pci_bus_assign_resources);
 
-static void pci_claim_device_resources(struct pci_dev *dev)
-{
-	int i;
-
-	for (i = 0; i < PCI_BRIDGE_RESOURCES; i++) {
-		struct resource *r = &dev->resource[i];
-
-		if (!r->flags || r->parent)
-			continue;
-
-		pci_claim_resource(dev, i);
-	}
-}
-
-static void pci_claim_bridge_resources(struct pci_dev *dev)
-{
-	int i;
-
-	for (i = PCI_BRIDGE_RESOURCES; i < PCI_NUM_RESOURCES; i++) {
-		struct resource *r = &dev->resource[i];
-
-		if (!r->flags || r->parent)
-			continue;
-
-		pci_claim_bridge_resource(dev, i);
-	}
-}
-
-static void pci_bus_allocate_dev_resources(struct pci_bus *b)
-{
-	struct pci_dev *dev;
-	struct pci_bus *child;
-
-	list_for_each_entry(dev, &b->devices, bus_list) {
-		pci_claim_device_resources(dev);
-
-		child = dev->subordinate;
-		if (child)
-			pci_bus_allocate_dev_resources(child);
-	}
-}
-
-static void pci_bus_allocate_resources(struct pci_bus *b)
-{
-	struct pci_bus *child;
-
-	/*
-	 * Carry out a depth-first search on the PCI bus
-	 * tree to allocate bridge apertures. Read the
-	 * programmed bridge bases and recursively claim
-	 * the respective bridge resources.
-	 */
-	if (b->self) {
-		pci_read_bridge_bases(b);
-		pci_claim_bridge_resources(b->self);
-	}
-
-	list_for_each_entry(child, &b->children, node)
-		pci_bus_allocate_resources(child);
-}
-
-void pci_bus_claim_resources(struct pci_bus *b)
-{
-	pci_bus_allocate_resources(b);
-	pci_bus_allocate_dev_resources(b);
-}
-EXPORT_SYMBOL(pci_bus_claim_resources);
-
 static void __pci_bridge_assign_resources(const struct pci_dev *bridge,
 					  struct list_head *add_head,
 					  struct list_head *fail_head)
@@ -1845,13 +1743,8 @@ void __init pci_assign_unassigned_resources(void)
 {
 	struct pci_bus *root_bus;
 
-	list_for_each_entry(root_bus, &pci_root_buses, node) {
+	list_for_each_entry(root_bus, &pci_root_buses, node)
 		pci_assign_unassigned_root_bus_resources(root_bus);
-
-		/* Make sure the root bridge has a companion ACPI device: */
-		if (ACPI_HANDLE(root_bus->bridge))
-			acpi_ioapic_add(ACPI_HANDLE(root_bus->bridge));
-	}
 }
 
 static void extend_bridge_window(struct pci_dev *bridge, struct resource *res,
@@ -1948,56 +1841,56 @@ static void pci_bus_distribute_available_resources(struct pci_bus *bus,
 	}
 
 	/*
+	 * There is only one bridge on the bus so it gets all available
+	 * resources which it can then distribute to the possible
+	 * hotplug bridges below.
+	 */
+	if (hotplug_bridges + normal_bridges == 1) {
+		dev = list_first_entry(&bus->devices, struct pci_dev, bus_list);
+		if (dev->subordinate) {
+			pci_bus_distribute_available_resources(dev->subordinate,
+				add_list, available_io, available_mmio,
+				available_mmio_pref);
+		}
+		return;
+	}
+
+	/*
 	 * Go over devices on this bus and distribute the remaining
 	 * resource space between hotplug bridges.
 	 */
 	for_each_pci_bridge(dev, bus) {
+		resource_size_t align, io, mmio, mmio_pref;
 		struct pci_bus *b;
 
 		b = dev->subordinate;
-		if (!b)
+		if (!b || !dev->is_hotplug_bridge)
 			continue;
 
-		if (!hotplug_bridges && normal_bridges == 1) {
-			/*
-			 * There is only one bridge on the bus (upstream
-			 * port) so it gets all available resources
-			 * which it can then distribute to the possible
-			 * hotplug bridges below.
-			 */
-			pci_bus_distribute_available_resources(b, add_list,
-				available_io, available_mmio,
-				available_mmio_pref);
-		} else if (dev->is_hotplug_bridge) {
-			resource_size_t align, io, mmio, mmio_pref;
+		/*
+		 * Distribute available extra resources equally between
+		 * hotplug-capable downstream ports taking alignment into
+		 * account.
+		 *
+		 * Here hotplug_bridges is always != 0.
+		 */
+		align = pci_resource_alignment(bridge, io_res);
+		io = div64_ul(available_io, hotplug_bridges);
+		io = min(ALIGN(io, align), remaining_io);
+		remaining_io -= io;
 
-			/*
-			 * Distribute available extra resources equally
-			 * between hotplug-capable downstream ports
-			 * taking alignment into account.
-			 *
-			 * Here hotplug_bridges is always != 0.
-			 */
-			align = pci_resource_alignment(bridge, io_res);
-			io = div64_ul(available_io, hotplug_bridges);
-			io = min(ALIGN(io, align), remaining_io);
-			remaining_io -= io;
+		align = pci_resource_alignment(bridge, mmio_res);
+		mmio = div64_ul(available_mmio, hotplug_bridges);
+		mmio = min(ALIGN(mmio, align), remaining_mmio);
+		remaining_mmio -= mmio;
 
-			align = pci_resource_alignment(bridge, mmio_res);
-			mmio = div64_ul(available_mmio, hotplug_bridges);
-			mmio = min(ALIGN(mmio, align), remaining_mmio);
-			remaining_mmio -= mmio;
+		align = pci_resource_alignment(bridge, mmio_pref_res);
+		mmio_pref = div64_ul(available_mmio_pref, hotplug_bridges);
+		mmio_pref = min(ALIGN(mmio_pref, align), remaining_mmio_pref);
+		remaining_mmio_pref -= mmio_pref;
 
-			align = pci_resource_alignment(bridge, mmio_pref_res);
-			mmio_pref = div64_ul(available_mmio_pref,
-					     hotplug_bridges);
-			mmio_pref = min(ALIGN(mmio_pref, align),
-					remaining_mmio_pref);
-			remaining_mmio_pref -= mmio_pref;
-
-			pci_bus_distribute_available_resources(b, add_list, io,
-							       mmio, mmio_pref);
-		}
+		pci_bus_distribute_available_resources(b, add_list, io, mmio,
+						       mmio_pref);
 	}
 }
 

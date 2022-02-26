@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * Linux driver for System z and s390 unit record devices
  * (z/VM virtual punch, reader, printer)
@@ -16,7 +15,7 @@
 #include <linux/slab.h>
 #include <linux/module.h>
 
-#include <linux/uaccess.h>
+#include <asm/uaccess.h>
 #include <asm/cio.h>
 #include <asm/ccwdev.h>
 #include <asm/debug.h>
@@ -90,7 +89,7 @@ static DEFINE_MUTEX(vmur_mutex);
  * urd references:
  * - ur_probe gets a urd reference, ur_remove drops the reference
  *   dev_get_drvdata(&cdev->dev)
- * - ur_open gets a urd reference, ur_release drops the reference
+ * - ur_open gets a urd reference, ur_relase drops the reference
  *   (urf->urd)
  *
  * cdev references:
@@ -111,7 +110,7 @@ static struct urdev *urdev_alloc(struct ccw_device *cdev)
 	mutex_init(&urd->io_mutex);
 	init_waitqueue_head(&urd->wait);
 	spin_lock_init(&urd->open_lock);
-	refcount_set(&urd->ref_count,  1);
+	atomic_set(&urd->ref_count,  1);
 	urd->cdev = cdev;
 	get_device(&cdev->dev);
 	return urd;
@@ -127,7 +126,7 @@ static void urdev_free(struct urdev *urd)
 
 static void urdev_get(struct urdev *urd)
 {
-	refcount_inc(&urd->ref_count);
+	atomic_inc(&urd->ref_count);
 }
 
 static struct urdev *urdev_get_from_cdev(struct ccw_device *cdev)
@@ -160,7 +159,7 @@ static struct urdev *urdev_get_from_devno(u16 devno)
 
 static void urdev_put(struct urdev *urd)
 {
-	if (refcount_dec_and_test(&urd->ref_count))
+	if (atomic_dec_and_test(&urd->ref_count))
 		urdev_free(urd);
 }
 
@@ -307,11 +306,10 @@ static void ur_int_handler(struct ccw_device *cdev, unsigned long intparm,
 {
 	struct urdev *urd;
 
-	if (!IS_ERR(irb)) {
-		TRACE("ur_int_handler: intparm=0x%lx cstat=%02x dstat=%02x res=%u\n",
-		      intparm, irb->scsw.cmd.cstat, irb->scsw.cmd.dstat,
-		      irb->scsw.cmd.count);
-	}
+	TRACE("ur_int_handler: intparm=0x%lx cstat=%02x dstat=%02x res=%u\n",
+	      intparm, irb->scsw.cmd.cstat, irb->scsw.cmd.dstat,
+	      irb->scsw.cmd.count);
+
 	if (!intparm) {
 		TRACE("ur_int_handler: unsolicited interrupt\n");
 		return;
@@ -893,9 +891,10 @@ static int ur_set_online(struct ccw_device *cdev)
 	}
 
 	urd->char_device->ops = &ur_fops;
+	urd->char_device->dev = MKDEV(major, minor);
 	urd->char_device->owner = ur_fops.owner;
 
-	rc = cdev_add(urd->char_device, MKDEV(major, minor), 1);
+	rc = cdev_add(urd->char_device, urd->char_device->dev, 1);
 	if (rc)
 		goto fail_free_cdev;
 	if (urd->cdev->id.cu_type == READER_PUNCH_DEVTYPE) {
@@ -910,8 +909,8 @@ static int ur_set_online(struct ccw_device *cdev)
 		goto fail_free_cdev;
 	}
 
-	urd->device = device_create(vmur_class, &cdev->dev,
-				    urd->char_device->dev, NULL, "%s", node_id);
+	urd->device = device_create(vmur_class, NULL, urd->char_device->dev,
+				    NULL, "%s", node_id);
 	if (IS_ERR(urd->device)) {
 		rc = PTR_ERR(urd->device);
 		TRACE("ur_set_online: device_create rc=%d\n", rc);
@@ -946,7 +945,7 @@ static int ur_set_offline_force(struct ccw_device *cdev, int force)
 		rc = -EBUSY;
 		goto fail_urdev_put;
 	}
-	if (!force && (refcount_read(&urd->ref_count) > 2)) {
+	if (!force && (atomic_read(&urd->ref_count) > 2)) {
 		/* There is still a user of urd (e.g. ur_open) */
 		TRACE("ur_set_offline: BUSY\n");
 		rc = -EBUSY;

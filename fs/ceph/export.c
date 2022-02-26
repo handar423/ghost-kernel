@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 #include <linux/ceph/ceph_debug.h>
 
 #include <linux/exportfs.h>
@@ -63,6 +62,7 @@ static struct dentry *__fh_to_dentry(struct super_block *sb, u64 ino)
 {
 	struct ceph_mds_client *mdsc = ceph_sb_to_client(sb)->mdsc;
 	struct inode *inode;
+	struct dentry *dentry;
 	struct ceph_vino vino;
 	int err;
 
@@ -98,7 +98,16 @@ static struct dentry *__fh_to_dentry(struct super_block *sb, u64 ino)
 		}
 	}
 
-	return d_obtain_alias(inode);
+	dentry = d_obtain_alias(inode);
+	if (IS_ERR(dentry))
+		return dentry;
+	err = ceph_init_dentry(dentry);
+	if (err < 0) {
+		dput(dentry);
+		return ERR_PTR(err);
+	}
+	dout("__fh_to_dentry %llx %p dentry %p\n", ino, inode, dentry);
+	return dentry;
 }
 
 /*
@@ -126,6 +135,7 @@ static struct dentry *__get_parent(struct super_block *sb,
 	struct ceph_mds_client *mdsc = ceph_sb_to_client(sb)->mdsc;
 	struct ceph_mds_request *req;
 	struct inode *inode;
+	struct dentry *dentry;
 	int mask;
 	int err;
 
@@ -135,8 +145,8 @@ static struct dentry *__get_parent(struct super_block *sb,
 		return ERR_CAST(req);
 
 	if (child) {
-		req->r_inode = d_inode(child);
-		ihold(d_inode(child));
+		req->r_inode = child->d_inode;
+		ihold(child->d_inode);
 	} else {
 		req->r_ino1 = (struct ceph_vino) {
 			.ino = ino,
@@ -158,17 +168,28 @@ static struct dentry *__get_parent(struct super_block *sb,
 	if (!inode)
 		return ERR_PTR(-ENOENT);
 
-	return d_obtain_alias(inode);
+	dentry = d_obtain_alias(inode);
+	if (IS_ERR(dentry))
+		return dentry;
+	err = ceph_init_dentry(dentry);
+	if (err < 0) {
+		dput(dentry);
+		return ERR_PTR(err);
+	}
+	dout("__get_parent ino %llx parent %p ino %llx.%llx\n",
+	     child ? ceph_ino(child->d_inode) : ino,
+	     dentry, ceph_vinop(inode));
+	return dentry;
 }
 
 static struct dentry *ceph_get_parent(struct dentry *child)
 {
 	/* don't re-export snaps */
-	if (ceph_snap(d_inode(child)) != CEPH_NOSNAP)
+	if (ceph_snap(child->d_inode) != CEPH_NOSNAP)
 		return ERR_PTR(-EINVAL);
 
 	dout("get_parent %p ino %llx.%llx\n",
-	     child, ceph_vinop(d_inode(child)));
+	     child, ceph_vinop(child->d_inode));
 	return __get_parent(child->d_sb, child, 0);
 }
 
@@ -201,33 +222,33 @@ static int ceph_get_name(struct dentry *parent, char *name,
 	struct ceph_mds_request *req;
 	int err;
 
-	mdsc = ceph_inode_to_client(d_inode(child))->mdsc;
+	mdsc = ceph_inode_to_client(child->d_inode)->mdsc;
 	req = ceph_mdsc_create_request(mdsc, CEPH_MDS_OP_LOOKUPNAME,
 				       USE_ANY_MDS);
 	if (IS_ERR(req))
 		return PTR_ERR(req);
 
-	inode_lock(d_inode(parent));
+	mutex_lock(&parent->d_inode->i_mutex);
 
-	req->r_inode = d_inode(child);
-	ihold(d_inode(child));
-	req->r_ino2 = ceph_vino(d_inode(parent));
-	req->r_parent = d_inode(parent);
+	req->r_inode = child->d_inode;
+	ihold(child->d_inode);
+	req->r_ino2 = ceph_vino(parent->d_inode);
+	req->r_parent = parent->d_inode;
 	set_bit(CEPH_MDS_R_PARENT_LOCKED, &req->r_req_flags);
 	req->r_num_caps = 2;
 	err = ceph_mdsc_do_request(mdsc, NULL, req);
 
-	inode_unlock(d_inode(parent));
+	mutex_unlock(&parent->d_inode->i_mutex);
 
 	if (!err) {
 		struct ceph_mds_reply_info_parsed *rinfo = &req->r_reply_info;
 		memcpy(name, rinfo->dname, rinfo->dname_len);
 		name[rinfo->dname_len] = 0;
 		dout("get_name %p ino %llx.%llx name %s\n",
-		     child, ceph_vinop(d_inode(child)), name);
+		     child, ceph_vinop(child->d_inode), name);
 	} else {
 		dout("get_name %p ino %llx.%llx err %d\n",
-		     child, ceph_vinop(d_inode(child)), err);
+		     child, ceph_vinop(child->d_inode), err);
 	}
 
 	ceph_mdsc_put_request(req);

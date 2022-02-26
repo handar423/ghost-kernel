@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  *  linux/arch/cris/kernel/process.c
  *
@@ -12,9 +11,6 @@
  */
 
 #include <linux/sched.h>
-#include <linux/sched/debug.h>
-#include <linux/sched/task.h>
-#include <linux/sched/task_stack.h>
 #include <linux/slab.h>
 #include <linux/err.h>
 #include <linux/fs.h>
@@ -39,6 +35,15 @@ void default_idle(void)
 	local_irq_enable();
 }
 
+/*
+ * Free current thread data structures etc..
+ */
+
+void exit_thread(void)
+{
+	/* Nothing needs to be done.  */
+}
+
 /* if the watchdog is enabled, we can simply disable interrupts and go
  * into an eternal loop, and the watchdog will reset the CPU after 0.1s
  * if on the other hand the watchdog wasn't enabled, we just enable it and wait
@@ -51,14 +56,14 @@ void hard_reset_now (void)
 	 * code to know about it than the watchdog handler in entry.S and
 	 * this code, implementing hard reset through the watchdog.
 	 */
-#if defined(CONFIG_ETRAX_WATCHDOG)
+#if defined(CONFIG_ETRAX_WATCHDOG) && !defined(CONFIG_SVINTO_SIM)
 	extern int cause_of_death;
 #endif
 
 	printk("*** HARD RESET ***\n");
 	local_irq_disable();
 
-#if defined(CONFIG_ETRAX_WATCHDOG)
+#if defined(CONFIG_ETRAX_WATCHDOG) && !defined(CONFIG_SVINTO_SIM)
 	cause_of_death = 0xbedead;
 #else
 	/* Since we dont plan to keep on resetting the watchdog,
@@ -68,6 +73,14 @@ void hard_reset_now (void)
 #endif
 
 	while(1) /* waiting for RETRIBUTION! */ ;
+}
+
+/*
+ * Return saved PC of a blocked thread.
+ */
+unsigned long thread_saved_pc(struct task_struct *t)
+{
+	return task_pt_regs(t)->irp;
 }
 
 /* setup the child's kernel stack with a pt_regs and switch_stack on it.

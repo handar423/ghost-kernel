@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2017, Intel Corp.
+ * Copyright (C) 2000 - 2013, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -47,31 +47,6 @@
 #define _COMPONENT          ACPI_UTILITIES
 ACPI_MODULE_NAME("utosi")
 
-/******************************************************************************
- *
- * ACPICA policy for new _OSI strings:
- *
- * It is the stated policy of ACPICA that new _OSI strings will be integrated
- * into this module as soon as possible after they are defined. It is strongly
- * recommended that all ACPICA hosts mirror this policy and integrate any
- * changes to this module as soon as possible. There are several historical
- * reasons behind this policy:
- *
- * 1) New BIOSs tend to test only the case where the host responds TRUE to
- *    the latest version of Windows, which would respond to the latest/newest
- *    _OSI string. Not responding TRUE to the latest version of Windows will
- *    risk executing untested code paths throughout the DSDT and SSDTs.
- *
- * 2) If a new _OSI string is recognized only after a significant delay, this
- *    has the potential to cause problems on existing working machines because
- *    of the possibility that a new and different path through the ASL code
- *    will be executed.
- *
- * 3) New _OSI strings are tending to come out about once per year. A delay
- *    in recognizing a new string for a significant amount of time risks the
- *    release of another string which only compounds the initial problem.
- *
- *****************************************************************************/
 /*
  * Strings supported by the _OSI predefined control method (which is
  * implemented internally within this module.)
@@ -101,6 +76,9 @@ static struct acpi_interface_info acpi_default_supported_interfaces[] = {
 	{"Windows 2012", NULL, 0, ACPI_OSI_WIN_8},	/* Windows 8 and Server 2012 - Added 08/2012 */
 	{"Windows 2013", NULL, 0, ACPI_OSI_WIN_8},	/* Windows 8.1 and Server 2012 R2 - Added 01/2014 */
 	{"Windows 2015", NULL, 0, ACPI_OSI_WIN_10},	/* Windows 10 - Added 03/2015 */
+	{"Windows 2016", NULL, 0, ACPI_OSI_WIN_10_RS1},	/* Windows 10 version 1607 - Added 12/2017 */
+	{"Windows 2017", NULL, 0, ACPI_OSI_WIN_10_RS2},	/* Windows 10 version 1703 - Added 12/2017 */
+	{"Windows 2017.2", NULL, 0, ACPI_OSI_WIN_10_RS3},	/* Windows 10 version 1709 - Added 02/2018 */
 
 	/* Feature Group Strings */
 
@@ -150,7 +128,7 @@ acpi_status acpi_ut_initialize_interfaces(void)
 	     i < (ACPI_ARRAY_LENGTH(acpi_default_supported_interfaces) - 1);
 	     i++) {
 		acpi_default_supported_interfaces[i].next =
-		    &acpi_default_supported_interfaces[(acpi_size)i + 1];
+		    &acpi_default_supported_interfaces[(acpi_size) i + 1];
 	}
 
 	acpi_os_release_mutex(acpi_gbl_osi_mutex);
@@ -269,10 +247,9 @@ acpi_status acpi_ut_remove_interface(acpi_string interface_name)
 	previous_interface = next_interface = acpi_gbl_supported_interfaces;
 	while (next_interface) {
 		if (!strcmp(interface_name, next_interface->name)) {
-			/*
-			 * Found: name is in either the static list
-			 * or was added at runtime
-			 */
+
+			/* Found: name is in either the static list or was added at runtime */
+
 			if (next_interface->flags & ACPI_OSI_DYNAMIC) {
 
 				/* Interface was added dynamically, remove and free it */
@@ -289,8 +266,8 @@ acpi_status acpi_ut_remove_interface(acpi_string interface_name)
 				ACPI_FREE(next_interface);
 			} else {
 				/*
-				 * Interface is in static list. If marked invalid, then
-				 * it does not actually exist. Else, mark it invalid.
+				 * Interface is in static list. If marked invalid, then it
+				 * does not actually exist. Else, mark it invalid.
 				 */
 				if (next_interface->flags & ACPI_OSI_INVALID) {
 					return (AE_NOT_EXIST);
@@ -390,32 +367,21 @@ struct acpi_interface_info *acpi_ut_get_interface(acpi_string interface_name)
  * PARAMETERS:  walk_state          - Current walk state
  *
  * RETURN:      Status
- *              Integer: TRUE (0) if input string is matched
- *                       FALSE (-1) if string is not matched
  *
  * DESCRIPTION: Implementation of the _OSI predefined control method. When
  *              an invocation of _OSI is encountered in the system AML,
  *              control is transferred to this function.
  *
- * (August 2016)
- * Note:  _OSI is now defined to return "Ones" to indicate a match, for
- * compatibility with other ACPI implementations. On a 32-bit DSDT, Ones
- * is 0xFFFFFFFF. On a 64-bit DSDT, Ones is 0xFFFFFFFFFFFFFFFF
- * (ACPI_UINT64_MAX).
- *
- * This function always returns ACPI_UINT64_MAX for TRUE, and later code
- * will truncate this to 32 bits if necessary.
- *
  ******************************************************************************/
 
-acpi_status acpi_ut_osi_implementation(struct acpi_walk_state *walk_state)
+acpi_status acpi_ut_osi_implementation(struct acpi_walk_state * walk_state)
 {
 	union acpi_operand_object *string_desc;
 	union acpi_operand_object *return_desc;
 	struct acpi_interface_info *interface_info;
 	acpi_interface_handler interface_handler;
 	acpi_status status;
-	u64 return_value;
+	u32 return_value;
 
 	ACPI_FUNCTION_TRACE(ut_osi_implementation);
 
@@ -455,7 +421,7 @@ acpi_status acpi_ut_osi_implementation(struct acpi_walk_state *walk_state)
 			acpi_gbl_osi_data = interface_info->value;
 		}
 
-		return_value = ACPI_UINT64_MAX;
+		return_value = ACPI_UINT32_MAX;
 	}
 
 	acpi_os_release_mutex(acpi_gbl_osi_mutex);
@@ -467,10 +433,9 @@ acpi_status acpi_ut_osi_implementation(struct acpi_walk_state *walk_state)
 	 */
 	interface_handler = acpi_gbl_interface_handler;
 	if (interface_handler) {
-		if (interface_handler
-		    (string_desc->string.pointer, (u32)return_value)) {
-			return_value = ACPI_UINT64_MAX;
-		}
+		return_value =
+		    interface_handler(string_desc->string.pointer,
+				      return_value);
 	}
 
 	ACPI_DEBUG_PRINT_RAW((ACPI_DB_INFO,

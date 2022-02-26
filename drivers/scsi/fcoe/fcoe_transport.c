@@ -32,13 +32,13 @@ MODULE_AUTHOR("Open-FCoE.org");
 MODULE_DESCRIPTION("FIP discovery protocol and FCoE transport for FCoE HBAs");
 MODULE_LICENSE("GPL v2");
 
-static int fcoe_transport_create(const char *, const struct kernel_param *);
-static int fcoe_transport_destroy(const char *, const struct kernel_param *);
+static int fcoe_transport_create(const char *, struct kernel_param *);
+static int fcoe_transport_destroy(const char *, struct kernel_param *);
 static int fcoe_transport_show(char *buffer, const struct kernel_param *kp);
 static struct fcoe_transport *fcoe_transport_lookup(struct net_device *device);
 static struct fcoe_transport *fcoe_netdev_map_lookup(struct net_device *device);
-static int fcoe_transport_enable(const char *, const struct kernel_param *);
-static int fcoe_transport_disable(const char *, const struct kernel_param *);
+static int fcoe_transport_enable(const char *, struct kernel_param *);
+static int fcoe_transport_disable(const char *, struct kernel_param *);
 static int libfcoe_device_notification(struct notifier_block *notifier,
 				    ulong event, void *ptr);
 
@@ -58,7 +58,7 @@ MODULE_PARM_DESC(show, " Show attached FCoE transports");
 module_param_call(create, fcoe_transport_create, NULL,
 		  (void *)FIP_MODE_FABRIC, S_IWUSR);
 __MODULE_PARM_TYPE(create, "string");
-MODULE_PARM_DESC(create, " Creates fcoe instance on an ethernet interface");
+MODULE_PARM_DESC(create, " Creates fcoe instance on a ethernet interface");
 
 module_param_call(create_vn2vn, fcoe_transport_create, NULL,
 		  (void *)FIP_MODE_VN2VN, S_IWUSR);
@@ -68,15 +68,15 @@ MODULE_PARM_DESC(create_vn2vn, " Creates a VN_node to VN_node FCoE instance "
 
 module_param_call(destroy, fcoe_transport_destroy, NULL, NULL, S_IWUSR);
 __MODULE_PARM_TYPE(destroy, "string");
-MODULE_PARM_DESC(destroy, " Destroys fcoe instance on an ethernet interface");
+MODULE_PARM_DESC(destroy, " Destroys fcoe instance on a ethernet interface");
 
 module_param_call(enable, fcoe_transport_enable, NULL, NULL, S_IWUSR);
 __MODULE_PARM_TYPE(enable, "string");
-MODULE_PARM_DESC(enable, " Enables fcoe on an ethernet interface.");
+MODULE_PARM_DESC(enable, " Enables fcoe on a ethernet interface.");
 
 module_param_call(disable, fcoe_transport_disable, NULL, NULL, S_IWUSR);
 __MODULE_PARM_TYPE(disable, "string");
-MODULE_PARM_DESC(disable, " Disables fcoe on an ethernet interface.");
+MODULE_PARM_DESC(disable, " Disables fcoe on a ethernet interface.");
 
 /* notification function for packets from net device */
 static struct notifier_block libfcoe_notifier = {
@@ -230,10 +230,24 @@ void fcoe_ctlr_get_lesb(struct fcoe_ctlr_device *ctlr_dev)
 {
 	struct fcoe_ctlr *fip = fcoe_ctlr_device_priv(ctlr_dev);
 	struct net_device *netdev = fcoe_get_netdev(fip->lp);
-	struct fc_els_lesb *fc_lesb;
+	struct fcoe_fc_els_lesb *fcoe_lesb;
+	struct fc_els_lesb fc_lesb;
 
-	fc_lesb = (struct fc_els_lesb *)(&ctlr_dev->lesb);
-	__fcoe_get_lesb(fip->lp, fc_lesb, netdev);
+	__fcoe_get_lesb(fip->lp, &fc_lesb, netdev);
+	fcoe_lesb = (struct fcoe_fc_els_lesb *)(&fc_lesb);
+
+	ctlr_dev->lesb.lesb_link_fail =
+		ntohl(fcoe_lesb->lesb_link_fail);
+	ctlr_dev->lesb.lesb_vlink_fail =
+		ntohl(fcoe_lesb->lesb_vlink_fail);
+	ctlr_dev->lesb.lesb_miss_fka =
+		ntohl(fcoe_lesb->lesb_miss_fka);
+	ctlr_dev->lesb.lesb_symb_err =
+		ntohl(fcoe_lesb->lesb_symb_err);
+	ctlr_dev->lesb.lesb_err_block =
+		ntohl(fcoe_lesb->lesb_err_block);
+	ctlr_dev->lesb.lesb_fcs_error =
+		ntohl(fcoe_lesb->lesb_fcs_error);
 }
 EXPORT_SYMBOL_GPL(fcoe_ctlr_get_lesb);
 
@@ -455,11 +469,9 @@ EXPORT_SYMBOL_GPL(fcoe_check_wait_queue);
  *
  * Calls fcoe_check_wait_queue on timeout
  */
-void fcoe_queue_timer(struct timer_list *t)
+void fcoe_queue_timer(ulong lport)
 {
-	struct fcoe_port *port = from_timer(port, t, timer);
-
-	fcoe_check_wait_queue(port->lport, NULL);
+	fcoe_check_wait_queue((struct fc_lport *)lport, NULL);
 }
 EXPORT_SYMBOL_GPL(fcoe_queue_timer);
 
@@ -625,7 +637,7 @@ static int fcoe_transport_show(char *buffer, const struct kernel_param *kp)
 
 static int __init fcoe_transport_init(void)
 {
-	register_netdevice_notifier(&libfcoe_notifier);
+	register_netdevice_notifier_rh(&libfcoe_notifier);
 	return 0;
 }
 
@@ -633,7 +645,7 @@ static int fcoe_transport_exit(void)
 {
 	struct fcoe_transport *ft;
 
-	unregister_netdevice_notifier(&libfcoe_notifier);
+	unregister_netdevice_notifier_rh(&libfcoe_notifier);
 	mutex_lock(&ft_mutex);
 	list_for_each_entry(ft, &fcoe_transports, list)
 		printk(KERN_ERR "FCoE transport %s is still attached!\n",
@@ -759,6 +771,7 @@ ssize_t fcoe_ctlr_create_store(struct bus_type *bus,
 {
 	struct net_device *netdev = NULL;
 	struct fcoe_transport *ft = NULL;
+	struct fcoe_ctlr_device *ctlr_dev = NULL;
 	int rc = 0;
 	int err;
 
@@ -805,8 +818,9 @@ ssize_t fcoe_ctlr_create_store(struct bus_type *bus,
 		goto out_putdev;
 	}
 
-	LIBFCOE_TRANSPORT_DBG("transport %s succeeded to create fcoe on %s.\n",
-			      ft->name, netdev->name);
+	LIBFCOE_TRANSPORT_DBG("transport %s %s to create fcoe on %s.\n",
+			      ft->name, (ctlr_dev) ? "succeeded" : "failed",
+			      netdev->name);
 
 out_putdev:
 	dev_put(netdev);
@@ -867,8 +881,7 @@ EXPORT_SYMBOL(fcoe_ctlr_destroy_store);
  *
  * Returns: 0 for success
  */
-static int fcoe_transport_create(const char *buffer,
-				 const struct kernel_param *kp)
+static int fcoe_transport_create(const char *buffer, struct kernel_param *kp)
 {
 	int rc = -ENODEV;
 	struct net_device *netdev = NULL;
@@ -933,8 +946,7 @@ out_nodev:
  *
  * Returns: 0 for success
  */
-static int fcoe_transport_destroy(const char *buffer,
-				  const struct kernel_param *kp)
+static int fcoe_transport_destroy(const char *buffer, struct kernel_param *kp)
 {
 	int rc = -ENODEV;
 	struct net_device *netdev = NULL;
@@ -978,8 +990,7 @@ out_nodev:
  *
  * Returns: 0 for success
  */
-static int fcoe_transport_disable(const char *buffer,
-				  const struct kernel_param *kp)
+static int fcoe_transport_disable(const char *buffer, struct kernel_param *kp)
 {
 	int rc = -ENODEV;
 	struct net_device *netdev = NULL;
@@ -1013,8 +1024,7 @@ out_nodev:
  *
  * Returns: 0 for success
  */
-static int fcoe_transport_enable(const char *buffer,
-				 const struct kernel_param *kp)
+static int fcoe_transport_enable(const char *buffer, struct kernel_param *kp)
 {
 	int rc = -ENODEV;
 	struct net_device *netdev = NULL;

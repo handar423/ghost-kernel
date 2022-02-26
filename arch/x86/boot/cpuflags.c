@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 #include <linux/types.h>
 #include "bitops.h"
 
@@ -29,35 +28,20 @@ static int has_fpu(void)
 	return fsw == 0 && (fcw & 0x103f) == 0x003f;
 }
 
-/*
- * For building the 16-bit code we want to explicitly specify 32-bit
- * push/pop operations, rather than just saying 'pushf' or 'popf' and
- * letting the compiler choose. But this is also included from the
- * compressed/ directory where it may be 64-bit code, and thus needs
- * to be 'pushfq' or 'popfq' in that case.
- */
-#ifdef __x86_64__
-#define PUSHF "pushfq"
-#define POPF "popfq"
-#else
-#define PUSHF "pushfl"
-#define POPF "popfl"
-#endif
-
 int has_eflag(unsigned long mask)
 {
 	unsigned long f0, f1;
 
-	asm volatile(PUSHF "	\n\t"
-		     PUSHF "	\n\t"
+	asm volatile("pushf	\n\t"
+		     "pushf	\n\t"
 		     "pop %0	\n\t"
 		     "mov %0,%1	\n\t"
 		     "xor %2,%1	\n\t"
 		     "push %1	\n\t"
-		     POPF "	\n\t"
-		     PUSHF "	\n\t"
+		     "popf	\n\t"
+		     "pushf	\n\t"
 		     "pop %1	\n\t"
-		     POPF
+		     "popf"
 		     : "=&r" (f0), "=&r" (f1)
 		     : "ri" (mask));
 
@@ -71,18 +55,15 @@ int has_eflag(unsigned long mask)
 # define EBX_REG "=b"
 #endif
 
-static inline void cpuid_count(u32 id, u32 count,
-		u32 *a, u32 *b, u32 *c, u32 *d)
+static inline void cpuid(u32 id, u32 *a, u32 *b, u32 *c, u32 *d)
 {
 	asm volatile(".ifnc %%ebx,%3 ; movl  %%ebx,%3 ; .endif	\n\t"
 		     "cpuid					\n\t"
 		     ".ifnc %%ebx,%3 ; xchgl %%ebx,%3 ; .endif	\n\t"
 		    : "=a" (*a), "=c" (*c), "=d" (*d), EBX_REG (*b)
-		    : "a" (id), "c" (count)
+		    : "a" (id)
 	);
 }
-
-#define cpuid(id, a, b, c, d) cpuid_count(id, 0, a, b, c, d)
 
 void get_cpuflags(void)
 {
@@ -110,11 +91,6 @@ void get_cpuflags(void)
 			cpu.model = (tfms >> 4) & 15;
 			if (cpu.level >= 6)
 				cpu.model += ((tfms >> 16) & 0xf) << 4;
-		}
-
-		if (max_intel_level >= 0x00000007) {
-			cpuid_count(0x00000007, 0, &ignored, &ignored,
-					&cpu.flags[16], &ignored);
 		}
 
 		cpuid(0x80000000, &max_amd_level, &ignored, &ignored,

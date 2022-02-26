@@ -165,7 +165,7 @@ static struct sas_task *sas_create_task(struct scsi_cmnd *cmd,
 	int_to_scsilun(cmd->device->lun, &lun);
 	memcpy(task->ssp_task.LUN, &lun.scsi_lun, 8);
 	task->ssp_task.task_attr = TASK_ATTR_SIMPLE;
-	task->ssp_task.cmd = cmd;
+	memcpy(task->ssp_task.cdb, cmd->cmnd, 16);
 
 	task->scatter = scsi_sglist(cmd);
 	task->num_scatter = scsi_sg_count(cmd);
@@ -356,7 +356,7 @@ static int sas_recover_lu(struct domain_device *dev, struct scsi_cmnd *cmd)
 
 	int_to_scsilun(cmd->device->lun, &lun);
 
-	SAS_DPRINTK("eh: device %llx LUN %llx has the task\n",
+	SAS_DPRINTK("eh: device %llx LUN %x has the task\n",
 		    SAS_ADDR(dev->sas_addr),
 		    cmd->device->lun);
 
@@ -442,8 +442,7 @@ static void sas_wait_eh(struct domain_device *dev)
 }
 EXPORT_SYMBOL(sas_wait_eh);
 
-static int sas_queue_reset(struct domain_device *dev, int reset_type,
-			   u64 lun, int wait)
+static int sas_queue_reset(struct domain_device *dev, int reset_type, int lun, int wait)
 {
 	struct sas_ha_struct *ha = dev->port->ha;
 	int scheduled = 0, tries = 100;
@@ -486,28 +485,18 @@ static int sas_queue_reset(struct domain_device *dev, int reset_type,
 
 int sas_eh_abort_handler(struct scsi_cmnd *cmd)
 {
-	int res = TMF_RESP_FUNC_FAILED;
+	int res;
 	struct sas_task *task = TO_SAS_TASK(cmd);
 	struct Scsi_Host *host = cmd->device->host;
-	struct domain_device *dev = cmd_to_domain_dev(cmd);
 	struct sas_internal *i = to_sas_internal(host->transportt);
-	unsigned long flags;
+
+	if (current != host->ehandler)
+		return FAILED;
 
 	if (!i->dft->lldd_abort_task)
 		return FAILED;
 
-	spin_lock_irqsave(host->host_lock, flags);
-	/* We cannot do async aborts for SATA devices */
-	if (dev_is_sata(dev) && !host->host_eh_scheduled) {
-		spin_unlock_irqrestore(host->host_lock, flags);
-		return FAILED;
-	}
-	spin_unlock_irqrestore(host->host_lock, flags);
-
-	if (task)
-		res = i->dft->lldd_abort_task(task);
-	else
-		SAS_DPRINTK("no task to abort\n");
+	res = i->dft->lldd_abort_task(task);
 	if (res == TMF_RESP_FUNC_SUCC || res == TMF_RESP_FUNC_COMPLETE)
 		return SUCCESS;
 
@@ -539,7 +528,7 @@ int sas_eh_device_reset_handler(struct scsi_cmnd *cmd)
 	return FAILED;
 }
 
-int sas_eh_target_reset_handler(struct scsi_cmnd *cmd)
+int sas_eh_bus_reset_handler(struct scsi_cmnd *cmd)
 {
 	int res;
 	struct Scsi_Host *host = cmd->device->host;
@@ -567,15 +556,15 @@ static int try_to_reset_cmd_device(struct scsi_cmnd *cmd)
 	struct Scsi_Host *shost = cmd->device->host;
 
 	if (!shost->hostt->eh_device_reset_handler)
-		goto try_target_reset;
+		goto try_bus_reset;
 
 	res = shost->hostt->eh_device_reset_handler(cmd);
 	if (res == SUCCESS)
 		return res;
 
-try_target_reset:
-	if (shost->hostt->eh_target_reset_handler)
-		return shost->hostt->eh_target_reset_handler(cmd);
+try_bus_reset:
+	if (shost->hostt->eh_bus_reset_handler)
+		return shost->hostt->eh_bus_reset_handler(cmd);
 
 	return FAILED;
 }
@@ -626,6 +615,8 @@ static void sas_eh_handle_sas_errors(struct Scsi_Host *shost, struct list_head *
 		SAS_DPRINTK("trying to find task 0x%p\n", task);
 		res = sas_scsi_find_task(task);
 
+		cmd->eh_eflags = 0;
+
 		switch (res) {
 		case TASK_IS_DONE:
 			SAS_DPRINTK("%s: task 0x%p is done\n", __func__,
@@ -642,7 +633,7 @@ static void sas_eh_handle_sas_errors(struct Scsi_Host *shost, struct list_head *
  reset:
 			tmf_resp = sas_recover_lu(task->dev, cmd);
 			if (tmf_resp == TMF_RESP_FUNC_COMPLETE) {
-				SAS_DPRINTK("dev %016llx LU %llx is "
+				SAS_DPRINTK("dev %016llx LU %x is "
 					    "recovered\n",
 					    SAS_ADDR(task->dev),
 					    cmd->device->lun);
@@ -695,7 +686,7 @@ static void sas_eh_handle_sas_errors(struct Scsi_Host *shost, struct list_head *
 			 * of effort could recover from errors.  Quite
 			 * possibly the HA just disappeared.
 			 */
-			SAS_DPRINTK("error from  device %llx, LUN %llx "
+			SAS_DPRINTK("error from  device %llx, LUN %x "
 				    "couldn't be recovered in any way\n",
 				    SAS_ADDR(task->dev->sas_addr),
 				    cmd->device->lun);
@@ -811,6 +802,13 @@ out:
 		    shost->host_failed, tries);
 }
 
+enum blk_eh_timer_return sas_scsi_timed_out(struct scsi_cmnd *cmd)
+{
+	scmd_dbg(cmd, "command %p timed out\n", cmd);
+
+	return BLK_EH_NOT_HANDLED;
+}
+
 int sas_ioctl(struct scsi_device *sdev, int cmd, void __user *arg)
 {
 	struct domain_device *dev = sdev_to_domain_dev(sdev);
@@ -868,6 +866,7 @@ int sas_target_alloc(struct scsi_target *starget)
 int sas_slave_configure(struct scsi_device *scsi_dev)
 {
 	struct domain_device *dev = sdev_to_domain_dev(scsi_dev);
+	struct sas_ha_struct *sas_ha;
 
 	BUG_ON(dev->rphy->identify.device_type != SAS_END_DEVICE);
 
@@ -876,15 +875,20 @@ int sas_slave_configure(struct scsi_device *scsi_dev)
 		return 0;
 	}
 
+	sas_ha = dev->port->ha;
+
 	sas_read_port_mode_page(scsi_dev);
 
 	if (scsi_dev->tagged_supported) {
-		scsi_change_queue_depth(scsi_dev, SAS_DEF_QD);
+		scsi_set_tag_type(scsi_dev, MSG_SIMPLE_TAG);
+		scsi_activate_tcq(scsi_dev, SAS_DEF_QD);
 	} else {
-		SAS_DPRINTK("device %llx, LUN %llx doesn't support "
+		SAS_DPRINTK("device %llx, LUN %x doesn't support "
 			    "TCQ\n", SAS_ADDR(dev->sas_addr),
 			    scsi_dev->lun);
-		scsi_change_queue_depth(scsi_dev, 1);
+		scsi_dev->tagged_supported = 0;
+		scsi_set_tag_type(scsi_dev, 0);
+		scsi_deactivate_tcq(scsi_dev, 1);
 	}
 
 	scsi_dev->allow_restart = 1;
@@ -892,16 +896,47 @@ int sas_slave_configure(struct scsi_device *scsi_dev)
 	return 0;
 }
 
-int sas_change_queue_depth(struct scsi_device *sdev, int depth)
+int sas_change_queue_depth(struct scsi_device *sdev, int depth, int reason)
 {
 	struct domain_device *dev = sdev_to_domain_dev(sdev);
 
 	if (dev_is_sata(dev))
-		return __ata_change_queue_depth(dev->sata_dev.ap, sdev, depth);
+		return __ata_change_queue_depth(dev->sata_dev.ap, sdev, depth,
+						reason);
 
-	if (!sdev->tagged_supported)
-		depth = 1;
-	return scsi_change_queue_depth(sdev, depth);
+	switch (reason) {
+	case SCSI_QDEPTH_DEFAULT:
+	case SCSI_QDEPTH_RAMP_UP:
+		if (!sdev->tagged_supported)
+			depth = 1;
+		scsi_adjust_queue_depth(sdev, scsi_get_tag_type(sdev), depth);
+		break;
+	case SCSI_QDEPTH_QFULL:
+		scsi_track_queue_full(sdev, depth);
+		break;
+	default:
+		return -EOPNOTSUPP;
+	}
+
+	return depth;
+}
+
+int sas_change_queue_type(struct scsi_device *scsi_dev, int qt)
+{
+	struct domain_device *dev = sdev_to_domain_dev(scsi_dev);
+
+	if (dev_is_sata(dev))
+		return -EINVAL;
+
+	if (!scsi_dev->tagged_supported)
+		return 0;
+
+	scsi_deactivate_tcq(scsi_dev, 1);
+
+	scsi_set_tag_type(scsi_dev, qt);
+	scsi_activate_tcq(scsi_dev, scsi_dev->queue_depth);
+
+	return qt;
 }
 
 int sas_bios_param(struct scsi_device *scsi_dev,
@@ -932,7 +967,7 @@ void sas_task_abort(struct sas_task *task)
 			return;
 		if (!del_timer(&slow->timer))
 			return;
-		slow->timer.function(&slow->timer);
+		slow->timer.function(slow->timer.data);
 		return;
 	}
 
@@ -1002,10 +1037,11 @@ EXPORT_SYMBOL_GPL(sas_queuecommand);
 EXPORT_SYMBOL_GPL(sas_target_alloc);
 EXPORT_SYMBOL_GPL(sas_slave_configure);
 EXPORT_SYMBOL_GPL(sas_change_queue_depth);
+EXPORT_SYMBOL_GPL(sas_change_queue_type);
 EXPORT_SYMBOL_GPL(sas_bios_param);
 EXPORT_SYMBOL_GPL(sas_task_abort);
 EXPORT_SYMBOL_GPL(sas_phy_reset);
 EXPORT_SYMBOL_GPL(sas_eh_device_reset_handler);
-EXPORT_SYMBOL_GPL(sas_eh_target_reset_handler);
+EXPORT_SYMBOL_GPL(sas_eh_bus_reset_handler);
 EXPORT_SYMBOL_GPL(sas_target_destroy);
 EXPORT_SYMBOL_GPL(sas_ioctl);

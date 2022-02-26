@@ -142,9 +142,7 @@ static int __init fscache_init(void)
 
 	fscache_cookie_jar = kmem_cache_create("fscache_cookie_jar",
 					       sizeof(struct fscache_cookie),
-					       0,
-					       0,
-					       fscache_cookie_init_once);
+					       0, 0, NULL);
 	if (!fscache_cookie_jar) {
 		pr_notice("Failed to allocate a cookie jar\n");
 		ret = -ENOMEM;
@@ -195,3 +193,12 @@ static void __exit fscache_exit(void)
 }
 
 module_exit(fscache_exit);
+
+/*
+ * wait_on_atomic_t() sleep function for uninterruptible waiting
+ */
+int fscache_wait_atomic_t(atomic_t *p)
+{
+	schedule();
+	return 0;
+}

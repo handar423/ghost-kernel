@@ -20,23 +20,45 @@
  *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  *  General Public License for more details.
  *
+ *  You should have received a copy of the GNU General Public License along
+ *  with this program; if not, write to the Free Software Foundation, Inc.,
+ *  59 Temple Place, Suite 330, Boston, MA 02111-1307 USA.
+ *
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  */
 
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/acpi.h>
+#include <acpi/acpi_bus.h>
 #include <linux/dmi.h>
 
 #include "internal.h"
 
-static const struct dmi_system_id acpi_rev_dmi_table[] __initconst;
+enum acpi_blacklist_predicates {
+	all_versions,
+	less_than_or_equal,
+	equal,
+	greater_than_or_equal,
+};
+
+struct acpi_blacklist_item {
+	char oem_id[7];
+	char oem_table_id[9];
+	u32 oem_revision;
+	char *table;
+	enum acpi_blacklist_predicates oem_revision_predicate;
+	char *reason;
+	u32 is_critical_error;
+};
+
+static const struct dmi_system_id acpi_rev_dmi_table[] __initdata;
 
 /*
  * POLICY: If *anything* doesn't work, put it on the blacklist.
  *	   If they are critical errors, mark it critical, and abort driver load.
  */
-static struct acpi_platform_list acpi_blacklist[] __initdata = {
+static struct acpi_blacklist_item acpi_blacklist[] __initdata = {
 	/* Compaq Presario 1700 */
 	{"PTLTD ", "  DSDT  ", 0x06040000, ACPI_SIG_DSDT, less_than_or_equal,
 	 "Multiple problems", 1},
@@ -50,27 +72,65 @@ static struct acpi_platform_list acpi_blacklist[] __initdata = {
 	{"IBM   ", "TP600E  ", 0x00000105, ACPI_SIG_DSDT, less_than_or_equal,
 	 "Incorrect _ADR", 1},
 
-	{ }
+	{""}
 };
 
 int __init acpi_blacklisted(void)
 {
-	int i;
+	int i = 0;
 	int blacklisted = 0;
+	struct acpi_table_header table_header;
 
-	i = acpi_match_platform_list(acpi_blacklist);
-	if (i >= 0) {
-		pr_err(PREFIX "Vendor \"%6.6s\" System \"%8.8s\" Revision 0x%x has a known ACPI BIOS problem.\n",
-		       acpi_blacklist[i].oem_id,
-		       acpi_blacklist[i].oem_table_id,
-		       acpi_blacklist[i].oem_revision);
+	while (acpi_blacklist[i].oem_id[0] != '\0') {
+		if (acpi_get_table_header(acpi_blacklist[i].table, 0, &table_header)) {
+			i++;
+			continue;
+		}
 
-		pr_err(PREFIX "Reason: %s. This is a %s error\n",
-		       acpi_blacklist[i].reason,
-		       (acpi_blacklist[i].data ?
-			"non-recoverable" : "recoverable"));
+		if (strncmp(acpi_blacklist[i].oem_id, table_header.oem_id, 6)) {
+			i++;
+			continue;
+		}
 
-		blacklisted = acpi_blacklist[i].data;
+		if (strncmp
+		    (acpi_blacklist[i].oem_table_id, table_header.oem_table_id,
+		     8)) {
+			i++;
+			continue;
+		}
+
+		if ((acpi_blacklist[i].oem_revision_predicate == all_versions)
+		    || (acpi_blacklist[i].oem_revision_predicate ==
+			less_than_or_equal
+			&& table_header.oem_revision <=
+			acpi_blacklist[i].oem_revision)
+		    || (acpi_blacklist[i].oem_revision_predicate ==
+			greater_than_or_equal
+			&& table_header.oem_revision >=
+			acpi_blacklist[i].oem_revision)
+		    || (acpi_blacklist[i].oem_revision_predicate == equal
+			&& table_header.oem_revision ==
+			acpi_blacklist[i].oem_revision)) {
+
+			printk(KERN_ERR PREFIX
+			       "Vendor \"%6.6s\" System \"%8.8s\" "
+			       "Revision 0x%x has a known ACPI BIOS problem.\n",
+			       acpi_blacklist[i].oem_id,
+			       acpi_blacklist[i].oem_table_id,
+			       acpi_blacklist[i].oem_revision);
+
+			printk(KERN_ERR PREFIX
+			       "Reason: %s. This is a %s error\n",
+			       acpi_blacklist[i].reason,
+			       (acpi_blacklist[i].
+				is_critical_error ? "non-recoverable" :
+				"recoverable"));
+
+			blacklisted = acpi_blacklist[i].is_critical_error;
+			break;
+		} else {
+			i++;
+		}
 	}
 
 	(void)early_acpi_osi_init();
@@ -78,71 +138,10 @@ int __init acpi_blacklisted(void)
 
 	return blacklisted;
 }
-#ifdef CONFIG_DMI
-#ifdef CONFIG_ACPI_REV_OVERRIDE_POSSIBLE
-static int __init dmi_enable_rev_override(const struct dmi_system_id *d)
-{
-	printk(KERN_NOTICE PREFIX "DMI detected: %s (force ACPI _REV to 5)\n",
-	       d->ident);
-	acpi_rev_override_setup(NULL);
-	return 0;
-}
-#endif
 
 static const struct dmi_system_id acpi_rev_dmi_table[] __initconst = {
 #ifdef CONFIG_ACPI_REV_OVERRIDE_POSSIBLE
-	/*
-	 * DELL XPS 13 (2015) switches sound between HDA and I2S
-	 * depending on the ACPI _REV callback. If userspace supports
-	 * I2S sufficiently (or if you do not care about sound), you
-	 * can safely disable this quirk.
-	 */
-	{
-	 .callback = dmi_enable_rev_override,
-	 .ident = "DELL XPS 13 (2015)",
-	 .matches = {
-		      DMI_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
-		      DMI_MATCH(DMI_PRODUCT_NAME, "XPS 13 9343"),
-		},
-	},
-	{
-	 .callback = dmi_enable_rev_override,
-	 .ident = "DELL Precision 5520",
-	 .matches = {
-		      DMI_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
-		      DMI_MATCH(DMI_PRODUCT_NAME, "Precision 5520"),
-		},
-	},
-	{
-	 .callback = dmi_enable_rev_override,
-	 .ident = "DELL Precision 3520",
-	 .matches = {
-		      DMI_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
-		      DMI_MATCH(DMI_PRODUCT_NAME, "Precision 3520"),
-		},
-	},
-	/*
-	 * Resolves a quirk with the Dell Latitude 3350 that
-	 * causes the ethernet adapter to not function.
-	 */
-	{
-	 .callback = dmi_enable_rev_override,
-	 .ident = "DELL Latitude 3350",
-	 .matches = {
-		      DMI_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
-		      DMI_MATCH(DMI_PRODUCT_NAME, "Latitude 3350"),
-		},
-	},
-	{
-	 .callback = dmi_enable_rev_override,
-	 .ident = "DELL Inspiron 7537",
-	 .matches = {
-		      DMI_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
-		      DMI_MATCH(DMI_PRODUCT_NAME, "Inspiron 7537"),
-		},
-	},
 #endif
-	{}
-};
+        {}
 
-#endif /* CONFIG_DMI */
+};

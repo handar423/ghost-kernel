@@ -54,7 +54,7 @@
 
 static int open_count;
 
-static const struct header_ops lowpan_header_ops = {
+static struct header_ops lowpan_header_ops = {
 	.create	= lowpan_header_create,
 };
 
@@ -91,11 +91,12 @@ static int lowpan_neigh_construct(struct net_device *dev, struct neighbour *n)
 }
 
 static const struct net_device_ops lowpan_netdev_ops = {
+	.ndo_size		= sizeof(struct net_device_ops),
 	.ndo_init		= lowpan_dev_init,
 	.ndo_start_xmit		= lowpan_xmit,
 	.ndo_open		= lowpan_open,
 	.ndo_stop		= lowpan_stop,
-	.ndo_neigh_construct    = lowpan_neigh_construct,
+	.extended.ndo_neigh_construct    = lowpan_neigh_construct,
 };
 
 static void lowpan_setup(struct net_device *ldev)
@@ -107,12 +108,11 @@ static void lowpan_setup(struct net_device *ldev)
 
 	ldev->netdev_ops	= &lowpan_netdev_ops;
 	ldev->header_ops	= &lowpan_header_ops;
-	ldev->needs_free_netdev	= true;
+	ldev->extended->needs_free_netdev	= true;
 	ldev->features		|= NETIF_F_NETNS_LOCAL;
 }
 
-static int lowpan_validate(struct nlattr *tb[], struct nlattr *data[],
-			   struct netlink_ext_ack *extack)
+static int lowpan_validate(struct nlattr *tb[], struct nlattr *data[])
 {
 	if (tb[IFLA_ADDRESS]) {
 		if (nla_len(tb[IFLA_ADDRESS]) != IEEE802154_ADDR_LEN)
@@ -122,8 +122,7 @@ static int lowpan_validate(struct nlattr *tb[], struct nlattr *data[],
 }
 
 static int lowpan_newlink(struct net *src_net, struct net_device *ldev,
-			  struct nlattr *tb[], struct nlattr *data[],
-			  struct netlink_ext_ack *extack)
+			  struct nlattr *tb[], struct nlattr *data[])
 {
 	struct net_device *wdev;
 	int ret;
@@ -243,7 +242,7 @@ static int __init lowpan_init_module(void)
 	if (err < 0)
 		goto out_frag;
 
-	err = register_netdevice_notifier(&lowpan_dev_notifier);
+	err = register_netdevice_notifier_rh(&lowpan_dev_notifier);
 	if (err < 0)
 		goto out_pack;
 
@@ -263,7 +262,7 @@ static void __exit lowpan_cleanup_module(void)
 
 	lowpan_net_frag_exit();
 
-	unregister_netdevice_notifier(&lowpan_dev_notifier);
+	unregister_netdevice_notifier_rh(&lowpan_dev_notifier);
 }
 
 module_init(lowpan_init_module);

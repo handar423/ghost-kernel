@@ -16,8 +16,6 @@
 #include <linux/spinlock.h>
 #include <linux/types.h>
 
-#include <linux/io-64-nonatomic-lo-hi.h>
-
 #include "virt-dma.h"
 
 /* Channel registers */
@@ -54,8 +52,7 @@
 #define IDMA64C_CTLL_LLP_S_EN		(1 << 28)	/* src block chain */
 
 /* Bitfields in CTL_HI */
-#define IDMA64C_CTLH_BLOCK_TS_MASK	((1 << 17) - 1)
-#define IDMA64C_CTLH_BLOCK_TS(x)	((x) & IDMA64C_CTLH_BLOCK_TS_MASK)
+#define IDMA64C_CTLH_BLOCK_TS(x)	((x) & ((1 << 17) - 1))
 #define IDMA64C_CTLH_DONE		(1 << 17)
 
 /* Bitfields in CFG_LO */
@@ -71,7 +68,7 @@
 #define IDMA64C_CFGH_SRC_PER(x)		((x) << 0)	/* src peripheral */
 #define IDMA64C_CFGH_DST_PER(x)		((x) << 4)	/* dst peripheral */
 #define IDMA64C_CFGH_RD_ISSUE_THD(x)	((x) << 8)
-#define IDMA64C_CFGH_WR_ISSUE_THD(x)	((x) << 18)
+#define IDMA64C_CFGH_RW_ISSUE_THD(x)	((x) << 18)
 
 /* Interrupt registers */
 
@@ -169,13 +166,19 @@ static inline void idma64c_writel(struct idma64_chan *idma64c, int offset,
 
 static inline u64 idma64c_readq(struct idma64_chan *idma64c, int offset)
 {
-	return lo_hi_readq(idma64c->regs + offset);
+	u64 l, h;
+
+	l = idma64c_readl(idma64c, offset);
+	h = idma64c_readl(idma64c, offset + 4);
+
+	return l | (h << 32);
 }
 
 static inline void idma64c_writeq(struct idma64_chan *idma64c, int offset,
 				  u64 value)
 {
-	lo_hi_writeq(value, idma64c->regs + offset);
+	idma64c_writel(idma64c, offset, value);
+	idma64c_writel(idma64c, offset + 4, value >> 32);
 }
 
 #define channel_readq(idma64c, reg)		\
@@ -214,7 +217,7 @@ static inline void idma64_writel(struct idma64 *idma64, int offset, u32 value)
 	idma64_writel(idma64, IDMA64_##reg, (value))
 
 /**
- * struct idma64_chip - representation of iDMA 64-bit controller hardware
+ * struct idma64_chip - representation of DesignWare DMA controller hardware
  * @dev:		struct device of the DMA controller
  * @irq:		irq line
  * @regs:		memory mapped I/O space

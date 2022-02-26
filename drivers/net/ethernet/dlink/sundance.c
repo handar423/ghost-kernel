@@ -91,7 +91,7 @@ static char *media[MAX_UNITS];
 #include <linux/skbuff.h>
 #include <linux/init.h>
 #include <linux/bitops.h>
-#include <linux/uaccess.h>
+#include <asm/uaccess.h>
 #include <asm/processor.h>		/* Processor type for cache alignment. */
 #include <asm/io.h>
 #include <linux/delay.h>
@@ -431,7 +431,7 @@ static void mdio_write(struct net_device *dev, int phy_id, int location, int val
 static int  mdio_wait_link(struct net_device *dev, int wait);
 static int  netdev_open(struct net_device *dev);
 static void check_duplex(struct net_device *dev);
-static void netdev_timer(struct timer_list *t);
+static void netdev_timer(unsigned long data);
 static void tx_timeout(struct net_device *dev);
 static void init_ring(struct net_device *dev);
 static netdev_tx_t start_tx(struct sk_buff *skb, struct net_device *dev);
@@ -469,17 +469,6 @@ static void sundance_reset(struct net_device *dev, unsigned long reset_cmd)
 	}
 }
 
-#ifdef CONFIG_NET_POLL_CONTROLLER
-static void sundance_poll_controller(struct net_device *dev)
-{
-	struct netdev_private *np = netdev_priv(dev);
-
-	disable_irq(np->pci_dev->irq);
-	intr_handler(np->pci_dev->irq, dev);
-	enable_irq(np->pci_dev->irq);
-}
-#endif
-
 static const struct net_device_ops netdev_ops = {
 	.ndo_open		= netdev_open,
 	.ndo_stop		= netdev_close,
@@ -491,9 +480,6 @@ static const struct net_device_ops netdev_ops = {
 	.ndo_change_mtu		= change_mtu,
 	.ndo_set_mac_address 	= sundance_set_mac_addr,
 	.ndo_validate_addr	= eth_validate_addr,
-#ifdef CONFIG_NET_POLL_CONTROLLER
-	.ndo_poll_controller 	= sundance_poll_controller,
-#endif
 };
 
 static int sundance_probe1(struct pci_dev *pdev,
@@ -577,12 +563,8 @@ static int sundance_probe1(struct pci_dev *pdev,
 
 	/* The chip-specific entries in the device structure. */
 	dev->netdev_ops = &netdev_ops;
-	dev->ethtool_ops = &ethtool_ops;
+	SET_ETHTOOL_OPS(dev, &ethtool_ops);
 	dev->watchdog_timeo = TX_TIMEOUT;
-
-	/* MTU range: 68 - 8191 */
-	dev->min_mtu = ETH_MIN_MTU;
-	dev->max_mtu = 8191;
 
 	pci_set_drvdata(pdev, dev);
 
@@ -707,6 +689,7 @@ err_out_unmap_tx:
 	dma_free_coherent(&pdev->dev, TX_TOTAL_SIZE,
 		np->tx_ring, np->tx_ring_dma);
 err_out_cleardev:
+	pci_set_drvdata(pdev, NULL);
 	pci_iounmap(pdev, ioaddr);
 err_out_res:
 	pci_release_regions(pdev);
@@ -717,6 +700,8 @@ err_out_netdev:
 
 static int change_mtu(struct net_device *dev, int new_mtu)
 {
+	if ((new_mtu < 68) || (new_mtu > 8191)) /* Set by RxDMAFrameLen */
+		return -EINVAL;
 	if (netif_running(dev))
 		return -EBUSY;
 	dev->mtu = new_mtu;
@@ -869,7 +854,7 @@ static int netdev_open(struct net_device *dev)
 
 	/* Initialize other registers. */
 	__set_mac_addr(dev);
-#if IS_ENABLED(CONFIG_VLAN_8021Q)
+#if defined(CONFIG_VLAN_8021Q) || defined(CONFIG_VLAN_8021Q_MODULE)
 	iowrite16(dev->mtu + 18, ioaddr + MaxFrameSize);
 #else
 	iowrite16(dev->mtu + 14, ioaddr + MaxFrameSize);
@@ -913,8 +898,10 @@ static int netdev_open(struct net_device *dev)
 			   ioread16(ioaddr + MACCtrl1), ioread16(ioaddr + MACCtrl0));
 
 	/* Set the timer to check for link beat. */
-	timer_setup(&np->timer, netdev_timer, 0);
+	init_timer(&np->timer);
 	np->timer.expires = jiffies + 3*HZ;
+	np->timer.data = (unsigned long)dev;
+	np->timer.function = netdev_timer;				/* timer handler */
 	add_timer(&np->timer);
 
 	/* Enable interrupts by setting the interrupt mask. */
@@ -951,10 +938,10 @@ static void check_duplex(struct net_device *dev)
 	}
 }
 
-static void netdev_timer(struct timer_list *t)
+static void netdev_timer(unsigned long data)
 {
-	struct netdev_private *np = from_timer(np, t, timer);
-	struct net_device *dev = np->mii_if.dev;
+	struct net_device *dev = (struct net_device *)data;
+	struct netdev_private *np = netdev_priv(dev);
 	void __iomem *ioaddr = np->base;
 	int next_tick = 10*HZ;
 
@@ -1137,7 +1124,7 @@ start_tx (struct sk_buff *skb, struct net_device *dev)
 	return NETDEV_TX_OK;
 
 drop_frame:
-	dev_kfree_skb_any(skb);
+	dev_kfree_skb(skb);
 	np->tx_skbuff[entry] = NULL;
 	dev->stats.tx_dropped++;
 	return NETDEV_TX_OK;
@@ -1662,23 +1649,21 @@ static void get_drvinfo(struct net_device *dev, struct ethtool_drvinfo *info)
 	strlcpy(info->bus_info, pci_name(np->pci_dev), sizeof(info->bus_info));
 }
 
-static int get_link_ksettings(struct net_device *dev,
-			      struct ethtool_link_ksettings *cmd)
+static int get_settings(struct net_device *dev, struct ethtool_cmd *ecmd)
 {
 	struct netdev_private *np = netdev_priv(dev);
 	spin_lock_irq(&np->lock);
-	mii_ethtool_get_link_ksettings(&np->mii_if, cmd);
+	mii_ethtool_gset(&np->mii_if, ecmd);
 	spin_unlock_irq(&np->lock);
 	return 0;
 }
 
-static int set_link_ksettings(struct net_device *dev,
-			      const struct ethtool_link_ksettings *cmd)
+static int set_settings(struct net_device *dev, struct ethtool_cmd *ecmd)
 {
 	struct netdev_private *np = netdev_priv(dev);
 	int res;
 	spin_lock_irq(&np->lock);
-	res = mii_ethtool_set_link_ksettings(&np->mii_if, cmd);
+	res = mii_ethtool_sset(&np->mii_if, ecmd);
 	spin_unlock_irq(&np->lock);
 	return res;
 }
@@ -1800,6 +1785,8 @@ static int sundance_set_wol(struct net_device *dev,
 static const struct ethtool_ops ethtool_ops = {
 	.begin = check_if_running,
 	.get_drvinfo = get_drvinfo,
+	.get_settings = get_settings,
+	.set_settings = set_settings,
 	.nway_reset = nway_reset,
 	.get_link = get_link,
 	.get_wol = sundance_get_wol,
@@ -1809,8 +1796,6 @@ static const struct ethtool_ops ethtool_ops = {
 	.get_strings = get_strings,
 	.get_sset_count = get_sset_count,
 	.get_ethtool_stats = get_ethtool_stats,
-	.get_link_ksettings = get_link_ksettings,
-	.set_link_ksettings = set_link_ksettings,
 };
 
 static int netdev_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
@@ -1942,6 +1927,7 @@ static void sundance_remove1(struct pci_dev *pdev)
 	    pci_iounmap(pdev, np->base);
 	    pci_release_regions(pdev);
 	    free_netdev(dev);
+	    pci_set_drvdata(pdev, NULL);
 	}
 }
 

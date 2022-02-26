@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_X86_SIGNAL_H
 #define _ASM_X86_SIGNAL_H
 
@@ -24,9 +23,18 @@ typedef struct {
 	unsigned long sig[_NSIG_WORDS];
 } sigset_t;
 
-/* non-uapi in-kernel SA_FLAGS for those indicates ABI for a signal frame */
-#define SA_IA32_ABI	0x02000000u
-#define SA_X32_ABI	0x01000000u
+/*
+ * Because some traps use the IST stack, we must keep preemption
+ * disabled while calling do_trap(), but do_trap() may call
+ * force_sig_info() which will grab the signal spin_locks for the
+ * task, which in PREEMPT_RT_FULL are mutexes.  By defining
+ * ARCH_RT_DELAYS_SIGNAL_SEND the force_sig_info() will set
+ * TIF_NOTIFY_RESUME and set up the signal to be sent on exit of the
+ * trap.
+ */
+#if defined(CONFIG_PREEMPT_RT_FULL) && defined(CONFIG_X86_64)
+#define ARCH_RT_DELAYS_SIGNAL_SEND
+#endif
 
 #ifndef CONFIG_COMPAT
 typedef sigset_t compat_sigset_t;
@@ -35,11 +43,11 @@ typedef sigset_t compat_sigset_t;
 #endif /* __ASSEMBLY__ */
 #include <uapi/asm/signal.h>
 #ifndef __ASSEMBLY__
-extern void do_signal(struct pt_regs *regs);
+extern void do_notify_resume(struct pt_regs *, void *, __u32);
 
 #define __ARCH_HAS_SA_RESTORER
 
-#include <uapi/asm/sigcontext.h>
+#include <asm/sigcontext.h>
 
 #ifdef __i386__
 
@@ -86,9 +94,9 @@ static inline int __const_sigismember(sigset_t *set, int _sig)
 
 static inline int __gen_sigismember(sigset_t *set, int _sig)
 {
-	unsigned char ret;
-	asm("btl %2,%1\n\tsetc %0"
-	    : "=qm"(ret) : "m"(*set), "Ir"(_sig-1) : "cc");
+	int ret;
+	asm("btl %2,%1\n\tsbbl %0,%0"
+	    : "=r"(ret) : "m"(*set), "Ir"(_sig-1) : "cc");
 	return ret;
 }
 
@@ -96,6 +104,12 @@ static inline int __gen_sigismember(sigset_t *set, int _sig)
 	(__builtin_constant_p(sig)		\
 	 ? __const_sigismember((set), (sig))	\
 	 : __gen_sigismember((set), (sig)))
+
+static inline int sigfindinword(unsigned long word)
+{
+	asm("bsfl %1,%0" : "=r"(word) : "rm"(word) : "cc");
+	return word;
+}
 
 struct pt_regs;
 

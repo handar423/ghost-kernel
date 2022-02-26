@@ -16,6 +16,10 @@
  *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  *  General Public License for more details.
  *
+ *  You should have received a copy of the GNU General Public License along
+ *  with this program; if not, write to the Free Software Foundation, Inc.,
+ *  59 Temple Place, Suite 330, Boston, MA 02111-1307 USA.
+ *
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  */
 
@@ -25,7 +29,8 @@
 #include <linux/types.h>
 #include <linux/uaccess.h>
 #include <linux/thermal.h>
-#include <linux/acpi.h>
+#include <acpi/acpi_bus.h>
+#include <acpi/acpi_drivers.h>
 #include <linux/platform_device.h>
 #include <linux/sort.h>
 
@@ -46,7 +51,7 @@ MODULE_DEVICE_TABLE(acpi, fan_device_ids);
 #ifdef CONFIG_PM_SLEEP
 static int acpi_fan_suspend(struct device *dev);
 static int acpi_fan_resume(struct device *dev);
-static const struct dev_pm_ops acpi_fan_pm = {
+static struct dev_pm_ops acpi_fan_pm = {
 	.resume = acpi_fan_resume,
 	.freeze = acpi_fan_suspend,
 	.thaw = acpi_fan_resume,
@@ -129,18 +134,8 @@ static int fan_get_state_acpi4(struct acpi_device *device, unsigned long *state)
 
 	control = obj->package.elements[1].integer.value;
 	for (i = 0; i < fan->fps_count; i++) {
-		/*
-		 * When Fine Grain Control is set, return the state
-		 * corresponding to maximum fan->fps[i].control
-		 * value compared to the current speed. Here the
-		 * fan->fps[] is sorted array with increasing speed.
-		 */
-		if (fan->fif.fine_grain_ctrl && control < fan->fps[i].control) {
-			i = (i > 0) ? i - 1 : 0;
+		if (control == fan->fps[i].control)
 			break;
-		} else if (control == fan->fps[i].control) {
-			break;
-		}
 	}
 	if (i == fan->fps_count) {
 		dev_dbg(&device->dev, "Invalid control value returned\n");
@@ -164,9 +159,8 @@ static int fan_get_state(struct acpi_device *device, unsigned long *state)
 	if (result)
 		return result;
 
-	*state = acpi_state == ACPI_STATE_D3_COLD
-			|| acpi_state == ACPI_STATE_D3_HOT ?
-		0 : (acpi_state == ACPI_STATE_D0 ? 1 : -1);
+	*state = (acpi_state == ACPI_STATE_D3_COLD ? 0 :
+		 (acpi_state == ACPI_STATE_D0 ? 1 : -1));
 	return 0;
 }
 
@@ -349,7 +343,7 @@ static int acpi_fan_probe(struct platform_device *pdev)
 	} else {
 		result = acpi_device_update_power(device, NULL);
 		if (result) {
-			dev_err(&device->dev, "Failed to set initial power state\n");
+			dev_err(&device->dev, "Setting initial power state\n");
 			goto end;
 		}
 	}
@@ -373,15 +367,16 @@ static int acpi_fan_probe(struct platform_device *pdev)
 				   &cdev->device.kobj,
 				   "thermal_cooling");
 	if (result)
-		dev_err(&pdev->dev, "Failed to create sysfs link 'thermal_cooling'\n");
+		dev_err(&pdev->dev, "Failed to create sysfs link "
+			"'thermal_cooling'\n");
 
 	result = sysfs_create_link(&cdev->device.kobj,
 				   &pdev->dev.kobj,
 				   "device");
 	if (result)
-		dev_err(&pdev->dev, "Failed to create sysfs link 'device'\n");
+		dev_err(&device->dev, "Failed to create sysfs link 'device'\n");
 
-end:
+      end:
 	return result;
 }
 

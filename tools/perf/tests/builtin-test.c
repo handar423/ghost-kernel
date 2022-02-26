@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * builtin-test.c
  *
@@ -193,15 +192,6 @@ static struct test generic_tests[] = {
 		.func = test__session_topology,
 	},
 	{
-		.desc = "BPF filter",
-		.func = test__bpf,
-		.subtest = {
-			.skip_if_fail	= true,
-			.get_nr		= test__bpf_subtest_get_nr,
-			.get_desc	= test__bpf_subtest_get_desc,
-		},
-	},
-	{
 		.desc = "Synthesize thread map",
 		.func = test__thread_map_synthesize,
 	},
@@ -258,6 +248,19 @@ static struct test generic_tests[] = {
 		.func = test__perf_hooks,
 	},
 	{
+		.desc = "unit_number__scnprintf",
+		.func = test__unit_number__scnprint,
+	},
+	{
+		.desc = "BPF filter",
+		.func = test__bpf,
+		.subtest = {
+			.skip_if_fail	= true,
+			.get_nr		= test__bpf_subtest_get_nr,
+			.get_desc	= test__bpf_subtest_get_desc,
+		},
+	},
+	{
 		.desc = "builtin clang support",
 		.func = test__clang,
 		.subtest = {
@@ -267,8 +270,8 @@ static struct test generic_tests[] = {
 		}
 	},
 	{
-		.desc = "unit_number__scnprintf",
-		.func = test__unit_number__scnprint,
+		.desc = "mem2node",
+		.func = test__mem2node,
 	},
 	{
 		.func = NULL,
@@ -376,7 +379,7 @@ static int test_and_print(struct test *t, bool force_skip, int subtest)
 	if (!t->subtest.get_nr)
 		pr_debug("%s:", t->desc);
 	else
-		pr_debug("%s subtest %d:", t->desc, subtest);
+		pr_debug("%s subtest %d:", t->desc, subtest + 1);
 
 	switch (err) {
 	case TEST_OK:
@@ -411,9 +414,9 @@ static const char *shell_test__description(char *description, size_t size,
 	return description ? trim(description + 1) : NULL;
 }
 
-#define for_each_shell_test(dir, ent)		\
+#define for_each_shell_test(dir, base, ent)	\
 	while ((ent = readdir(dir)) != NULL)	\
-		if (ent->d_type == DT_REG && ent->d_name[0] != '.')
+		if (!is_directory(base, ent) && ent->d_name[0] != '.')
 
 static const char *shell_tests__dir(char *path, size_t size)
 {
@@ -452,7 +455,7 @@ static int shell_tests__max_desc_width(void)
 	if (!dir)
 		return -1;
 
-	for_each_shell_test(dir, ent) {
+	for_each_shell_test(dir, path, ent) {
 		char bf[256];
 		const char *desc = shell_test__description(bf, sizeof(bf), path, ent->d_name);
 
@@ -504,7 +507,7 @@ static int run_shell_tests(int argc, const char *argv[], int i, int width)
 	if (!dir)
 		return -1;
 
-	for_each_shell_test(dir, ent) {
+	for_each_shell_test(dir, st.dir, ent) {
 		int curr = i++;
 		char desc[256];
 		struct test test = {
@@ -614,7 +617,7 @@ static int perf_test__list_shell(int argc, const char **argv, int i)
 	if (!dir)
 		return -1;
 
-	for_each_shell_test(dir, ent) {
+	for_each_shell_test(dir, path, ent) {
 		int curr = i++;
 		char bf[256];
 		struct test t = {
@@ -645,6 +648,15 @@ static int perf_test__list(int argc, const char **argv)
 			continue;
 
 		pr_info("%2d: %s\n", i, t->desc);
+
+		if (t->subtest.get_nr) {
+			int subn = t->subtest.get_nr();
+			int subi;
+
+			for (subi = 0; subi < subn; subi++)
+				pr_info("%2d:%1d: %s\n", i, subi + 1,
+					t->subtest.get_desc(subi));
+		}
 	}
 
 	perf_test__list_shell(argc, argv, i);

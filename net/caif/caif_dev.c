@@ -22,7 +22,6 @@
 #include <net/pkt_sched.h>
 #include <net/caif/caif_device.h>
 #include <net/caif/caif_layer.h>
-#include <net/caif/caif_dev.h>
 #include <net/caif/cfpkt.h>
 #include <net/caif/cfcnfg.h>
 #include <net/caif/cfserl.h>
@@ -52,7 +51,7 @@ struct caif_net {
 	struct caif_device_entry_list caifdevs;
 };
 
-static unsigned int caif_net_id;
+static int caif_net_id;
 static int q_high = 50; /* Percent */
 
 struct cfcnfg *get_cfcnfg(struct net *net)
@@ -177,7 +176,7 @@ static int transmit(struct cflayer *layer, struct cfpkt *pkt)
 	skb->protocol = htons(ETH_P_CAIF);
 
 	/* Check if we need to handle xoff */
-	if (likely(caifd->netdev->priv_flags & IFF_NO_QUEUE))
+	if (likely(caifd->netdev->tx_queue_len == 0))
 		goto noxoff;
 
 	if (unlikely(caifd->xoff))
@@ -334,8 +333,9 @@ void caif_enroll_dev(struct net_device *dev, struct caif_dev_common *caifdev,
 	mutex_lock(&caifdevs->lock);
 	list_add_rcu(&caifd->list, &caifdevs->list);
 
-	strlcpy(caifd->layer.name, dev->name,
-		sizeof(caifd->layer.name));
+	strncpy(caifd->layer.name, dev->name,
+		sizeof(caifd->layer.name) - 1);
+	caifd->layer.name[sizeof(caifd->layer.name) - 1] = 0;
 	caifd->layer.transmit = transmit;
 	cfcnfg_add_phy_layer(cfg,
 				dev,
@@ -556,7 +556,7 @@ static int __init caif_device_init(void)
 	if (result)
 		return result;
 
-	register_netdevice_notifier(&caif_device_notifier);
+	register_netdevice_notifier_rh(&caif_device_notifier);
 	dev_add_pack(&caif_packet_type);
 
 	return result;
@@ -564,7 +564,7 @@ static int __init caif_device_init(void)
 
 static void __exit caif_device_exit(void)
 {
-	unregister_netdevice_notifier(&caif_device_notifier);
+	unregister_netdevice_notifier_rh(&caif_device_notifier);
 	dev_remove_pack(&caif_packet_type);
 	unregister_pernet_subsys(&caif_net_ops);
 }

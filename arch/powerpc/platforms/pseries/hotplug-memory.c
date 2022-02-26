@@ -336,38 +336,7 @@ static struct memory_block *lmb_to_memblock(struct of_drconf_cell *lmb)
 	return mem_block;
 }
 
-static int dlpar_change_lmb_state(struct of_drconf_cell *lmb, bool online)
-{
-	struct memory_block *mem_block;
-	int rc;
-
-	mem_block = lmb_to_memblock(lmb);
-	if (!mem_block)
-		return -EINVAL;
-
-	if (online && mem_block->dev.offline)
-		rc = device_online(&mem_block->dev);
-	else if (!online && !mem_block->dev.offline)
-		rc = device_offline(&mem_block->dev);
-	else
-		rc = 0;
-
-	put_device(&mem_block->dev);
-
-	return rc;
-}
-
-static int dlpar_online_lmb(struct of_drconf_cell *lmb)
-{
-	return dlpar_change_lmb_state(lmb, true);
-}
-
 #ifdef CONFIG_MEMORY_HOTREMOVE
-static int dlpar_offline_lmb(struct of_drconf_cell *lmb)
-{
-	return dlpar_change_lmb_state(lmb, false);
-}
-
 static int pseries_remove_memblock(unsigned long base, unsigned int memblock_size)
 {
 	unsigned long block_sz, start_pfn;
@@ -462,13 +431,19 @@ static int dlpar_add_lmb(struct of_drconf_cell *);
 
 static int dlpar_remove_lmb(struct of_drconf_cell *lmb)
 {
+	struct memory_block *mem_block;
 	unsigned long block_sz;
 	int nid, rc;
 
 	if (!lmb_is_removable(lmb))
 		return -EINVAL;
 
-	rc = dlpar_offline_lmb(lmb);
+	mem_block = lmb_to_memblock(lmb);
+	if (!mem_block)
+		return -EINVAL;
+
+	rc = device_offline(&mem_block->dev);
+	put_device(&mem_block->dev);
 	if (rc)
 		return rc;
 
@@ -762,6 +737,20 @@ static int dlpar_memory_remove_by_ic(u32 lmbs_to_remove, u32 drc_index,
 }
 #endif /* CONFIG_MEMORY_HOTREMOVE */
 
+static int dlpar_online_lmb(struct of_drconf_cell *lmb)
+{
+	struct memory_block *mem_block;
+	int rc;
+
+	mem_block = lmb_to_memblock(lmb);
+	if (!mem_block)
+		return -EINVAL;
+
+	rc = device_online(&mem_block->dev);
+	put_device(&mem_block->dev);
+	return rc;
+}
+
 static int dlpar_add_lmb(struct of_drconf_cell *lmb)
 {
 	unsigned long block_sz;
@@ -828,9 +817,6 @@ static int dlpar_memory_add_by_count(u32 lmbs_to_add, struct property *prop)
 		return -EINVAL;
 
 	for (i = 0; i < num_lmbs && lmbs_to_add != lmbs_added; i++) {
-		if (lmbs[i].flags & DRCONF_MEM_ASSIGNED)
-			continue;
-
 		rc = dlpar_acquire_drc(lmbs[i].drc_index);
 		if (rc)
 			continue;
@@ -873,7 +859,6 @@ static int dlpar_memory_add_by_count(u32 lmbs_to_add, struct property *prop)
 				lmbs[i].base_addr, lmbs[i].drc_index);
 			lmbs[i].reserved = 0;
 		}
-		rc = 0;
 	}
 
 	return rc;
@@ -1114,7 +1099,7 @@ static int pseries_add_mem_node(struct device_node *np)
 	return (ret < 0) ? -EINVAL : 0;
 }
 
-static int pseries_update_drconf_memory(struct of_reconfig_data *pr)
+static int pseries_update_drconf_memory(struct of_prop_reconfig *pr)
 {
 	struct of_drconf_cell *new_drmem, *old_drmem;
 	unsigned long memblock_size;
@@ -1129,7 +1114,7 @@ static int pseries_update_drconf_memory(struct of_reconfig_data *pr)
 	if (!memblock_size)
 		return -EINVAL;
 
-	p = (__be32 *) pr->old_prop->value;
+	p = (__be32 *)of_get_property(pr->dn, "ibm,dynamic-memory", NULL);
 	if (!p)
 		return -EINVAL;
 
@@ -1166,21 +1151,22 @@ static int pseries_update_drconf_memory(struct of_reconfig_data *pr)
 }
 
 static int pseries_memory_notifier(struct notifier_block *nb,
-				   unsigned long action, void *data)
+				   unsigned long action, void *node)
 {
-	struct of_reconfig_data *rd = data;
+	struct of_prop_reconfig *pr;
 	int err = 0;
 
 	switch (action) {
 	case OF_RECONFIG_ATTACH_NODE:
-		err = pseries_add_mem_node(rd->dn);
+		err = pseries_add_mem_node(node);
 		break;
 	case OF_RECONFIG_DETACH_NODE:
-		err = pseries_remove_mem_node(rd->dn);
+		err = pseries_remove_mem_node(node);
 		break;
 	case OF_RECONFIG_UPDATE_PROPERTY:
-		if (!strcmp(rd->prop->name, "ibm,dynamic-memory"))
-			err = pseries_update_drconf_memory(rd);
+		pr = (struct of_prop_reconfig *)node;
+		if (!strcmp(pr->prop->name, "ibm,dynamic-memory"))
+			err = pseries_update_drconf_memory(pr);
 		break;
 	}
 	return notifier_from_errno(err);

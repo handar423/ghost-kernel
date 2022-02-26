@@ -33,7 +33,6 @@
 #include <linux/ctype.h>
 #include <linux/random.h>
 #include <linux/highmem.h>
-#include <crypto/skcipher.h>
 #include <crypto/aead.h>
 
 static int
@@ -478,7 +477,6 @@ find_timestamp(struct cifs_ses *ses)
 	unsigned char *blobptr;
 	unsigned char *blobend;
 	struct ntlmssp2_name *attrptr;
-	struct timespec ts;
 
 	if (!ses->auth_key.len || !ses->auth_key.response)
 		return 0;
@@ -503,8 +501,7 @@ find_timestamp(struct cifs_ses *ses)
 		blobptr += attrsize; /* advance attr value */
 	}
 
-	ktime_get_real_ts(&ts);
-	return cpu_to_le64(cifs_UnixTimeToNT(ts));
+	return cpu_to_le64(cifs_UnixTimeToNT(CURRENT_TIME));
 }
 
 static int calc_ntlmv2_hash(struct cifs_ses *ses, char *ntlmv2_hash,
@@ -708,15 +705,11 @@ setup_ntlmv2_rsp(struct cifs_ses *ses, const struct nls_table *nls_cp)
 
 	if (ses->server->negflavor == CIFS_NEGFLAVOR_EXTENDED) {
 		if (!ses->domainName) {
-			if (ses->domainAuto) {
-				rc = find_domain_name(ses, nls_cp);
-				if (rc) {
-					cifs_dbg(VFS, "error %d finding domain name\n",
-						 rc);
-					goto setup_ntlmv2_rsp_ret;
-				}
-			} else {
-				ses->domainName = kstrdup("", GFP_KERNEL);
+			rc = find_domain_name(ses, nls_cp);
+			if (rc) {
+				cifs_dbg(VFS, "error %d finding domain name\n",
+					 rc);
+				goto setup_ntlmv2_rsp_ret;
 			}
 		}
 	} else {
@@ -818,50 +811,38 @@ int
 calc_seckey(struct cifs_ses *ses)
 {
 	int rc;
-	struct crypto_skcipher *tfm_arc4;
+	struct crypto_blkcipher *tfm_arc4;
 	struct scatterlist sgin, sgout;
-	struct skcipher_request *req;
-	unsigned char *sec_key;
-
-	sec_key = kmalloc(CIFS_SESS_KEY_SIZE, GFP_KERNEL);
-	if (sec_key == NULL)
-		return -ENOMEM;
+	struct blkcipher_desc desc;
+	unsigned char sec_key[CIFS_SESS_KEY_SIZE]; /* a nonce */
 
 	get_random_bytes(sec_key, CIFS_SESS_KEY_SIZE);
 
-	tfm_arc4 = crypto_alloc_skcipher("ecb(arc4)", 0, CRYPTO_ALG_ASYNC);
+	tfm_arc4 = crypto_alloc_blkcipher("ecb(arc4)", 0, CRYPTO_ALG_ASYNC);
 	if (IS_ERR(tfm_arc4)) {
 		rc = PTR_ERR(tfm_arc4);
 		cifs_dbg(VFS, "could not allocate crypto API arc4\n");
-		goto out;
+		return rc;
 	}
 
-	rc = crypto_skcipher_setkey(tfm_arc4, ses->auth_key.response,
+	desc.tfm = tfm_arc4;
+
+	rc = crypto_blkcipher_setkey(tfm_arc4, ses->auth_key.response,
 					CIFS_SESS_KEY_SIZE);
 	if (rc) {
 		cifs_dbg(VFS, "%s: Could not set response as a key\n",
 			 __func__);
-		goto out_free_cipher;
-	}
-
-	req = skcipher_request_alloc(tfm_arc4, GFP_KERNEL);
-	if (!req) {
-		rc = -ENOMEM;
-		cifs_dbg(VFS, "could not allocate crypto API arc4 request\n");
-		goto out_free_cipher;
+		return rc;
 	}
 
 	sg_init_one(&sgin, sec_key, CIFS_SESS_KEY_SIZE);
 	sg_init_one(&sgout, ses->ntlmssp->ciphertext, CIFS_CPHTXT_SIZE);
 
-	skcipher_request_set_callback(req, 0, NULL, NULL);
-	skcipher_request_set_crypt(req, &sgin, &sgout, CIFS_CPHTXT_SIZE, NULL);
-
-	rc = crypto_skcipher_encrypt(req);
-	skcipher_request_free(req);
+	rc = crypto_blkcipher_encrypt(&desc, &sgout, &sgin, CIFS_CPHTXT_SIZE);
 	if (rc) {
 		cifs_dbg(VFS, "could not encrypt session key rc: %d\n", rc);
-		goto out_free_cipher;
+		crypto_free_blkcipher(tfm_arc4);
+		return rc;
 	}
 
 	/* make secondary_key/nonce as session key */
@@ -869,10 +850,8 @@ calc_seckey(struct cifs_ses *ses)
 	/* and make len as that of session key only */
 	ses->auth_key.len = CIFS_SESS_KEY_SIZE;
 
-out_free_cipher:
-	crypto_free_skcipher(tfm_arc4);
-out:
-	kfree(sec_key);
+	crypto_free_blkcipher(tfm_arc4);
+
 	return rc;
 }
 

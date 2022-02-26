@@ -21,18 +21,25 @@
  * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with GNU CC; see the file COPYING.  If not, see
- * <http://www.gnu.org/licenses/>.
+ * along with GNU CC; see the file COPYING.  If not, write to
+ * the Free Software Foundation, 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
  *
  * Please send any bug reports or fixes you make to the
  * email address(es):
- *    lksctp developers <linux-sctp@vger.kernel.org>
+ *    lksctp developers <lksctp-developers@lists.sourceforge.net>
+ *
+ * Or submit a bug report through the following website:
+ *    http://www.sf.net/projects/lksctp
  *
  * Written or modified by:
  *    La Monte H.P. Yarroll <piggy@acm.org>
  *    Karl Knutson          <karl@athena.chicago.il.us>
  *    Jon Grimm             <jgrimm@us.ibm.com>
  *    Daisy Chang           <daisyc@us.ibm.com>
+ *
+ * Any bugs reported given to us we will try to fix... any fixes shared will
+ * be incorporated into the next SCTP release.
  */
 
 #include <linux/types.h>
@@ -45,9 +52,9 @@
 #include <net/sctp/sm.h>
 
 /* Forward declarations for internal helpers. */
-static int sctp_copy_one_addr(struct net *net, struct sctp_bind_addr *dest,
-			      union sctp_addr *addr, enum sctp_scope scope,
-			      gfp_t gfp, int flags);
+static int sctp_copy_one_addr(struct net *, struct sctp_bind_addr *,
+			      union sctp_addr *, sctp_scope_t scope, gfp_t gfp,
+			      int flags);
 static void sctp_bind_addr_clean(struct sctp_bind_addr *);
 
 /* First Level Abstractions. */
@@ -57,7 +64,7 @@ static void sctp_bind_addr_clean(struct sctp_bind_addr *);
  */
 int sctp_bind_addr_copy(struct net *net, struct sctp_bind_addr *dest,
 			const struct sctp_bind_addr *src,
-			enum sctp_scope scope, gfp_t gfp,
+			sctp_scope_t scope, gfp_t gfp,
 			int flags)
 {
 	struct sctp_sockaddr_entry *addr;
@@ -440,8 +447,9 @@ union sctp_addr *sctp_find_unmatch_addr(struct sctp_bind_addr	*bp,
 
 /* Copy out addresses from the global local address list. */
 static int sctp_copy_one_addr(struct net *net, struct sctp_bind_addr *dest,
-			      union sctp_addr *addr, enum sctp_scope scope,
-			      gfp_t gfp, int flags)
+			      union sctp_addr *addr,
+			      sctp_scope_t scope, gfp_t gfp,
+			      int flags)
 {
 	int error = 0;
 
@@ -484,10 +492,9 @@ int sctp_is_any(struct sock *sk, const union sctp_addr *addr)
 }
 
 /* Is 'addr' valid for 'scope'?  */
-int sctp_in_scope(struct net *net, const union sctp_addr *addr,
-		  enum sctp_scope scope)
+int sctp_in_scope(struct net *net, const union sctp_addr *addr, sctp_scope_t scope)
 {
-	enum sctp_scope addr_scope = sctp_scope(addr);
+	sctp_scope_t addr_scope = sctp_scope(addr);
 
 	/* The unusable SCTP addresses will not be considered with
 	 * any defined scopes.
@@ -545,7 +552,7 @@ int sctp_is_ep_boundall(struct sock *sk)
  ********************************************************************/
 
 /* What is the scope of 'addr'?  */
-enum sctp_scope sctp_scope(const union sctp_addr *addr)
+sctp_scope_t sctp_scope(const union sctp_addr *addr)
 {
 	struct sctp_af *af;
 

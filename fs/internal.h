@@ -9,6 +9,8 @@
  * 2 of the License, or (at your option) any later version.
  */
 
+#include <linux/lglock.h>
+
 struct super_block;
 struct file_system_type;
 struct iomap;
@@ -16,7 +18,6 @@ struct iomap_ops;
 struct linux_binprm;
 struct path;
 struct mount;
-struct shrink_control;
 
 /*
  * block_dev.c
@@ -55,7 +56,6 @@ extern void __init chrdev_init(void);
 extern int user_path_mountpoint_at(int, const char __user *, unsigned int, struct path *);
 extern int vfs_path_lookup(struct dentry *, struct vfsmount *,
 			   const char *, unsigned int, struct path *);
-long do_unlinkat(int dfd, struct filename *name);
 
 /*
  * namespace.c
@@ -91,7 +91,7 @@ extern struct file *get_empty_filp(void);
  * super.c
  */
 extern int do_remount_sb(struct super_block *, int, void *, int);
-extern bool trylock_super(struct super_block *sb);
+extern bool grab_super_passive(struct super_block *sb);
 extern struct dentry *mount_fs(struct file_system_type *,
 			       int, const char *, void *);
 extern struct super_block *user_get_super(dev_t);
@@ -111,16 +111,14 @@ extern struct file *do_filp_open(int dfd, struct filename *pathname,
 extern struct file *do_file_open_root(struct dentry *, struct vfsmount *,
 		const char *, const struct open_flags *);
 
+extern long do_handle_open(int mountdirfd,
+			   struct file_handle __user *ufh, int open_flag);
 extern int open_check_o_direct(struct file *f);
-extern int vfs_open(const struct path *, struct file *, const struct cred *);
-extern struct file *filp_clone_open(struct file *);
 
 /*
  * inode.c
  */
-extern long prune_icache_sb(struct super_block *sb, struct shrink_control *sc);
 extern void inode_add_lru(struct inode *inode);
-extern int dentry_needs_remove_privs(struct dentry *dentry);
 
 extern bool __atime_needs_update(const struct path *, struct inode *, bool);
 static inline bool atime_needs_update_rcu(const struct path *path,
@@ -129,12 +127,15 @@ static inline bool atime_needs_update_rcu(const struct path *path,
 	return __atime_needs_update(path, inode, true);
 }
 
+extern bool atime_needs_update_rcu(const struct path *, struct inode *);
+
 /*
  * fs-writeback.c
  */
 extern void inode_io_list_del(struct inode *inode);
 
 extern long get_nr_dirty_inodes(void);
+extern void evict_inodes(struct super_block *);
 extern int invalidate_inodes(struct super_block *, bool);
 
 /*
@@ -142,36 +143,16 @@ extern int invalidate_inodes(struct super_block *, bool);
  */
 extern struct dentry *__d_alloc(struct super_block *, const struct qstr *);
 extern int d_set_mounted(struct dentry *dentry);
-extern long prune_dcache_sb(struct super_block *sb, struct shrink_control *sc);
 extern struct dentry *d_alloc_cursor(struct dentry *);
 
 /*
  * read_write.c
  */
-extern int rw_verify_area(int, struct file *, const loff_t *, size_t);
 
 /*
  * pipe.c
  */
 extern const struct file_operations pipefifo_fops;
-
-/*
- * fs_pin.c
- */
-extern void group_pin_kill(struct hlist_head *p);
-extern void mnt_pin_kill(struct mount *m);
-
-/*
- * fs/nsfs.c
- */
-extern const struct dentry_operations ns_dentry_operations;
-
-/*
- * fs/ioctl.c
- */
-extern int do_vfs_ioctl(struct file *file, unsigned int fd, unsigned int cmd,
-		    unsigned long arg);
-extern long vfs_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
 
 /*
  * iomap support:
@@ -183,5 +164,8 @@ loff_t iomap_apply(struct inode *inode, loff_t pos, loff_t length,
 		unsigned flags, const struct iomap_ops *ops, void *data,
 		iomap_actor_t actor);
 
-/* direct-io.c: */
-int sb_init_dio_done_wq(struct super_block *sb);
+/*
+ * fs_pin.c
+ */
+extern void group_pin_kill(struct hlist_head *p);
+extern void mnt_pin_kill(struct mount *m);

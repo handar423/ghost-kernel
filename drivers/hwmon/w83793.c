@@ -324,7 +324,7 @@ static struct i2c_driver w83793_driver = {
 };
 
 static ssize_t
-vrm_show(struct device *dev, struct device_attribute *attr, char *buf)
+show_vrm(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct w83793_data *data = dev_get_drvdata(dev);
 	return sprintf(buf, "%d\n", data->vrm);
@@ -342,7 +342,7 @@ show_vid(struct device *dev, struct device_attribute *attr, char *buf)
 }
 
 static ssize_t
-vrm_store(struct device *dev, struct device_attribute *attr,
+store_vrm(struct device *dev, struct device_attribute *attr,
 	  const char *buf, size_t count)
 {
 	struct w83793_data *data = dev_get_drvdata(dev);
@@ -352,9 +352,6 @@ vrm_store(struct device *dev, struct device_attribute *attr,
 	err = kstrtoul(buf, 10, &val);
 	if (err)
 		return err;
-
-	if (val > 255)
-		return -EINVAL;
 
 	data->vrm = val;
 	return count;
@@ -811,7 +808,7 @@ show_sf_ctrl(struct device *dev, struct device_attribute *attr, char *buf)
 	if (nr == TEMP_FAN_MAP) {
 		val = data->temp_fan_map[index];
 	} else if (nr == TEMP_PWM_ENABLE) {
-		/* +2 to transform into 2 and 3 to conform with sysfs intf */
+		/* +2 to transfrom into 2 and 3 to conform with sysfs intf */
 		val = ((data->pwm_enable >> index) & 0x01) + 2;
 	} else if (nr == TEMP_CRUISE) {
 		val = TEMP_FROM_REG(data->temp_cruise[index] & 0x7f);
@@ -1169,7 +1166,7 @@ static struct sensor_device_attribute_2 w83793_vid[] = {
 	SENSOR_ATTR_2(cpu0_vid, S_IRUGO, show_vid, NULL, NOT_USED, 0),
 	SENSOR_ATTR_2(cpu1_vid, S_IRUGO, show_vid, NULL, NOT_USED, 1),
 };
-static DEVICE_ATTR_RW(vrm);
+static DEVICE_ATTR(vrm, S_IWUSR | S_IRUGO, show_vrm, store_vrm);
 
 static struct sensor_device_attribute_2 sda_single_files[] = {
 	SENSOR_ATTR_2(intrusion0_alarm, S_IWUSR | S_IRUGO, show_alarm_beep,
@@ -1202,8 +1199,7 @@ static void w83793_init_client(struct i2c_client *client)
 
 static int watchdog_set_timeout(struct w83793_data *data, int timeout)
 {
-	unsigned int mtimeout;
-	int ret;
+	int ret, mtimeout;
 
 	mtimeout = DIV_ROUND_UP(timeout, 60);
 
@@ -1564,8 +1560,10 @@ static int w83793_remove(struct i2c_client *client)
 	for (i = 0; i < ARRAY_SIZE(w83793_temp); i++)
 		device_remove_file(dev, &w83793_temp[i].dev_attr);
 
-	i2c_unregister_device(data->lm75[0]);
-	i2c_unregister_device(data->lm75[1]);
+	if (data->lm75[0] != NULL)
+		i2c_unregister_device(data->lm75[0]);
+	if (data->lm75[1] != NULL)
+		i2c_unregister_device(data->lm75[1]);
 
 	/* Decrease data reference counter */
 	mutex_lock(&watchdog_data_mutex);
@@ -1623,7 +1621,8 @@ w83793_detect_subclients(struct i2c_client *client)
 	/* Undo inits in case of errors */
 
 ERROR_SC_1:
-	i2c_unregister_device(data->lm75[0]);
+	if (data->lm75[0] != NULL)
+		i2c_unregister_device(data->lm75[0]);
 ERROR_SC_0:
 	return err;
 }
@@ -1673,9 +1672,7 @@ static int w83793_probe(struct i2c_client *client,
 			const struct i2c_device_id *id)
 {
 	struct device *dev = &client->dev;
-	static const int watchdog_minors[] = {
-		WATCHDOG_MINOR, 212, 213, 214, 215
-	};
+	const int watchdog_minors[] = { WATCHDOG_MINOR, 212, 213, 214, 215 };
 	struct w83793_data *data;
 	int i, tmp, val, err;
 	int files_fan = ARRAY_SIZE(w83793_left_fan) / 7;
@@ -1959,8 +1956,10 @@ exit_remove:
 	for (i = 0; i < ARRAY_SIZE(w83793_temp); i++)
 		device_remove_file(dev, &w83793_temp[i].dev_attr);
 
-	i2c_unregister_device(data->lm75[0]);
-	i2c_unregister_device(data->lm75[1]);
+	if (data->lm75[0] != NULL)
+		i2c_unregister_device(data->lm75[0]);
+	if (data->lm75[1] != NULL)
+		i2c_unregister_device(data->lm75[1]);
 free_mem:
 	kfree(data);
 exit:

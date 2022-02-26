@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 #include "symbol.h"
 #include "util.h"
 
@@ -288,8 +287,7 @@ void symsrc__destroy(struct symsrc *ss)
 }
 
 int dso__synthesize_plt_symbols(struct dso *dso __maybe_unused,
-				struct symsrc *ss __maybe_unused,
-				struct map *map __maybe_unused)
+				struct symsrc *ss __maybe_unused)
 {
 	return 0;
 }

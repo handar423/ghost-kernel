@@ -13,7 +13,6 @@
 #include <linux/slab.h>
 #include <linux/bitops.h>
 #include <linux/key.h>
-#include <linux/sched/user.h>
 #include <linux/interrupt.h>
 #include <linux/export.h>
 #include <linux/user_namespace.h>
@@ -26,41 +25,32 @@
 struct user_namespace init_user_ns = {
 	.uid_map = {
 		.nr_extents = 1,
-		{
-			.extent[0] = {
-				.first = 0,
-				.lower_first = 0,
-				.count = 4294967295U,
-			},
+		.extent[0] = {
+			.first = 0,
+			.lower_first = 0,
+			.count = 4294967295U,
 		},
 	},
 	.gid_map = {
 		.nr_extents = 1,
-		{
-			.extent[0] = {
-				.first = 0,
-				.lower_first = 0,
-				.count = 4294967295U,
-			},
+		.extent[0] = {
+			.first = 0,
+			.lower_first = 0,
+			.count = 4294967295U,
 		},
 	},
 	.projid_map = {
 		.nr_extents = 1,
-		{
-			.extent[0] = {
-				.first = 0,
-				.lower_first = 0,
-				.count = 4294967295U,
-			},
+		.extent[0] = {
+			.first = 0,
+			.lower_first = 0,
+			.count = 4294967295U,
 		},
 	},
 	.count = ATOMIC_INIT(3),
 	.owner = GLOBAL_ROOT_UID,
 	.group = GLOBAL_ROOT_GID,
-	.ns.inum = PROC_USER_INIT_INO,
-#ifdef CONFIG_USER_NS
-	.ns.ops = &userns_operations,
-#endif
+	.proc_inum = PROC_USER_INIT_INO,
 	.flags = USERNS_INIT_FLAGS,
 #ifdef CONFIG_PERSISTENT_KEYRINGS
 	.persistent_keyring_register_sem =
@@ -98,6 +88,7 @@ static DEFINE_SPINLOCK(uidhash_lock);
 struct user_struct root_user = {
 	.__count	= ATOMIC_INIT(1),
 	.processes	= ATOMIC_INIT(1),
+	.files		= ATOMIC_INIT(0),
 	.sigpending	= ATOMIC_INIT(0),
 	.locked_shm     = 0,
 	.uid		= GLOBAL_ROOT_UID,
@@ -168,11 +159,11 @@ void free_uid(struct user_struct *up)
 	if (!up)
 		return;
 
-	local_irq_save(flags);
+	local_irq_save_nort(flags);
 	if (atomic_dec_and_lock(&up->__count, &uidhash_lock))
 		free_user(up, flags);
 	else
-		local_irq_restore(flags);
+		local_irq_restore_nort(flags);
 }
 
 struct user_struct *alloc_uid(kuid_t uid)

@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * Entropy functions used on early boot for KASLR base and memory
  * randomization. The base randomization is done in the compressed
@@ -6,11 +5,10 @@
  * kernel starts. This file is included in the compressed kernel and
  * normally linked in the regular.
  */
-#include <asm/asm.h>
 #include <asm/kaslr.h>
 #include <asm/msr.h>
 #include <asm/archrandom.h>
-#include <asm/e820/api.h>
+#include <asm/e820.h>
 #include <asm/io.h>
 
 /*
@@ -21,7 +19,7 @@
 #include <asm/cpufeature.h>
 #include <asm/setup.h>
 
-#define debug_putstr(v) early_printk("%s", v)
+#define debug_putstr(v) early_printk(v)
 #define has_cpuflag(f) boot_cpu_has(f)
 #define get_boot_seed() kaslr_offset()
 #endif
@@ -69,7 +67,7 @@ unsigned long kaslr_get_random_long(const char *purpose)
 
 	if (has_cpuflag(X86_FEATURE_TSC)) {
 		debug_putstr(" RDTSC");
-		raw = rdtsc();
+		rdtscll(raw);
 
 		random ^= raw;
 		use_i8254 = false;
@@ -81,7 +79,7 @@ unsigned long kaslr_get_random_long(const char *purpose)
 	}
 
 	/* Circular multiply for better bit diffusion */
-	asm(_ASM_MUL "%3"
+	asm("mul %3"
 	    : "=a" (random), "=d" (raw)
 	    : "a" (random), "rm" (mix_const));
 	random += raw;

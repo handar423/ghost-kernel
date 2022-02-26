@@ -58,7 +58,7 @@ static void nvmet_format_discovery_entry(struct nvmf_disc_rsp_page_hdr *hdr,
 	memcpy(e->trsvcid, port->disc_addr.trsvcid, NVMF_TRSVCID_SIZE);
 	memcpy(e->traddr, port->disc_addr.traddr, NVMF_TRADDR_SIZE);
 	memcpy(e->tsas.common, port->disc_addr.tsas.common, NVMF_TSAS_SIZE);
-	memcpy(e->subnqn, subsys_nqn, NVMF_NQN_SIZE);
+	strncpy(e->subnqn, subsys_nqn, NVMF_NQN_SIZE);
 }
 
 static void nvmet_execute_get_disc_log_page(struct nvmet_req *req)
@@ -147,10 +147,10 @@ static void nvmet_execute_identify_disc_ctrl(struct nvmet_req *req)
 	id->sgls = cpu_to_le32(1 << 0);	/* we always support SGLs */
 	if (ctrl->ops->has_keyed_sgls)
 		id->sgls |= cpu_to_le32(1 << 2);
-	if (ctrl->ops->sqe_inline_size)
+	if (req->port->inline_data_size)
 		id->sgls |= cpu_to_le32(1 << 20);
 
-	strcpy(id->subnqn, ctrl->subsys->subsysnqn);
+	strlcpy(id->subnqn, ctrl->subsys->subsysnqn, sizeof(id->subnqn));
 
 	status = nvmet_copy_to_sgl(req, 0, id, sizeof(*id));
 
@@ -163,8 +163,6 @@ u16 nvmet_parse_discovery_cmd(struct nvmet_req *req)
 {
 	struct nvme_command *cmd = req->cmd;
 
-	req->ns = NULL;
-
 	if (unlikely(!(req->sq->ctrl->csts & NVME_CSTS_RDY))) {
 		pr_err("got cmd %d while not ready\n",
 		       cmd->common.opcode);
@@ -172,6 +170,10 @@ u16 nvmet_parse_discovery_cmd(struct nvmet_req *req)
 	}
 
 	switch (cmd->common.opcode) {
+	case nvme_admin_keep_alive:
+		req->execute = nvmet_execute_keep_alive;
+		req->data_len = 0;
+		return 0;
 	case nvme_admin_get_log_page:
 		req->data_len = nvmet_get_log_page_len(cmd);
 
@@ -197,20 +199,18 @@ u16 nvmet_parse_discovery_cmd(struct nvmet_req *req)
 			return NVME_SC_INVALID_OPCODE | NVME_SC_DNR;
 		}
 	default:
-		pr_err("unsupported cmd %d\n", cmd->common.opcode);
+		pr_err("unhandled cmd %d\n", cmd->common.opcode);
 		return NVME_SC_INVALID_OPCODE | NVME_SC_DNR;
 	}
 
-	pr_err("unhandled cmd %d\n", cmd->common.opcode);
-	return NVME_SC_INVALID_OPCODE | NVME_SC_DNR;
 }
 
 int __init nvmet_init_discovery(void)
 {
 	nvmet_disc_subsys =
 		nvmet_subsys_alloc(NVME_DISC_SUBSYS_NAME, NVME_NQN_DISC);
-	if (!nvmet_disc_subsys)
-		return -ENOMEM;
+	if (IS_ERR(nvmet_disc_subsys))
+		return PTR_ERR(nvmet_disc_subsys);
 	return 0;
 }
 

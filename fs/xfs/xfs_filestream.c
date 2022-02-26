@@ -30,11 +30,9 @@
 #include "xfs_mru_cache.h"
 #include "xfs_filestream.h"
 #include "xfs_trace.h"
-#include "xfs_ag_resv.h"
 
 struct xfs_fstrm_item {
 	struct xfs_mru_cache_elem	mru;
-	struct xfs_inode		*ip;
 	xfs_agnumber_t			ag; /* AG in use for this directory */
 };
 
@@ -122,14 +120,15 @@ xfs_filestream_put_ag(
 
 static void
 xfs_fstrm_free_func(
+	void			*data,
 	struct xfs_mru_cache_elem *mru)
 {
+	struct xfs_mount	*mp = data;
 	struct xfs_fstrm_item	*item =
 		container_of(mru, struct xfs_fstrm_item, mru);
 
-	xfs_filestream_put_ag(item->ip->i_mount, item->ag);
-
-	trace_xfs_filestream_free(item->ip, item->ag);
+	xfs_filestream_put_ag(mp, item->ag);
+	trace_xfs_filestream_free(mp, mru->key, item->ag);
 
 	kmem_free(item);
 }
@@ -165,7 +164,7 @@ xfs_filestream_pick_ag(
 	trylock = XFS_ALLOC_FLAG_TRYLOCK;
 
 	for (nscan = 0; 1; nscan++) {
-		trace_xfs_filestream_scan(ip, ag);
+		trace_xfs_filestream_scan(mp, ip->i_ino, ag);
 
 		pag = xfs_perag_get(mp, ag);
 
@@ -199,8 +198,7 @@ xfs_filestream_pick_ag(
 		}
 
 		longest = xfs_alloc_longest_free_extent(mp, pag,
-				xfs_alloc_min_freelist(mp, pag),
-				xfs_ag_resv_needed(pag, XFS_AG_RESV_NONE));
+					xfs_alloc_min_freelist(mp, pag));
 		if (((minlen && longest >= minlen) ||
 		     (!minlen && pag->pagf_freeblks >= minfree)) &&
 		    (!pag->pagf_metadata || !(flags & XFS_PICK_USERDATA) ||
@@ -265,7 +263,6 @@ next_ag:
 		goto out_put_ag;
 
 	item->ag = *agp;
-	item->ip = ip;
 
 	err = xfs_mru_cache_insert(mp->m_filestream, ip->i_ino, &item->mru);
 	if (err) {
@@ -298,7 +295,7 @@ xfs_filestream_get_parent(
 	if (!parent)
 		goto out_dput;
 
-	dir = igrab(d_inode(parent));
+	dir = igrab(parent->d_inode);
 	dput(parent);
 
 out_dput:
@@ -333,7 +330,7 @@ xfs_filestream_lookup_ag(
 		ag = container_of(mru, struct xfs_fstrm_item, mru)->ag;
 		xfs_mru_cache_done(mp->m_filestream);
 
-		trace_xfs_filestream_lookup(ip, ag);
+		trace_xfs_filestream_lookup(mp, ip->i_ino, ag);
 		goto out;
 	}
 
@@ -399,7 +396,7 @@ xfs_filestream_new_ag(
 	 * Only free the item here so we skip over the old AG earlier.
 	 */
 	if (mru)
-		xfs_fstrm_free_func(mru);
+		xfs_fstrm_free_func(mp, mru);
 
 	IRELE(pip);
 exit:
@@ -426,8 +423,8 @@ xfs_filestream_mount(
 	 * timer tunable to within about 10 percent.  This requires at least 10
 	 * groups.
 	 */
-	return xfs_mru_cache_create(&mp->m_filestream, xfs_fstrm_centisecs * 10,
-				    10, xfs_fstrm_free_func);
+	return xfs_mru_cache_create(&mp->m_filestream, mp,
+			xfs_fstrm_centisecs * 10, 10, xfs_fstrm_free_func);
 }
 
 void

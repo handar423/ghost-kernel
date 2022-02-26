@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_X86_CPU_H
 #define _ASM_X86_CPU_H
 
@@ -19,6 +18,7 @@ static inline void prefill_possible_map(void) {}
 #define cpu_physical_id(cpu)			boot_cpu_physical_apicid
 #define cpu_acpi_id(cpu)			0
 #define safe_smp_processor_id()			0
+#define stack_smp_processor_id()		0
 
 #endif /* CONFIG_SMP */
 
@@ -34,6 +34,8 @@ extern void start_cpu0(void);
 extern int _debug_hotplug_cpu(int cpu, int action);
 #endif
 #endif
+
+DECLARE_PER_CPU(int, cpu_state);
 
 int mwait_usable(const struct cpuinfo_x86 *);
 

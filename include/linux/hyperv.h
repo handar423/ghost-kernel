@@ -36,6 +36,7 @@
 #include <linux/device.h>
 #include <linux/mod_devicetable.h>
 #include <linux/interrupt.h>
+#include <linux/reciprocal_div.h>
 
 #define MAX_PAGE_BUFFER_COUNT				32
 #define MAX_MULTIPAGE_BUFFER_COUNT			32 /* 128K */
@@ -121,34 +122,15 @@ struct hv_ring_buffer {
 struct hv_ring_buffer_info {
 	struct hv_ring_buffer *ring_buffer;
 	u32 ring_size;			/* Include the shared header */
+	struct reciprocal_value ring_size_div10_reciprocal;
 	spinlock_t ring_lock;
 
 	u32 ring_datasize;		/* < ring_size */
+	u32 ring_data_startoffset;
+	u32 priv_write_index;
 	u32 priv_read_index;
 };
 
-/*
- *
- * hv_get_ringbuffer_availbytes()
- *
- * Get number of bytes available to read and to write to
- * for the specified ring buffer
- */
-static inline void
-hv_get_ringbuffer_availbytes(const struct hv_ring_buffer_info *rbi,
-			     u32 *read, u32 *write)
-{
-	u32 read_loc, write_loc, dsize;
-
-	/* Capture the read/write indices before they changed */
-	read_loc = rbi->ring_buffer->read_index;
-	write_loc = rbi->ring_buffer->write_index;
-	dsize = rbi->ring_datasize;
-
-	*write = write_loc >= read_loc ? dsize - (write_loc - read_loc) :
-		read_loc - write_loc;
-	*read = dsize - *write;
-}
 
 static inline u32 hv_get_bytes_to_read(const struct hv_ring_buffer_info *rbi)
 {
@@ -177,6 +159,16 @@ static inline u32 hv_get_bytes_to_write(const struct hv_ring_buffer_info *rbi)
 	return write;
 }
 
+static inline u32 hv_get_avail_to_write_percent(
+		const struct hv_ring_buffer_info *rbi)
+{
+	u32 avail_write = hv_get_bytes_to_write(rbi);
+
+	return reciprocal_divide(
+			(avail_write  << 3) + (avail_write << 1),
+			rbi->ring_size_div10_reciprocal);
+}
+
 /*
  * VMBUS version is 32 bit entity broken up into
  * two 16 bit quantities: major_number. minor_number.
@@ -186,6 +178,7 @@ static inline u32 hv_get_bytes_to_write(const struct hv_ring_buffer_info *rbi)
  * 2 . 4  (Windows 8)
  * 3 . 0  (Windows 8 R2)
  * 4 . 0  (Windows 10)
+ * 5 . 0  (Newer Windows 10)
  */
 
 #define VERSION_WS2008  ((0 << 16) | (13))
@@ -193,10 +186,11 @@ static inline u32 hv_get_bytes_to_write(const struct hv_ring_buffer_info *rbi)
 #define VERSION_WIN8    ((2 << 16) | (4))
 #define VERSION_WIN8_1    ((3 << 16) | (0))
 #define VERSION_WIN10	((4 << 16) | (0))
+#define VERSION_WIN10_V5 ((5 << 16) | (0))
 
 #define VERSION_INVAL -1
 
-#define VERSION_CURRENT VERSION_WIN10
+#define VERSION_CURRENT VERSION_WIN10_V5
 
 /* Make maximum size of pipe payload of 16K */
 #define MAX_PIPE_DATA_PAYLOAD		(sizeof(u8) * 16384)
@@ -593,7 +587,14 @@ struct vmbus_channel_initiate_contact {
 	struct vmbus_channel_message_header header;
 	u32 vmbus_version_requested;
 	u32 target_vcpu; /* The VCPU the host should respond to */
-	u64 interrupt_page;
+	union {
+		u64 interrupt_page;
+		struct {
+			u8	msg_sint;
+			u8	padding1[3];
+			u32	padding2;
+		};
+	};
 	u64 monitor_page1;
 	u64 monitor_page2;
 } __packed;
@@ -608,6 +609,19 @@ struct vmbus_channel_tl_connect_request {
 struct vmbus_channel_version_response {
 	struct vmbus_channel_message_header header;
 	u8 version_supported;
+
+	u8 connection_state;
+	u16 padding;
+
+	/*
+	 * On new hosts that support VMBus protocol 5.0, we must use
+	 * VMBUS_MESSAGE_CONNECTION_ID_4 for the Initiate Contact Message,
+	 * and for subsequent messages, we must use the Message Connection ID
+	 * field in the host-returned Version Response Message.
+	 *
+	 * On old hosts, we should always use VMBUS_MESSAGE_CONNECTION_ID (1).
+	 */
+	u32 msg_conn_id;
 } __packed;
 
 enum vmbus_channel_state {
@@ -713,8 +727,9 @@ struct vmbus_channel {
 	u32 ringbuffer_gpadlhandle;
 
 	/* Allocated memory for ring buffer */
-	void *ringbuffer_pages;
+	struct page *ringbuffer_page;
 	u32 ringbuffer_pagecount;
+	u32 ringbuffer_send_offset;
 	struct hv_ring_buffer_info outbound;	/* send to parent */
 	struct hv_ring_buffer_info inbound;	/* receive from parent */
 
@@ -866,7 +881,7 @@ struct vmbus_channel {
 
 	/*
 	 * NUMA distribution policy:
-	 * We support teo policies:
+	 * We support two policies:
 	 * 1) Balanced: Here all performance critical channels are
 	 *    distributed evenly amongst all the NUMA nodes.
 	 *    This policy will be the default policy.
@@ -878,6 +893,13 @@ struct vmbus_channel {
 
 	bool probe_done;
 
+	/*
+	 * We must offload the handling of the primary/sub channels
+	 * from the single-threaded vmbus_connection.work_queue to
+	 * two different workqueue, otherwise we can block
+	 * vmbus_connection.work_queue and hang: see vmbus_process_offer().
+	 */
+	struct work_struct add_channel_work;
 };
 
 static inline bool is_hvsock_channel(const struct vmbus_channel *c)
@@ -995,6 +1017,14 @@ struct vmbus_packet_mpb_array {
 	struct hv_mpb_array range;
 } __packed;
 
+int vmbus_alloc_ring(struct vmbus_channel *channel,
+		     u32 send_size, u32 recv_size);
+void vmbus_free_ring(struct vmbus_channel *channel);
+
+int vmbus_connect_ring(struct vmbus_channel *channel,
+		       void (*onchannel_callback)(void *context),
+		       void *context);
+int vmbus_disconnect_ring(struct vmbus_channel *channel);
 
 extern int vmbus_open(struct vmbus_channel *channel,
 			    u32 send_ringbuffersize,
@@ -1034,6 +1064,8 @@ extern int vmbus_establish_gpadl(struct vmbus_channel *channel,
 
 extern int vmbus_teardown_gpadl(struct vmbus_channel *channel,
 				     u32 gpadl_handle);
+
+void vmbus_reset_channel_cb(struct vmbus_channel *channel);
 
 extern int vmbus_recvpacket(struct vmbus_channel *channel,
 				  void *buffer,
@@ -1097,6 +1129,7 @@ struct hv_device {
 	u16 device_id;
 
 	struct device device;
+	char *driver_override; /* Driver name to force a match */
 
 	struct vmbus_channel *channel;
 	struct kset	     *channels_kset;
@@ -1131,8 +1164,9 @@ struct hv_ring_buffer_debug_info {
 	u32 bytes_avail_towrite;
 };
 
-void hv_ringbuffer_get_debuginfo(const struct hv_ring_buffer_info *ring_info,
-			    struct hv_ring_buffer_debug_info *debug_info);
+
+int hv_ringbuffer_get_debuginfo(const struct hv_ring_buffer_info *ring_info,
+				struct hv_ring_buffer_debug_info *debug_info);
 
 /* Vmbus interface */
 #define vmbus_driver_register(driver)	\
@@ -1149,6 +1183,19 @@ int vmbus_allocate_mmio(struct resource **new, struct hv_device *device_obj,
 			resource_size_t size, resource_size_t align,
 			bool fb_overlap_ok);
 void vmbus_free_mmio(resource_size_t start, resource_size_t size);
+
+/**
+ * VMBUS_DEVICE - macro used to describe a specific hyperv vmbus device
+ *
+ * This macro is used to create a struct hv_vmbus_device_id that matches a
+ * specific device.
+ */
+#define VMBUS_DEVICE(g0, g1, g2, g3, g4, g5, g6, g7,	\
+		     g8, g9, ga, gb, gc, gd, ge, gf)	\
+	.guid = { g0, g1, g2, g3, g4, g5, g6, g7,	\
+		  g8, g9, ga, gb, gc, gd, ge, gf },
+
+
 
 /*
  * GUID definitions of various offer types - services offered to the guest.
@@ -1414,7 +1461,7 @@ extern bool vmbus_prep_negotiate_resp(struct icmsg_hdr *icmsghdrp, u8 *buf,
 				const int *srv_version, int srv_vercnt,
 				int *nego_fw_version, int *nego_srv_version);
 
-void hv_process_channel_removal(u32 relid);
+void hv_process_channel_removal(struct vmbus_channel *channel);
 
 void vmbus_setevent(struct vmbus_channel *channel);
 /*
@@ -1442,7 +1489,7 @@ static inline void hv_begin_read(struct hv_ring_buffer_info *rbi)
 	rbi->ring_buffer->interrupt_mask = 1;
 
 	/* make sure mask update is not reordered */
-	virt_mb();
+	mb();
 }
 
 /*
@@ -1454,7 +1501,7 @@ static inline u32 hv_end_read(struct hv_ring_buffer_info *rbi)
 	rbi->ring_buffer->interrupt_mask = 0;
 
 	/* make sure mask update is not reordered */
-	virt_mb();
+	mb();
 
 	/*
 	 * Now check to see if the ring buffer is still empty.

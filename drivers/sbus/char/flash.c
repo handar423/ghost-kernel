@@ -9,13 +9,14 @@
 #include <linux/miscdevice.h>
 #include <linux/fcntl.h>
 #include <linux/poll.h>
+#include <linux/init.h>
 #include <linux/mutex.h>
 #include <linux/spinlock.h>
 #include <linux/mm.h>
 #include <linux/of.h>
 #include <linux/of_device.h>
 
-#include <linux/uaccess.h>
+#include <asm/uaccess.h>
 #include <asm/pgtable.h>
 #include <asm/io.h>
 #include <asm/upa.h>
@@ -181,8 +182,8 @@ static int flash_probe(struct platform_device *op)
 	}
 	flash.busy = 0;
 
-	printk(KERN_INFO "%pOF: OBP Flash, RD %lx[%lx] WR %lx[%lx]\n",
-	       op->dev.of_node,
+	printk(KERN_INFO "%s: OBP Flash, RD %lx[%lx] WR %lx[%lx]\n",
+	       op->dev.of_node->full_name,
 	       flash.read_base, flash.read_size,
 	       flash.write_base, flash.write_size);
 
@@ -207,6 +208,7 @@ MODULE_DEVICE_TABLE(of, flash_match);
 static struct platform_driver flash_driver = {
 	.driver = {
 		.name = "flash",
+		.owner = THIS_MODULE,
 		.of_match_table = flash_match,
 	},
 	.probe		= flash_probe,

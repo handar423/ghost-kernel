@@ -1,22 +1,5 @@
-/* Intel(R) Ethernet Switch Host Interface Driver
- * Copyright(c) 2013 - 2017 Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * The full GNU General Public License is included in this distribution in
- * the file called "COPYING".
- *
- * Contact Information:
- * e1000-devel Mailing List <e1000-devel@lists.sourceforge.net>
- * Intel Corporation, 5200 N.E. Elam Young Parkway, Hillsboro, OR 97124-6497
- */
+// SPDX-License-Identifier: GPL-2.0
+/* Copyright(c) 2013 - 2018 Intel Corporation. */
 
 #include <linux/types.h>
 #include <linux/module.h>
@@ -28,17 +11,17 @@
 
 #include "fm10k.h"
 
-#define DRV_VERSION	"0.22.1-k"
+#define DRV_VERSION	"0.26.1-k"
 #define DRV_SUMMARY	"Intel(R) Ethernet Switch Host Interface Driver"
 const char fm10k_driver_version[] = DRV_VERSION;
 char fm10k_driver_name[] = "fm10k";
 static const char fm10k_driver_string[] = DRV_SUMMARY;
 static const char fm10k_copyright[] =
-	"Copyright(c) 2013 - 2017 Intel Corporation.";
+	"Copyright(c) 2013 - 2018 Intel Corporation.";
 
 MODULE_AUTHOR("Intel Corporation, <linux.nics@intel.com>");
 MODULE_DESCRIPTION(DRV_SUMMARY);
-MODULE_LICENSE("GPL");
+MODULE_LICENSE("GPL v2");
 MODULE_VERSION(DRV_VERSION);
 
 /* single workqueue for entire fm10k driver */
@@ -93,7 +76,7 @@ static bool fm10k_alloc_mapped_page(struct fm10k_ring *rx_ring,
 		return true;
 
 	/* alloc new page for storage */
-	page = dev_alloc_page();
+	page = alloc_page(GFP_ATOMIC | __GFP_COLD);
 	if (unlikely(!page)) {
 		rx_ring->rx_stats.alloc_failed++;
 		return false;
@@ -334,8 +317,8 @@ static struct sk_buff *fm10k_fetch_rx_buffer(struct fm10k_ring *rx_ring,
 #endif
 
 		/* allocate a skb to store the frags */
-		skb = napi_alloc_skb(&rx_ring->q_vector->napi,
-				     FM10K_RX_HDR_LEN);
+		skb = netdev_alloc_skb_ip_align(rx_ring->netdev,
+						FM10K_RX_HDR_LEN);
 		if (unlikely(!skb)) {
 			rx_ring->rx_stats.alloc_failed++;
 			return NULL;
@@ -444,15 +427,14 @@ static void fm10k_type_trans(struct fm10k_ring *rx_ring,
 			l2_accel = NULL;
 	}
 
-	skb->protocol = eth_type_trans(skb, dev);
-
+	/* Record Rx queue, or update macvlan statistics */
 	if (!l2_accel)
-		return;
+		skb_record_rx_queue(skb, rx_ring->queue_index);
+	else
+		macvlan_count_rx(netdev_priv(dev), skb->len + ETH_HLEN, true,
+				 false);
 
-	/* update MACVLAN statistics */
-	macvlan_count_rx(netdev_priv(dev), skb->len + ETH_HLEN, 1,
-			 !!(rx_desc->w.hdr_info &
-			    cpu_to_le16(FM10K_RXD_HDR_INFO_XC_MASK)));
+	skb->protocol = eth_type_trans(skb, dev);
 }
 
 /**
@@ -478,8 +460,6 @@ static unsigned int fm10k_process_skb_fields(struct fm10k_ring *rx_ring,
 	FM10K_CB(skb)->tstamp = rx_desc->q.timestamp;
 
 	FM10K_CB(skb)->fi.w.vlan = rx_desc->w.vlan;
-
-	skb_record_rx_queue(skb, rx_ring->queue_index);
 
 	FM10K_CB(skb)->fi.d.glort = rx_desc->d.glort;
 
@@ -656,11 +636,11 @@ static int fm10k_clean_rx_irq(struct fm10k_q_vector *q_vector,
 static struct ethhdr *fm10k_port_is_vxlan(struct sk_buff *skb)
 {
 	struct fm10k_intfc *interface = netdev_priv(skb->dev);
-	struct fm10k_udp_port *vxlan_port;
+	struct fm10k_vxlan_port *vxlan_port;
 
 	/* we can only offload a vxlan if we recognize it as such */
 	vxlan_port = list_first_entry_or_null(&interface->vxlan_port,
-					      struct fm10k_udp_port, list);
+					      struct fm10k_vxlan_port, list);
 
 	if (!vxlan_port)
 		return NULL;
@@ -695,6 +675,10 @@ static struct ethhdr *fm10k_gre_is_nvgre(struct sk_buff *skb)
 	if (nvgre_hdr->flags & FM10K_NVGRE_RESERVED0_FLAGS)
 		return NULL;
 
+	/* verify protocol is transparent Ethernet bridging */
+	if (nvgre_hdr->proto != htons(ETH_P_TEB))
+		return NULL;
+
 	/* report start of ethernet header */
 	if (nvgre_hdr->flags & NVGRE_TNI)
 		return (struct ethhdr *)(nvgre_hdr + 1);
@@ -702,13 +686,15 @@ static struct ethhdr *fm10k_gre_is_nvgre(struct sk_buff *skb)
 	return (struct ethhdr *)(&nvgre_hdr->tni);
 }
 
-__be16 fm10k_tx_encap_offload(struct sk_buff *skb)
+static __be16 fm10k_tx_encap_offload(struct sk_buff *skb)
 {
-	u8 l4_hdr = 0, inner_l4_hdr = 0, inner_l4_hlen;
 	struct ethhdr *eth_hdr;
+	u8 l4_hdr = 0;
 
-	if (skb->inner_protocol_type != ENCAP_TYPE_ETHER ||
-	    skb->inner_protocol != htons(ETH_P_TEB))
+/* fm10k supports 184 octets of outer+inner headers. Minus 20 for inner L4. */
+#define FM10K_MAX_ENCAP_TRANSPORT_OFFSET	164
+	if (skb_inner_transport_header(skb) - skb_mac_header(skb) >
+	    FM10K_MAX_ENCAP_TRANSPORT_OFFSET)
 		return 0;
 
 	switch (vlan_get_protocol(skb)) {
@@ -738,32 +724,11 @@ __be16 fm10k_tx_encap_offload(struct sk_buff *skb)
 
 	switch (eth_hdr->h_proto) {
 	case htons(ETH_P_IP):
-		inner_l4_hdr = inner_ip_hdr(skb)->protocol;
-		break;
 	case htons(ETH_P_IPV6):
-		inner_l4_hdr = inner_ipv6_hdr(skb)->nexthdr;
 		break;
 	default:
 		return 0;
 	}
-
-	switch (inner_l4_hdr) {
-	case IPPROTO_TCP:
-		inner_l4_hlen = inner_tcp_hdrlen(skb);
-		break;
-	case IPPROTO_UDP:
-		inner_l4_hlen = 8;
-		break;
-	default:
-		return 0;
-	}
-
-	/* The hardware allows tunnel offloads only if the combined inner and
-	 * outer header is 184 bytes or less
-	 */
-	if (skb_inner_transport_header(skb) + inner_l4_hlen -
-	    skb_mac_header(skb) > FM10K_TUNNEL_HEADER_LENGTH)
-		return 0;
 
 	return eth_hdr->h_proto;
 }
@@ -1051,18 +1016,13 @@ static void fm10k_tx_map(struct fm10k_ring *tx_ring,
 
 	tx_ring->next_to_use = i;
 
-	/* Make sure there is space in the ring for the next send. */
-	fm10k_maybe_stop_tx(tx_ring, DESC_NEEDED);
-
 	/* notify HW of packet */
-	if (netif_xmit_stopped(txring_txq(tx_ring)) || !skb->xmit_more) {
-		writel(i, tx_ring->tail);
+	writel(i, tx_ring->tail);
 
-		/* we need this if more than one processor can write to our tail
-		 * at a time, it synchronizes IO on IA64/Altix systems
-		 */
-		mmiowb();
-	}
+	/* we need this if more than one processor can write to our tail
+	 * at a time, it synchronizes IO on IA64/Altix systems
+	 */
+	mmiowb();
 
 	return;
 dma_error:
@@ -1120,6 +1080,8 @@ netdev_tx_t fm10k_xmit_frame_ring(struct sk_buff *skb,
 		fm10k_tx_csum(tx_ring, first);
 
 	fm10k_tx_map(tx_ring, first);
+
+	fm10k_maybe_stop_tx(tx_ring, DESC_NEEDED);
 
 	return NETDEV_TX_OK;
 

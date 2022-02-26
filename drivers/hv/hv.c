@@ -27,7 +27,7 @@
 #include <linux/vmalloc.h>
 #include <linux/hyperv.h>
 #include <linux/version.h>
-#include <linux/interrupt.h>
+#include <linux/random.h>
 #include <linux/clockchips.h>
 #include <asm/hyperv.h>
 #include <asm/mshyperv.h>
@@ -37,6 +37,17 @@
 struct hv_context hv_context = {
 	.synic_initialized	= false,
 };
+
+/*
+ * If false, we're using the old mechanism for stimer0 interrupts
+ * where it sends a VMbus message when it expires. The old
+ * mechanism is used when running on older versions of Hyper-V
+ * that don't support Direct Mode. While Hyper-V provides
+ * four stimer's per CPU, Linux uses only stimer0.
+ */
+static bool direct_mode_enabled;
+static int stimer0_irq;
+static int stimer0_vector;
 
 #define HV_TIMER_FREQUENCY (10 * 1000 * 1000) /* 100ns period */
 #define HV_MAX_MAX_DELTA_TICKS 0xffffffff
@@ -49,13 +60,12 @@ struct hv_context hv_context = {
  */
 int hv_init(void)
 {
-	if (!hv_is_hypercall_page_setup())
-		return -ENOTSUPP;
-
 	hv_context.cpu_context = alloc_percpu(struct hv_per_cpu_context);
 	if (!hv_context.cpu_context)
 		return -ENOMEM;
 
+	direct_mode_enabled = ms_hyperv.misc_features &
+			HV_X64_STIMER_DIRECT_MODE_AVAILABLE;
 	return 0;
 }
 
@@ -94,12 +104,27 @@ int hv_post_message(union hv_connection_id connection_id,
 	return status & 0xFFFF;
 }
 
+/*
+ * ISR for when stimer0 is operating in Direct Mode.  Direct Mode
+ * does not use VMbus or any VMbus messages, so process here and not
+ * in the VMbus driver code.
+ */
+
+static void hv_stimer0_isr(void)
+{
+	struct hv_per_cpu_context *hv_cpu;
+
+	hv_cpu = this_cpu_ptr(hv_context.cpu_context);
+	hv_cpu->clk_evt->event_handler(hv_cpu->clk_evt);
+	add_interrupt_randomness(stimer0_vector, 0);
+}
+
 static int hv_ce_set_next_event(unsigned long delta,
 				struct clock_event_device *evt)
 {
 	u64 current_tick;
 
-	WARN_ON(!clockevent_state_oneshot(evt));
+	WARN_ON(evt->mode != CLOCK_EVT_MODE_ONESHOT);
 
 	current_tick = hyperv_cs->read(NULL);
 	current_tick += delta;
@@ -107,24 +132,50 @@ static int hv_ce_set_next_event(unsigned long delta,
 	return 0;
 }
 
-static int hv_ce_shutdown(struct clock_event_device *evt)
-{
-	hv_init_timer(HV_X64_MSR_STIMER0_COUNT, 0);
-	hv_init_timer_config(HV_X64_MSR_STIMER0_CONFIG, 0);
-
-	return 0;
-}
-
-static int hv_ce_set_oneshot(struct clock_event_device *evt)
+static void hv_ce_setmode(enum clock_event_mode mode,
+			  struct clock_event_device *evt)
 {
 	union hv_timer_config timer_cfg;
 
-	timer_cfg.enable = 1;
-	timer_cfg.auto_enable = 1;
-	timer_cfg.sintx = VMBUS_MESSAGE_SINT;
-	hv_init_timer_config(HV_X64_MSR_STIMER0_CONFIG, timer_cfg.as_uint64);
+	switch (mode) {
+	case CLOCK_EVT_MODE_PERIODIC:
+		/* unsupported */
+		break;
 
-	return 0;
+	case CLOCK_EVT_MODE_ONESHOT:
+		timer_cfg.as_uint64 = 0;
+		timer_cfg.enable = 1;
+		timer_cfg.auto_enable = 1;
+		timer_cfg.sintx = VMBUS_MESSAGE_SINT;
+		if (direct_mode_enabled) {
+			/*
+			 * When it expires, the timer will directly interrupt
+			 * on the specified hardware vector/IRQ.
+			 */
+			timer_cfg.direct_mode = 1;
+			timer_cfg.apic_vector = stimer0_vector;
+			hv_enable_stimer0_percpu_irq(stimer0_irq);
+		} else {
+			/*
+			 * When it expires, the timer will generate a VMbus message,
+			 * to be handled by the normal VMbus interrupt handler.
+			 */
+			timer_cfg.direct_mode = 0;
+			timer_cfg.sintx = VMBUS_MESSAGE_SINT;
+		}
+		hv_init_timer_config(HV_X64_MSR_STIMER0_CONFIG, timer_cfg.as_uint64);
+		break;
+
+	case CLOCK_EVT_MODE_UNUSED:
+	case CLOCK_EVT_MODE_SHUTDOWN:
+		hv_init_timer(HV_X64_MSR_STIMER0_COUNT, 0);
+		hv_init_timer_config(HV_X64_MSR_STIMER0_CONFIG, 0);
+		if (direct_mode_enabled)
+			hv_disable_stimer0_percpu_irq(stimer0_irq);
+		break;
+	case CLOCK_EVT_MODE_RESUME:
+		break;
+	}
 }
 
 static void hv_init_clockevent_device(struct clock_event_device *dev, int cpu)
@@ -139,8 +190,7 @@ static void hv_init_clockevent_device(struct clock_event_device *dev, int cpu)
 	 * references to the hv_vmbus module making it impossible to unload.
 	 */
 
-	dev->set_state_shutdown = hv_ce_shutdown;
-	dev->set_state_oneshot = hv_ce_set_oneshot;
+	dev->set_mode = hv_ce_setmode;
 	dev->set_next_event = hv_ce_set_next_event;
 }
 
@@ -150,7 +200,7 @@ int hv_synic_alloc(void)
 	int cpu;
 
 	hv_context.hv_numa_map = kzalloc(sizeof(struct cpumask) * nr_node_ids,
-					 GFP_ATOMIC);
+					 GFP_KERNEL);
 	if (hv_context.hv_numa_map == NULL) {
 		pr_err("Unable to allocate NUMA map\n");
 		goto err;
@@ -194,11 +244,15 @@ int hv_synic_alloc(void)
 		INIT_LIST_HEAD(&hv_cpu->chan_list);
 	}
 
+	if (direct_mode_enabled &&
+	    hv_setup_stimer0_irq(&stimer0_irq, &stimer0_vector,
+				hv_stimer0_isr))
+		goto err;
+
 	return 0;
 err:
 	return -ENOMEM;
 }
-
 
 void hv_synic_free(void)
 {
@@ -219,8 +273,20 @@ void hv_synic_free(void)
 	kfree(hv_context.hv_numa_map);
 }
 
+void hv_clockevents_bind(int cpu)
+{
+	struct hv_per_cpu_context *hv_cpu
+		= per_cpu_ptr(hv_context.cpu_context, cpu);
+
+	if (ms_hyperv.features & HV_X64_MSR_SYNTIMER_AVAILABLE)
+		clockevents_config_and_register(hv_cpu->clk_evt,
+						HV_TIMER_FREQUENCY,
+						HV_MIN_DELTA_TICKS,
+						HV_MAX_MAX_DELTA_TICKS);
+}
+
 /*
- * hv_synic_init - Initialize the Synthethic Interrupt Controller.
+ * hv_synic_init - Initialize the Synthetic Interrupt Controller.
  *
  * If it is already initialized by another entity (ie x2v shim), we need to
  * retrieve the initialized message and event pages.  Otherwise, we create and
@@ -255,7 +321,6 @@ int hv_synic_init(unsigned int cpu)
 	hv_get_synint_state(HV_X64_MSR_SINT0 + VMBUS_MESSAGE_SINT,
 			    shared_sint.as_uint64);
 
-	shared_sint.as_uint64 = 0;
 	shared_sint.vector = HYPERVISOR_CALLBACK_VECTOR;
 	shared_sint.masked = false;
 	if (ms_hyperv.hints & HV_X64_DEPRECATING_AEOI_RECOMMENDED)
@@ -277,11 +342,8 @@ int hv_synic_init(unsigned int cpu)
 	/*
 	 * Register the per-cpu clockevent source.
 	 */
-	if (ms_hyperv.features & HV_X64_MSR_SYNTIMER_AVAILABLE)
-		clockevents_config_and_register(hv_cpu->clk_evt,
-						HV_TIMER_FREQUENCY,
-						HV_MIN_DELTA_TICKS,
-						HV_MAX_MAX_DELTA_TICKS);
+	hv_clockevents_bind(cpu);
+
 	return 0;
 }
 
@@ -295,6 +357,9 @@ void hv_synic_clockevents_cleanup(void)
 	if (!(ms_hyperv.features & HV_X64_MSR_SYNTIMER_AVAILABLE))
 		return;
 
+	if (direct_mode_enabled)
+		hv_remove_stimer0_irq(stimer0_irq);
+
 	for_each_present_cpu(cpu) {
 		struct hv_per_cpu_context *hv_cpu
 			= per_cpu_ptr(hv_context.cpu_context, cpu);
@@ -303,21 +368,20 @@ void hv_synic_clockevents_cleanup(void)
 	}
 }
 
-/*
- * hv_synic_cleanup - Cleanup routine for hv_synic_init().
- */
-int hv_synic_cleanup(unsigned int cpu)
+void hv_clockevents_unbind(int cpu)
 {
-	union hv_synic_sint shared_sint;
-	union hv_synic_simp simp;
-	union hv_synic_siefp siefp;
-	union hv_synic_scontrol sctrl;
+	struct hv_per_cpu_context *hv_cpu
+		= per_cpu_ptr(hv_context.cpu_context, cpu);
+
+	if (ms_hyperv.features & HV_X64_MSR_SYNTIMER_AVAILABLE)
+		clockevents_unbind_device(hv_cpu->clk_evt, cpu);
+}
+
+int hv_synic_cpu_used(unsigned int cpu)
+{
 	struct vmbus_channel *channel, *sc;
 	bool channel_found = false;
 	unsigned long flags;
-
-	if (!hv_context.synic_initialized)
-		return -EFAULT;
 
 	/*
 	 * Search for channels which are bound to the CPU we're about to
@@ -345,7 +409,23 @@ int hv_synic_cleanup(unsigned int cpu)
 	mutex_unlock(&vmbus_connection.channel_mutex);
 
 	if (channel_found && vmbus_connection.conn_state == CONNECTED)
-		return -EBUSY;
+		return 1;
+
+	return 0;
+}
+
+/*
+ * hv_synic_cleanup - Cleanup routine for hv_synic_init().
+ */
+int hv_synic_cleanup(unsigned int cpu)
+{
+	union hv_synic_sint shared_sint;
+	union hv_synic_simp simp;
+	union hv_synic_siefp siefp;
+	union hv_synic_scontrol sctrl;
+
+	if (!hv_context.synic_initialized)
+		return -EFAULT;
 
 	/* Turn off clockevent device */
 	if (ms_hyperv.features & HV_X64_MSR_SYNTIMER_AVAILABLE) {
@@ -353,7 +433,7 @@ int hv_synic_cleanup(unsigned int cpu)
 			= this_cpu_ptr(hv_context.cpu_context);
 
 		clockevents_unbind_device(hv_cpu->clk_evt, cpu);
-		hv_ce_shutdown(hv_cpu->clk_evt);
+		hv_ce_setmode(CLOCK_EVT_MODE_SHUTDOWN, hv_cpu->clk_evt);
 		put_cpu_ptr(hv_cpu);
 	}
 

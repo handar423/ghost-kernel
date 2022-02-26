@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_IA64_PCI_H
 #define _ASM_IA64_PCI_H
 
@@ -7,9 +6,9 @@
 #include <linux/spinlock.h>
 #include <linux/string.h>
 #include <linux/types.h>
-#include <linux/scatterlist.h>
 
 #include <asm/io.h>
+#include <asm/scatterlist.h>
 #include <asm/hw_irq.h>
 
 struct pci_vector_struct {
@@ -30,6 +29,10 @@ struct pci_vector_struct {
 #define PCIBIOS_MIN_IO		0x1000
 #define PCIBIOS_MIN_MEM		0x10000000
 
+void pcibios_config_init(void);
+
+struct pci_dev;
+
 /*
  * PCI_DMA_BUS_IS_PHYS should be set to 1 if there is _necessarily_ a direct
  * correspondence between device bus addresses and CPU physical addresses.
@@ -47,10 +50,28 @@ struct pci_vector_struct {
 extern unsigned long ia64_max_iommu_merge_mask;
 #define PCI_DMA_BUS_IS_PHYS	(ia64_max_iommu_merge_mask == ~0UL)
 
-#define HAVE_PCI_MMAP
-#define ARCH_GENERIC_PCI_MMAP_RESOURCE
-#define arch_can_pci_mmap_wc()	1
+#ifdef CONFIG_PCI
+static inline void pci_dma_burst_advice(struct pci_dev *pdev,
+					enum pci_dma_burst_strategy *strat,
+					unsigned long *strategy_parameter)
+{
+	unsigned long cacheline_size;
+	u8 byte;
 
+	pci_read_config_byte(pdev, PCI_CACHE_LINE_SIZE, &byte);
+	if (byte == 0)
+		cacheline_size = 1024;
+	else
+		cacheline_size = (int) byte * 4;
+
+	*strat = PCI_DMA_BURST_MULTIPLE;
+	*strategy_parameter = cacheline_size;
+}
+#endif
+
+#define HAVE_PCI_MMAP
+extern int pci_mmap_page_range (struct pci_dev *dev, struct vm_area_struct *vma,
+				enum pci_mmap_state mmap_state, int write_combine);
 #define HAVE_PCI_LEGACY
 extern int pci_mmap_legacy_page_range(struct pci_bus *bus,
 				      struct vm_area_struct *vma,
@@ -60,15 +81,22 @@ extern int pci_mmap_legacy_page_range(struct pci_bus *bus,
 #define pci_legacy_read platform_pci_legacy_read
 #define pci_legacy_write platform_pci_legacy_write
 
+struct pci_window {
+	struct resource resource;
+	u64 offset;
+};
+
 struct pci_controller {
-	struct acpi_device *companion;
+	void *acpi_handle;
 	void *iommu;
 	int segment;
-	int node;		/* nearest node with memory or NUMA_NO_NODE for global allocation */
+	int node;		/* nearest node with memory or -1 for global allocation */
+
+	unsigned int windows;
+	struct pci_window *window;
 
 	void *platform_data;
 };
-
 
 #define PCI_CONTROLLER(busdev) ((struct pci_controller *) busdev->sysdata)
 #define pci_domain_nr(busdev)    (PCI_CONTROLLER(busdev)->segment)
@@ -78,6 +106,19 @@ extern struct pci_ops pci_root_ops;
 static inline int pci_proc_domain(struct pci_bus *bus)
 {
 	return (pci_domain_nr(bus) != 0);
+}
+
+static inline struct resource *
+pcibios_select_root(struct pci_dev *pdev, struct resource *res)
+{
+	struct resource *root = NULL;
+
+	if (res->flags & IORESOURCE_IO)
+		root = &ioport_resource;
+	if (res->flags & IORESOURCE_MEM)
+		root = &iomem_resource;
+
+	return root;
 }
 
 #define HAVE_ARCH_PCI_GET_LEGACY_IDE_IRQ

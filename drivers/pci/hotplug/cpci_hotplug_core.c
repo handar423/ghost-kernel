@@ -27,7 +27,6 @@
 
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/sched/signal.h>
 #include <linux/slab.h>
 #include <linux/pci.h>
 #include <linux/pci_hotplug.h>
@@ -719,4 +718,14 @@ cpci_hotplug_init(int debug)
 {
 	cpci_debug = debug;
 	return 0;
+}
+
+void __exit
+cpci_hotplug_exit(void)
+{
+	/*
+	 * Clean everything up.
+	 */
+	cpci_hp_stop();
+	cpci_hp_unregister_controller(controller);
 }

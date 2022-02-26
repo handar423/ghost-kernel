@@ -245,6 +245,7 @@ struct qib_chip_specific {
 	u64 iblnkerrsnap;
 	u64 ibcctrl; /* shadow for kr_ibcctrl */
 	u32 lastlinkrecov; /* link recovery issue */
+	int irq;
 	u32 cntrnamelen;
 	u32 portcntrnamelen;
 	u32 ncntrs;
@@ -707,7 +708,7 @@ static void qib_6120_clear_freeze(struct qib_devdata *dd)
 	/* disable error interrupts, to avoid confusion */
 	qib_write_kreg(dd, kr_errmask, 0ULL);
 
-	/* also disable interrupts; errormask is sometimes overwritten */
+	/* also disable interrupts; errormask is sometimes overwriten */
 	qib_6120_set_intr_state(dd, 0);
 
 	qib_cancel_sends(dd->pport);
@@ -1474,6 +1475,15 @@ static void qib_6120_setup_setextled(struct qib_pportdata *ppd, u32 on)
 	spin_unlock_irqrestore(&dd->cspec->gpio_lock, flags);
 }
 
+static void qib_6120_free_irq(struct qib_devdata *dd)
+{
+	if (dd->cspec->irq) {
+		free_irq(dd->cspec->irq, dd);
+		dd->cspec->irq = 0;
+	}
+	qib_nomsi(dd);
+}
+
 /**
  * qib_6120_setup_cleanup - clean up any per-chip chip-specific stuff
  * @dd: the qlogic_ib device
@@ -1482,7 +1492,7 @@ static void qib_6120_setup_setextled(struct qib_pportdata *ppd, u32 on)
 */
 static void qib_6120_setup_cleanup(struct qib_devdata *dd)
 {
-	qib_free_irq(dd);
+	qib_6120_free_irq(dd);
 	kfree(dd->cspec->cntrs);
 	kfree(dd->cspec->portcntrs);
 	if (dd->cspec->dummy_hdrq) {
@@ -1686,8 +1696,6 @@ bail:
  */
 static void qib_setup_6120_interrupt(struct qib_devdata *dd)
 {
-	int ret;
-
 	/*
 	 * If the chip supports added error indication via GPIO pins,
 	 * enable interrupts on those bits so the interrupt routine
@@ -1701,12 +1709,19 @@ static void qib_setup_6120_interrupt(struct qib_devdata *dd)
 		qib_write_kreg(dd, kr_gpio_mask, dd->cspec->gpio_mask);
 	}
 
-	ret = pci_request_irq(dd->pcidev, 0, qib_6120intr, NULL, dd,
-			      QIB_DRV_NAME);
-	if (ret)
+	if (!dd->cspec->irq)
 		qib_dev_err(dd,
-			    "Couldn't setup interrupt (irq=%d): %d\n",
-			    pci_irq_vector(dd->pcidev, 0), ret);
+			"irq is 0, BIOS error?  Interrupts won't work\n");
+	else {
+		int ret;
+
+		ret = request_irq(dd->cspec->irq, qib_6120intr, 0,
+				  QIB_DRV_NAME, dd);
+		if (ret)
+			qib_dev_err(dd,
+				"Couldn't setup interrupt (irq=%d): %d\n",
+				dd->cspec->irq, ret);
+	}
 }
 
 /**
@@ -1904,6 +1919,7 @@ static void qib_6120_put_tid_2(struct qib_devdata *dd, u64 __iomem *tidptr,
 			       u32 type, unsigned long pa)
 {
 	u32 __iomem *tidp32 = (u32 __iomem *)tidptr;
+	u32 tidx;
 
 	if (!dd->kregbase)
 		return;
@@ -1927,6 +1943,7 @@ static void qib_6120_put_tid_2(struct qib_devdata *dd, u64 __iomem *tidptr,
 		else /* for now, always full 4KB page */
 			pa |= 2 << 29;
 	}
+	tidx = tidptr - dd->egrtidbase;
 	writel(pa, tidp32);
 	mmiowb();
 }
@@ -2496,15 +2513,16 @@ static void init_6120_cntrnames(struct qib_devdata *dd)
 		dd->cspec->cntrnamelen = sizeof(cntr6120names) - 1;
 	else
 		dd->cspec->cntrnamelen = 1 + s - cntr6120names;
-	dd->cspec->cntrs = kmalloc(dd->cspec->ncntrs
-		* sizeof(u64), GFP_KERNEL);
+	dd->cspec->cntrs = kmalloc_array(dd->cspec->ncntrs, sizeof(u64),
+					 GFP_KERNEL);
 
 	for (i = 0, s = (char *)portcntr6120names; s; i++)
 		s = strchr(s + 1, '\n');
 	dd->cspec->nportcntrs = i - 1;
 	dd->cspec->portcntrnamelen = sizeof(portcntr6120names) - 1;
-	dd->cspec->portcntrs = kmalloc(dd->cspec->nportcntrs
-		* sizeof(u64), GFP_KERNEL);
+	dd->cspec->portcntrs = kmalloc_array(dd->cspec->nportcntrs,
+					     sizeof(u64),
+					     GFP_KERNEL);
 }
 
 static u32 qib_read_6120cntrs(struct qib_devdata *dd, loff_t pos, char **namep,
@@ -3258,9 +3276,11 @@ static int init_6120_variables(struct qib_devdata *dd)
 	qib_6120_config_ctxts(dd);
 	qib_set_ctxtcnt(dd);
 
-	ret = init_chip_wc_pat(dd, 0);
-	if (ret)
-		goto bail;
+	if (qib_wc_pat) {
+		ret = init_chip_wc_pat(dd, 0);
+		if (ret)
+			goto bail;
+	}
 	set_6120_baseaddrs(dd); /* set chip access pointers now */
 
 	ret = 0;
@@ -3447,7 +3467,7 @@ struct qib_devdata *qib_init_iba6120_funcs(struct pci_dev *pdev,
 	dd->f_bringup_serdes    = qib_6120_bringup_serdes;
 	dd->f_cleanup           = qib_6120_setup_cleanup;
 	dd->f_clear_tids        = qib_6120_clear_tids;
-	dd->f_free_irq          = qib_free_irq;
+	dd->f_free_irq          = qib_6120_free_irq;
 	dd->f_get_base_info     = qib_6120_get_base_info;
 	dd->f_get_msgheader     = qib_6120_get_msgheader;
 	dd->f_getsendbuf        = qib_6120_getsendbuf;
@@ -3516,6 +3536,8 @@ struct qib_devdata *qib_init_iba6120_funcs(struct pci_dev *pdev,
 	if (qib_pcie_params(dd, 8, NULL))
 		qib_dev_err(dd,
 			"Failed to setup PCIe or interrupts; continuing anyway\n");
+	dd->cspec->irq = pdev->irq; /* save IRQ */
+
 	/* clear diagctrl register, in case diags were running and crashed */
 	qib_write_kreg(dd, kr_hwdiagctrl, 0);
 

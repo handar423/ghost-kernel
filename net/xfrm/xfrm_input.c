@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * xfrm_input.c
  *
@@ -26,7 +25,13 @@ struct xfrm_trans_tasklet {
 };
 
 struct xfrm_trans_cb {
-	int (*finish)(struct net *net, struct sock *sk, struct sk_buff *skb);
+	union {
+		struct inet_skb_parm	h4;
+#if IS_ENABLED(CONFIG_IPV6)
+		struct inet6_skb_parm	h6;
+#endif
+	} header;
+	int (*finish)(struct sock *sk, struct sk_buff *skb);
 };
 
 #define XFRM_TRANS_SKB_CB(__skb) ((struct xfrm_trans_cb *)&((__skb)->cb[0]))
@@ -34,23 +39,21 @@ struct xfrm_trans_cb {
 static struct kmem_cache *secpath_cachep __read_mostly;
 
 static DEFINE_SPINLOCK(xfrm_input_afinfo_lock);
-static struct xfrm_input_afinfo const __rcu *xfrm_input_afinfo[AF_INET6 + 1];
-
-static struct gro_cells gro_cells;
-static struct net_device xfrm_napi_dev;
+static struct xfrm_input_afinfo __rcu *xfrm_input_afinfo[NPROTO];
 
 static DEFINE_PER_CPU(struct xfrm_trans_tasklet, xfrm_trans_tasklet);
 
-int xfrm_input_register_afinfo(const struct xfrm_input_afinfo *afinfo)
+int xfrm_input_register_afinfo(struct xfrm_input_afinfo *afinfo)
 {
 	int err = 0;
 
-	if (WARN_ON(afinfo->family >= ARRAY_SIZE(xfrm_input_afinfo)))
+	if (unlikely(afinfo == NULL))
+		return -EINVAL;
+	if (unlikely(afinfo->family >= NPROTO))
 		return -EAFNOSUPPORT;
-
 	spin_lock_bh(&xfrm_input_afinfo_lock);
 	if (unlikely(xfrm_input_afinfo[afinfo->family] != NULL))
-		err = -EEXIST;
+		err = -ENOBUFS;
 	else
 		rcu_assign_pointer(xfrm_input_afinfo[afinfo->family], afinfo);
 	spin_unlock_bh(&xfrm_input_afinfo_lock);
@@ -58,10 +61,14 @@ int xfrm_input_register_afinfo(const struct xfrm_input_afinfo *afinfo)
 }
 EXPORT_SYMBOL(xfrm_input_register_afinfo);
 
-int xfrm_input_unregister_afinfo(const struct xfrm_input_afinfo *afinfo)
+int xfrm_input_unregister_afinfo(struct xfrm_input_afinfo *afinfo)
 {
 	int err = 0;
 
+	if (unlikely(afinfo == NULL))
+		return -EINVAL;
+	if (unlikely(afinfo->family >= NPROTO))
+		return -EAFNOSUPPORT;
 	spin_lock_bh(&xfrm_input_afinfo_lock);
 	if (likely(xfrm_input_afinfo[afinfo->family] != NULL)) {
 		if (unlikely(xfrm_input_afinfo[afinfo->family] != afinfo))
@@ -75,13 +82,12 @@ int xfrm_input_unregister_afinfo(const struct xfrm_input_afinfo *afinfo)
 }
 EXPORT_SYMBOL(xfrm_input_unregister_afinfo);
 
-static const struct xfrm_input_afinfo *xfrm_input_get_afinfo(unsigned int family)
+static struct xfrm_input_afinfo *xfrm_input_get_afinfo(unsigned int family)
 {
-	const struct xfrm_input_afinfo *afinfo;
+	struct xfrm_input_afinfo *afinfo;
 
-	if (WARN_ON_ONCE(family >= ARRAY_SIZE(xfrm_input_afinfo)))
+	if (unlikely(family >= NPROTO))
 		return NULL;
-
 	rcu_read_lock();
 	afinfo = rcu_dereference(xfrm_input_afinfo[family]);
 	if (unlikely(!afinfo))
@@ -89,17 +95,22 @@ static const struct xfrm_input_afinfo *xfrm_input_get_afinfo(unsigned int family
 	return afinfo;
 }
 
+static void xfrm_input_put_afinfo(struct xfrm_input_afinfo *afinfo)
+{
+	rcu_read_unlock();
+}
+
 static int xfrm_rcv_cb(struct sk_buff *skb, unsigned int family, u8 protocol,
 		       int err)
 {
 	int ret;
-	const struct xfrm_input_afinfo *afinfo = xfrm_input_get_afinfo(family);
+	struct xfrm_input_afinfo *afinfo = xfrm_input_get_afinfo(family);
 
 	if (!afinfo)
 		return -EAFNOSUPPORT;
 
 	ret = afinfo->callback(skb, protocol, err);
-	rcu_read_unlock();
+	xfrm_input_put_afinfo(afinfo);
 
 	return ret;
 }
@@ -122,10 +133,6 @@ struct sec_path *secpath_dup(struct sec_path *src)
 		return NULL;
 
 	sp->len = 0;
-	sp->olen = 0;
-
-	memset(sp->ovec, 0, sizeof(sp->ovec[XFRM_MAX_OFFLOAD_DEPTH]));
-
 	if (src) {
 		int i;
 
@@ -133,28 +140,10 @@ struct sec_path *secpath_dup(struct sec_path *src)
 		for (i = 0; i < sp->len; i++)
 			xfrm_state_hold(sp->xvec[i]);
 	}
-	refcount_set(&sp->refcnt, 1);
+	atomic_set(&sp->refcnt, 1);
 	return sp;
 }
 EXPORT_SYMBOL(secpath_dup);
-
-int secpath_set(struct sk_buff *skb)
-{
-	struct sec_path *sp;
-
-	/* Allocate new secpath or COW existing one. */
-	if (!skb->sp || refcount_read(&skb->sp->refcnt) != 1) {
-		sp = secpath_dup(skb->sp);
-		if (!sp)
-			return -ENOMEM;
-
-		if (skb->sp)
-			secpath_put(skb->sp);
-		skb->sp = sp;
-	}
-	return 0;
-}
-EXPORT_SYMBOL(secpath_set);
 
 /* Fetch spi and seq from ipsec header */
 
@@ -191,7 +180,6 @@ int xfrm_parse_spi(struct sk_buff *skb, u8 nexthdr, __be32 *spi, __be32 *seq)
 	*seq = *(__be32 *)(skb_transport_header(skb) + offset_seq);
 	return 0;
 }
-EXPORT_SYMBOL(xfrm_parse_spi);
 
 int xfrm_prepare_input(struct xfrm_state *x, struct sk_buff *skb)
 {
@@ -223,75 +211,21 @@ int xfrm_input(struct sk_buff *skb, int nexthdr, __be32 spi, int encap_type)
 	xfrm_address_t *daddr;
 	struct xfrm_mode *inner_mode;
 	u32 mark = skb->mark;
-	unsigned int family = AF_UNSPEC;
+	unsigned int family;
 	int decaps = 0;
 	int async = 0;
-	bool xfrm_gro = false;
-	bool crypto_done = false;
-	struct xfrm_offload *xo = xfrm_offload(skb);
 
+	/* A negative encap_type indicates async resumption. */
 	if (encap_type < 0) {
+		async = 1;
 		x = xfrm_input_state(skb);
-
-		if (unlikely(x->km.state != XFRM_STATE_VALID)) {
-			if (x->km.state == XFRM_STATE_ACQ)
-				XFRM_INC_STATS(net, LINUX_MIB_XFRMACQUIREERROR);
-			else
-				XFRM_INC_STATS(net,
-					       LINUX_MIB_XFRMINSTATEINVALID);
-			goto drop;
-		}
-
+		seq = XFRM_SKB_CB(skb)->seq.input.low;
 		family = x->outer_mode->afinfo->family;
-
-		/* An encap_type of -1 indicates async resumption. */
-		if (encap_type == -1) {
-			async = 1;
-			seq = XFRM_SKB_CB(skb)->seq.input.low;
-			goto resume;
-		}
-
-		/* encap_type < -1 indicates a GRO call. */
-		encap_type = 0;
-		seq = XFRM_SPI_SKB_CB(skb)->seq;
-
-		if (xo && (xo->flags & CRYPTO_DONE)) {
-			crypto_done = true;
-			x = xfrm_input_state(skb);
-			family = XFRM_SPI_SKB_CB(skb)->family;
-
-			if (!(xo->status & CRYPTO_SUCCESS)) {
-				if (xo->status &
-				    (CRYPTO_TRANSPORT_AH_AUTH_FAILED |
-				     CRYPTO_TRANSPORT_ESP_AUTH_FAILED |
-				     CRYPTO_TUNNEL_AH_AUTH_FAILED |
-				     CRYPTO_TUNNEL_ESP_AUTH_FAILED)) {
-
-					xfrm_audit_state_icvfail(x, skb,
-								 x->type->proto);
-					x->stats.integrity_failed++;
-					XFRM_INC_STATS(net, LINUX_MIB_XFRMINSTATEPROTOERROR);
-					goto drop;
-				}
-
-				if (xo->status & CRYPTO_INVALID_PROTOCOL) {
-					XFRM_INC_STATS(net, LINUX_MIB_XFRMINSTATEPROTOERROR);
-					goto drop;
-				}
-
-				XFRM_INC_STATS(net, LINUX_MIB_XFRMINBUFFERERROR);
-				goto drop;
-			}
-
-			if ((err = xfrm_parse_spi(skb, nexthdr, &spi, &seq)) != 0) {
-				XFRM_INC_STATS(net, LINUX_MIB_XFRMINHDRERROR);
-				goto drop;
-			}
-		}
-
-		goto lock;
+		goto resume;
 	}
 
+	daddr = (xfrm_address_t *)(skb_network_header(skb) +
+				   XFRM_SPI_SKB_CB(skb)->daddroff);
 	family = XFRM_SPI_SKB_CB(skb)->family;
 
 	/* if tunnel is present override skb->mark value with tunnel i_key */
@@ -306,10 +240,18 @@ int xfrm_input(struct sk_buff *skb, int nexthdr, __be32 spi, int encap_type)
 		break;
 	}
 
-	err = secpath_set(skb);
-	if (err) {
-		XFRM_INC_STATS(net, LINUX_MIB_XFRMINERROR);
-		goto drop;
+	/* Allocate new secpath or COW existing one. */
+	if (!skb->sp || atomic_read(&skb->sp->refcnt) != 1) {
+		struct sec_path *sp;
+
+		sp = secpath_dup(skb->sp);
+		if (!sp) {
+			XFRM_INC_STATS(net, LINUX_MIB_XFRMINERROR);
+			goto drop;
+		}
+		if (skb->sp)
+			secpath_put(skb->sp);
+		skb->sp = sp;
 	}
 
 	seq = 0;
@@ -318,8 +260,6 @@ int xfrm_input(struct sk_buff *skb, int nexthdr, __be32 spi, int encap_type)
 		goto drop;
 	}
 
-	daddr = (xfrm_address_t *)(skb_network_header(skb) +
-				   XFRM_SPI_SKB_CB(skb)->daddroff);
 	do {
 		if (skb->sp->len == XFRM_MAX_DEPTH) {
 			XFRM_INC_STATS(net, LINUX_MIB_XFRMINBUFFERERROR);
@@ -335,15 +275,9 @@ int xfrm_input(struct sk_buff *skb, int nexthdr, __be32 spi, int encap_type)
 
 		skb->sp->xvec[skb->sp->len++] = x;
 
-lock:
 		spin_lock(&x->lock);
-
 		if (unlikely(x->km.state != XFRM_STATE_VALID)) {
-			if (x->km.state == XFRM_STATE_ACQ)
-				XFRM_INC_STATS(net, LINUX_MIB_XFRMACQUIREERROR);
-			else
-				XFRM_INC_STATS(net,
-					       LINUX_MIB_XFRMINSTATEINVALID);
+			XFRM_INC_STATS(net, LINUX_MIB_XFRMINSTATEINVALID);
 			goto drop_unlock;
 		}
 
@@ -377,10 +311,7 @@ lock:
 		skb_dst_force(skb);
 		dev_hold(skb->dev);
 
-		if (crypto_done)
-			nexthdr = x->type_offload->input_tail(x, skb);
-		else
-			nexthdr = x->type->input(x, skb);
+		nexthdr = x->type->input(x, skb);
 
 		if (nexthdr == -EINPROGRESS)
 			return 0;
@@ -456,26 +387,11 @@ resume:
 	nf_reset(skb);
 
 	if (decaps) {
-		if (skb->sp)
-			skb->sp->olen = 0;
 		skb_dst_drop(skb);
-		gro_cells_receive(&gro_cells, skb);
+		netif_rx(skb);
 		return 0;
 	} else {
-		xo = xfrm_offload(skb);
-		if (xo)
-			xfrm_gro = xo->flags & XFRM_GRO;
-
-		err = x->inner_mode->afinfo->transport_finish(skb, xfrm_gro || async);
-		if (xfrm_gro) {
-			if (skb->sp)
-				skb->sp->olen = 0;
-			skb_dst_drop(skb);
-			gro_cells_receive(&gro_cells, skb);
-			return err;
-		}
-
-		return err;
+		return x->inner_mode->afinfo->transport_finish(skb, async);
 	}
 
 drop_unlock:
@@ -500,14 +416,18 @@ static void xfrm_trans_reinject(unsigned long data)
 	struct sk_buff *skb;
 
 	__skb_queue_head_init(&queue);
+	if (IS_ENABLED(CONFIG_PREEMPT_RT_FULL))
+		spin_lock(&trans->queue.lock);
 	skb_queue_splice_init(&trans->queue, &queue);
+	if (IS_ENABLED(CONFIG_PREEMPT_RT_FULL))
+		spin_unlock(&trans->queue.lock);
 
 	while ((skb = __skb_dequeue(&queue)))
-		XFRM_TRANS_SKB_CB(skb)->finish(dev_net(skb->dev), NULL, skb);
+		XFRM_TRANS_SKB_CB(skb)->finish(NULL, skb);
 }
 
 int xfrm_trans_queue(struct sk_buff *skb,
-		     int (*finish)(struct net *, struct sock *,
+		     int (*finish)(struct sock *,
 				   struct sk_buff *))
 {
 	struct xfrm_trans_tasklet *trans;
@@ -518,7 +438,11 @@ int xfrm_trans_queue(struct sk_buff *skb,
 		return -ENOBUFS;
 
 	XFRM_TRANS_SKB_CB(skb)->finish = finish;
-	__skb_queue_tail(&trans->queue, skb);
+	if (IS_ENABLED(CONFIG_PREEMPT_RT_FULL))
+		skb_queue_tail(&trans->queue, skb);
+	else
+		__skb_queue_tail(&trans->queue, skb);
+
 	tasklet_schedule(&trans->tasklet);
 	return 0;
 }
@@ -526,13 +450,7 @@ EXPORT_SYMBOL(xfrm_trans_queue);
 
 void __init xfrm_input_init(void)
 {
-	int err;
 	int i;
-
-	init_dummy_netdev(&xfrm_napi_dev);
-	err = gro_cells_init(&gro_cells, &xfrm_napi_dev);
-	if (err)
-		gro_cells.cells = NULL;
 
 	secpath_cachep = kmem_cache_create("secpath_cache",
 					   sizeof(struct sec_path),
@@ -543,7 +461,11 @@ void __init xfrm_input_init(void)
 		struct xfrm_trans_tasklet *trans;
 
 		trans = &per_cpu(xfrm_trans_tasklet, i);
-		__skb_queue_head_init(&trans->queue);
+		if (IS_ENABLED(CONFIG_PREEMPT_RT_FULL))
+			skb_queue_head_init(&trans->queue);
+		else
+			__skb_queue_head_init(&trans->queue);
+
 		tasklet_init(&trans->tasklet, xfrm_trans_reinject,
 			     (unsigned long)trans);
 	}

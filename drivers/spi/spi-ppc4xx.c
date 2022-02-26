@@ -24,6 +24,7 @@
  */
 
 #include <linux/module.h>
+#include <linux/init.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/errno.h>
@@ -191,6 +192,12 @@ static int spi_ppc4xx_setupxfer(struct spi_device *spi, struct spi_transfer *t)
 			speed = min(t->speed_hz, spi->max_speed_hz);
 	}
 
+	if (bits_per_word != 8) {
+		dev_err(&spi->dev, "invalid bits-per-word (%d)\n",
+				bits_per_word);
+		return -EINVAL;
+	}
+
 	if (!speed || (speed > spi->max_speed_hz)) {
 		dev_err(&spi->dev, "invalid speed_hz (%d)\n", speed);
 		return -EINVAL;
@@ -210,12 +217,12 @@ static int spi_ppc4xx_setupxfer(struct spi_device *spi, struct spi_transfer *t)
 	if (in_8(&hw->regs->cdm) != cdm)
 		out_8(&hw->regs->cdm, cdm);
 
-	mutex_lock(&hw->bitbang.lock);
+	spin_lock(&hw->bitbang.lock);
 	if (!hw->bitbang.busy) {
 		hw->bitbang.chipselect(spi, BITBANG_CS_INACTIVE);
 		/* Need to ndelay here? */
 	}
-	mutex_unlock(&hw->bitbang.lock);
+	spin_unlock(&hw->bitbang.lock);
 
 	return 0;
 }
@@ -223,6 +230,12 @@ static int spi_ppc4xx_setupxfer(struct spi_device *spi, struct spi_transfer *t)
 static int spi_ppc4xx_setup(struct spi_device *spi)
 {
 	struct spi_ppc4xx_cs *cs = spi->controller_state;
+
+	if (spi->bits_per_word != 8) {
+		dev_err(&spi->dev, "invalid bits-per-word (%d)\n",
+			spi->bits_per_word);
+		return -EINVAL;
+	}
 
 	if (!spi->max_speed_hz) {
 		dev_err(&spi->dev, "invalid max_speed_hz (must be non-zero)\n");
@@ -395,9 +408,9 @@ static int spi_ppc4xx_of_probe(struct platform_device *op)
 	if (master == NULL)
 		return -ENOMEM;
 	master->dev.of_node = np;
-	platform_set_drvdata(op, master);
+	dev_set_drvdata(dev, master);
 	hw = spi_master_get_devdata(master);
-	hw->master = master;
+	hw->master = spi_master_get(master);
 	hw->dev = dev;
 
 	init_completion(&hw->done);
@@ -411,7 +424,7 @@ static int spi_ppc4xx_of_probe(struct platform_device *op)
 	if (num_gpios > 0) {
 		int i;
 
-		hw->gpios = kcalloc(num_gpios, sizeof(*hw->gpios), GFP_KERNEL);
+		hw->gpios = kzalloc(sizeof(int) * num_gpios, GFP_KERNEL);
 		if (!hw->gpios) {
 			ret = -ENOMEM;
 			goto free_master;
@@ -428,9 +441,8 @@ static int spi_ppc4xx_of_probe(struct platform_device *op)
 				/* Real CS - set the initial state. */
 				ret = gpio_request(gpio, np->name);
 				if (ret < 0) {
-					dev_err(dev,
-						"can't request gpio #%d: %d\n",
-						i, ret);
+					dev_err(dev, "can't request gpio "
+							"#%d: %d\n", i, ret);
 					goto free_gpios;
 				}
 
@@ -455,7 +467,6 @@ static int spi_ppc4xx_of_probe(struct platform_device *op)
 	bbp->use_dma = 0;
 	bbp->master->setup = spi_ppc4xx_setup;
 	bbp->master->cleanup = spi_ppc4xx_cleanup;
-	bbp->master->bits_per_word_mask = SPI_BPW_MASK(8);
 
 	/* the spi->mode bits understood by this driver: */
 	bbp->master->mode_bits =
@@ -544,6 +555,7 @@ request_mem_error:
 free_gpios:
 	free_gpios(hw);
 free_master:
+	dev_set_drvdata(dev, NULL);
 	spi_master_put(master);
 
 	dev_err(dev, "initialization failed\n");
@@ -552,15 +564,15 @@ free_master:
 
 static int spi_ppc4xx_of_remove(struct platform_device *op)
 {
-	struct spi_master *master = platform_get_drvdata(op);
+	struct spi_master *master = dev_get_drvdata(&op->dev);
 	struct ppc4xx_spi *hw = spi_master_get_devdata(master);
 
 	spi_bitbang_stop(&hw->bitbang);
+	dev_set_drvdata(&op->dev, NULL);
 	release_mem_region(hw->mapbase, hw->mapsize);
 	free_irq(hw->irqnum, hw);
 	iounmap(hw->regs);
 	free_gpios(hw);
-	spi_master_put(master);
 	return 0;
 }
 
@@ -576,6 +588,7 @@ static struct platform_driver spi_ppc4xx_of_driver = {
 	.remove = spi_ppc4xx_of_remove,
 	.driver = {
 		.name = DRIVER_NAME,
+		.owner = THIS_MODULE,
 		.of_match_table = spi_ppc4xx_of_match,
 	},
 };

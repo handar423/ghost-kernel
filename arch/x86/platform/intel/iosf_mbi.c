@@ -30,7 +30,6 @@
 #define PCI_DEVICE_ID_BAYTRAIL		0x0F00
 #define PCI_DEVICE_ID_BRASWELL		0x2280
 #define PCI_DEVICE_ID_QUARK_X1000	0x0958
-#define PCI_DEVICE_ID_TANGIER		0x1170
 
 static struct pci_dev *mbi_pdev;
 static DEFINE_SPINLOCK(iosf_mbi_lock);
@@ -218,14 +217,23 @@ int iosf_mbi_register_pmic_bus_access_notifier(struct notifier_block *nb)
 }
 EXPORT_SYMBOL(iosf_mbi_register_pmic_bus_access_notifier);
 
+int iosf_mbi_unregister_pmic_bus_access_notifier_unlocked(
+	struct notifier_block *nb)
+{
+	iosf_mbi_assert_punit_acquired();
+
+	return blocking_notifier_chain_unregister(
+				&iosf_mbi_pmic_bus_access_notifier, nb);
+}
+EXPORT_SYMBOL(iosf_mbi_unregister_pmic_bus_access_notifier_unlocked);
+
 int iosf_mbi_unregister_pmic_bus_access_notifier(struct notifier_block *nb)
 {
 	int ret;
 
 	/* Wait for the bus to go inactive before unregistering */
 	mutex_lock(&iosf_mbi_punit_mutex);
-	ret = blocking_notifier_chain_unregister(
-				&iosf_mbi_pmic_bus_access_notifier, nb);
+	ret = iosf_mbi_unregister_pmic_bus_access_notifier_unlocked(nb);
 	mutex_unlock(&iosf_mbi_punit_mutex);
 
 	return ret;
@@ -238,6 +246,12 @@ int iosf_mbi_call_pmic_bus_access_notifier_chain(unsigned long val, void *v)
 				&iosf_mbi_pmic_bus_access_notifier, val, v);
 }
 EXPORT_SYMBOL(iosf_mbi_call_pmic_bus_access_notifier_chain);
+
+void iosf_mbi_assert_punit_acquired(void)
+{
+	WARN_ON(!mutex_is_locked(&iosf_mbi_punit_mutex));
+}
+EXPORT_SYMBOL(iosf_mbi_assert_punit_acquired);
 
 #ifdef CONFIG_IOSF_MBI_DEBUG
 static u32	dbg_mdr;
@@ -289,17 +303,17 @@ static void iosf_sideband_debug_init(void)
 
 	/* mdr */
 	d = debugfs_create_x32("mdr", 0660, iosf_dbg, &dbg_mdr);
-	if (!d)
+	if (IS_ERR_OR_NULL(d))
 		goto cleanup;
 
 	/* mcrx */
-	d = debugfs_create_x32("mcrx", 0660, iosf_dbg, &dbg_mcrx);
-	if (!d)
+	debugfs_create_x32("mcrx", 0660, iosf_dbg, &dbg_mcrx);
+	if (IS_ERR_OR_NULL(d))
 		goto cleanup;
 
 	/* mcr - initiates mailbox tranaction */
-	d = debugfs_create_file("mcr", 0660, iosf_dbg, &dbg_mcr, &iosf_mcr_fops);
-	if (!d)
+	debugfs_create_file("mcr", 0660, iosf_dbg, &dbg_mcr, &iosf_mcr_fops);
+	if (IS_ERR_OR_NULL(d))
 		goto cleanup;
 
 	return;
@@ -341,7 +355,6 @@ static const struct pci_device_id iosf_mbi_pci_ids[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_BAYTRAIL) },
 	{ PCI_DEVICE(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_BRASWELL) },
 	{ PCI_DEVICE(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_QUARK_X1000) },
-	{ PCI_DEVICE(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_TANGIER) },
 	{ 0, },
 };
 MODULE_DEVICE_TABLE(pci, iosf_mbi_pci_ids);
@@ -364,8 +377,10 @@ static void __exit iosf_mbi_exit(void)
 	iosf_debugfs_remove();
 
 	pci_unregister_driver(&iosf_mbi_pci_driver);
-	pci_dev_put(mbi_pdev);
-	mbi_pdev = NULL;
+	if (mbi_pdev) {
+		pci_dev_put(mbi_pdev);
+		mbi_pdev = NULL;
+	}
 }
 
 module_init(iosf_mbi_init);

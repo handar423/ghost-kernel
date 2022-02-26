@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  *  linux/arch/sparc/kernel/setup.c
  *
@@ -69,6 +68,8 @@ struct screen_info screen_info = {
  * prints out pretty messages and returns.
  */
 
+extern unsigned long trapbase;
+
 /* Pretty sick eh? */
 static void prom_sync_me(void)
 {
@@ -83,7 +84,7 @@ static void prom_sync_me(void)
 			     "nop\n\t" : : "r" (&trapbase));
 
 	prom_printf("PROM SYNC COMMAND...\n");
-	show_free_areas(0, NULL);
+	show_free_areas(0);
 	if (!is_idle_task(current)) {
 		local_irq_enable();
 		sys_sync();
@@ -108,7 +109,7 @@ unsigned long cmdline_memory_size __initdata = 0;
 unsigned char boot_cpu_id = 0xff; /* 0xff will make it into DATA section... */
 
 static void
-prom_console_write(struct console *con, const char *s, unsigned int n)
+prom_console_write(struct console *con, const char *s, unsigned n)
 {
 	prom_write(s, n);
 }
@@ -149,7 +150,7 @@ static void __init boot_flags_init(char *commands)
 {
 	while (*commands) {
 		/* Move to the start of the next "argument". */
-		while (*commands == ' ')
+		while (*commands && *commands == ' ')
 			commands++;
 
 		/* Process any command switches, otherwise skip it. */
@@ -266,7 +267,7 @@ static __init void leon_patch(void)
 }
 
 struct tt_entry *sparc_ttable;
-static struct pt_regs fake_swapper_regs;
+struct pt_regs fake_swapper_regs;
 
 /* Called from head_32.S - before we have setup anything
  * in the kernel. Be very careful with what you do here.
@@ -299,7 +300,7 @@ void __init setup_arch(char **cmdline_p)
 	int i;
 	unsigned long highest_paddr;
 
-	sparc_ttable = &trapbase;
+	sparc_ttable = (struct tt_entry *) &trapbase;
 
 	/* Initialize PROM console and command line. */
 	*cmdline_p = prom_getbootargs();
@@ -308,6 +309,7 @@ void __init setup_arch(char **cmdline_p)
 
 	boot_flags_init(*cmdline_p);
 
+	early_console = &prom_early_console;
 	register_console(&prom_early_console);
 
 	printk("ARCH: ");
@@ -364,7 +366,7 @@ void __init setup_arch(char **cmdline_p)
 
 	prom_setsync(prom_sync_me);
 
-	if((boot_flags & BOOTME_DEBUG) && (linux_dbvec != NULL) &&
+	if((boot_flags&BOOTME_DEBUG) && (linux_dbvec!=0) && 
 	   ((*(short *)linux_dbvec) != -1)) {
 		printk("Booted under KADB. Syncing trap table.\n");
 		(*(linux_dbvec->teach_debugger))();

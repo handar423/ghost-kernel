@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * Manage cache of swap slots to be used for and returned from
  * swap.
@@ -240,9 +239,33 @@ static int free_slot_cache(unsigned int cpu)
 	return 0;
 }
 
+static int swap_slot_handler(struct notifier_block *self,
+			     unsigned long action, void *hcpu)
+{
+	long cpu = (long) hcpu;
+
+	switch (action & ~CPU_TASKS_FROZEN) {
+	case CPU_ONLINE:
+	case CPU_ONLINE_FROZEN:
+		alloc_swap_slot_cache(cpu);
+		return NOTIFY_OK;
+	case CPU_DOWN_PREPARE:
+	case CPU_DOWN_PREPARE_FROZEN:
+		free_slot_cache(cpu);
+		return NOTIFY_OK;
+	default:
+		return NOTIFY_DONE;
+	}
+}
+
+static struct notifier_block swap_slot_nb = {
+       .notifier_call  = swap_slot_handler,
+       .next           = NULL,
+};
+
 int enable_swap_slots_cache(void)
 {
-	int ret = 0;
+	int ret = 0, cpu;
 
 	mutex_lock(&swap_slots_cache_enable_mutex);
 	if (swap_slot_cache_initialized) {
@@ -250,12 +273,12 @@ int enable_swap_slots_cache(void)
 		goto out_unlock;
 	}
 
-	ret = cpuhp_setup_state(CPUHP_AP_ONLINE_DYN, "swap_slots_cache",
-				alloc_swap_slot_cache, free_slot_cache);
-	if (WARN_ONCE(ret < 0, "Cache allocation failed (%s), operating "
-			       "without swap slots cache.\n", __func__))
+	ret = register_cpu_notifier(&swap_slot_nb);
+	if (ret < 0)
 		goto out_unlock;
 
+	for_each_online_cpu(cpu)
+		alloc_swap_slot_cache(cpu);
 	swap_slot_cache_initialized = true;
 	__reenable_swap_slots_cache();
 out_unlock:
@@ -271,8 +294,7 @@ static int refill_swap_slots_cache(struct swap_slots_cache *cache)
 
 	cache->cur = 0;
 	if (swap_slot_cache_active)
-		cache->nr = get_swap_pages(SWAP_SLOTS_CACHE_SIZE, false,
-					   cache->slots);
+		cache->nr = get_swap_pages(SWAP_SLOTS_CACHE_SIZE, cache->slots);
 
 	return cache->nr;
 }
@@ -281,7 +303,7 @@ int free_swap_slot(swp_entry_t entry)
 {
 	struct swap_slots_cache *cache;
 
-	cache = raw_cpu_ptr(&swp_slots);
+	cache = __this_cpu_ptr(&swp_slots);
 	if (likely(use_swap_slot_cache && cache->slots_ret)) {
 		spin_lock_irq(&cache->free_lock);
 		/* Swap slots cache may be deactivated before acquiring lock */
@@ -309,18 +331,10 @@ direct_free:
 	return 0;
 }
 
-swp_entry_t get_swap_page(struct page *page)
+swp_entry_t get_swap_page(void)
 {
 	swp_entry_t entry, *pentry;
 	struct swap_slots_cache *cache;
-
-	entry.val = 0;
-
-	if (PageTransHuge(page)) {
-		if (IS_ENABLED(CONFIG_THP_SWAP))
-			get_swap_pages(1, true, &entry);
-		return entry;
-	}
 
 	/*
 	 * Preemption is allowed here, because we may sleep
@@ -331,8 +345,9 @@ swp_entry_t get_swap_page(struct page *page)
 	 * The alloc path here does not touch cache->slots_ret
 	 * so cache->free_lock is not taken.
 	 */
-	cache = raw_cpu_ptr(&swp_slots);
+	cache = __this_cpu_ptr(&swp_slots);
 
+	entry.val = 0;
 	if (likely(check_cache_active() && cache->slots)) {
 		mutex_lock(&cache->alloc_lock);
 		if (cache->slots) {
@@ -352,7 +367,7 @@ repeat:
 			return entry;
 	}
 
-	get_swap_pages(1, false, &entry);
+	get_swap_pages(1, &entry);
 
 	return entry;
 }

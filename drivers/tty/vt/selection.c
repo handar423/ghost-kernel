@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * This module exports the functions:
  *
@@ -14,10 +13,11 @@
 #include <linux/tty.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
+#include <linux/mutex.h>
 #include <linux/slab.h>
 #include <linux/types.h>
 
-#include <linux/uaccess.h>
+#include <asm/uaccess.h>
 
 #include <linux/kbd_kern.h>
 #include <linux/vt_kern.h>
@@ -25,7 +25,6 @@
 #include <linux/selection.h>
 #include <linux/tiocl.h>
 #include <linux/console.h>
-#include <linux/tty_flip.h>
 
 /* Don't take this from <ctype.h>: 011-015 on the screen aren't spaces */
 #define isspace(c)	((c) == ' ')
@@ -41,6 +40,7 @@ static volatile int sel_start = -1; 	/* cleared by clear_selection */
 static int sel_end;
 static int sel_buffer_lth;
 static char *sel_buffer;
+static DEFINE_MUTEX(sel_lock);
 
 /* clear_selection, highlight and highlight_pointer can be called
    from interrupt (via scrollback/front) */
@@ -79,19 +79,28 @@ void clear_selection(void)
 	}
 }
 
+bool vc_is_sel(struct vc_data *vc)
+{
+	return vc == sel_cons;
+}
+
 /*
  * User settable table: what characters are to be considered alphabetic?
- * 128 bits. Locked by the console lock.
+ * 256 bits. Locked by the console lock.
  */
-static u32 inwordLut[]={
+static u32 inwordLut[8]={
   0x00000000, /* control chars     */
-  0x03FFE000, /* digits and "-./"  */
+  0x03FF0000, /* digits            */
   0x87FFFFFE, /* uppercase and '_' */
   0x07FFFFFE, /* lowercase         */
+  0x00000000,
+  0x00000000,
+  0xFF7FFFFF, /* latin-1 accented letters, not multiplication sign */
+  0xFF7FFFFF  /* latin-1 accented letters, not division sign */
 };
 
 static inline int inword(const u16 c) {
-	return c > 0x7f || (( inwordLut[c>>5] >> (c & 0x1F) ) & 1);
+	return c > 0xff || (( inwordLut[c>>5] >> (c & 0x1F) ) & 1);
 }
 
 /**
@@ -103,10 +112,10 @@ static inline int inword(const u16 c) {
  */
 int sel_loadlut(char __user *p)
 {
-	u32 tmplut[ARRAY_SIZE(inwordLut)];
-	if (copy_from_user(tmplut, (u32 __user *)(p+4), sizeof(inwordLut)))
+	u32 tmplut[8];
+	if (copy_from_user(tmplut, (u32 __user *)(p+4), 32))
 		return -EFAULT;
-	memcpy(inwordLut, tmplut, sizeof(inwordLut));
+	memcpy(inwordLut, tmplut, 32);
 	return 0;
 }
 
@@ -156,34 +165,42 @@ static int store_utf8(u16 c, char *p)
 int set_selection(const struct tiocl_selection __user *sel, struct tty_struct *tty)
 {
 	struct vc_data *vc = vc_cons[fg_console].d;
-	int new_sel_start, new_sel_end, spc;
-	struct tiocl_selection v;
+	int sel_mode, new_sel_start, new_sel_end, spc;
 	char *bp, *obp;
 	int i, ps, pe, multiplier;
 	u16 c;
-	int mode;
+	int mode, ret = 0;
 
 	poke_blanked_console();
-	if (copy_from_user(&v, sel, sizeof(*sel)))
+
+	{ unsigned short xs, ys, xe, ye;
+
+	  if (!access_ok(VERIFY_READ, sel, sizeof(*sel)))
 		return -EFAULT;
+	  __get_user(xs, &sel->xs);
+	  __get_user(ys, &sel->ys);
+	  __get_user(xe, &sel->xe);
+	  __get_user(ye, &sel->ye);
+	  __get_user(sel_mode, &sel->sel_mode);
+	  xs--; ys--; xe--; ye--;
+	  xs = limit(xs, vc->vc_cols - 1);
+	  ys = limit(ys, vc->vc_rows - 1);
+	  xe = limit(xe, vc->vc_cols - 1);
+	  ye = limit(ye, vc->vc_rows - 1);
+	  ps = ys * vc->vc_size_row + (xs << 1);
+	  pe = ye * vc->vc_size_row + (xe << 1);
 
-	v.xs = limit(v.xs - 1, vc->vc_cols - 1);
-	v.ys = limit(v.ys - 1, vc->vc_rows - 1);
-	v.xe = limit(v.xe - 1, vc->vc_cols - 1);
-	v.ye = limit(v.ye - 1, vc->vc_rows - 1);
-	ps = v.ys * vc->vc_size_row + (v.xs << 1);
-	pe = v.ye * vc->vc_size_row + (v.xe << 1);
+	  if (sel_mode == TIOCL_SELCLEAR) {
+	      /* useful for screendump without selection highlights */
+	      clear_selection();
+	      return 0;
+	  }
 
-	if (v.sel_mode == TIOCL_SELCLEAR) {
-		/* useful for screendump without selection highlights */
-		clear_selection();
-		return 0;
-	}
-
-	if (mouse_reporting() && (v.sel_mode & TIOCL_SELMOUSEREPORT)) {
-		mouse_report(tty, v.sel_mode & TIOCL_SELBUTTONMASK, v.xs, v.ys);
-		return 0;
-	}
+	  if (mouse_reporting() && (sel_mode & TIOCL_SELMOUSEREPORT)) {
+	      mouse_report(tty, sel_mode & TIOCL_SELBUTTONMASK, xs, ys);
+	      return 0;
+	  }
+        }
 
 	if (ps > pe)	/* make sel_start <= sel_end */
 	{
@@ -192,6 +209,7 @@ int set_selection(const struct tiocl_selection __user *sel, struct tty_struct *t
 		pe = tmp;
 	}
 
+	mutex_lock(&sel_lock);
 	if (sel_cons != vc_cons[fg_console].d) {
 		clear_selection();
 		sel_cons = vc_cons[fg_console].d;
@@ -202,7 +220,7 @@ int set_selection(const struct tiocl_selection __user *sel, struct tty_struct *t
 	else
 		use_unicode = 0;
 
-	switch (v.sel_mode)
+	switch (sel_mode)
 	{
 		case TIOCL_SELCHAR:	/* character-by-character selection */
 			new_sel_start = ps;
@@ -237,9 +255,10 @@ int set_selection(const struct tiocl_selection __user *sel, struct tty_struct *t
 			break;
 		case TIOCL_SELPOINTER:
 			highlight_pointer(pe);
-			return 0;
+			goto unlock;
 		default:
-			return -EINVAL;
+			ret = -EINVAL;
+			goto unlock;
 	}
 
 	/* remove the pointer */
@@ -261,7 +280,7 @@ int set_selection(const struct tiocl_selection __user *sel, struct tty_struct *t
 	else if (new_sel_start == sel_start)
 	{
 		if (new_sel_end == sel_end)	/* no action required */
-			return 0;
+			goto unlock;
 		else if (new_sel_end > sel_end)	/* extend to right */
 			highlight(sel_end + 2, new_sel_end);
 		else				/* contract from right */
@@ -288,7 +307,8 @@ int set_selection(const struct tiocl_selection __user *sel, struct tty_struct *t
 	if (!bp) {
 		printk(KERN_WARNING "selection: kmalloc() failed\n");
 		clear_selection();
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto unlock;
 	}
 	kfree(sel_buffer);
 	sel_buffer = bp;
@@ -313,7 +333,9 @@ int set_selection(const struct tiocl_selection __user *sel, struct tty_struct *t
 		}
 	}
 	sel_buffer_lth = bp - sel_buffer;
-	return 0;
+unlock:
+	mutex_unlock(&sel_lock);
+	return ret;
 }
 
 /* Insert the contents of the selection buffer into the
@@ -336,27 +358,27 @@ int paste_selection(struct tty_struct *tty)
 	console_unlock();
 
 	ld = tty_ldisc_ref_wait(tty);
-	if (!ld)
-		return -EIO;	/* ldisc was hung up */
-	tty_buffer_lock_exclusive(&vc->port);
 
+	/* FIXME: this is completely unsafe */
 	add_wait_queue(&vc->paste_wait, &wait);
+	mutex_lock(&sel_lock);
 	while (sel_buffer && sel_buffer_lth > pasted) {
 		set_current_state(TASK_INTERRUPTIBLE);
 		if (tty_throttled(tty)) {
+			mutex_unlock(&sel_lock);
 			schedule();
+			mutex_lock(&sel_lock);
 			continue;
 		}
-		__set_current_state(TASK_RUNNING);
 		count = sel_buffer_lth - pasted;
 		count = tty_ldisc_receive_buf(ld, sel_buffer + pasted, NULL,
 					      count);
 		pasted += count;
 	}
+	mutex_unlock(&sel_lock);
 	remove_wait_queue(&vc->paste_wait, &wait);
 	__set_current_state(TASK_RUNNING);
 
-	tty_buffer_unlock_exclusive(&vc->port);
 	tty_ldisc_deref(ld);
 	return 0;
 }

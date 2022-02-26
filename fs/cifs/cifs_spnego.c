@@ -45,7 +45,7 @@ cifs_spnego_key_instantiate(struct key *key, struct key_preparsed_payload *prep)
 		goto error;
 
 	/* attach the data */
-	key->payload.data[0] = payload;
+	key->payload.data = payload;
 	ret = 0;
 
 error:
@@ -55,7 +55,7 @@ error:
 static void
 cifs_spnego_key_destroy(struct key *key)
 {
-	kfree(key->payload.data[0]);
+	kfree(key->payload.data);
 }
 
 
@@ -65,6 +65,7 @@ cifs_spnego_key_destroy(struct key *key)
 struct key_type cifs_spnego_key_type = {
 	.name		= "cifs.spnego",
 	.instantiate	= cifs_spnego_key_instantiate,
+	.match		= user_match,
 	.destroy	= cifs_spnego_key_destroy,
 	.describe	= user_describe,
 };
@@ -147,8 +148,10 @@ cifs_get_spnego_key(struct cifs_ses *sesInfo)
 		sprintf(dp, ";sec=krb5");
 	else if (server->sec_mskerberos)
 		sprintf(dp, ";sec=mskrb5");
-	else
-		goto out;
+	else {
+		cifs_dbg(VFS, "unknown or missing server auth type, use krb5\n");
+		sprintf(dp, ";sec=krb5");
+	}
 
 	dp = description + strlen(description);
 	sprintf(dp, ";uid=0x%x",
@@ -173,7 +176,7 @@ cifs_get_spnego_key(struct cifs_ses *sesInfo)
 
 #ifdef CONFIG_CIFS_DEBUG2
 	if (cifsFYI && !IS_ERR(spnego_key)) {
-		struct cifs_spnego_msg *msg = spnego_key->payload.data[0];
+		struct cifs_spnego_msg *msg = spnego_key->payload.data;
 		cifs_dump_mem("SPNEGO reply blob:", msg->data, min(1024U,
 				msg->secblob_len + msg->sesskey_len));
 	}
@@ -207,7 +210,7 @@ init_cifs_spnego(void)
 				GLOBAL_ROOT_UID, GLOBAL_ROOT_GID, cred,
 				(KEY_POS_ALL & ~KEY_POS_SETATTR) |
 				KEY_USR_VIEW | KEY_USR_READ,
-				KEY_ALLOC_NOT_IN_QUOTA, NULL, NULL);
+				KEY_ALLOC_NOT_IN_QUOTA, NULL);
 	if (IS_ERR(keyring)) {
 		ret = PTR_ERR(keyring);
 		goto failed_put_cred;

@@ -29,13 +29,14 @@
 
 #include <plat/cpu.h>
 #include <plat/cpu-freq-core.h>
+#include <plat/clock.h>
 
-#include <mach/s3c2412.h>
+#include "s3c2412.h"
 
 #define print_ns(x) ((x) / 10), ((x) % 10)
 
 /**
- * s3c2412_print_timing - print timing information via printk.
+ * s3c2412_print_timing - print timing infromation via printk.
  * @pfx: The prefix to print each line with.
  * @iot: The IO timing information
  */
@@ -242,9 +243,11 @@ int s3c2412_iotiming_get(struct s3c_cpufreq_config *cfg,
 		if (!bank_is_io(bank, bankcfg))
 			continue;
 
-		bt = kzalloc(sizeof(*bt), GFP_KERNEL);
-		if (!bt)
+		bt = kzalloc(sizeof(struct s3c2412_iobank_timing), GFP_KERNEL);
+		if (!bt) {
+			printk(KERN_ERR "%s: no memory for bank\n", __func__);
 			return -ENOMEM;
+		}
 
 		timings->bank[bank].io_2412 = bt;
 		s3c2412_iotiming_getbank(cfg, bt, bank);

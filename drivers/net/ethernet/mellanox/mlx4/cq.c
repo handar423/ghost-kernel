@@ -34,6 +34,7 @@
  * SOFTWARE.
  */
 
+#include <linux/init.h>
 #include <linux/hardirq.h>
 #include <linux/export.h>
 

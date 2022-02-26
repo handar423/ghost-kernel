@@ -48,7 +48,7 @@
 #include <linux/cdev.h>
 #include <linux/vmalloc.h>
 #include <linux/io.h>
-#include <linux/sched/mm.h>
+#include <linux/aio.h>
 #include <linux/bitmap.h>
 
 #include <rdma/ib.h>
@@ -73,7 +73,8 @@
  */
 static int hfi1_file_open(struct inode *inode, struct file *fp);
 static int hfi1_file_close(struct inode *inode, struct file *fp);
-static ssize_t hfi1_write_iter(struct kiocb *kiocb, struct iov_iter *from);
+static ssize_t hfi1_aio_write(struct kiocb *kiocb, const struct iovec *iovec,
+			      unsigned long dim, loff_t offset);
 static unsigned int hfi1_poll(struct file *fp, struct poll_table_struct *pt);
 static int hfi1_file_mmap(struct file *fp, struct vm_area_struct *vma);
 
@@ -110,13 +111,13 @@ static int set_ctxt_pkey(struct hfi1_ctxtdata *uctxt, unsigned long arg);
 static int ctxt_reset(struct hfi1_ctxtdata *uctxt);
 static int manage_rcvq(struct hfi1_ctxtdata *uctxt, u16 subctxt,
 		       unsigned long arg);
-static int vma_fault(struct vm_fault *vmf);
+static int vma_fault(struct vm_area_struct *vma, struct vm_fault *vmf);
 static long hfi1_file_ioctl(struct file *fp, unsigned int cmd,
 			    unsigned long arg);
 
 static const struct file_operations hfi1_file_ops = {
 	.owner = THIS_MODULE,
-	.write_iter = hfi1_write_iter,
+	.aio_write = hfi1_aio_write,
 	.open = hfi1_file_open,
 	.release = hfi1_file_close,
 	.unlocked_ioctl = hfi1_file_ioctl,
@@ -196,9 +197,6 @@ static int hfi1_file_open(struct inode *inode, struct file *fp)
 	if (!atomic_inc_not_zero(&dd->user_refcount))
 		return -ENXIO;
 
-	/* Just take a ref now. Not all opens result in a context assign */
-	kobject_get(&dd->kobj);
-
 	/* The real work is performed later in assign_ctxt() */
 
 	fd = kzalloc(sizeof(*fd), GFP_KERNEL);
@@ -206,8 +204,9 @@ static int hfi1_file_open(struct inode *inode, struct file *fp)
 	if (fd) {
 		fd->rec_cpu_num = -1; /* no cpu affinity by default */
 		fd->mm = current->mm;
-		mmgrab(fd->mm);
+		atomic_inc(&fd->mm->mm_count);
 		fd->dd = dd;
+		kobject_get(&fd->dd->kobj);
 		fp->private_data = fd;
 	} else {
 		fp->private_data = NULL;
@@ -300,18 +299,18 @@ static long hfi1_file_ioctl(struct file *fp, unsigned int cmd,
 	return ret;
 }
 
-static ssize_t hfi1_write_iter(struct kiocb *kiocb, struct iov_iter *from)
+static ssize_t hfi1_aio_write(struct kiocb *kiocb, const struct iovec *iovec,
+			      unsigned long dim, loff_t offset)
 {
 	struct hfi1_filedata *fd = kiocb->ki_filp->private_data;
 	struct hfi1_user_sdma_pkt_q *pq = fd->pq;
 	struct hfi1_user_sdma_comp_q *cq = fd->cq;
 	int done = 0, reqs = 0;
-	unsigned long dim = from->nr_segs;
 
 	if (!cq || !pq)
 		return -EIO;
 
-	if (!iter_is_iovec(from) || !dim)
+	if (!dim)
 		return -EINVAL;
 
 	trace_hfi1_sdma_request(fd->dd, fd->uctxt->ctxt, fd->subctxt, dim);
@@ -324,7 +323,7 @@ static ssize_t hfi1_write_iter(struct kiocb *kiocb, struct iov_iter *from)
 		unsigned long count = 0;
 
 		ret = hfi1_user_sdma_process_request(
-			fd, (struct iovec *)(from->iov + done),
+			fd, (struct iovec *)(iovec + done),
 			dim, &count);
 		if (ret) {
 			reqs = ret;
@@ -413,7 +412,7 @@ static int hfi1_file_mmap(struct file *fp, struct vm_area_struct *vma)
 		mapio = 1;
 		break;
 	case RCV_HDRQ:
-		memlen = uctxt->rcvhdrq_size;
+		memlen = rcvhdrq_size(uctxt);
 		memvirt = uctxt->rcvhdrq;
 		break;
 	case RCV_EGRBUF: {
@@ -490,7 +489,7 @@ static int hfi1_file_mmap(struct file *fp, struct vm_area_struct *vma)
 		vmf = 1;
 		break;
 	case STATUS:
-		if (flags & (unsigned long)(VM_WRITE | VM_EXEC)) {
+		if (flags & VM_WRITE) {
 			ret = -EPERM;
 			goto done;
 		}
@@ -507,7 +506,7 @@ static int hfi1_file_mmap(struct file *fp, struct vm_area_struct *vma)
 			ret = -EINVAL;
 			goto done;
 		}
-		if (flags & VM_WRITE) {
+		if ((flags & VM_WRITE) || !uctxt->rcvhdrtail_kvaddr) {
 			ret = -EPERM;
 			goto done;
 		}
@@ -523,7 +522,7 @@ static int hfi1_file_mmap(struct file *fp, struct vm_area_struct *vma)
 		break;
 	case SUBCTXT_RCV_HDRQ:
 		memaddr = (u64)uctxt->subctxt_rcvhdr_base;
-		memlen = uctxt->rcvhdrq_size * uctxt->subctxt_cnt;
+		memlen = rcvhdrq_size(uctxt) * uctxt->subctxt_cnt;
 		flags |= VM_IO | VM_DONTEXPAND;
 		vmf = 1;
 		break;
@@ -593,7 +592,7 @@ done:
  * Local (non-chip) user memory is not mapped right away but as it is
  * accessed by the user-level code.
  */
-static int vma_fault(struct vm_fault *vmf)
+static int vma_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 {
 	struct page *page;
 
@@ -683,7 +682,8 @@ static int hfi1_file_close(struct inode *inode, struct file *fp)
 		     HFI1_RCVCTRL_TAILUPD_DIS |
 		     HFI1_RCVCTRL_ONE_PKT_EGR_DIS |
 		     HFI1_RCVCTRL_NO_RHQ_DROP_DIS |
-		     HFI1_RCVCTRL_NO_EGR_DROP_DIS, uctxt);
+		     HFI1_RCVCTRL_NO_EGR_DROP_DIS |
+		     HFI1_RCVCTRL_URGENT_DIS, uctxt);
 	/* Clear the context's J_KEY */
 	hfi1_clear_ctxt_jkey(dd, uctxt);
 	/*
@@ -691,8 +691,8 @@ static int hfi1_file_close(struct inode *inode, struct file *fp)
 	 * checks to default and disable the send context.
 	 */
 	if (uctxt->sc) {
-		set_pio_integrity(uctxt->sc);
 		sc_disable(uctxt->sc);
+		set_pio_integrity(uctxt->sc);
 	}
 
 	hfi1_free_ctxt_rcv_groups(uctxt);
@@ -987,7 +987,11 @@ static int allocate_ctxt(struct hfi1_filedata *fd, struct hfi1_devdata *dd,
 	 * sub contexts.
 	 * This has to be done here so the rest of the sub-contexts find the
 	 * proper base context.
+	 * NOTE: _set_bit() can be used here because the context creation is
+	 * protected by the mutex (rather than the spin_lock), and will be the
+	 * very first instance of this context.
 	 */
+	__set_bit(0, uctxt->in_use_ctxts);
 	if (uinfo->subctxt_cnt)
 		init_subctxts(uctxt, uinfo);
 	uctxt->userversion = uinfo->userversion;
@@ -1042,7 +1046,7 @@ static int setup_subctxt(struct hfi1_ctxtdata *uctxt)
 		return -ENOMEM;
 
 	/* We can take the size of the RcvHdr Queue from the master */
-	uctxt->subctxt_rcvhdr_base = vmalloc_user(uctxt->rcvhdrq_size *
+	uctxt->subctxt_rcvhdr_base = vmalloc_user(rcvhdrq_size(uctxt) *
 						  num_subctxts);
 	if (!uctxt->subctxt_rcvhdr_base) {
 		ret = -ENOMEM;
@@ -1094,6 +1098,7 @@ static void user_init(struct hfi1_ctxtdata *uctxt)
 	hfi1_set_ctxt_jkey(uctxt->dd, uctxt, uctxt->jkey);
 
 	rcvctrl_ops = HFI1_RCVCTRL_CTXT_ENB;
+	rcvctrl_ops |= HFI1_RCVCTRL_URGENT_ENB;
 	if (HFI1_CAP_UGET_MASK(uctxt->flags, HDRSUPP))
 		rcvctrl_ops |= HFI1_RCVCTRL_TIDFLOW_ENB;
 	/*

@@ -15,9 +15,6 @@
 
 #undef DEBUG_PROM
 
-/* we cannot use FORTIFY as it brings in new symbols */
-#define __NO_FORTIFY
-
 #include <stdarg.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
@@ -45,7 +42,6 @@
 #include <asm/sections.h>
 #include <asm/machdep.h>
 #include <asm/opal.h>
-#include <asm/asm-prototypes.h>
 
 #include <linux/linux_logo.h>
 
@@ -170,15 +166,6 @@ static int __initdata prom_iommu_off;
 static unsigned long __initdata prom_tce_alloc_start;
 static unsigned long __initdata prom_tce_alloc_end;
 #endif
-
-static bool __initdata prom_radix_disable;
-
-struct platform_support {
-	bool hash_mmu;
-	bool radix_mmu;
-	bool radix_gtse;
-	bool xive;
-};
 
 /* Platforms codes are now obsolete in the kernel. Now only used within this
  * file and ultimately gone too. Feel free to change them if you need, they
@@ -402,7 +389,6 @@ static void __init prom_printf(const char *format, ...)
 			break;
 		}
 	}
-	va_end(args);
 }
 
 
@@ -473,14 +459,14 @@ static int __init prom_next_node(phandle *nodep)
 	}
 }
 
-static inline int prom_getprop(phandle node, const char *pname,
+static int inline prom_getprop(phandle node, const char *pname,
 			       void *value, size_t valuelen)
 {
 	return call_prom("getprop", 4, 1, node, ADDR(pname),
 			 (u32)(unsigned long) value, (u32) valuelen);
 }
 
-static inline int prom_getproplen(phandle node, const char *pname)
+static int inline prom_getproplen(phandle node, const char *pname)
 {
 	return call_prom("getproplen", 2, 1, node, ADDR(pname));
 }
@@ -638,12 +624,6 @@ static void __init early_cmdline_parse(void)
 		prom_memory_limit = ALIGN(prom_memory_limit, 0x1000000);
 #endif
 	}
-
-	opt = strstr(prom_cmd_line, "disable_radix");
-	if (opt) {
-		prom_debug("Radix disabled from cmdline\n");
-		prom_radix_disable = true;
-	}
 }
 
 #if defined(CONFIG_PPC_PSERIES) || defined(CONFIG_PPC_POWERNV)
@@ -667,7 +647,6 @@ static void __init early_cmdline_parse(void)
 struct option_vector1 {
 	u8 byte1;
 	u8 arch_versions;
-	u8 arch_versions3;
 } __packed;
 
 struct option_vector2 {
@@ -710,11 +689,6 @@ struct option_vector5 {
 	u8 reserved2;
 	__be16 reserved3;
 	u8 subprocessors;
-	u8 byte22;
-	u8 intarch;
-	u8 mmu;
-	u8 hash_ext;
-	u8 radix_ext;
 } __packed;
 
 struct option_vector6 {
@@ -724,7 +698,7 @@ struct option_vector6 {
 } __packed;
 
 struct ibm_arch_vec {
-	struct { u32 mask, val; } pvrs[12];
+	struct { u32 mask, val; } pvrs[10];
 
 	u8 num_vectors;
 
@@ -774,14 +748,6 @@ struct ibm_arch_vec __cacheline_aligned ibm_architecture_vec = {
 			.val  = cpu_to_be32(0x004d0000),
 		},
 		{
-			.mask = cpu_to_be32(0xffff0000), /* POWER9 */
-			.val  = cpu_to_be32(0x004e0000),
-		},
-		{
-			.mask = cpu_to_be32(0xffffffff), /* all 3.00-compliant */
-			.val  = cpu_to_be32(0x0f000005),
-		},
-		{
 			.mask = cpu_to_be32(0xffffffff), /* all 2.07-compliant */
 			.val  = cpu_to_be32(0x0f000004),
 		},
@@ -806,7 +772,6 @@ struct ibm_arch_vec __cacheline_aligned ibm_architecture_vec = {
 		.byte1 = 0,
 		.arch_versions = OV1_PPC_2_00 | OV1_PPC_2_01 | OV1_PPC_2_02 | OV1_PPC_2_03 |
 				 OV1_PPC_2_04 | OV1_PPC_2_05 | OV1_PPC_2_06 | OV1_PPC_2_07,
-		.arch_versions3 = OV1_PPC_3_00,
 	},
 
 	.vec2_len = VECTOR_LENGTH(sizeof(struct option_vector2)),
@@ -869,10 +834,6 @@ struct ibm_arch_vec __cacheline_aligned ibm_architecture_vec = {
 		.reserved2 = 0,
 		.reserved3 = 0,
 		.subprocessors = 1,
-		.intarch = 0,
-		.mmu = 0,
-		.hash_ext = 0,
-		.radix_ext = 0,
 	},
 
 	/* option vector 6: IBM PAPR hints */
@@ -1011,132 +972,12 @@ static int __init prom_count_smt_threads(void)
 
 }
 
-static void __init prom_parse_mmu_model(u8 val,
-					struct platform_support *support)
-{
-	switch (val) {
-	case OV5_FEAT(OV5_MMU_DYNAMIC):
-	case OV5_FEAT(OV5_MMU_EITHER): /* Either Available */
-		prom_debug("MMU - either supported\n");
-		support->radix_mmu = !prom_radix_disable;
-		support->hash_mmu = true;
-		break;
-	case OV5_FEAT(OV5_MMU_RADIX): /* Only Radix */
-		prom_debug("MMU - radix only\n");
-		if (prom_radix_disable) {
-			/*
-			 * If we __have__ to do radix, we're better off ignoring
-			 * the command line rather than not booting.
-			 */
-			prom_printf("WARNING: Ignoring cmdline option disable_radix\n");
-		}
-		support->radix_mmu = true;
-		break;
-	case OV5_FEAT(OV5_MMU_HASH):
-		prom_debug("MMU - hash only\n");
-		support->hash_mmu = true;
-		break;
-	default:
-		prom_debug("Unknown mmu support option: 0x%x\n", val);
-		break;
-	}
-}
-
-static void __init prom_parse_xive_model(u8 val,
-					 struct platform_support *support)
-{
-	switch (val) {
-	case OV5_FEAT(OV5_XIVE_EITHER): /* Either Available */
-		prom_debug("XIVE - either mode supported\n");
-		support->xive = true;
-		break;
-	case OV5_FEAT(OV5_XIVE_EXPLOIT): /* Only Exploitation mode */
-		prom_debug("XIVE - exploitation mode supported\n");
-		support->xive = true;
-		break;
-	case OV5_FEAT(OV5_XIVE_LEGACY): /* Only Legacy mode */
-		prom_debug("XIVE - legacy mode supported\n");
-		break;
-	default:
-		prom_debug("Unknown xive support option: 0x%x\n", val);
-		break;
-	}
-}
-
-static void __init prom_parse_platform_support(u8 index, u8 val,
-					       struct platform_support *support)
-{
-	switch (index) {
-	case OV5_INDX(OV5_MMU_SUPPORT): /* MMU Model */
-		prom_parse_mmu_model(val & OV5_FEAT(OV5_MMU_SUPPORT), support);
-		break;
-	case OV5_INDX(OV5_RADIX_GTSE): /* Radix Extensions */
-		if (val & OV5_FEAT(OV5_RADIX_GTSE)) {
-			prom_debug("Radix - GTSE supported\n");
-			support->radix_gtse = true;
-		}
-		break;
-	case OV5_INDX(OV5_XIVE_SUPPORT): /* Interrupt mode */
-		prom_parse_xive_model(val & OV5_FEAT(OV5_XIVE_SUPPORT),
-				      support);
-		break;
-	}
-}
-
-static void __init prom_check_platform_support(void)
-{
-	struct platform_support supported = {
-		.hash_mmu = false,
-		.radix_mmu = false,
-		.radix_gtse = false,
-		.xive = false
-	};
-	int prop_len = prom_getproplen(prom.chosen,
-				       "ibm,arch-vec-5-platform-support");
-	if (prop_len > 1) {
-		int i;
-		u8 vec[prop_len];
-		prom_debug("Found ibm,arch-vec-5-platform-support, len: %d\n",
-			   prop_len);
-		prom_getprop(prom.chosen, "ibm,arch-vec-5-platform-support",
-			     &vec, sizeof(vec));
-		for (i = 0; i < prop_len; i += 2) {
-			prom_debug("%d: index = 0x%x val = 0x%x\n", i / 2
-								  , vec[i]
-								  , vec[i + 1]);
-			prom_parse_platform_support(vec[i], vec[i + 1],
-						    &supported);
-		}
-	}
-
-	if (supported.radix_mmu && supported.radix_gtse) {
-		/* Radix preferred - but we require GTSE for now */
-		prom_debug("Asking for radix with GTSE\n");
-		ibm_architecture_vec.vec5.mmu = OV5_FEAT(OV5_MMU_RADIX);
-		ibm_architecture_vec.vec5.radix_ext = OV5_FEAT(OV5_RADIX_GTSE);
-	} else if (supported.hash_mmu) {
-		/* Default to hash mmu (if we can) */
-		prom_debug("Asking for hash\n");
-		ibm_architecture_vec.vec5.mmu = OV5_FEAT(OV5_MMU_HASH);
-	} else {
-		/* We're probably on a legacy hypervisor */
-		prom_debug("Assuming legacy hash support\n");
-	}
-
-	if (supported.xive) {
-		prom_debug("Asking for XIVE\n");
-		ibm_architecture_vec.vec5.intarch = OV5_FEAT(OV5_XIVE_EXPLOIT);
-	}
-}
 
 static void __init prom_send_capabilities(void)
 {
 	ihandle root;
 	prom_arg_t ret;
 	u32 cores;
-
-	/* Check ibm,arch-vec-5-platform-support and fixup vec5 if required */
-	prom_check_platform_support();
 
 	root = call_prom("open", 1, 1, ADDR("/"));
 	if (root != 0) {
@@ -2234,22 +2075,6 @@ static void __init prom_check_displays(void)
 					   clut[2]) != 0)
 				break;
 #endif /* CONFIG_LOGO_LINUX_CLUT224 */
-
-#ifdef CONFIG_PPC_EARLY_DEBUG_BOOTX
-		if (prom_getprop(node, "linux,boot-display", NULL, 0) !=
-		    PROM_ERROR) {
-			u32 width, height, pitch, addr;
-
-			prom_printf("Setting btext !\n");
-			prom_getprop(node, "width", &width, 4);
-			prom_getprop(node, "height", &height, 4);
-			prom_getprop(node, "linebytes", &pitch, 4);
-			prom_getprop(node, "address", &addr, 4);
-			prom_printf("W=%d H=%d LB=%d addr=0x%x\n",
-				    width, height, pitch, addr);
-			btext_setup_display(width, height, 8, pitch, addr);
-		}
-#endif /* CONFIG_PPC_EARLY_DEBUG_BOOTX */
 	}
 }
 
@@ -2888,86 +2713,6 @@ static void __init fixup_device_tree_efika(void)
 #define fixup_device_tree_efika()
 #endif
 
-#ifdef CONFIG_PPC_PASEMI_NEMO
-/*
- * CFE supplied on Nemo is broken in several ways, biggest
- * problem is that it reassigns ISA interrupts to unused mpic ints.
- * Add an interrupt-controller property for the io-bridge to use
- * and correct the ints so we can attach them to an irq_domain
- */
-static void __init fixup_device_tree_pasemi(void)
-{
-	u32 interrupts[2], parent, rval, val = 0;
-	char *name, *pci_name;
-	phandle iob, node;
-
-	/* Find the root pci node */
-	name = "/pxp@0,e0000000";
-	iob = call_prom("finddevice", 1, 1, ADDR(name));
-	if (!PHANDLE_VALID(iob))
-		return;
-
-	/* check if interrupt-controller node set yet */
-	if (prom_getproplen(iob, "interrupt-controller") !=PROM_ERROR)
-		return;
-
-	prom_printf("adding interrupt-controller property for SB600...\n");
-
-	prom_setprop(iob, name, "interrupt-controller", &val, 0);
-
-	pci_name = "/pxp@0,e0000000/pci@11";
-	node = call_prom("finddevice", 1, 1, ADDR(pci_name));
-	parent = ADDR(iob);
-
-	for( ; prom_next_node(&node); ) {
-		/* scan each node for one with an interrupt */
-		if (!PHANDLE_VALID(node))
-			continue;
-
-		rval = prom_getproplen(node, "interrupts");
-		if (rval == 0 || rval == PROM_ERROR)
-			continue;
-
-		prom_getprop(node, "interrupts", &interrupts, sizeof(interrupts));
-		if ((interrupts[0] < 212) || (interrupts[0] > 222))
-			continue;
-
-		/* found a node, update both interrupts and interrupt-parent */
-		if ((interrupts[0] >= 212) && (interrupts[0] <= 215))
-			interrupts[0] -= 203;
-		if ((interrupts[0] >= 216) && (interrupts[0] <= 220))
-			interrupts[0] -= 213;
-		if (interrupts[0] == 221)
-			interrupts[0] = 14;
-		if (interrupts[0] == 222)
-			interrupts[0] = 8;
-
-		prom_setprop(node, pci_name, "interrupts", interrupts,
-					sizeof(interrupts));
-		prom_setprop(node, pci_name, "interrupt-parent", &parent,
-					sizeof(parent));
-	}
-
-	/*
-	 * The io-bridge has device_type set to 'io-bridge' change it to 'isa'
-	 * so that generic isa-bridge code can add the SB600 and its on-board
-	 * peripherals.
-	 */
-	name = "/pxp@0,e0000000/io-bridge@0";
-	iob = call_prom("finddevice", 1, 1, ADDR(name));
-	if (!PHANDLE_VALID(iob))
-		return;
-
-	/* device_type is already set, just change it. */
-
-	prom_printf("Changing device_type of SB600 node...\n");
-
-	prom_setprop(iob, name, "device_type", "isa", sizeof("isa"));
-}
-#else	/* !CONFIG_PPC_PASEMI_NEMO */
-static inline void fixup_device_tree_pasemi(void) { }
-#endif
-
 static void __init fixup_device_tree(void)
 {
 	fixup_device_tree_maple();
@@ -2975,7 +2720,6 @@ static void __init fixup_device_tree(void)
 	fixup_device_tree_chrp();
 	fixup_device_tree_pmac();
 	fixup_device_tree_efika();
-	fixup_device_tree_pasemi();
 }
 
 static void __init prom_find_boot_cpu(void)
@@ -2990,9 +2734,6 @@ static void __init prom_find_boot_cpu(void)
 	prom_cpu = be32_to_cpu(rval);
 
 	cpu_pkg = call_prom("instance-to-package", 1, 1, prom_cpu);
-
-	if (!PHANDLE_VALID(cpu_pkg))
-		return;
 
 	prom_getprop(cpu_pkg, "reg", &rval, sizeof(rval));
 	prom.cpu = be32_to_cpu(rval);
@@ -3134,11 +2875,6 @@ unsigned long __init prom_init(unsigned long r3, unsigned long r4,
 	 */
 	prom_check_initrd(r3, r4);
 
-	/*
-	 * Do early parsing of command line
-	 */
-	early_cmdline_parse();
-
 #if defined(CONFIG_PPC_PSERIES) || defined(CONFIG_PPC_POWERNV)
 	/*
 	 * On pSeries, inform the firmware about our capabilities
@@ -3153,6 +2889,11 @@ unsigned long __init prom_init(unsigned long r3, unsigned long r4,
 	 */
 	if (of_platform != PLATFORM_POWERMAC)
 		copy_and_flush(0, kbase, 0x100, 0);
+
+	/*
+	 * Do early parsing of command line
+	 */
+	early_cmdline_parse();
 
 	/*
 	 * Initialize memory management within prom_init
@@ -3260,7 +3001,7 @@ unsigned long __init prom_init(unsigned long r3, unsigned long r4,
 	 * Call OF "quiesce" method to shut down pending DMA's from
 	 * devices etc...
 	 */
-	prom_printf("Quiescing Open Firmware ...\n");
+	prom_printf("Calling quiesce...\n");
 	call_prom("quiesce", 0, 0);
 
 	/*
@@ -3272,7 +3013,7 @@ unsigned long __init prom_init(unsigned long r3, unsigned long r4,
 
 	/* Don't print anything after quiesce under OPAL, it crashes OFW */
 	if (of_platform != PLATFORM_OPAL) {
-		prom_printf("Booting Linux via __start() @ 0x%lx ...\n", kbase);
+		prom_printf("returning from prom_init\n");
 		prom_debug("->dt_header_start=0x%x\n", hdr);
 	}
 

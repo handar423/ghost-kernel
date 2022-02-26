@@ -1284,35 +1284,49 @@ static struct attribute *qlcnic_hwmon_attrs[] = {
 	NULL
 };
 
-ATTRIBUTE_GROUPS(qlcnic_hwmon);
+static const struct attribute_group qlcnic_hwmon_group = {
+	.attrs = qlcnic_hwmon_attrs,
+};
 
 void qlcnic_register_hwmon_dev(struct qlcnic_adapter *adapter)
 {
 	struct device *dev = &adapter->pdev->dev;
 	struct device *hwmon_dev;
+	int err;
 
 	/* Skip hwmon registration for a VF device */
 	if (qlcnic_sriov_vf_check(adapter)) {
 		adapter->ahw->hwmon_dev = NULL;
 		return;
 	}
-	hwmon_dev = hwmon_device_register_with_groups(dev, qlcnic_driver_name,
-						      adapter,
-						      qlcnic_hwmon_groups);
+
+	err = sysfs_create_group(&dev->kobj, &qlcnic_hwmon_group);
+	if (err) {
+		dev_err(dev, "Cannot create sysfs group, aborting\n");
+		return;
+	}
+
+	hwmon_dev = hwmon_device_register(dev);
 	if (IS_ERR(hwmon_dev)) {
 		dev_err(dev, "Cannot register with hwmon, err=%ld\n",
 			PTR_ERR(hwmon_dev));
 		hwmon_dev = NULL;
+		sysfs_remove_group(&dev->kobj, &qlcnic_hwmon_group);
+		return;
 	}
+
 	adapter->ahw->hwmon_dev = hwmon_dev;
 }
 
 void qlcnic_unregister_hwmon_dev(struct qlcnic_adapter *adapter)
 {
 	struct device *hwmon_dev = adapter->ahw->hwmon_dev;
+
 	if (hwmon_dev) {
 		hwmon_device_unregister(hwmon_dev);
 		adapter->ahw->hwmon_dev = NULL;
+		sysfs_remove_group(&adapter->pdev->dev.kobj,
+				   &qlcnic_hwmon_group);
 	}
 }
 #endif

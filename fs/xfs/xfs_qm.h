@@ -74,7 +74,9 @@ typedef struct xfs_quotainfo {
 	struct xfs_inode	*qi_uquotaip;	/* user quota inode */
 	struct xfs_inode	*qi_gquotaip;	/* group quota inode */
 	struct xfs_inode	*qi_pquotaip;	/* project quota inode */
-	struct list_lru	 qi_lru;
+	struct list_head qi_lru_list;
+	struct mutex	 qi_lru_lock;
+	int		 qi_lru_count;
 	int		 qi_dquots;
 	time_t		 qi_btimelimit;	 /* limit for blks timer */
 	time_t		 qi_itimelimit;	 /* limit for inodes timer */
@@ -171,9 +173,13 @@ extern void		xfs_qm_dqrele_all_inodes(struct xfs_mount *, uint);
 /* quota ops */
 extern int		xfs_qm_scall_trunc_qfiles(struct xfs_mount *, uint);
 extern int		xfs_qm_scall_getquota(struct xfs_mount *, xfs_dqid_t *,
-					uint, struct qc_dqblk *, uint);
+					uint, struct fs_disk_quota *, uint);
 extern int		xfs_qm_scall_setqlim(struct xfs_mount *, xfs_dqid_t, uint,
-					struct qc_dqblk *);
+					struct fs_disk_quota *);
+extern int		xfs_qm_scall_getqstat(struct xfs_mount *,
+					struct fs_quota_stat *);
+extern int		xfs_qm_scall_getqstatv(struct xfs_mount *,
+					struct fs_quota_statv *);
 extern int		xfs_qm_scall_quotaon(struct xfs_mount *, uint);
 extern int		xfs_qm_scall_quotaoff(struct xfs_mount *, uint);
 

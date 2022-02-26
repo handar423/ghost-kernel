@@ -11,10 +11,11 @@
 #include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/gfp.h>
-#include <linux/acpi.h>
+#include <scsi/scsi_host.h>
+#include <acpi/acpi_bus.h>
+
 #include <linux/libata.h>
 #include <linux/ata.h>
-#include <scsi/scsi_host.h>
 
 #define DRV_NAME	"pata_acpi"
 #define DRV_VERSION	"0.2.3"
@@ -265,7 +266,7 @@ static struct pci_driver pacpi_pci_driver = {
 	.id_table		= pacpi_pci_tbl,
 	.probe			= pacpi_init_one,
 	.remove			= ata_pci_remove_one,
-#ifdef CONFIG_PM_SLEEP
+#ifdef CONFIG_PM
 	.suspend		= ata_pci_device_suspend,
 	.resume			= ata_pci_device_resume,
 #endif

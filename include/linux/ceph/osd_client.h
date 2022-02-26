@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _FS_CEPH_OSD_CLIENT_H
 #define _FS_CEPH_OSD_CLIENT_H
 
@@ -7,7 +6,6 @@
 #include <linux/kref.h>
 #include <linux/mempool.h>
 #include <linux/rbtree.h>
-#include <linux/refcount.h>
 
 #include <linux/ceph/types.h>
 #include <linux/ceph/osdmap.h>
@@ -30,7 +28,7 @@ typedef void (*ceph_osdc_callback_t)(struct ceph_osd_request *);
 
 /* a given osd we're communicating with */
 struct ceph_osd {
-	refcount_t o_ref;
+	atomic_t o_ref;
 	struct ceph_osd_client *o_osdc;
 	int o_osd;
 	int o_incarnation;

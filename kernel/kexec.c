@@ -6,8 +6,6 @@
  * Version 2.  See the file COPYING for more details.
  */
 
-#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
-
 #include <linux/capability.h>
 #include <linux/mm.h>
 #include <linux/file.h>
@@ -17,6 +15,7 @@
 #include <linux/syscalls.h>
 #include <linux/vmalloc.h>
 #include <linux/slab.h>
+#include <linux/security.h>
 
 #include "kexec_internal.h"
 
@@ -48,8 +47,7 @@ static int kimage_alloc_init(struct kimage **rimage, unsigned long entry,
 
 	if (kexec_on_panic) {
 		/* Verify we have a valid entry point */
-		if ((entry < phys_to_boot_phys(crashk_res.start)) ||
-		    (entry > phys_to_boot_phys(crashk_res.end)))
+		if ((entry < crashk_res.start) || (entry > crashk_res.end))
 			return -EADDRNOTAVAIL;
 	}
 
@@ -64,15 +62,15 @@ static int kimage_alloc_init(struct kimage **rimage, unsigned long entry,
 	if (ret)
 		goto out_free_image;
 
-	if (kexec_on_panic) {
-		/* Enable special crash kernel control page alloc policy. */
-		image->control_page = crashk_res.start;
-		image->type = KEXEC_TYPE_CRASH;
-	}
-
 	ret = sanity_check_segment_list(image);
 	if (ret)
 		goto out_free_image;
+
+	 /* Enable the special crash kernel control page allocation policy. */
+	if (kexec_on_panic) {
+		image->control_page = crashk_res.start;
+		image->type = KEXEC_TYPE_CRASH;
+	}
 
 	/*
 	 * Find a location for the control code buffer, and add it
@@ -144,14 +142,6 @@ static int do_kexec_load(unsigned long entry, unsigned long nr_segments,
 	if (ret)
 		goto out;
 
-	/*
-	 * Some architecture(like S390) may touch the crash memory before
-	 * machine_kexec_prepare(), we must copy vmcoreinfo data after it.
-	 */
-	ret = kimage_crash_copy_vmcoreinfo(image);
-	if (ret)
-		goto out;
-
 	for (i = 0; i < nr_segments; i++) {
 		ret = kimage_load_segment(image, &image->segment[i]);
 		if (ret)
@@ -199,6 +189,9 @@ SYSCALL_DEFINE4(kexec_load, unsigned long, entry, unsigned long, nr_segments,
 
 	/* We only trust the superuser with rebooting the system. */
 	if (!capable(CAP_SYS_BOOT) || kexec_load_disabled)
+		return -EPERM;
+
+	if (get_securelevel() > 0)
 		return -EPERM;
 
 	/*

@@ -21,9 +21,8 @@
 #include <linux/cpu.h>
 #include <linux/workqueue.h>
 #include <linux/slab.h>
-#include <linux/topology.h>
 
-#include <linux/uaccess.h>
+#include <asm/uaccess.h>
 #include <asm/io.h>
 #include <asm/rtas.h>
 #include <asm/prom.h>
@@ -50,7 +49,7 @@ static unsigned int rtas_error_log_buffer_max;
 static unsigned int event_scan;
 static unsigned int rtas_event_scan_rate;
 
-static bool full_rtas_msgs;
+static int full_rtas_msgs = 0;
 
 /* Stop logging to nvram after first fatal error */
 static int logging_enabled; /* Until we initialize everything,
@@ -283,12 +282,11 @@ static void prrn_work_fn(struct work_struct *work)
 	 * the RTAS event.
 	 */
 	pseries_devicetree_update(-prrn_update_scope);
-	numa_update_cpu_topology(false);
 }
 
 static DECLARE_WORK(prrn_work, prrn_work_fn);
 
-static void prrn_schedule_update(u32 scope)
+void prrn_schedule_update(u32 scope)
 {
 	flush_work(&prrn_work);
 	prrn_update_scope = scope;
@@ -436,10 +434,7 @@ static void do_event_scan(void)
 		}
 
 		if (error == 0) {
-			if (rtas_error_type((struct rtas_error_log *)logdata) !=
-			    RTAS_TYPE_PRRN)
-				pSeries_log_error(logdata, ERR_TYPE_RTAS_LOG,
-						  0);
+			pSeries_log_error(logdata, ERR_TYPE_RTAS_LOG, 0);
 			handle_rtas_event((struct rtas_error_log *)logdata);
 		}
 
@@ -447,7 +442,7 @@ static void do_event_scan(void)
 }
 
 static void rtas_event_scan(struct work_struct *w);
-static DECLARE_DELAYED_WORK(event_scan_work, rtas_event_scan);
+DECLARE_DELAYED_WORK(event_scan_work, rtas_event_scan);
 
 /*
  * Delay should be at least one second since some machines have problems if
@@ -488,7 +483,7 @@ static void rtas_event_scan(struct work_struct *w)
 }
 
 #ifdef CONFIG_PPC64
-static void retrieve_nvram_error_log(void)
+static void retreive_nvram_error_log(void)
 {
 	unsigned int err_type ;
 	int rc ;
@@ -506,7 +501,7 @@ static void retrieve_nvram_error_log(void)
 	}
 }
 #else /* CONFIG_PPC64 */
-static void retrieve_nvram_error_log(void)
+static void retreive_nvram_error_log(void)
 {
 }
 #endif /* CONFIG_PPC64 */
@@ -518,7 +513,7 @@ static void start_event_scan(void)
 		 (30000 / rtas_event_scan_rate));
 
 	/* Retrieve errors from nvram if any */
-	retrieve_nvram_error_log();
+	retreive_nvram_error_log();
 
 	schedule_delayed_work_on(cpumask_first(cpu_online_mask),
 				 &event_scan_work, event_scan_delay);
@@ -609,6 +604,11 @@ __setup("surveillance=", surveillance_setup);
 
 static int __init rtasmsgs_setup(char *str)
 {
-	return (kstrtobool(str, &full_rtas_msgs) == 0);
+	if (strcmp(str, "on") == 0)
+		full_rtas_msgs = 1;
+	else if (strcmp(str, "off") == 0)
+		full_rtas_msgs = 0;
+
+	return 1;
 }
 __setup("rtasmsgs=", rtasmsgs_setup);

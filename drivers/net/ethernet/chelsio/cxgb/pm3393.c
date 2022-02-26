@@ -12,7 +12,8 @@
  * published by the Free Software Foundation.                                *
  *                                                                           *
  * You should have received a copy of the GNU General Public License along   *
- * with this program; if not, see <http://www.gnu.org/licenses/>.            *
+ * with this program; if not, write to the Free Software Foundation, Inc.,   *
+ * 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.                 *
  *                                                                           *
  * THIS SOFTWARE IS PROVIDED ``AS IS'' AND WITHOUT ANY EXPRESS OR IMPLIED    *
  * WARRANTIES, INCLUDING, WITHOUT LIMITATION, THE IMPLIED WARRANTIES OF      *
@@ -46,6 +47,9 @@
 #include <linux/slab.h>
 
 #define OFFSET(REG_ADDR)    ((REG_ADDR) << 2)
+
+/* Max frame size PM3393 can handle. Includes Ethernet header and CRC. */
+#define MAX_FRAME_SIZE  9600
 
 #define IPG 12
 #define TXXG_CONF1_VAL ((IPG << SUNI1x10GEXP_BITOFF_TXXG_IPGT) | \
@@ -328,7 +332,10 @@ static int pm3393_set_mtu(struct cmac *cmac, int mtu)
 {
 	int enabled = cmac->instance->enabled;
 
-	mtu += ETH_HLEN + ETH_FCS_LEN;
+	/* MAX_FRAME_SIZE includes header + FCS, mtu doesn't */
+	mtu += 14 + 4;
+	if (mtu > MAX_FRAME_SIZE)
+		return -EINVAL;
 
 	/* Disable Rx/Tx MAC before configuring it. */
 	if (enabled)
@@ -564,7 +571,7 @@ static void pm3393_destroy(struct cmac *cmac)
 	kfree(cmac);
 }
 
-static const struct cmac_ops pm3393_ops = {
+static struct cmac_ops pm3393_ops = {
 	.destroy                 = pm3393_destroy,
 	.reset                   = pm3393_reset,
 	.interrupt_enable        = pm3393_interrupt_enable,

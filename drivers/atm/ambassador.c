@@ -293,7 +293,7 @@ static inline void __init show_version (void) {
   
 */
 
-static void do_housekeeping (struct timer_list *t);
+static void do_housekeeping (unsigned long arg);
 /********** globals **********/
 
 static unsigned short debug = 0;
@@ -1403,7 +1403,7 @@ static void amb_free_rx_skb (struct atm_vcc * atm_vcc, struct sk_buff * skb) {
   rx.host_address = cpu_to_be32 (virt_to_bus (skb->data));
   
   skb->data = skb->head;
-  skb_reset_tail_pointer(skb);
+  skb->tail = skb->head;
   skb->len = 0;
   
   if (!rx_give (dev, &rx, pool)) {
@@ -1493,8 +1493,8 @@ static const struct atmdev_ops amb_ops = {
 };
 
 /********** housekeeping **********/
-static void do_housekeeping (struct timer_list *t) {
-  amb_dev * dev = from_timer(dev, t, housekeeping);
+static void do_housekeeping (unsigned long arg) {
+  amb_dev * dev = (amb_dev *) arg;
   
   // could collect device-specific (not driver/atm-linux) stats here
       
@@ -1925,7 +1925,7 @@ static int ucode_init(loader_block *lb, amb_dev *dev)
   const struct firmware *fw;
   unsigned long start_address;
   const struct ihex_binrec *rec;
-  const char *errmsg = NULL;
+  const char *errmsg = 0;
   int res;
 
   res = request_ihex_firmware(&fw, "atmsar11.fw", &dev->pci_dev->dev);
@@ -2258,7 +2258,7 @@ static int amb_probe(struct pci_dev *pci_dev,
 
 	PRINTD (DBG_INFO, "registered Madge ATM adapter (no. %d) (%p) at %p",
 		dev->atm_dev->number, dev, dev->atm_dev);
-	dev->atm_dev->dev_data = (void *) dev;
+		dev->atm_dev->dev_data = (void *) dev;
 
 	// register our address
 	amb_esi (dev, dev->atm_dev->esi);
@@ -2267,7 +2267,9 @@ static int amb_probe(struct pci_dev *pci_dev,
 	dev->atm_dev->ci_range.vpi_bits = NUM_VPI_BITS;
 	dev->atm_dev->ci_range.vci_bits = NUM_VCI_BITS;
 
-	timer_setup(&dev->housekeeping, do_housekeeping, 0);
+	init_timer(&dev->housekeeping);
+	dev->housekeeping.function = do_housekeeping;
+	dev->housekeeping.data = (unsigned long) dev;
 	mod_timer(&dev->housekeeping, jiffies);
 
 	// enable host interrupts
@@ -2373,7 +2375,7 @@ MODULE_PARM_DESC(pci_lat, "PCI latency in bus cycles");
 
 /********** module entry **********/
 
-static const struct pci_device_id amb_pci_tbl[] = {
+static struct pci_device_id amb_pci_tbl[] = {
 	{ PCI_VDEVICE(MADGE, PCI_DEVICE_ID_MADGE_AMBASSADOR), 0 },
 	{ PCI_VDEVICE(MADGE, PCI_DEVICE_ID_MADGE_AMBASSADOR_BAD), 0 },
 	{ 0, }
@@ -2392,7 +2394,12 @@ static int __init amb_module_init (void)
 {
   PRINTD (DBG_FLOW|DBG_INIT, "init_module");
   
-  BUILD_BUG_ON(sizeof(amb_mem) != 4*16 + 4*12);
+  // sanity check - cast needed as printk does not support %Zu
+  if (sizeof(amb_mem) != 4*16 + 4*12) {
+    PRINTK (KERN_ERR, "Fix amb_mem (is %lu words).",
+	    (unsigned long) sizeof(amb_mem));
+    return -ENOMEM;
+  }
   
   show_version();
   

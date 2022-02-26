@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_M32R_MMU_CONTEXT_H
 #define _ASM_M32R_MMU_CONTEXT_H
 #ifdef __KERNEL__
@@ -13,8 +12,6 @@
 #ifndef __ASSEMBLY__
 
 #include <linux/atomic.h>
-#include <linux/mm_types.h>
-
 #include <asm/pgalloc.h>
 #include <asm/mmu.h>
 #include <asm/tlbflush.h>
@@ -48,7 +45,7 @@ static inline void get_new_mmu_context(struct mm_struct *mm)
 		   Flush all TLB and start new cycle. */
 		local_flush_tlb_all();
 		/* Fix version if needed.
-		   Note that we avoid version #0 to distinguish NO_CONTEXT. */
+		   Note that we avoid version #0 to distingush NO_CONTEXT. */
 		if (!mc)
 			mmu_context_cache = mc = MMU_CONTEXT_FIRST_VERSION;
 	}

@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 #include <linux/errno.h>
 #include <linux/numa.h>
 #include <linux/slab.h>
@@ -432,7 +431,7 @@ do_sync_free:
 		synchronize_rcu_expedited();
 		dm_stat_free(&s->rcu_head);
 	} else {
-		WRITE_ONCE(dm_stat_need_rcu_barrier, 1);
+		ACCESS_ONCE(dm_stat_need_rcu_barrier) = 1;
 		call_rcu(&s->rcu_head, dm_stat_free);
 	}
 	return 0;
@@ -511,10 +510,11 @@ static void dm_stat_round(struct dm_stat *s, struct dm_stat_shared *shared,
 }
 
 static void dm_stat_for_entry(struct dm_stat *s, size_t entry,
-			      int idx, sector_t len,
+			      unsigned long bi_rw, sector_t len,
 			      struct dm_stats_aux *stats_aux, bool end,
 			      unsigned long duration_jiffies)
 {
+	unsigned long idx = bi_rw & REQ_WRITE;
 	struct dm_stat_shared *shared = &s->stat_shared[entry];
 	struct dm_stat_percpu *p;
 
@@ -580,7 +580,7 @@ static void dm_stat_for_entry(struct dm_stat *s, size_t entry,
 #endif
 }
 
-static void __dm_stat_bio(struct dm_stat *s, int bi_rw,
+static void __dm_stat_bio(struct dm_stat *s, unsigned long bi_rw,
 			  sector_t bi_sector, sector_t end_sector,
 			  bool end, unsigned long duration_jiffies,
 			  struct dm_stats_aux *stats_aux)
@@ -638,14 +638,14 @@ void dm_stats_account_io(struct dm_stats *stats, unsigned long bi_rw,
 		 * A race condition can at worst result in the merged flag being
 		 * misrepresented, so we don't have to disable preemption here.
 		 */
-		last = raw_cpu_ptr(stats->last);
+		last = __this_cpu_ptr(stats->last);
 		stats_aux->merged =
-			(bi_sector == (READ_ONCE(last->last_sector) &&
-				       ((bi_rw == WRITE) ==
-					(READ_ONCE(last->last_rw) == WRITE))
+			(bi_sector == (ACCESS_ONCE(last->last_sector) &&
+				       ((bi_rw & (REQ_WRITE | REQ_DISCARD)) ==
+					(ACCESS_ONCE(last->last_rw) & (REQ_WRITE | REQ_DISCARD)))
 				       ));
-		WRITE_ONCE(last->last_sector, end_sector);
-		WRITE_ONCE(last->last_rw, bi_rw);
+		ACCESS_ONCE(last->last_sector) = end_sector;
+		ACCESS_ONCE(last->last_rw) = bi_rw;
 	}
 
 	rcu_read_lock();
@@ -694,22 +694,22 @@ static void __dm_stat_init_temporary_percpu_totals(struct dm_stat_shared *shared
 
 	for_each_possible_cpu(cpu) {
 		p = &s->stat_percpu[cpu][x];
-		shared->tmp.sectors[READ] += READ_ONCE(p->sectors[READ]);
-		shared->tmp.sectors[WRITE] += READ_ONCE(p->sectors[WRITE]);
-		shared->tmp.ios[READ] += READ_ONCE(p->ios[READ]);
-		shared->tmp.ios[WRITE] += READ_ONCE(p->ios[WRITE]);
-		shared->tmp.merges[READ] += READ_ONCE(p->merges[READ]);
-		shared->tmp.merges[WRITE] += READ_ONCE(p->merges[WRITE]);
-		shared->tmp.ticks[READ] += READ_ONCE(p->ticks[READ]);
-		shared->tmp.ticks[WRITE] += READ_ONCE(p->ticks[WRITE]);
-		shared->tmp.io_ticks[READ] += READ_ONCE(p->io_ticks[READ]);
-		shared->tmp.io_ticks[WRITE] += READ_ONCE(p->io_ticks[WRITE]);
-		shared->tmp.io_ticks_total += READ_ONCE(p->io_ticks_total);
-		shared->tmp.time_in_queue += READ_ONCE(p->time_in_queue);
+		shared->tmp.sectors[READ] += ACCESS_ONCE(p->sectors[READ]);
+		shared->tmp.sectors[WRITE] += ACCESS_ONCE(p->sectors[WRITE]);
+		shared->tmp.ios[READ] += ACCESS_ONCE(p->ios[READ]);
+		shared->tmp.ios[WRITE] += ACCESS_ONCE(p->ios[WRITE]);
+		shared->tmp.merges[READ] += ACCESS_ONCE(p->merges[READ]);
+		shared->tmp.merges[WRITE] += ACCESS_ONCE(p->merges[WRITE]);
+		shared->tmp.ticks[READ] += ACCESS_ONCE(p->ticks[READ]);
+		shared->tmp.ticks[WRITE] += ACCESS_ONCE(p->ticks[WRITE]);
+		shared->tmp.io_ticks[READ] += ACCESS_ONCE(p->io_ticks[READ]);
+		shared->tmp.io_ticks[WRITE] += ACCESS_ONCE(p->io_ticks[WRITE]);
+		shared->tmp.io_ticks_total += ACCESS_ONCE(p->io_ticks_total);
+		shared->tmp.time_in_queue += ACCESS_ONCE(p->time_in_queue);
 		if (s->n_histogram_entries) {
 			unsigned i;
 			for (i = 0; i < s->n_histogram_entries + 1; i++)
-				shared->tmp.histogram[i] += READ_ONCE(p->histogram[i]);
+				shared->tmp.histogram[i] += ACCESS_ONCE(p->histogram[i]);
 		}
 	}
 }

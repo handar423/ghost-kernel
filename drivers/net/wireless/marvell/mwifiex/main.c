@@ -100,7 +100,8 @@ static int mwifiex_register(void *card, struct device *dev,
 	}
 	mwifiex_init_lock_list(adapter);
 
-	timer_setup(&adapter->cmd_timer, mwifiex_cmd_timeout_func, 0);
+	setup_timer(&adapter->cmd_timer, mwifiex_cmd_timeout_func,
+		    (unsigned long)adapter);
 
 	return 0;
 
@@ -524,6 +525,9 @@ static int _mwifiex_fw_dpc(const struct firmware *firmware, void *context)
 	bool init_failed = false;
 	struct wireless_dev *wdev;
 	struct completion *fw_done = adapter->fw_done;
+#if 1 /* in RHEL */
+	const int NET_NAME_ENUM = 1;
+#endif
 
 	if (!firmware) {
 		mwifiex_dbg(adapter, ERROR,
@@ -1301,7 +1305,7 @@ void mwifiex_init_priv_params(struct mwifiex_private *priv,
 			      struct net_device *dev)
 {
 	dev->netdev_ops = &mwifiex_netdev_ops;
-	dev->needs_free_netdev = true;
+	dev->extended->needs_free_netdev = true;
 	/* Initialize private structure */
 	priv->current_key_index = 0;
 	priv->media_connected = false;
@@ -1553,7 +1557,11 @@ static irqreturn_t mwifiex_irq_wakeup_handler(int irq, void *priv)
 
 	/* Notify PM core we are wakeup source */
 	pm_wakeup_event(adapter->dev, 0);
+#if 0 /* Not in RHEL */
 	pm_system_wakeup();
+#else
+	freeze_wake();
+#endif
 
 	return IRQ_HANDLED;
 }

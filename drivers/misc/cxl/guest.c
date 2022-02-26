@@ -169,7 +169,7 @@ static irqreturn_t guest_psl_irq(int irq, void *data)
 		return IRQ_HANDLED;
 	}
 
-	rc = cxl_irq_psl8(irq, ctx, &irq_info);
+	rc = cxl_irq(irq, ctx, &irq_info);
 	return rc;
 }
 
@@ -196,18 +196,15 @@ static irqreturn_t guest_slice_irq_err(int irq, void *data)
 {
 	struct cxl_afu *afu = data;
 	int rc;
-	u64 serr, afu_error, dsisr;
+	u64 serr;
 
+	WARN(irq, "CXL SLICE ERROR interrupt %i\n", irq);
 	rc = cxl_h_get_fn_error_interrupt(afu->guest->handle, &serr);
 	if (rc) {
 		dev_crit(&afu->dev, "Couldn't read PSL_SERR_An: %d\n", rc);
 		return IRQ_HANDLED;
 	}
-	afu_error = cxl_p2n_read(afu, CXL_AFU_ERR_An);
-	dsisr = cxl_p2n_read(afu, CXL_PSL_DSISR_An);
-	cxl_afu_decode_psl_serr(afu, serr);
-	dev_crit(&afu->dev, "AFU_ERR_An: 0x%.16llx\n", afu_error);
-	dev_crit(&afu->dev, "PSL_DSISR_An: 0x%.16llx\n", dsisr);
+	dev_crit(&afu->dev, "PSL_SERR_An: 0x%.16llx\n", serr);
 
 	rc = cxl_h_ack_fn_error_interrupt(afu->guest->handle, serr);
 	if (rc)
@@ -551,24 +548,13 @@ static int attach_afu_directed(struct cxl_context *ctx, u64 wed, u64 amr)
 	elem->common.tid    = cpu_to_be32(0); /* Unused */
 	elem->common.pid    = cpu_to_be32(pid);
 	elem->common.csrp   = cpu_to_be64(0); /* disable */
-	elem->common.u.psl8.aurp0  = cpu_to_be64(0); /* disable */
-	elem->common.u.psl8.aurp1  = cpu_to_be64(0); /* disable */
+	elem->common.aurp0  = cpu_to_be64(0); /* disable */
+	elem->common.aurp1  = cpu_to_be64(0); /* disable */
 
 	cxl_prefault(ctx, wed);
 
-	elem->common.u.psl8.sstp0  = cpu_to_be64(ctx->sstp0);
-	elem->common.u.psl8.sstp1  = cpu_to_be64(ctx->sstp1);
-
-	/*
-	 * Ensure we have at least one interrupt allocated to take faults for
-	 * kernel contexts that may not have allocated any AFU IRQs at all:
-	 */
-	if (ctx->irqs.range[0] == 0) {
-		rc = afu_register_irqs(ctx, 0);
-		if (rc)
-			goto out_free;
-	}
-
+	elem->common.sstp0  = cpu_to_be64(ctx->sstp0);
+	elem->common.sstp1  = cpu_to_be64(ctx->sstp1);
 	for (r = 0; r < CXL_IRQ_RANGES; r++) {
 		for (i = 0; i < ctx->irqs.range[r]; i++) {
 			if (r == 0 && i == 0) {
@@ -614,7 +600,6 @@ static int attach_afu_directed(struct cxl_context *ctx, u64 wed, u64 amr)
 		enable_afu_irqs(ctx);
 	}
 
-out_free:
 	free_page((u64)elem);
 	return rc;
 }
@@ -622,9 +607,6 @@ out_free:
 static int guest_attach_process(struct cxl_context *ctx, bool kernel, u64 wed, u64 amr)
 {
 	pr_devel("in %s\n", __func__);
-
-	if (ctx->real_mode)
-		return -EPERM;
 
 	ctx->kernel = kernel;
 	if (ctx->afu->current_mode == CXL_MODE_DIRECTED)
@@ -887,7 +869,7 @@ static void afu_handle_errstate(struct work_struct *work)
 	    afu_guest->previous_state == H_STATE_PERM_UNAVAILABLE)
 		return;
 
-	if (afu_guest->handle_err)
+	if (afu_guest->handle_err == true)
 		schedule_delayed_work(&afu_guest->work_err,
 				      msecs_to_jiffies(3000));
 }
@@ -1055,18 +1037,16 @@ static void free_adapter(struct cxl *adapter)
 	struct irq_avail *cur;
 	int i;
 
-	if (adapter->guest) {
-		if (adapter->guest->irq_avail) {
-			for (i = 0; i < adapter->guest->irq_nranges; i++) {
-				cur = &adapter->guest->irq_avail[i];
-				kfree(cur->bitmap);
-			}
-			kfree(adapter->guest->irq_avail);
+	if (adapter->guest->irq_avail) {
+		for (i = 0; i < adapter->guest->irq_nranges; i++) {
+			cur = &adapter->guest->irq_avail[i];
+			kfree(cur->bitmap);
 		}
-		kfree(adapter->guest->status);
-		kfree(adapter->guest);
+		kfree(adapter->guest->irq_avail);
 	}
+	kfree(adapter->guest->status);
 	cxl_remove_adapter_nr(adapter);
+	kfree(adapter->guest);
 	kfree(adapter);
 }
 
@@ -1190,7 +1170,6 @@ const struct cxl_backend_ops cxl_guest_ops = {
 	.ack_irq = guest_ack_irq,
 	.attach_process = guest_attach_process,
 	.detach_process = guest_detach_process,
-	.update_ivtes = NULL,
 	.support_attributes = guest_support_attributes,
 	.link_ok = guest_link_ok,
 	.release_afu = guest_release_afu,

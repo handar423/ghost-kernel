@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * Cryptographic API.
  *
@@ -10,7 +9,6 @@
 
 #include <crypto/internal/hash.h>
 #include <linux/module.h>
-#include <linux/cpufeature.h>
 #include <asm/cpacf.h>
 
 #define GHASH_BLOCK_SIZE	16
@@ -148,7 +146,7 @@ static void __exit ghash_mod_exit(void)
 	crypto_unregister_shash(&ghash_alg);
 }
 
-module_cpu_feature_match(MSA, ghash_mod_init);
+module_init(ghash_mod_init);
 module_exit(ghash_mod_exit);
 
 MODULE_ALIAS_CRYPTO("ghash");

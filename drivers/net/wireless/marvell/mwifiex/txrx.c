@@ -341,7 +341,13 @@ void mwifiex_parse_tx_status_event(struct mwifiex_private *priv,
 		return;
 
 	spin_lock_irqsave(&priv->ack_status_lock, flags);
+#if 0 /* Not in RHEL */
 	ack_skb = idr_remove(&priv->ack_status_frames, tx_status->tx_token_id);
+#else
+	ack_skb = idr_find(&priv->ack_status_frames, tx_status->tx_token_id);
+	if (ack_skb)
+		idr_remove(&priv->ack_status_frames, tx_status->tx_token_id);
+#endif
 	spin_unlock_irqrestore(&priv->ack_status_lock, flags);
 
 	if (ack_skb) {

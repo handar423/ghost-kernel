@@ -417,6 +417,9 @@ static int teql_master_mtu(struct net_device *dev, int new_mtu)
 	struct teql_master *m = netdev_priv(dev);
 	struct Qdisc *q;
 
+	if (new_mtu < 68)
+		return -EINVAL;
+
 	q = m->slaves;
 	if (q) {
 		do {
@@ -434,7 +437,7 @@ static const struct net_device_ops teql_netdev_ops = {
 	.ndo_stop	= teql_master_close,
 	.ndo_start_xmit	= teql_master_xmit,
 	.ndo_get_stats64 = teql_master_stats64,
-	.ndo_change_mtu	= teql_master_mtu,
+	.ndo_change_mtu_rh74 = teql_master_mtu,
 };
 
 static __init void teql_master_setup(struct net_device *dev)
@@ -456,8 +459,6 @@ static __init void teql_master_setup(struct net_device *dev)
 	dev->netdev_ops =       &teql_netdev_ops;
 	dev->type		= ARPHRD_VOID;
 	dev->mtu		= 1500;
-	dev->min_mtu		= 68;
-	dev->max_mtu		= 65535;
 	dev->tx_queue_len	= 100;
 	dev->flags		= IFF_NOARP;
 	dev->hard_header_len	= LL_MAX_HEADER;
@@ -478,8 +479,8 @@ static int __init teql_init(void)
 		struct net_device *dev;
 		struct teql_master *master;
 
-		dev = alloc_netdev(sizeof(struct teql_master), "teql%d",
-				   NET_NAME_UNKNOWN, teql_master_setup);
+		dev = alloc_netdev(sizeof(struct teql_master),
+				  "teql%d", teql_master_setup);
 		if (!dev) {
 			err = -ENOMEM;
 			break;

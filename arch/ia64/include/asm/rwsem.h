@@ -1,10 +1,9 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * R/W semaphores for ia64
  *
  * Copyright (C) 2003 Ken Chen <kenneth.w.chen@intel.com>
  * Copyright (C) 2003 Asit Mallick <asit.k.mallick@intel.com>
- * Copyright (C) 2005 Christoph Lameter <cl@linux.com>
+ * Copyright (C) 2005 Christoph Lameter <clameter@sgi.com>
  *
  * Based on asm-i386/rwsem.h and other architecture implementation.
  *
@@ -38,36 +37,20 @@
 /*
  * lock for reading
  */
-static inline int
-___down_read (struct rw_semaphore *sem)
-{
-	long result = ia64_fetchadd8_acq((unsigned long *)&sem->count.counter, 1);
-
-	return (result < 0);
-}
-
 static inline void
 __down_read (struct rw_semaphore *sem)
 {
-	if (___down_read(sem))
+	long result = ia64_fetchadd8_acq((unsigned long *)&sem->count.counter, 1);
+
+	if (result < 0)
 		rwsem_down_read_failed(sem);
-}
-
-static inline int
-__down_read_killable (struct rw_semaphore *sem)
-{
-	if (___down_read(sem))
-		if (IS_ERR(rwsem_down_read_failed_killable(sem)))
-			return -EINTR;
-
-	return 0;
 }
 
 /*
  * lock for writing
  */
-static inline long
-___down_write (struct rw_semaphore *sem)
+static inline void
+__down_write (struct rw_semaphore *sem)
 {
 	long old, new;
 
@@ -76,25 +59,8 @@ ___down_write (struct rw_semaphore *sem)
 		new = old + RWSEM_ACTIVE_WRITE_BIAS;
 	} while (atomic_long_cmpxchg_acquire(&sem->count, old, new) != old);
 
-	return old;
-}
-
-static inline void
-__down_write (struct rw_semaphore *sem)
-{
-	if (___down_write(sem))
+	if (old != 0)
 		rwsem_down_write_failed(sem);
-}
-
-static inline int
-__down_write_killable (struct rw_semaphore *sem)
-{
-	if (___down_write(sem)) {
-		if (IS_ERR(rwsem_down_write_failed_killable(sem)))
-			return -EINTR;
-	}
-
-	return 0;
 }
 
 /*

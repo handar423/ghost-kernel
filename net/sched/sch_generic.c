@@ -26,11 +26,12 @@
 #include <linux/list.h>
 #include <linux/slab.h>
 #include <linux/if_vlan.h>
-#include <linux/if_macvlan.h>
 #include <net/sch_generic.h>
 #include <net/pkt_sched.h>
 #include <net/dst.h>
+#ifndef __GENKSYMS__
 #include <trace/events/qdisc.h>
+#endif
 
 /* Qdisc to use by default */
 const struct Qdisc_ops *default_qdisc_ops = &pfifo_fast_ops;
@@ -159,6 +160,39 @@ trace:
 	return skb;
 }
 
+static inline int handle_dev_cpu_collision(struct sk_buff *skb,
+					   struct netdev_queue *dev_queue,
+					   struct Qdisc *q)
+{
+	int ret;
+
+#ifdef CONFIG_PREEMPT_RT_FULL
+	if (unlikely(dev_queue->xmit_lock_owner == current)) {
+#else
+	if (unlikely(dev_queue->xmit_lock_owner == smp_processor_id())) {
+#endif
+		/*
+		 * Same CPU holding the lock. It may be a transient
+		 * configuration error, when hard_start_xmit() recurses. We
+		 * detect it by checking xmit owner and drop the packet when
+		 * deadloop is detected. Return OK to try the next skb.
+		 */
+		kfree_skb_list(skb);
+		net_warn_ratelimited("Dead loop on netdevice %s, fix it urgently!\n",
+				     dev_queue->dev->name);
+		ret = qdisc_qlen(q);
+	} else {
+		/*
+		 * Another cpu is holding lock, requeue & delay xmits for
+		 * some time.
+		 */
+		__this_cpu_inc(softnet_data.cpu_collision);
+		ret = dev_requeue_skb(skb, q);
+	}
+
+	return ret;
+}
+
 /*
  * Transmit possibly several skbs, and handle the return status as
  * required. Owning running seqcount bit guarantees that
@@ -196,6 +230,9 @@ int sch_direct_xmit(struct sk_buff *skb, struct Qdisc *q,
 	if (dev_xmit_complete(ret)) {
 		/* Driver sent out skb successfully or skb was consumed */
 		ret = qdisc_qlen(q);
+	} else if (ret == NETDEV_TX_LOCKED) {
+		/* Driver try lock failed */
+		ret = handle_dev_cpu_collision(skb, txq, q);
 	} else {
 		/* Driver returned NETDEV_TX_BUSY - requeue skb */
 		if (unlikely(ret != NETDEV_TX_BUSY))
@@ -278,22 +315,22 @@ unsigned long dev_trans_start(struct net_device *dev)
 
 	if (is_vlan_dev(dev))
 		dev = vlan_dev_real_dev(dev);
-	else if (netif_is_macvlan(dev))
-		dev = macvlan_dev_real_dev(dev);
 	res = netdev_get_tx_queue(dev, 0)->trans_start;
 	for (i = 1; i < dev->num_tx_queues; i++) {
 		val = netdev_get_tx_queue(dev, i)->trans_start;
 		if (val && time_after(val, res))
 			res = val;
 	}
+	/* RHEL - update deprecated trans_start for old binary modules */
+	dev->rh_reserved_trans_start = res;
 
 	return res;
 }
 EXPORT_SYMBOL(dev_trans_start);
 
-static void dev_watchdog(struct timer_list *t)
+static void dev_watchdog(unsigned long arg)
 {
-	struct net_device *dev = from_timer(dev, t, watchdog_timer);
+	struct net_device *dev = (struct net_device *)arg;
 
 	netif_tx_lock(dev);
 	if (!qdisc_tx_is_noop(dev)) {
@@ -432,7 +469,11 @@ struct Qdisc noop_qdisc = {
 	.ops		=	&noop_qdisc_ops,
 	.q.lock		=	__SPIN_LOCK_UNLOCKED(noop_qdisc.q.lock),
 	.dev_queue	=	&noop_netdev_queue,
+#ifdef CONFIG_PREEMPT_RT_BASE
+	.running        =       __SEQLOCK_UNLOCKED(noop_qdisc.running),
+#else
 	.running	=	SEQCNT_ZERO(noop_qdisc.running),
+#endif
 	.busylock	=	__SPIN_LOCK_UNLOCKED(noop_qdisc.busylock),
 };
 EXPORT_SYMBOL(noop_qdisc);
@@ -597,7 +638,6 @@ struct Qdisc_ops pfifo_fast_ops __read_mostly = {
 EXPORT_SYMBOL(pfifo_fast_ops);
 
 static struct lock_class_key qdisc_tx_busylock;
-static struct lock_class_key qdisc_running_key;
 
 struct Qdisc *qdisc_alloc(struct netdev_queue *dev_queue,
 			  const struct Qdisc_ops *ops)
@@ -650,9 +690,11 @@ struct Qdisc *qdisc_alloc(struct netdev_queue *dev_queue,
 	lockdep_set_class(&sch->busylock,
 			  dev->qdisc_tx_busylock ?: &qdisc_tx_busylock);
 
+#ifdef CONFIG_PREEMPT_RT_BASE
+	seqlock_init(&sch->running);
+#else
 	seqcount_init(&sch->running);
-	lockdep_set_class(&sch->running,
-			  dev->qdisc_running_key ?: &qdisc_running_key);
+#endif
 
 	sch->ops = ops;
 	sch->flags = ops->static_flags;
@@ -660,7 +702,7 @@ struct Qdisc *qdisc_alloc(struct netdev_queue *dev_queue,
 	sch->dequeue = ops->dequeue;
 	sch->dev_queue = dev_queue;
 	dev_hold(dev);
-	refcount_set(&sch->refcnt, 1);
+	atomic_set(&sch->refcnt, 1);
 
 	return sch;
 errout1:
@@ -726,10 +768,14 @@ void qdisc_free(struct Qdisc *qdisc)
 
 void qdisc_destroy(struct Qdisc *qdisc)
 {
-	const struct Qdisc_ops  *ops = qdisc->ops;
+	const struct Qdisc_ops *ops;
+
+	if (!qdisc)
+		return;
+	ops = qdisc->ops;
 
 	if (qdisc->flags & TCQ_F_BUILTIN ||
-	    !refcount_dec_and_test(&qdisc->refcnt))
+	    !atomic_dec_and_test(&qdisc->refcnt))
 		return;
 
 #ifdef CONFIG_NET_SCHED
@@ -763,7 +809,7 @@ struct Qdisc *dev_graft_qdisc(struct netdev_queue *dev_queue,
 	spin_lock_bh(root_lock);
 
 	/* Prune old scheduler */
-	if (oqdisc && refcount_read(&oqdisc->refcnt) <= 1)
+	if (oqdisc && atomic_read(&oqdisc->refcnt) <= 1)
 		qdisc_reset(oqdisc);
 
 	/* ... and graft new one */
@@ -949,7 +995,7 @@ void dev_deactivate_many(struct list_head *head)
 	/* Wait for outstanding qdisc_run calls. */
 	list_for_each_entry(dev, head, close_list)
 		while (some_qdisc_is_busy(dev))
-			yield();
+			msleep(1);
 }
 
 void dev_deactivate(struct net_device *dev)
@@ -979,7 +1025,7 @@ void dev_init_scheduler(struct net_device *dev)
 	if (dev_ingress_queue(dev))
 		dev_init_scheduler_queue(dev, dev_ingress_queue(dev), &noop_qdisc);
 
-	timer_setup(&dev->watchdog_timer, dev_watchdog, 0);
+	setup_timer(&dev->watchdog_timer, dev_watchdog, (unsigned long)dev);
 }
 
 static void shutdown_scheduler_queue(struct net_device *dev,

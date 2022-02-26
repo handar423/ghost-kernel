@@ -67,8 +67,8 @@ static void pasemi_msi_teardown_msi_irqs(struct pci_dev *pdev)
 
 	pr_debug("pasemi_msi_teardown_msi_irqs, pdev %p\n", pdev);
 
-	for_each_pci_msi_entry(entry, pdev) {
-		if (!entry->irq)
+	list_for_each_entry(entry, &pdev->msi_list, list) {
+		if (entry->irq == NO_IRQ)
 			continue;
 
 		hwirq = virq_to_hw(entry->irq);
@@ -95,7 +95,7 @@ static int pasemi_msi_setup_msi_irqs(struct pci_dev *pdev, int nvec, int type)
 	msg.address_hi = 0;
 	msg.address_lo = PASEMI_MSI_ADDR;
 
-	for_each_pci_msi_entry(entry, pdev) {
+	list_for_each_entry(entry, &pdev->msi_list, list) {
 		/* Allocate 16 interrupts for now, since that's the grouping for
 		 * affinity. This can be changed later if it turns out 32 is too
 		 * few MSIs for someone, but restrictions will apply to how the
@@ -109,7 +109,7 @@ static int pasemi_msi_setup_msi_irqs(struct pci_dev *pdev, int nvec, int type)
 		}
 
 		virq = irq_create_mapping(msi_mpic->irqhost, hwirq);
-		if (!virq) {
+		if (virq == NO_IRQ) {
 			pr_debug("pasemi_msi: failed mapping hwirq 0x%x\n",
 				  hwirq);
 			msi_bitmap_free_hwirqs(&msi_mpic->msi_bitmap, hwirq,
@@ -143,12 +143,9 @@ static int pasemi_msi_setup_msi_irqs(struct pci_dev *pdev, int nvec, int type)
 int mpic_pasemi_msi_init(struct mpic *mpic)
 {
 	int rc;
-	struct pci_controller *phb;
-	struct device_node *of_node;
 
-	of_node = irq_domain_get_of_node(mpic->irqhost);
-	if (!of_node ||
-	    !of_device_is_compatible(of_node,
+	if (!mpic->irqhost->of_node ||
+	    !of_device_is_compatible(mpic->irqhost->of_node,
 				     "pasemi,pwrficient-openpic"))
 		return -ENODEV;
 
@@ -161,11 +158,9 @@ int mpic_pasemi_msi_init(struct mpic *mpic)
 	pr_debug("pasemi_msi: Registering PA Semi MPIC MSI callbacks\n");
 
 	msi_mpic = mpic;
-	list_for_each_entry(phb, &hose_list, list_node) {
-		WARN_ON(phb->controller_ops.setup_msi_irqs);
-		phb->controller_ops.setup_msi_irqs = pasemi_msi_setup_msi_irqs;
-		phb->controller_ops.teardown_msi_irqs = pasemi_msi_teardown_msi_irqs;
-	}
+	WARN_ON(ppc_md.setup_msi_irqs);
+	ppc_md.setup_msi_irqs = pasemi_msi_setup_msi_irqs;
+	ppc_md.teardown_msi_irqs = pasemi_msi_teardown_msi_irqs;
 
 	return 0;
 }

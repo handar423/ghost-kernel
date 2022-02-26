@@ -113,7 +113,6 @@ int match_token(char *s, const match_table_t table, substring_t args[])
 
 	return p->token;
 }
-EXPORT_SYMBOL(match_token);
 
 /**
  * match_number: scan a number in the given base from a substring_t
@@ -194,7 +193,6 @@ int match_int(substring_t *s, int *result)
 {
 	return match_number(s, result, 0);
 }
-EXPORT_SYMBOL(match_int);
 
 /**
  * match_u64: - scan a decimal representation of a u64 from
@@ -226,7 +224,6 @@ int match_octal(substring_t *s, int *result)
 {
 	return match_number(s, result, 8);
 }
-EXPORT_SYMBOL(match_octal);
 
 /**
  * match_hex: - scan a hex representation of an integer from a substring_t
@@ -241,7 +238,6 @@ int match_hex(substring_t *s, int *result)
 {
 	return match_number(s, result, 16);
 }
-EXPORT_SYMBOL(match_hex);
 
 /**
  * match_wildcard: - parse if a string matches given wildcard pattern
@@ -292,7 +288,6 @@ bool match_wildcard(const char *pattern, const char *str)
 		++p;
 	return !*p;
 }
-EXPORT_SYMBOL(match_wildcard);
 
 /**
  * match_strlcpy: - Copy the characters from a substring_t to a sized buffer
@@ -315,7 +310,6 @@ size_t match_strlcpy(char *dest, const substring_t *src, size_t size)
 	}
 	return ret;
 }
-EXPORT_SYMBOL(match_strlcpy);
 
 /**
  * match_strdup: - allocate a new string with the contents of a substring_t
@@ -333,4 +327,11 @@ char *match_strdup(const substring_t *s)
 		match_strlcpy(p, s, sz);
 	return p;
 }
+
+EXPORT_SYMBOL(match_token);
+EXPORT_SYMBOL(match_int);
+EXPORT_SYMBOL(match_octal);
+EXPORT_SYMBOL(match_hex);
+EXPORT_SYMBOL(match_wildcard);
+EXPORT_SYMBOL(match_strlcpy);
 EXPORT_SYMBOL(match_strdup);

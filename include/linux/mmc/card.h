@@ -11,6 +11,7 @@
 #define LINUX_MMC_CARD_H
 
 #include <linux/device.h>
+#include <linux/mmc/core.h>
 #include <linux/mod_devicetable.h>
 
 struct mmc_cid {
@@ -207,6 +208,7 @@ struct sdio_cis {
 };
 
 struct mmc_host;
+struct mmc_ios;
 struct sdio_func;
 struct sdio_func_tuple;
 struct mmc_queue_req;
@@ -306,6 +308,8 @@ struct mmc_card {
 	unsigned int    nr_parts;
 
 	unsigned int		bouncesz;	/* Bounce buffer size */
+
+	RH_KABI_EXTEND(struct workqueue_struct *complete_wq)	/* Private workqueue */
 };
 
 static inline bool mmc_large_sector(struct mmc_card *card)

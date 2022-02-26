@@ -30,6 +30,7 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/slab.h>
+#include <linux/init.h>
 #include <linux/input.h>
 #include <linux/gameport.h>
 #include <linux/jiffies.h>
@@ -672,16 +673,16 @@ static int sw_connect(struct gameport *gameport, struct gameport_driver *drv)
 
 			switch (i * m) {
 				case 60:
-					sw->number++;			/* fall through */
+					sw->number++;
 				case 45:				/* Ambiguous packet length */
 					if (j <= 40) {			/* ID length less or eq 40 -> FSP */
 				case 43:
 						sw->type = SW_ID_FSP;
 						break;
 					}
-					sw->number++;			/* fall through */
+					sw->number++;
 				case 30:
-					sw->number++;			/* fall through */
+					sw->number++;
 				case 15:
 					sw->type = SW_ID_GP;
 					break;
@@ -697,9 +698,9 @@ static int sw_connect(struct gameport *gameport, struct gameport_driver *drv)
 						sw->type = SW_ID_PP;
 					break;
 				case 66:
-					sw->bits = 3;			/* fall through */
+					sw->bits = 3;
 				case 198:
-					sw->length = 22;		/* fall through */
+					sw->length = 22;
 				case 64:
 					sw->type = SW_ID_3DP;
 					if (j == 160)

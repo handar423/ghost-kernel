@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 #include <linux/ucs2_string.h>
 #include <linux/module.h>
 
@@ -57,12 +56,12 @@ ucs2_utf8size(const ucs2_char_t *src)
 	unsigned long i;
 	unsigned long j = 0;
 
-	for (i = 0; src[i]; i++) {
+	for (i = 0; i < ucs2_strlen(src); i++) {
 		u16 c = src[i];
 
-		if (c >= 0x800)
+		if (c > 0x800)
 			j += 3;
-		else if (c >= 0x80)
+		else if (c > 0x80)
 			j += 2;
 		else
 			j += 1;
@@ -89,19 +88,19 @@ ucs2_as_utf8(u8 *dest, const ucs2_char_t *src, unsigned long maxlength)
 	for (i = 0; maxlength && i < limit; i++) {
 		u16 c = src[i];
 
-		if (c >= 0x800) {
+		if (c > 0x800) {
 			if (maxlength < 3)
 				break;
 			maxlength -= 3;
 			dest[j++] = 0xe0 | (c & 0xf000) >> 12;
-			dest[j++] = 0x80 | (c & 0x0fc0) >> 6;
+			dest[j++] = 0x80 | (c & 0x0fc0) >> 8;
 			dest[j++] = 0x80 | (c & 0x003f);
-		} else if (c >= 0x80) {
+		} else if (c > 0x80) {
 			if (maxlength < 2)
 				break;
 			maxlength -= 2;
-			dest[j++] = 0xc0 | (c & 0x7c0) >> 6;
-			dest[j++] = 0x80 | (c & 0x03f);
+			dest[j++] = 0xc0 | (c & 0xfe0) >> 5;
+			dest[j++] = 0x80 | (c & 0x01f);
 		} else {
 			maxlength -= 1;
 			dest[j++] = c & 0x7f;

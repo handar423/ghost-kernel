@@ -34,6 +34,7 @@
 #include <linux/mlx4/cq.h>
 #include <linux/mlx4/qp.h>
 #include <linux/mlx4/cmd.h>
+#include <linux/interrupt.h>
 
 #include "mlx4_en.h"
 
@@ -120,9 +121,11 @@ int mlx4_en_activate_cq(struct mlx4_en_priv *priv, struct mlx4_en_cq *cq,
 			assigned_eq = true;
 		}
 
+#ifdef CONFIG_GENERIC_HARDIRQS
 		cq->irq_desc =
 			irq_to_desc(mlx4_eq_get_irq(mdev->dev,
 						    cq->vector));
+#endif
 	} else {
 		/* For TX we use the same irq per
 		ring we assigned for the RX    */

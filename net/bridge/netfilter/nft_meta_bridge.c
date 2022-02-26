@@ -86,7 +86,6 @@ static const struct nft_expr_ops nft_meta_bridge_set_ops = {
 	.init		= nft_meta_set_init,
 	.destroy	= nft_meta_set_destroy,
 	.dump		= nft_meta_set_dump,
-	.validate	= nft_meta_set_validate,
 };
 
 static const struct nft_expr_ops *
@@ -111,7 +110,7 @@ nft_meta_bridge_select_ops(const struct nft_ctx *ctx,
 static struct nft_expr_type nft_meta_bridge_type __read_mostly = {
 	.family         = NFPROTO_BRIDGE,
 	.name           = "meta",
-	.select_ops     = nft_meta_bridge_select_ops,
+	.select_ops     = &nft_meta_bridge_select_ops,
 	.policy         = nft_meta_policy,
 	.maxattr        = NFTA_META_MAX,
 	.owner          = THIS_MODULE,

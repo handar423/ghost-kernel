@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Hodge-podge collection of knfsd-related stuff.
  * I will sort this out later.
@@ -61,7 +60,7 @@ struct readdir_cd {
 
 
 extern struct svc_program	nfsd_program;
-extern const struct svc_version	nfsd_version2, nfsd_version3,
+extern struct svc_version	nfsd_version2, nfsd_version3,
 				nfsd_version4;
 extern struct mutex		nfsd_mutex;
 extern spinlock_t		nfsd_drc_lock;
@@ -87,12 +86,12 @@ void		nfsd_destroy(struct net *net);
 
 #if defined(CONFIG_NFSD_V2_ACL) || defined(CONFIG_NFSD_V3_ACL)
 #ifdef CONFIG_NFSD_V2_ACL
-extern const struct svc_version nfsd_acl_version2;
+extern struct svc_version nfsd_acl_version2;
 #else
 #define nfsd_acl_version2 NULL
 #endif
 #ifdef CONFIG_NFSD_V3_ACL
-extern const struct svc_version nfsd_acl_version3;
+extern struct svc_version nfsd_acl_version3;
 #else
 #define nfsd_acl_version3 NULL
 #endif
@@ -125,7 +124,6 @@ void nfs4_state_shutdown_net(struct net *net);
 void nfs4_reset_lease(time_t leasetime);
 int nfs4_reset_recoverydir(char *recdir);
 char * nfs4_recoverydir(void);
-bool nfsd4_spo_must_allow(struct svc_rqst *rqstp);
 #else
 static inline int nfsd4_init_slabs(void) { return 0; }
 static inline void nfsd4_free_slabs(void) { }
@@ -136,10 +134,6 @@ static inline void nfs4_state_shutdown_net(struct net *net) { }
 static inline void nfs4_reset_lease(time_t leasetime) { }
 static inline int nfs4_reset_recoverydir(char *recdir) { return 0; }
 static inline char * nfs4_recoverydir(void) {return NULL; }
-static inline bool nfsd4_spo_must_allow(struct svc_rqst *rqstp)
-{
-	return false;
-}
 #endif
 
 /*
@@ -363,16 +357,16 @@ void		nfsd_lockd_shutdown(void);
 	FATTR4_WORD2_MODE_UMASK | \
 	NFSD4_2_SECURITY_ATTRS)
 
-extern const u32 nfsd_suppattrs[3][3];
+extern u32 nfsd_suppattrs[3][3];
 
-static inline bool bmval_is_subset(const u32 *bm1, const u32 *bm2)
+static inline bool bmval_is_subset(u32 *bm1, u32 *bm2)
 {
 	return !((bm1[0] & ~bm2[0]) ||
 	         (bm1[1] & ~bm2[1]) ||
 		 (bm1[2] & ~bm2[2]));
 }
 
-static inline bool nfsd_attrs_supported(u32 minorversion, const u32 *bmval)
+static inline bool nfsd_attrs_supported(u32 minorversion, u32 *bmval)
 {
 	return bmval_is_subset(bmval, nfsd_suppattrs[minorversion]);
 }

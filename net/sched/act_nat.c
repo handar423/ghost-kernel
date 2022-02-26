@@ -29,7 +29,7 @@
 #include <net/udp.h>
 
 
-static unsigned int nat_net_id;
+static int nat_net_id;
 static struct tc_action_ops act_nat_ops;
 
 static const struct nla_policy nat_policy[TCA_NAT_MAX + 1] = {
@@ -48,7 +48,7 @@ static int tcf_nat_init(struct net *net, struct nlattr *nla, struct nlattr *est,
 	if (nla == NULL)
 		return -EINVAL;
 
-	err = nla_parse_nested(tb, TCA_NAT_MAX, nla, nat_policy, NULL);
+	err = nla_parse_nested(tb, TCA_NAT_MAX, nla, nat_policy);
 	if (err < 0)
 		return err;
 
@@ -65,9 +65,10 @@ static int tcf_nat_init(struct net *net, struct nlattr *nla, struct nlattr *est,
 	} else {
 		if (bind)
 			return 0;
-		tcf_idr_release(*a, bind);
-		if (!ovr)
+		if (!ovr) {
+			tcf_idr_release(*a, bind);
 			return -EEXIST;
+		}
 	}
 	p = to_tcf_nat(*a);
 
@@ -160,8 +161,7 @@ static int tcf_nat(struct sk_buff *skb, const struct tc_action *a,
 			goto drop;
 
 		tcph = (void *)(skb_network_header(skb) + ihl);
-		inet_proto_csum_replace4(&tcph->check, skb, addr, new_addr,
-					 true);
+		inet_proto_csum_replace4(&tcph->check, skb, addr, new_addr, 1);
 		break;
 	}
 	case IPPROTO_UDP:
@@ -175,7 +175,7 @@ static int tcf_nat(struct sk_buff *skb, const struct tc_action *a,
 		udph = (void *)(skb_network_header(skb) + ihl);
 		if (udph->check || skb->ip_summed == CHECKSUM_PARTIAL) {
 			inet_proto_csum_replace4(&udph->check, skb, addr,
-						 new_addr, true);
+						 new_addr, 1);
 			if (!udph->check)
 				udph->check = CSUM_MANGLED_0;
 		}
@@ -226,7 +226,7 @@ static int tcf_nat(struct sk_buff *skb, const struct tc_action *a,
 			iph->saddr = new_addr;
 
 		inet_proto_csum_replace4(&icmph->checksum, skb, addr, new_addr,
-					 false);
+					 0);
 		break;
 	}
 	default:

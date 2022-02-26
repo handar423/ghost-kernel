@@ -487,7 +487,7 @@ static int __init pcc_cpufreq_probe(void)
 	doorbell.space_id = reg_resource->space_id;
 	doorbell.bit_width = reg_resource->bit_width;
 	doorbell.bit_offset = reg_resource->bit_offset;
-	doorbell.access_width = 4;
+	doorbell.access_width = 64;
 	doorbell.address = reg_resource->address;
 
 	pr_debug("probe: doorbell: space_id is %d, bit_width is %d, "
@@ -574,14 +574,19 @@ static struct cpufreq_driver pcc_cpufreq_driver = {
 	.init = pcc_cpufreq_cpu_init,
 	.exit = pcc_cpufreq_cpu_exit,
 	.name = "pcc-cpufreq",
+	.owner = THIS_MODULE,
 };
 
 static int __init pcc_cpufreq_init(void)
 {
 	int ret;
 
+	/* Skip initialization if another cpufreq driver is there. */
+	if (cpufreq_get_current_driver())
+		return -EEXIST;
+
 	if (acpi_disabled)
-		return 0;
+		return -ENODEV;
 
 	ret = pcc_cpufreq_probe();
 	if (ret) {

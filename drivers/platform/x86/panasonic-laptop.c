@@ -125,9 +125,11 @@
 #include <linux/seq_file.h>
 #include <linux/uaccess.h>
 #include <linux/slab.h>
-#include <linux/acpi.h>
+#include <acpi/acpi_bus.h>
+#include <acpi/acpi_drivers.h>
 #include <linux/input.h>
 #include <linux/input/sparse-keymap.h>
+
 
 #ifndef ACPI_HOTKEY_COMPONENT
 #define ACPI_HOTKEY_COMPONENT	0x10000000
@@ -226,6 +228,10 @@ struct pcc_acpi {
 	struct acpi_device	*device;
 	struct input_dev	*input_dev;
 	struct backlight_device	*backlight;
+};
+
+struct pcc_keyinput {
+	struct acpi_hotkey      *hotkey;
 };
 
 /* method access functions */
@@ -437,7 +443,7 @@ static struct attribute *pcc_sysfs_entries[] = {
 	NULL,
 };
 
-static const struct attribute_group pcc_attr_group = {
+static struct attribute_group pcc_attr_group = {
 	.name	= NULL,		/* put in device directory */
 	.attrs	= pcc_sysfs_entries,
 };
@@ -445,7 +451,6 @@ static const struct attribute_group pcc_attr_group = {
 
 /* hotkey input device driver */
 
-static int sleep_keydown_seen;
 static void acpi_pcc_generate_keyinput(struct pcc_acpi *pcc)
 {
 	struct input_dev *hotk_input_dev = pcc->input_dev;
@@ -460,14 +465,7 @@ static void acpi_pcc_generate_keyinput(struct pcc_acpi *pcc)
 		return;
 	}
 
-	/* hack: some firmware sends no key down for sleep / hibernate */
-	if ((result & 0xf) == 0x7 || (result & 0xf) == 0xa) {
-		if (result & 0x80)
-			sleep_keydown_seen = 1;
-		if (!sleep_keydown_seen)
-			sparse_keymap_report_event(hotk_input_dev,
-					result & 0xf, 0x80, false);
-	}
+	acpi_bus_generate_proc_event(pcc->device, HKEY_NOTIFY, result);
 
 	if (!sparse_keymap_report_event(hotk_input_dev,
 					result & 0xf, result & 0x80, false))
@@ -495,8 +493,11 @@ static int acpi_pcc_init_input(struct pcc_acpi *pcc)
 	int error;
 
 	input_dev = input_allocate_device();
-	if (!input_dev)
+	if (!input_dev) {
+		ACPI_DEBUG_PRINT((ACPI_DB_ERROR,
+				  "Couldn't allocate input device for hotkey"));
 		return -ENOMEM;
+	}
 
 	input_dev->name = ACPI_PCC_DRIVER_NAME;
 	input_dev->phys = ACPI_PCC_INPUT_PHYS;
@@ -516,15 +517,27 @@ static int acpi_pcc_init_input(struct pcc_acpi *pcc)
 	if (error) {
 		ACPI_DEBUG_PRINT((ACPI_DB_ERROR,
 				  "Unable to register input device\n"));
-		goto err_free_dev;
+		goto err_free_keymap;
 	}
 
 	pcc->input_dev = input_dev;
 	return 0;
 
+ err_free_keymap:
+	sparse_keymap_free(input_dev);
  err_free_dev:
 	input_free_device(input_dev);
 	return error;
+}
+
+static void acpi_pcc_destroy_input(struct pcc_acpi *pcc)
+{
+	sparse_keymap_free(pcc->input_dev);
+	input_unregister_device(pcc->input_dev);
+	/*
+	 * No need to input_free_device() since core input API refcounts
+	 * and free()s the device.
+	 */
 }
 
 /* kernel module interface */
@@ -624,13 +637,30 @@ static int acpi_pcc_hotkey_add(struct acpi_device *device)
 out_backlight:
 	backlight_device_unregister(pcc->backlight);
 out_input:
-	input_unregister_device(pcc->input_dev);
+	acpi_pcc_destroy_input(pcc);
 out_sinf:
 	kfree(pcc->sinf);
 out_hotkey:
 	kfree(pcc);
 
 	return result;
+}
+
+static int __init acpi_pcc_init(void)
+{
+	int result = 0;
+
+	if (acpi_disabled)
+		return -ENODEV;
+
+	result = acpi_bus_register_driver(&acpi_pcc_driver);
+	if (result < 0) {
+		ACPI_DEBUG_PRINT((ACPI_DB_ERROR,
+				  "Error registering hotkey driver\n"));
+		return -ENODEV;
+	}
+
+	return 0;
 }
 
 static int acpi_pcc_hotkey_remove(struct acpi_device *device)
@@ -644,7 +674,7 @@ static int acpi_pcc_hotkey_remove(struct acpi_device *device)
 
 	backlight_device_unregister(pcc->backlight);
 
-	input_unregister_device(pcc->input_dev);
+	acpi_pcc_destroy_input(pcc);
 
 	kfree(pcc->sinf);
 	kfree(pcc);
@@ -652,4 +682,10 @@ static int acpi_pcc_hotkey_remove(struct acpi_device *device)
 	return 0;
 }
 
-module_acpi_driver(acpi_pcc_driver);
+static void __exit acpi_pcc_exit(void)
+{
+	acpi_bus_unregister_driver(&acpi_pcc_driver);
+}
+
+module_init(acpi_pcc_init);
+module_exit(acpi_pcc_exit);

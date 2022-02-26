@@ -1,15 +1,15 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef LINUX_VIRTIO_H
 #define LINUX_VIRTIO_H
 #include <linux/scatterlist.h>
 #include <linux/kernel.h>
 
-struct device {
-	void *parent;
-};
+/* TODO: empty stubs for now. Broken but enough for virtio_ring.c */
+#define list_add_tail(a, b) do {} while (0)
+#define list_del(a) do {} while (0)
+/* end of stubs */
 
 struct virtio_device {
-	struct device dev;
+	void *dev;
 	u64 features;
 };
 
@@ -24,6 +24,9 @@ struct virtqueue {
         unsigned int num_free;
 	void *priv;
 };
+
+#define MODULE_LICENSE(__MODULE_LICENSE_value) \
+	const char *__MODULE_LICENSE_name = __MODULE_LICENSE_value
 
 /* Interfaces exported by virtio_ring. */
 int virtqueue_add_sgs(struct virtqueue *vq,
@@ -43,7 +46,7 @@ int virtqueue_add_inbuf(struct virtqueue *vq,
 			void *data,
 			gfp_t gfp);
 
-bool virtqueue_kick(struct virtqueue *vq);
+void virtqueue_kick(struct virtqueue *vq);
 
 void *virtqueue_get_buf(struct virtqueue *vq, unsigned int *len);
 
@@ -58,9 +61,8 @@ struct virtqueue *vring_new_virtqueue(unsigned int index,
 				      unsigned int vring_align,
 				      struct virtio_device *vdev,
 				      bool weak_barriers,
-				      bool ctx,
 				      void *pages,
-				      bool (*notify)(struct virtqueue *vq),
+				      void (*notify)(struct virtqueue *vq),
 				      void (*callback)(struct virtqueue *vq),
 				      const char *name);
 void vring_del_virtqueue(struct virtqueue *vq);

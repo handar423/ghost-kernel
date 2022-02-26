@@ -19,6 +19,12 @@ config USB_EHCI_BIG_ENDIAN_MMIO
 config USB_EHCI_BIG_ENDIAN_DESC
 	bool
 
+config USB_UHCI_BIG_ENDIAN_MMIO
+	bool
+
+config USB_UHCI_BIG_ENDIAN_DESC
+	bool
+
 menuconfig USB_SUPPORT
 	bool "USB support"
 	depends on HAS_IOMEM
@@ -106,17 +112,11 @@ source "drivers/usb/usbip/Kconfig"
 
 endif
 
-source "drivers/usb/mtu3/Kconfig"
-
 source "drivers/usb/musb/Kconfig"
 
 source "drivers/usb/dwc3/Kconfig"
 
-source "drivers/usb/dwc2/Kconfig"
-
 source "drivers/usb/chipidea/Kconfig"
-
-source "drivers/usb/isp1760/Kconfig"
 
 comment "USB port drivers"
 
@@ -165,6 +165,8 @@ source "drivers/usb/gadget/Kconfig"
 
 source "drivers/usb/typec/Kconfig"
 
+source "drivers/usb/roles/Kconfig"
+
 config USB_LED_TRIG
 	bool "USB LED Triggers"
 	depends on LEDS_CLASS && LEDS_TRIGGERS
@@ -196,5 +198,9 @@ config USB_ULPI_BUS
 
 	  To compile this driver as a module, choose M here: the module will
 	  be called ulpi.
+
+config USB_ROLE_SWITCH
+	tristate
+	select USB_COMMON
 
 endif # USB_SUPPORT

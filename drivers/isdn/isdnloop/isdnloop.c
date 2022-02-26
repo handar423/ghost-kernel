@@ -59,8 +59,7 @@ isdnloop_bchan_send(isdnloop_card *card, int ch)
 	isdn_ctrl cmd;
 
 	while (card->sndcount[ch]) {
-		skb = skb_dequeue(&card->bqueue[ch]);
-		if (skb) {
+		if ((skb = skb_dequeue(&card->bqueue[ch]))) {
 			len = skb->len;
 			card->sndcount[ch] -= len;
 			ack = *(skb->head); /* used as scratch area */
@@ -90,9 +89,9 @@ isdnloop_bchan_send(isdnloop_card *card, int ch)
  *   data = pointer to card struct, set by kernel timer.data
  */
 static void
-isdnloop_pollbchan(struct timer_list *t)
+isdnloop_pollbchan(unsigned long data)
 {
-	isdnloop_card *card = from_timer(card, t, rb_timer);
+	isdnloop_card *card = (isdnloop_card *) data;
 	unsigned long flags;
 
 	if (card->flags & ISDNLOOP_FLAGS_B1ACTIVE)
@@ -150,7 +149,8 @@ typedef struct isdnloop_stat {
 	int action;
 } isdnloop_stat;
 /* *INDENT-OFF* */
-static isdnloop_stat isdnloop_stat_table[] = {
+static isdnloop_stat isdnloop_stat_table[] =
+{
 	{"BCON_",          ISDN_STAT_BCONN, 1}, /* B-Channel connected        */
 	{"BDIS_",          ISDN_STAT_BHUP,  2}, /* B-Channel disconnected     */
 	{"DCON_",          ISDN_STAT_DCONN, 0}, /* D-Channel connected        */
@@ -305,9 +305,9 @@ isdnloop_putmsg(isdnloop_card *card, unsigned char c)
  *   data = pointer to card struct
  */
 static void
-isdnloop_polldchan(struct timer_list *t)
+isdnloop_polldchan(unsigned long data)
 {
-	isdnloop_card *card = from_timer(card, t, st_timer);
+	isdnloop_card *card = (isdnloop_card *) data;
 	struct sk_buff *skb;
 	int avail;
 	int left;
@@ -317,8 +317,7 @@ isdnloop_polldchan(struct timer_list *t)
 	u_char *p;
 	isdn_ctrl cmd;
 
-	skb = skb_dequeue(&card->dqueue);
-	if (skb)
+	if ((skb = skb_dequeue(&card->dqueue)))
 		avail = skb->len;
 	else
 		avail = 0;
@@ -373,6 +372,8 @@ isdnloop_polldchan(struct timer_list *t)
 			card->flags |= ISDNLOOP_FLAGS_RBTIMER;
 			spin_lock_irqsave(&card->isdnloop_lock, flags);
 			del_timer(&card->rb_timer);
+			card->rb_timer.function = isdnloop_pollbchan;
+			card->rb_timer.data = (unsigned long) card;
 			card->rb_timer.expires = jiffies + ISDNLOOP_TIMER_BCREAD;
 			add_timer(&card->rb_timer);
 			spin_unlock_irqrestore(&card->isdnloop_lock, flags);
@@ -407,7 +408,7 @@ isdnloop_sendbuf(int channel, struct sk_buff *skb, isdnloop_card *card)
 		return -EINVAL;
 	}
 	if (len) {
-		if (!(card->flags & (channel ? ISDNLOOP_FLAGS_B2ACTIVE : ISDNLOOP_FLAGS_B1ACTIVE)))
+		if (!(card->flags & (channel) ? ISDNLOOP_FLAGS_B2ACTIVE : ISDNLOOP_FLAGS_B1ACTIVE))
 			return 0;
 		if (card->sndcount[channel] > ISDNLOOP_MAX_SQUEUE)
 			return 0;
@@ -470,19 +471,20 @@ isdnloop_fake(isdnloop_card *card, char *s, int ch)
 {
 	struct sk_buff *skb;
 	int len = strlen(s) + ((ch >= 0) ? 3 : 0);
-	skb = dev_alloc_skb(len);
-	if (!skb) {
+
+	if (!(skb = dev_alloc_skb(len))) {
 		printk(KERN_WARNING "isdnloop: Out of memory in isdnloop_fake\n");
 		return 1;
 	}
 	if (ch >= 0)
 		sprintf(skb_put(skb, 3), "%02d;", ch);
-	skb_put_data(skb, s, strlen(s));
+	memcpy(skb_put(skb, strlen(s)), s, strlen(s));
 	skb_queue_tail(&card->dqueue, skb);
 	return 0;
 }
 /* *INDENT-OFF* */
-static isdnloop_stat isdnloop_cmd_table[] = {
+static isdnloop_stat isdnloop_cmd_table[] =
+{
 	{"BCON_R",         0,  1},	/* B-Channel connect        */
 	{"BCON_I",         0, 17},	/* B-Channel connect ind    */
 	{"BDIS_R",         0,  2},	/* B-Channel disconnect     */
@@ -516,15 +518,17 @@ static isdnloop_stat isdnloop_cmd_table[] = {
 static void
 isdnloop_fake_err(isdnloop_card *card)
 {
-	char buf[64];
+	char buf[60];
 
-	snprintf(buf, sizeof(buf), "E%s", card->omsg);
+	sprintf(buf, "E%s", card->omsg);
 	isdnloop_fake(card, buf, -1);
 	isdnloop_fake(card, "NAK", -1);
 }
 
-static u_char ctable_eu[] = {0x00, 0x11, 0x01, 0x12};
-static u_char ctable_1t[] = {0x00, 0x3b, 0x01, 0x3a};
+static u_char ctable_eu[] =
+{0x00, 0x11, 0x01, 0x12};
+static u_char ctable_1t[] =
+{0x00, 0x3b, 0x01, 0x3a};
 
 /*
  * Assemble a simplified cause message depending on the
@@ -550,9 +554,9 @@ isdnloop_unicause(isdnloop_card *card, int loc, int cau)
 		sprintf(buf, "%02X44", ctable_1t[cau]);
 		break;
 	default:
-		return "0000";
+		return ("0000");
 	}
-	return buf;
+	return (buf);
 }
 
 /*
@@ -586,10 +590,9 @@ isdnloop_atimeout(isdnloop_card *card, int ch)
  * Wrapper for isdnloop_atimeout().
  */
 static void
-isdnloop_atimeout0(struct timer_list *t)
+isdnloop_atimeout0(unsigned long data)
 {
-	isdnloop_card *card = from_timer(card, t, c_timer[0]);
-
+	isdnloop_card *card = (isdnloop_card *) data;
 	isdnloop_atimeout(card, 0);
 }
 
@@ -597,10 +600,9 @@ isdnloop_atimeout0(struct timer_list *t)
  * Wrapper for isdnloop_atimeout().
  */
 static void
-isdnloop_atimeout1(struct timer_list *t)
+isdnloop_atimeout1(unsigned long data)
 {
-	isdnloop_card *card = from_timer(card, t, c_timer[1]);
-
+	isdnloop_card *card = (isdnloop_card *) data;
 	isdnloop_atimeout(card, 1);
 }
 
@@ -617,9 +619,13 @@ isdnloop_start_ctimer(isdnloop_card *card, int ch)
 	unsigned long flags;
 
 	spin_lock_irqsave(&card->isdnloop_lock, flags);
-	timer_setup(&card->c_timer[ch], ch ? isdnloop_atimeout1
-					   : isdnloop_atimeout0, 0);
+	init_timer(&card->c_timer[ch]);
 	card->c_timer[ch].expires = jiffies + ISDNLOOP_TIMER_ALERTWAIT;
+	if (ch)
+		card->c_timer[ch].function = isdnloop_atimeout1;
+	else
+		card->c_timer[ch].function = isdnloop_atimeout0;
+	card->c_timer[ch].data = (unsigned long) card;
 	add_timer(&card->c_timer[ch]);
 	spin_unlock_irqrestore(&card->isdnloop_lock, flags);
 }
@@ -641,8 +647,10 @@ isdnloop_kill_ctimer(isdnloop_card *card, int ch)
 	spin_unlock_irqrestore(&card->isdnloop_lock, flags);
 }
 
-static u_char si2bit[] = {0, 1, 0, 0, 0, 2, 0, 4, 0, 0};
-static u_char bit2si[] = {1, 5, 7};
+static u_char si2bit[] =
+{0, 1, 0, 0, 0, 2, 0, 4, 0, 0};
+static u_char bit2si[] =
+{1, 5, 7};
 
 /*
  * Try finding a listener for an outgoing call.
@@ -746,17 +754,17 @@ isdnloop_vstphone(isdnloop_card *card, char *phone, int caller)
 		if (caller) {
 			for (i = 0; i < 2; i++)
 				if (!(strcmp(card->s0num[i], phone)))
-					return phone;
-			return card->s0num[0];
+					return (phone);
+			return (card->s0num[0]);
 		}
-		return phone;
+		return (phone);
 		break;
 	case ISDN_PTYPE_1TR6:
 		if (caller) {
 			sprintf(nphone, "%s%c", card->s0num[0], phone[0]);
-			return nphone;
+			return (nphone);
 		} else
-			return &phone[strlen(phone) - 1];
+			return (&phone[strlen(phone) - 1]);
 		break;
 	}
 	return "";
@@ -895,8 +903,6 @@ isdnloop_parse_cmd(isdnloop_card *card)
 	case 7:
 		/* 0x;EAZ */
 		p += 3;
-		if (strlen(p) >= sizeof(card->eazlist[0]))
-			break;
 		strcpy(card->eazlist[ch - 1], p);
 		break;
 	case 8:
@@ -1064,12 +1070,6 @@ isdnloop_start(isdnloop_card *card, isdnloop_sdef *sdefp)
 		return -EBUSY;
 	if (copy_from_user((char *) &sdef, (char *) sdefp, sizeof(sdef)))
 		return -EFAULT;
-
-	for (i = 0; i < 3; i++) {
-		if (!memchr(sdef.num[i], 0, sizeof(sdef.num[i])))
-			return -EINVAL;
-	}
-
 	spin_lock_irqsave(&card->isdnloop_lock, flags);
 	switch (sdef.ptype) {
 	case ISDN_PTYPE_EURO:
@@ -1109,9 +1109,10 @@ isdnloop_start(isdnloop_card *card, isdnloop_sdef *sdefp)
 		       sdef.ptype);
 		return -EINVAL;
 	}
-	timer_setup(&card->rb_timer, isdnloop_pollbchan, 0);
-	timer_setup(&card->st_timer, isdnloop_polldchan, 0);
+	init_timer(&card->st_timer);
 	card->st_timer.expires = jiffies + ISDNLOOP_TIMER_DCREAD;
+	card->st_timer.function = isdnloop_polldchan;
+	card->st_timer.data = (unsigned long) card;
 	add_timer(&card->st_timer);
 	card->flags |= ISDNLOOP_FLAGS_RUNNING;
 	spin_unlock_irqrestore(&card->isdnloop_lock, flags);
@@ -1126,7 +1127,7 @@ isdnloop_command(isdn_ctrl *c, isdnloop_card *card)
 {
 	ulong a;
 	int i;
-	char cbuf[80];
+	char cbuf[60];
 	isdn_ctrl cmd;
 	isdnloop_cdef cdef;
 
@@ -1137,14 +1138,16 @@ isdnloop_command(isdn_ctrl *c, isdnloop_card *card)
 		case ISDNLOOP_IOCTL_DEBUGVAR:
 			return (ulong) card;
 		case ISDNLOOP_IOCTL_STARTUP:
-			return isdnloop_start(card, (isdnloop_sdef *) a);
+			if (!access_ok(VERIFY_READ, (void *) a, sizeof(isdnloop_sdef)))
+				return -EFAULT;
+			return (isdnloop_start(card, (isdnloop_sdef *) a));
 			break;
 		case ISDNLOOP_IOCTL_ADDCARD:
 			if (copy_from_user((char *)&cdef,
 					   (char *)a,
 					   sizeof(cdef)))
 				return -EFAULT;
-			return isdnloop_addcard(cdef.id1);
+			return (isdnloop_addcard(cdef.id1));
 			break;
 		case ISDNLOOP_IOCTL_LEASEDCFG:
 			if (a) {
@@ -1189,6 +1192,7 @@ isdnloop_command(isdn_ctrl *c, isdnloop_card *card)
 			break;
 		if ((c->arg & 255) < ISDNLOOP_BCH) {
 			char *p;
+			char dial[50];
 			char dcode[4];
 
 			a = c->arg;
@@ -1200,10 +1204,10 @@ isdnloop_command(isdn_ctrl *c, isdnloop_card *card)
 			} else
 				/* Normal Dial */
 				strcpy(dcode, "CAL");
-			snprintf(cbuf, sizeof(cbuf),
-				 "%02d;D%s_R%s,%02d,%02d,%s\n", (int) (a + 1),
-				 dcode, p, c->parm.setup.si1,
-				 c->parm.setup.si2, c->parm.setup.eazmsn);
+			strcpy(dial, p);
+			sprintf(cbuf, "%02d;D%s_R%s,%02d,%02d,%s\n", (int) (a + 1),
+				dcode, dial, c->parm.setup.si1,
+				c->parm.setup.si2, c->parm.setup.eazmsn);
 			i = isdnloop_writecmd(cbuf, strlen(cbuf), 0, card);
 		}
 		break;
@@ -1366,7 +1370,7 @@ if_command(isdn_ctrl *c)
 	isdnloop_card *card = isdnloop_findcard(c->driver);
 
 	if (card)
-		return isdnloop_command(c, card);
+		return (isdnloop_command(c, card));
 	printk(KERN_ERR
 	       "isdnloop: if_command called with invalid driverId!\n");
 	return -ENODEV;
@@ -1380,7 +1384,7 @@ if_writecmd(const u_char __user *buf, int len, int id, int channel)
 	if (card) {
 		if (!(card->flags & ISDNLOOP_FLAGS_RUNNING))
 			return -ENODEV;
-		return isdnloop_writecmd(buf, len, 1, card);
+		return (isdnloop_writecmd(buf, len, 1, card));
 	}
 	printk(KERN_ERR
 	       "isdnloop: if_writecmd called with invalid driverId!\n");
@@ -1395,7 +1399,7 @@ if_readstatus(u_char __user *buf, int len, int id, int channel)
 	if (card) {
 		if (!(card->flags & ISDNLOOP_FLAGS_RUNNING))
 			return -ENODEV;
-		return isdnloop_readstatus(buf, len, card);
+		return (isdnloop_readstatus(buf, len, card));
 	}
 	printk(KERN_ERR
 	       "isdnloop: if_readstatus called with invalid driverId!\n");
@@ -1412,7 +1416,7 @@ if_sendbuf(int id, int channel, int ack, struct sk_buff *skb)
 			return -ENODEV;
 		/* ack request stored in skb scratch area */
 		*(skb->head) = ack;
-		return isdnloop_sendbuf(channel, skb, card);
+		return (isdnloop_sendbuf(channel, skb, card));
 	}
 	printk(KERN_ERR
 	       "isdnloop: if_sendbuf called with invalid driverId!\n");
@@ -1428,8 +1432,8 @@ isdnloop_initcard(char *id)
 {
 	isdnloop_card *card;
 	int i;
-	card = kzalloc(sizeof(isdnloop_card), GFP_KERNEL);
-	if (!card) {
+
+	if (!(card = kzalloc(sizeof(isdnloop_card), GFP_KERNEL))) {
 		printk(KERN_WARNING
 		       "isdnloop: (%s) Could not allocate card-struct.\n", id);
 		return (isdnloop_card *) 0;
@@ -1478,8 +1482,8 @@ static int
 isdnloop_addcard(char *id1)
 {
 	isdnloop_card *card;
-	card = isdnloop_initcard(id1);
-	if (!card) {
+
+	if (!(card = isdnloop_initcard(id1))) {
 		return -EIO;
 	}
 	printk(KERN_INFO
@@ -1492,7 +1496,7 @@ static int __init
 isdnloop_init(void)
 {
 	if (isdnloop_id)
-		return isdnloop_addcard(isdnloop_id);
+		return (isdnloop_addcard(isdnloop_id));
 
 	return 0;
 }

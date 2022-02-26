@@ -221,7 +221,7 @@ static void hvs_set_channel_pending_send_size(struct vmbus_channel *chan)
 	 * the new pending send size, before we can re-check the writable
 	 * bytes.
 	 */
-	virt_mb();
+	mb();
 }
 
 static void hvs_clear_channel_pending_send_size(struct vmbus_channel *chan)
@@ -229,7 +229,7 @@ static void hvs_clear_channel_pending_send_size(struct vmbus_channel *chan)
 	set_channel_pending_send_size(chan, 0);
 
 	/* Ditto */
-	virt_mb();
+	mb();
 }
 
 static bool hvs_channel_readable(struct vmbus_channel *chan)
@@ -296,7 +296,7 @@ static void hvs_channel_cb(void *ctx)
 	struct vmbus_channel *chan = hvs->chan;
 
 	if (hvs_channel_readable(chan))
-		sk->sk_data_ready(sk);
+		sk->sk_data_ready(sk, 0);
 
 	/* See hvs_stream_has_space(): when we reach here, the writable bytes
 	 * may be already less than HVS_PKT_LEN(HVS_SEND_BUF_SIZE).
@@ -349,6 +349,7 @@ static void hvs_open_connection(struct vmbus_channel *chan)
 		return;
 
 	lock_sock(sk);
+
 	if ((conn_from_host && sk->sk_state != TCP_LISTEN) ||
 	    (!conn_from_host && sk->sk_state != TCP_SYN_SENT))
 		goto out;
@@ -358,7 +359,7 @@ static void hvs_open_connection(struct vmbus_channel *chan)
 			goto out;
 
 		new = __vsock_create(sock_net(sk), NULL, sk, GFP_KERNEL,
-				     sk->sk_type, 0);
+				     sk->sk_type);
 		if (!new)
 			goto out;
 
@@ -514,8 +515,8 @@ static int hvs_dgram_bind(struct vsock_sock *vsk, struct sockaddr_vm *addr)
 	return -EOPNOTSUPP;
 }
 
-static int hvs_dgram_dequeue(struct vsock_sock *vsk, struct msghdr *msg,
-			     size_t len, int flags)
+static int hvs_dgram_dequeue(struct kiocb *kiocb, struct vsock_sock *vsk,
+			     struct msghdr *msg, size_t len, int flags)
 {
 	return -EOPNOTSUPP;
 }
@@ -573,7 +574,8 @@ static ssize_t hvs_stream_dequeue(struct vsock_sock *vsk, struct msghdr *msg,
 
 	recv_buf = (struct hvs_recv_buf *)(hvs->recv_desc + 1);
 	to_read = min_t(u32, len, hvs->recv_data_len);
-	ret = memcpy_to_msg(msg, recv_buf->data + hvs->recv_data_off, to_read);
+	ret = memcpy_toiovec(msg->msg_iov, recv_buf->data + hvs->recv_data_off,
+			     to_read);
 	if (ret != 0)
 		return ret;
 
@@ -885,6 +887,9 @@ static struct hv_driver hvs_drv = {
 static int __init hvs_init(void)
 {
 	int ret;
+
+	mark_tech_preview("Hyper-V Virtual Sockets transport driver",
+			   THIS_MODULE);
 
 	if (vmbus_proto_version < VERSION_WIN10)
 		return -ENODEV;

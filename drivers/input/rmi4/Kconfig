@@ -11,24 +11,6 @@ config RMI4_CORE
 
 if RMI4_CORE
 
-config RMI4_I2C
-	tristate "RMI4 I2C Support"
-	depends on I2C
-	help
-	  Say Y here if you want to support RMI4 devices connected to an I2C
-	  bus.
-
-	  If unsure, say Y.
-
-config RMI4_SPI
-	tristate "RMI4 SPI Support"
-	depends on SPI
-	help
-	  Say Y here if you want to support RMI4 devices connected to a SPI
-	  bus.
-
-	  If unsure, say N.
-
 config RMI4_SMB
 	tristate "RMI4 SMB Support"
 	depends on I2C
@@ -42,10 +24,10 @@ config RMI4_SMB
 	  called rmi_smbus.
 
 config RMI4_F03
-	bool "RMI4 Function 03 (PS2 Guest)"
+        bool "RMI4 Function 03 (PS2 Guest)"
 	depends on RMI4_CORE
-	help
-	  Say Y here if you want to add support for RMI4 function 03.
+        help
+          Say Y here if you want to add support for RMI4 function 03.
 
 	  Function 03 provides PS2 guest support for RMI4 devices. This
 	  includes support for TrackPoints on TouchPads.
@@ -87,34 +69,5 @@ config RMI4_F30
 
 	  Function 30 provides GPIO and LED support for RMI4 devices. This
 	  includes support for buttons on TouchPads and ClickPads.
-
-config RMI4_F34
-	bool "RMI4 Function 34 (Device reflash)"
-	select FW_LOADER
-	help
-	  Say Y here if you want to add support for RMI4 function 34.
-
-	  Function 34 provides support for upgrading the firmware on the RMI4
-	  device via the firmware loader interface. This is triggered using a
-	  sysfs attribute.
-
-config RMI4_F54
-	bool "RMI4 Function 54 (Analog diagnostics)"
-	depends on VIDEO_V4L2=y || (RMI4_CORE=m && VIDEO_V4L2=m)
-	select VIDEOBUF2_VMALLOC
-	select RMI4_F55
-	help
-	  Say Y here if you want to add support for RMI4 function 54
-
-	  Function 54 provides access to various diagnostic features in certain
-	  RMI4 touch sensors.
-
-config RMI4_F55
-	bool "RMI4 Function 55 (Sensor tuning)"
-	help
-	  Say Y here if you want to add support for RMI4 function 55
-
-	  Function 55 provides access to the RMI4 touch sensor tuning
-	  mechanism.
 
 endif # RMI_CORE

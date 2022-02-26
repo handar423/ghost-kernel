@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2017, Intel Corp.
+ * Copyright (C) 2000 - 2013, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -65,13 +65,13 @@ ACPI_MODULE_NAME("utcache")
 acpi_status
 acpi_os_create_cache(char *cache_name,
 		     u16 object_size,
-		     u16 max_depth, struct acpi_memory_list **return_cache)
+		     u16 max_depth, struct acpi_memory_list ** return_cache)
 {
 	struct acpi_memory_list *cache;
 
 	ACPI_FUNCTION_ENTRY();
 
-	if (!cache_name || !return_cache || !object_size) {
+	if (!cache_name || !return_cache || (object_size < 16)) {
 		return (AE_BAD_PARAMETER);
 	}
 
@@ -105,7 +105,7 @@ acpi_os_create_cache(char *cache_name,
  *
  ******************************************************************************/
 
-acpi_status acpi_os_purge_cache(struct acpi_memory_list *cache)
+acpi_status acpi_os_purge_cache(struct acpi_memory_list * cache)
 {
 	void *next;
 	acpi_status status;
@@ -151,7 +151,7 @@ acpi_status acpi_os_purge_cache(struct acpi_memory_list *cache)
  *
  ******************************************************************************/
 
-acpi_status acpi_os_delete_cache(struct acpi_memory_list *cache)
+acpi_status acpi_os_delete_cache(struct acpi_memory_list * cache)
 {
 	acpi_status status;
 
@@ -184,7 +184,8 @@ acpi_status acpi_os_delete_cache(struct acpi_memory_list *cache)
  *
  ******************************************************************************/
 
-acpi_status acpi_os_release_object(struct acpi_memory_list *cache, void *object)
+acpi_status
+acpi_os_release_object(struct acpi_memory_list * cache, void *object)
 {
 	acpi_status status;
 
@@ -244,15 +245,15 @@ void *acpi_os_acquire_object(struct acpi_memory_list *cache)
 	acpi_status status;
 	void *object;
 
-	ACPI_FUNCTION_TRACE(os_acquire_object);
+	ACPI_FUNCTION_NAME(os_acquire_object);
 
 	if (!cache) {
-		return_PTR(NULL);
+		return (NULL);
 	}
 
 	status = acpi_ut_acquire_mutex(ACPI_MTX_CACHES);
 	if (ACPI_FAILURE(status)) {
-		return_PTR(NULL);
+		return (NULL);
 	}
 
 	ACPI_MEM_TRACKING(cache->requests++);
@@ -275,7 +276,7 @@ void *acpi_os_acquire_object(struct acpi_memory_list *cache)
 
 		status = acpi_ut_release_mutex(ACPI_MTX_CACHES);
 		if (ACPI_FAILURE(status)) {
-			return_PTR(NULL);
+			return (NULL);
 		}
 
 		/* Clear (zero) the previously used Object */
@@ -298,15 +299,15 @@ void *acpi_os_acquire_object(struct acpi_memory_list *cache)
 
 		status = acpi_ut_release_mutex(ACPI_MTX_CACHES);
 		if (ACPI_FAILURE(status)) {
-			return_PTR(NULL);
+			return (NULL);
 		}
 
 		object = ACPI_ALLOCATE_ZEROED(cache->object_size);
 		if (!object) {
-			return_PTR(NULL);
+			return (NULL);
 		}
 	}
 
-	return_PTR(object);
+	return (object);
 }
 #endif				/* ACPI_USE_LOCAL_CACHE */

@@ -15,10 +15,10 @@
 #include <linux/slab.h>
 #include <linux/err.h>
 #include <linux/oid_registry.h>
-#include <crypto/public_key.h>
+#include "public_key.h"
 #include "x509_parser.h"
 #include "x509-asn1.h"
-#include "x509_akid-asn1.h"
+#include "x509_rsakey-asn1.h"
 
 struct x509_parse_context {
 	struct x509_certificate	*cert;		/* Certificate being constructed */
@@ -35,10 +35,6 @@ struct x509_parse_context {
 	u16		o_offset;		/* Offset of organizationName (O) */
 	u16		cn_offset;		/* Offset of commonName (CN) */
 	u16		email_offset;		/* Offset of emailAddress */
-	unsigned	raw_akid_size;
-	const void	*raw_akid;		/* Raw authorityKeyId in ASN.1 */
-	const void	*akid_raw_issuer;	/* Raw directoryName in authorityKeyId */
-	unsigned	akid_raw_issuer_size;
 };
 
 /*
@@ -47,12 +43,13 @@ struct x509_parse_context {
 void x509_free_certificate(struct x509_certificate *cert)
 {
 	if (cert) {
-		public_key_free(cert->pub);
-		public_key_signature_free(cert->sig);
+		public_key_destroy(cert->pub);
 		kfree(cert->issuer);
 		kfree(cert->subject);
-		kfree(cert->id);
-		kfree(cert->skid);
+		kfree(cert->fingerprint);
+		kfree(cert->authority);
+		kfree(cert->sig.digest);
+		mpi_free(cert->sig.rsa.s);
 		kfree(cert);
 	}
 }
@@ -65,7 +62,6 @@ struct x509_certificate *x509_cert_parse(const void *data, size_t datalen)
 {
 	struct x509_certificate *cert;
 	struct x509_parse_context *ctx;
-	struct asymmetric_key_id *kid;
 	long ret;
 
 	ret = -ENOMEM;
@@ -74,9 +70,6 @@ struct x509_certificate *x509_cert_parse(const void *data, size_t datalen)
 		goto error_no_cert;
 	cert->pub = kzalloc(sizeof(struct public_key), GFP_KERNEL);
 	if (!cert->pub)
-		goto error_no_ctx;
-	cert->sig = kzalloc(sizeof(struct public_key_signature), GFP_KERNEL);
-	if (!cert->sig)
 		goto error_no_ctx;
 	ctx = kzalloc(sizeof(struct x509_parse_context), GFP_KERNEL);
 	if (!ctx)
@@ -90,43 +83,9 @@ struct x509_certificate *x509_cert_parse(const void *data, size_t datalen)
 	if (ret < 0)
 		goto error_decode;
 
-	/* Decode the AuthorityKeyIdentifier */
-	if (ctx->raw_akid) {
-		pr_devel("AKID: %u %*phN\n",
-			 ctx->raw_akid_size, ctx->raw_akid_size, ctx->raw_akid);
-		ret = asn1_ber_decoder(&x509_akid_decoder, ctx,
-				       ctx->raw_akid, ctx->raw_akid_size);
-		if (ret < 0) {
-			pr_warn("Couldn't decode AuthKeyIdentifier\n");
-			goto error_decode;
-		}
-	}
-
-	ret = -ENOMEM;
-	cert->pub->key = kmemdup(ctx->key, ctx->key_size, GFP_KERNEL);
-	if (!cert->pub->key)
-		goto error_decode;
-
-	cert->pub->keylen = ctx->key_size;
-
-	/* Grab the signature bits */
-	ret = x509_get_sig_params(cert);
-	if (ret < 0)
-		goto error_decode;
-
-	/* Generate cert issuer + serial number key ID */
-	kid = asymmetric_key_generate_id(cert->raw_serial,
-					 cert->raw_serial_size,
-					 cert->raw_issuer,
-					 cert->raw_issuer_size);
-	if (IS_ERR(kid)) {
-		ret = PTR_ERR(kid);
-		goto error_decode;
-	}
-	cert->id = kid;
-
-	/* Detect self-signed certificates */
-	ret = x509_check_for_self_signed(cert);
+	/* Decode the public key */
+	ret = asn1_ber_decoder(&x509_rsakey_decoder, ctx,
+			       ctx->key, ctx->key_size);
 	if (ret < 0)
 		goto error_decode;
 
@@ -198,33 +157,33 @@ int x509_note_pkey_algo(void *context, size_t hdrlen,
 		return -ENOPKG; /* Unsupported combination */
 
 	case OID_md4WithRSAEncryption:
-		ctx->cert->sig->hash_algo = "md4";
-		ctx->cert->sig->pkey_algo = "rsa";
+		ctx->cert->sig.pkey_hash_algo = HASH_ALGO_MD5;
+		ctx->cert->sig.pkey_algo = PKEY_ALGO_RSA;
 		break;
 
 	case OID_sha1WithRSAEncryption:
-		ctx->cert->sig->hash_algo = "sha1";
-		ctx->cert->sig->pkey_algo = "rsa";
+		ctx->cert->sig.pkey_hash_algo = HASH_ALGO_SHA1;
+		ctx->cert->sig.pkey_algo = PKEY_ALGO_RSA;
 		break;
 
 	case OID_sha256WithRSAEncryption:
-		ctx->cert->sig->hash_algo = "sha256";
-		ctx->cert->sig->pkey_algo = "rsa";
+		ctx->cert->sig.pkey_hash_algo = HASH_ALGO_SHA256;
+		ctx->cert->sig.pkey_algo = PKEY_ALGO_RSA;
 		break;
 
 	case OID_sha384WithRSAEncryption:
-		ctx->cert->sig->hash_algo = "sha384";
-		ctx->cert->sig->pkey_algo = "rsa";
+		ctx->cert->sig.pkey_hash_algo = HASH_ALGO_SHA384;
+		ctx->cert->sig.pkey_algo = PKEY_ALGO_RSA;
 		break;
 
 	case OID_sha512WithRSAEncryption:
-		ctx->cert->sig->hash_algo = "sha512";
-		ctx->cert->sig->pkey_algo = "rsa";
+		ctx->cert->sig.pkey_hash_algo = HASH_ALGO_SHA512;
+		ctx->cert->sig.pkey_algo = PKEY_ALGO_RSA;
 		break;
 
 	case OID_sha224WithRSAEncryption:
-		ctx->cert->sig->hash_algo = "sha224";
-		ctx->cert->sig->pkey_algo = "rsa";
+		ctx->cert->sig.pkey_hash_algo = HASH_ALGO_SHA224;
+		ctx->cert->sig.pkey_algo = PKEY_ALGO_RSA;
 		break;
 	}
 
@@ -406,13 +365,34 @@ int x509_extract_key_data(void *context, size_t hdrlen,
 	if (ctx->last_oid != OID_rsaEncryption)
 		return -ENOPKG;
 
-	ctx->cert->pub->pkey_algo = "rsa";
+	ctx->cert->pub->pkey_algo = PKEY_ALGO_RSA;
 
 	/* Discard the BIT STRING metadata */
-	if (vlen < 1 || *(const u8 *)value != 0)
-		return -EBADMSG;
 	ctx->key = value + 1;
 	ctx->key_size = vlen - 1;
+	return 0;
+}
+
+/*
+ * Extract a RSA public key value
+ */
+int rsa_extract_mpi(void *context, size_t hdrlen,
+		    unsigned char tag,
+		    const void *value, size_t vlen)
+{
+	struct x509_parse_context *ctx = context;
+	MPI mpi;
+
+	if (ctx->nr_mpi >= ARRAY_SIZE(ctx->cert->pub->mpi)) {
+		pr_err("Too many public key MPIs in certificate\n");
+		return -EBADMSG;
+	}
+
+	mpi = mpi_read_raw_data(value, vlen);
+	if (!mpi)
+		return -ENOMEM;
+
+	ctx->cert->pub->mpi[ctx->nr_mpi++] = mpi;
 	return 0;
 }
 
@@ -427,34 +407,86 @@ int x509_process_extension(void *context, size_t hdrlen,
 			   const void *value, size_t vlen)
 {
 	struct x509_parse_context *ctx = context;
-	struct asymmetric_key_id *kid;
 	const unsigned char *v = value;
+	char *f;
+	int i;
 
 	pr_debug("Extension: %u\n", ctx->last_oid);
 
 	if (ctx->last_oid == OID_subjectKeyIdentifier) {
 		/* Get hold of the key fingerprint */
-		if (ctx->cert->skid || vlen < 3)
+		if (vlen < 3)
 			return -EBADMSG;
 		if (v[0] != ASN1_OTS || v[1] != vlen - 2)
 			return -EBADMSG;
 		v += 2;
 		vlen -= 2;
 
-		ctx->cert->raw_skid_size = vlen;
-		ctx->cert->raw_skid = v;
-		kid = asymmetric_key_generate_id(v, vlen, "", 0);
-		if (IS_ERR(kid))
-			return PTR_ERR(kid);
-		ctx->cert->skid = kid;
-		pr_debug("subjkeyid %*phN\n", kid->len, kid->data);
+		f = kmalloc(vlen * 2 + 1, GFP_KERNEL);
+		if (!f)
+			return -ENOMEM;
+		for (i = 0; i < vlen; i++)
+			sprintf(f + i * 2, "%02x", v[i]);
+		pr_debug("fingerprint %s\n", f);
+		ctx->cert->fingerprint = f;
 		return 0;
 	}
 
 	if (ctx->last_oid == OID_authorityKeyIdentifier) {
+		size_t key_len;
+
 		/* Get hold of the CA key fingerprint */
-		ctx->raw_akid = v;
-		ctx->raw_akid_size = vlen;
+		if (vlen < 5)
+			return -EBADMSG;
+
+		/* Authority Key Identifier must be a Constructed SEQUENCE */
+		if (v[0] != (ASN1_SEQ | (ASN1_CONS << 5)))
+			return -EBADMSG;
+
+		/* Authority Key Identifier is not indefinite length */
+		if (unlikely(vlen == ASN1_INDEFINITE_LENGTH))
+			return -EBADMSG;
+
+		if (vlen < ASN1_INDEFINITE_LENGTH) {
+			/* Short Form length */
+			if (v[1] != vlen - 2 ||
+			    v[2] != SEQ_TAG_KEYID ||
+			    v[3] > vlen - 4)
+				return -EBADMSG;
+
+			key_len = v[3];
+			v += 4;
+		} else {
+			/* Long Form length */
+			size_t seq_len = 0;
+			size_t sub = v[1] - ASN1_INDEFINITE_LENGTH;
+
+			if (sub > 2)
+				return -EBADMSG;
+
+			/* calculate the length from subsequent octets */
+			v += 2;
+			for (i = 0; i < sub; i++) {
+				seq_len <<= 8;
+				seq_len |= v[i];
+			}
+
+			if (seq_len != vlen - 2 - sub ||
+			    v[sub] != SEQ_TAG_KEYID ||
+			    v[sub + 1] > vlen - 4 - sub)
+				return -EBADMSG;
+
+			key_len = v[sub + 1];
+			v += (sub + 2);
+		}
+
+		f = kmalloc(key_len * 2 + 1, GFP_KERNEL);
+		if (!f)
+			return -ENOMEM;
+		for (i = 0; i < key_len; i++)
+			sprintf(f + i * 2, "%02x", v[i]);
+		pr_debug("authority   %s\n", f);
+		ctx->cert->authority = f;
 		return 0;
 	}
 
@@ -542,7 +574,7 @@ int x509_decode_time(time64_t *_t,  size_t hdrlen,
 	    sec > 60) /* ISO 8601 permits leap seconds [X.680 46.3] */
 		goto invalid_time;
 
-	*_t = mktime64(year, mon, day, hour, min, sec);
+	*_t = mktime(year, mon, day, hour, min, sec);
 	return 0;
 
 unsupported_time:
@@ -570,70 +602,4 @@ int x509_note_not_after(void *context, size_t hdrlen,
 {
 	struct x509_parse_context *ctx = context;
 	return x509_decode_time(&ctx->cert->valid_to, hdrlen, tag, value, vlen);
-}
-
-/*
- * Note a key identifier-based AuthorityKeyIdentifier
- */
-int x509_akid_note_kid(void *context, size_t hdrlen,
-		       unsigned char tag,
-		       const void *value, size_t vlen)
-{
-	struct x509_parse_context *ctx = context;
-	struct asymmetric_key_id *kid;
-
-	pr_debug("AKID: keyid: %*phN\n", (int)vlen, value);
-
-	if (ctx->cert->sig->auth_ids[1])
-		return 0;
-
-	kid = asymmetric_key_generate_id(value, vlen, "", 0);
-	if (IS_ERR(kid))
-		return PTR_ERR(kid);
-	pr_debug("authkeyid %*phN\n", kid->len, kid->data);
-	ctx->cert->sig->auth_ids[1] = kid;
-	return 0;
-}
-
-/*
- * Note a directoryName in an AuthorityKeyIdentifier
- */
-int x509_akid_note_name(void *context, size_t hdrlen,
-			unsigned char tag,
-			const void *value, size_t vlen)
-{
-	struct x509_parse_context *ctx = context;
-
-	pr_debug("AKID: name: %*phN\n", (int)vlen, value);
-
-	ctx->akid_raw_issuer = value;
-	ctx->akid_raw_issuer_size = vlen;
-	return 0;
-}
-
-/*
- * Note a serial number in an AuthorityKeyIdentifier
- */
-int x509_akid_note_serial(void *context, size_t hdrlen,
-			  unsigned char tag,
-			  const void *value, size_t vlen)
-{
-	struct x509_parse_context *ctx = context;
-	struct asymmetric_key_id *kid;
-
-	pr_debug("AKID: serial: %*phN\n", (int)vlen, value);
-
-	if (!ctx->akid_raw_issuer || ctx->cert->sig->auth_ids[0])
-		return 0;
-
-	kid = asymmetric_key_generate_id(value,
-					 vlen,
-					 ctx->akid_raw_issuer,
-					 ctx->akid_raw_issuer_size);
-	if (IS_ERR(kid))
-		return PTR_ERR(kid);
-
-	pr_debug("authkeyid %*phN\n", kid->len, kid->data);
-	ctx->cert->sig->auth_ids[0] = kid;
-	return 0;
 }

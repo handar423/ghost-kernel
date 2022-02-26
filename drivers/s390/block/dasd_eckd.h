@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Author(s)......: Holger Smolinski <Holger.Smolinski@de.ibm.com>
  *		    Horst Hummel <Horst.Hummel@de.ibm.com>
@@ -166,7 +165,7 @@ struct DE_eckd_data {
 	__u8 ga_extended;	/* Global Attributes Extended	*/
 	struct ch_t beg_ext;
 	struct ch_t end_ext;
-	unsigned long ep_sys_time; /* Ext Parameter - System Time Stamp */
+	unsigned long long ep_sys_time; /* Ext Parameter - System Time Stamp */
 	__u8 ep_format;        /* Extended Parameter format byte       */
 	__u8 ep_prio;          /* Extended Parameter priority I/O byte */
 	__u8 ep_reserved1;     /* Extended Parameter Reserved	       */
@@ -560,7 +559,6 @@ struct dasd_eckd_private {
 	int count;
 
 	u32 fcx_max_data;
-	char suc_reason;
 };
 
 
@@ -570,7 +568,7 @@ void dasd_alias_disconnect_device_from_lcu(struct dasd_device *);
 int dasd_alias_add_device(struct dasd_device *);
 int dasd_alias_remove_device(struct dasd_device *);
 struct dasd_device *dasd_alias_get_start_dev(struct dasd_device *);
-void dasd_alias_handle_summary_unit_check(struct work_struct *);
+void dasd_alias_handle_summary_unit_check(struct dasd_device *, struct irb *);
 void dasd_eckd_reset_ccw_to_base_io(struct dasd_ccw_req *);
 void dasd_alias_lcu_setup_complete(struct dasd_device *);
 void dasd_alias_wait_for_lcu_setup(struct dasd_device *);

@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2017, Intel Corp.
+ * Copyright (C) 2000 - 2013, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -122,7 +122,7 @@ static char *acpi_ex_allocate_name_string(u32 prefix_count, u32 num_name_segs)
 
 		/* Set up multi prefixes   */
 
-		*temp_ptr++ = AML_MULTI_NAME_PREFIX;
+		*temp_ptr++ = AML_MULTI_NAME_PREFIX_OP;
 		*temp_ptr++ = (char)num_name_segs;
 	} else if (2 == num_name_segs) {
 
@@ -164,8 +164,8 @@ static acpi_status acpi_ex_name_segment(u8 ** in_aml_address, char *name_string)
 	ACPI_FUNCTION_TRACE(ex_name_segment);
 
 	/*
-	 * If first character is a digit, then we know that we aren't looking
-	 * at a valid name segment
+	 * If first character is a digit, then we know that we aren't looking at a
+	 * valid name segment
 	 */
 	char_buf[0] = *aml_address;
 
@@ -342,7 +342,7 @@ acpi_ex_get_name_string(acpi_object_type data_type,
 			}
 			break;
 
-		case AML_MULTI_NAME_PREFIX:
+		case AML_MULTI_NAME_PREFIX_OP:
 
 			ACPI_DEBUG_PRINT((ACPI_DB_LOAD,
 					  "MultiNamePrefix at %p\n",

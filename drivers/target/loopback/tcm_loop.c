@@ -93,6 +93,32 @@ static struct device_driver tcm_loop_driverfs = {
  */
 static struct device *tcm_loop_primary;
 
+/*
+ * Copied from drivers/scsi/libfc/fc_fcp.c:fc_change_queue_depth() and
+ * drivers/scsi/libiscsi.c:iscsi_change_queue_depth()
+ */
+static int tcm_loop_change_queue_depth(
+	struct scsi_device *sdev,
+	int depth,
+	int reason)
+{
+
+	switch (reason) {
+	case SCSI_QDEPTH_DEFAULT:
+		scsi_adjust_queue_depth(sdev, depth, reason);
+		break;
+	case SCSI_QDEPTH_QFULL:
+		scsi_track_queue_full(sdev, depth);
+		break;
+	case SCSI_QDEPTH_RAMP_UP:
+		scsi_adjust_queue_depth(sdev, depth, reason);
+		break;
+	default:
+		return -EOPNOTSUPP;
+	}
+	return sdev->queue_depth;
+}
+
 static void tcm_loop_submission_work(struct work_struct *work)
 {
 	struct tcm_loop_cmd *tl_cmd =
@@ -177,7 +203,7 @@ static int tcm_loop_queuecommand(struct Scsi_Host *sh, struct scsi_cmnd *sc)
 {
 	struct tcm_loop_cmd *tl_cmd;
 
-	pr_debug("tcm_loop_queuecommand() %d:%d:%d:%llu got CDB: 0x%02x"
+	pr_debug("tcm_loop_queuecommand() %d:%d:%d:%d got CDB: 0x%02x"
 		" scsi_buf_len: %u\n", sc->device->host->host_no,
 		sc->device->id, sc->device->channel, sc->device->lun,
 		sc->cmnd[0], scsi_bufflen(sc));
@@ -209,6 +235,8 @@ static int tcm_loop_issue_tmr(struct tcm_loop_tpg *tl_tpg,
 	struct tcm_loop_nexus *tl_nexus;
 	struct tcm_loop_cmd *tl_cmd = NULL;
 	int ret = TMR_FUNCTION_FAILED, rc;
+
+	flush_workqueue(tcm_loop_workqueue);
 
 	/*
 	 * Locate the tl_nexus and se_sess pointers
@@ -319,12 +347,26 @@ static int tcm_loop_slave_alloc(struct scsi_device *sd)
 	return 0;
 }
 
+static int tcm_loop_slave_configure(struct scsi_device *sd)
+{
+	if (sd->tagged_supported) {
+		scsi_activate_tcq(sd, sd->queue_depth);
+		scsi_adjust_queue_depth(sd, MSG_SIMPLE_TAG,
+					sd->host->cmd_per_lun);
+	} else {
+		scsi_adjust_queue_depth(sd, 0,
+					sd->host->cmd_per_lun);
+	}
+
+	return 0;
+}
+
 static struct scsi_host_template tcm_loop_driver_template = {
 	.show_info		= tcm_loop_show_info,
 	.proc_name		= "tcm_loopback",
 	.name			= "TCM_Loopback",
 	.queuecommand		= tcm_loop_queuecommand,
-	.change_queue_depth	= scsi_change_queue_depth,
+	.change_queue_depth	= tcm_loop_change_queue_depth,
 	.eh_abort_handler = tcm_loop_abort_task,
 	.eh_device_reset_handler = tcm_loop_device_reset,
 	.eh_target_reset_handler = tcm_loop_target_reset,
@@ -335,8 +377,8 @@ static struct scsi_host_template tcm_loop_driver_template = {
 	.max_sectors		= 0xFFFF,
 	.use_clustering		= DISABLE_CLUSTERING,
 	.slave_alloc		= tcm_loop_slave_alloc,
+	.slave_configure	= tcm_loop_slave_configure,
 	.module			= THIS_MODULE,
-	.track_queue_depth	= 1,
 };
 
 static int tcm_loop_driver_probe(struct device *dev)
@@ -469,11 +511,6 @@ static void tcm_loop_release_core_bus(void)
 	root_device_unregister(tcm_loop_primary);
 
 	pr_debug("Releasing TCM Loop Core BUS\n");
-}
-
-static char *tcm_loop_get_fabric_name(void)
-{
-	return "loopback";
 }
 
 static inline struct tcm_loop_tpg *tl_tpg(struct se_portal_group *se_tpg)
@@ -778,7 +815,7 @@ static int tcm_loop_make_nexus(
 		return -ENOMEM;
 	}
 
-	tl_nexus->se_sess = target_alloc_session(&tl_tpg->tl_se_tpg, 0, 0,
+	tl_nexus->se_sess = target_setup_session(&tl_tpg->tl_se_tpg, 0, 0,
 					TARGET_PROT_DIN_PASS | TARGET_PROT_DOUT_PASS,
 					name, tl_nexus, tcm_loop_alloc_sess_cb);
 	if (IS_ERR(tl_nexus->se_sess)) {
@@ -820,7 +857,7 @@ static int tcm_loop_drop_nexus(
 	/*
 	 * Release the SCSI I_T Nexus to the emulated Target Port
 	 */
-	transport_deregister_session(tl_nexus->se_sess);
+	target_remove_session(se_sess);
 	tpg->tl_nexus = NULL;
 	kfree(tl_nexus);
 	return 0;
@@ -1176,8 +1213,7 @@ static struct configfs_attribute *tcm_loop_wwn_attrs[] = {
 
 static const struct target_core_fabric_ops loop_ops = {
 	.module				= THIS_MODULE,
-	.name				= "loopback",
-	.get_fabric_name		= tcm_loop_get_fabric_name,
+	.fabric_name			= "loopback",
 	.tpg_get_wwn			= tcm_loop_get_endpoint_wwn,
 	.tpg_get_tag			= tcm_loop_get_tag,
 	.tpg_check_demo_mode		= tcm_loop_check_demo_mode,
@@ -1214,7 +1250,7 @@ static int __init tcm_loop_fabric_init(void)
 {
 	int ret = -ENOMEM;
 
-	tcm_loop_workqueue = alloc_workqueue("tcm_loop", 0, 0);
+	tcm_loop_workqueue = alloc_workqueue("tcm_loop", WQ_MEM_RECLAIM, 0);
 	if (!tcm_loop_workqueue)
 		goto out;
 

@@ -150,10 +150,7 @@ xfs_dquot_item_error(
 	struct xfs_log_item	*lip,
 	struct xfs_buf		*bp)
 {
-	struct xfs_dquot	*dqp;
-
-	dqp = DQUOT_ITEM(lip)->qli_dquot;
-	ASSERT(!completion_done(&dqp->q_flush));
+	ASSERT(!completion_done(&DQUOT_ITEM(lip)->qli_dquot->q_flush));
 	xfs_set_li_failed(lip, bp);
 }
 
@@ -175,7 +172,7 @@ xfs_qm_dquot_logitem_push(
 	 * The buffer containing this item failed to be written back
 	 * previously. Resubmit the buffer for IO
 	 */
-	if (lip->li_flags & XFS_LI_FAILED) {
+	if (test_bit(XFS_LI_FAILED, &lip->li_flags)) {
 		if (!xfs_buf_trylock(bp))
 			return XFS_ITEM_LOCKED;
 

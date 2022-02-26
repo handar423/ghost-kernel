@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * linux/include/linux/sunrpc/auth.h
  *
@@ -22,18 +21,10 @@
 #include <linux/utsname.h>
 
 /*
- * Maximum size of AUTH_NONE authentication information, in XDR words.
- */
-#define NUL_CALLSLACK	(4)
-#define NUL_REPLYSLACK	(2)
-
-/*
  * Size of the nodename buffer. RFC1831 specifies a hard limit of 255 bytes,
  * but Linux hostnames are actually limited to __NEW_UTS_LEN bytes.
  */
 #define UNX_MAXNODENAME	__NEW_UTS_LEN
-#define UNX_CALLSLACK	(21 + XDR_QUADLEN(UNX_MAXNODENAME))
-#define UNX_NGROUPS	16
 
 struct rpcsec_gss_info;
 
@@ -65,6 +56,9 @@ struct rpc_cred {
 	struct rcu_head		cr_rcu;
 	struct rpc_auth *	cr_auth;
 	const struct rpc_credops *cr_ops;
+#if IS_ENABLED(CONFIG_SUNRPC_DEBUG)
+	unsigned long		cr_magic;	/* 0x0f4aa4f0 */
+#endif
 	unsigned long		cr_expire;	/* when to gc */
 	unsigned long		cr_flags;	/* various flags */
 	atomic_t		cr_count;	/* ref count */
@@ -77,6 +71,8 @@ struct rpc_cred {
 #define RPCAUTH_CRED_UPTODATE	1
 #define RPCAUTH_CRED_HASHED	2
 #define RPCAUTH_CRED_NEGATIVE	3
+
+#define RPCAUTH_CRED_MAGIC	0x0f4aa4f0
 
 /* rpc_auth au_flags */
 #define RPCAUTH_AUTH_NO_CRKEY_TIMEOUT	0x0001 /* underlying cred has no key timeout */

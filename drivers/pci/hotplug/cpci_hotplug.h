@@ -101,8 +101,10 @@ int cpci_unconfigure_slot(struct slot *slot);
 
 #ifdef CONFIG_HOTPLUG_PCI_CPCI
 int cpci_hotplug_init(int debug);
+void cpci_hotplug_exit(void);
 #else
 static inline int cpci_hotplug_init(int debug) { return 0; }
+static inline void cpci_hotplug_exit(void) { }
 #endif
 
 #endif	/* _CPCI_HOTPLUG_H */

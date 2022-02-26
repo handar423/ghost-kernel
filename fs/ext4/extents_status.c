@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  *  fs/ext4/extents_status.c
  *
@@ -10,10 +9,10 @@
  *
  * Ext4 extents status tree core functions.
  */
+#include <linux/rbtree.h>
 #include <linux/list_sort.h>
-#include <linux/proc_fs.h>
-#include <linux/seq_file.h>
 #include "ext4.h"
+#include "extents_status.h"
 
 #include <trace/events/ext4.h>
 
@@ -85,7 +84,7 @@
  *   --	writeout
  *	Writeout looks up whole page cache to see if a buffer is
  *	mapped, If there are not very many delayed buffers, then it is
- *	time consuming.
+ *	time comsuming.
  *
  * With extent status tree implementation, FIEMAP, SEEK_HOLE/DATA,
  * bigalloc and writeout can figure out if a block or a range of
@@ -344,28 +343,20 @@ ext4_es_alloc_extent(struct inode *inode, ext4_lblk_t lblk, ext4_lblk_t len,
 	if (!ext4_es_is_delayed(es)) {
 		if (!EXT4_I(inode)->i_es_shk_nr++)
 			ext4_es_list_add(inode);
-		percpu_counter_inc(&EXT4_SB(inode->i_sb)->
-					s_es_stats.es_stats_shk_cnt);
+		percpu_counter_inc(&EXT4_SB(inode->i_sb)->s_extent_cache_cnt);
 	}
-
-	EXT4_I(inode)->i_es_all_nr++;
-	percpu_counter_inc(&EXT4_SB(inode->i_sb)->s_es_stats.es_stats_all_cnt);
 
 	return es;
 }
 
 static void ext4_es_free_extent(struct inode *inode, struct extent_status *es)
 {
-	EXT4_I(inode)->i_es_all_nr--;
-	percpu_counter_dec(&EXT4_SB(inode->i_sb)->s_es_stats.es_stats_all_cnt);
-
 	/* Decrease the shrink counter when this es is not delayed */
 	if (!ext4_es_is_delayed(es)) {
 		BUG_ON(EXT4_I(inode)->i_es_shk_nr == 0);
 		if (!--EXT4_I(inode)->i_es_shk_nr)
 			ext4_es_list_del(inode);
-		percpu_counter_dec(&EXT4_SB(inode->i_sb)->
-					s_es_stats.es_stats_shk_cnt);
+		percpu_counter_dec(&EXT4_SB(inode->i_sb)->s_extent_cache_cnt);
 	}
 
 	kmem_cache_free(ext4_es_cachep, es);
@@ -470,7 +461,7 @@ static void ext4_es_insert_extent_ext_check(struct inode *inode,
 	unsigned short ee_len;
 	int depth, ee_status, es_status;
 
-	path = ext4_find_extent(inode, es->es_lblk, NULL, EXT4_EX_NOCACHE);
+	path = ext4_ext_find_extent(inode, es->es_lblk, NULL, EXT4_EX_NOCACHE);
 	if (IS_ERR(path))
 		return;
 
@@ -543,8 +534,10 @@ static void ext4_es_insert_extent_ext_check(struct inode *inode,
 		}
 	}
 out:
-	ext4_ext_drop_refs(path);
-	kfree(path);
+	if (path) {
+		ext4_ext_drop_refs(path);
+		kfree(path);
+	}
 }
 
 static void ext4_es_insert_extent_ind_check(struct inode *inode,
@@ -708,7 +701,7 @@ int ext4_es_insert_extent(struct inode *inode, ext4_lblk_t lblk,
 	    (status & EXTENT_STATUS_WRITTEN)) {
 		ext4_warning(inode->i_sb, "Inserting extent [%u/%u] as "
 				" delayed and written which can potentially "
-				" cause data loss.", lblk, len);
+				" cause data loss.\n", lblk, len);
 		WARN_ON(1);
 	}
 
@@ -781,7 +774,6 @@ int ext4_es_lookup_extent(struct inode *inode, ext4_lblk_t lblk,
 			  struct extent_status *es)
 {
 	struct ext4_es_tree *tree;
-	struct ext4_es_stats *stats;
 	struct extent_status *es1 = NULL;
 	struct rb_node *node;
 	int found = 0;
@@ -818,7 +810,6 @@ int ext4_es_lookup_extent(struct inode *inode, ext4_lblk_t lblk,
 	}
 
 out:
-	stats = &EXT4_SB(inode->i_sb)->s_es_stats;
 	if (found) {
 		BUG_ON(!es1);
 		es->es_lblk = es1->es_lblk;
@@ -826,9 +817,6 @@ out:
 		es->es_pblk = es1->es_pblk;
 		if (!ext4_es_is_referenced(es1))
 			ext4_es_set_referenced(es1);
-		stats->es_stats_cache_hits++;
-	} else {
-		stats->es_stats_cache_misses++;
 	}
 
 	read_unlock(&EXT4_I(inode)->i_es_lock);
@@ -886,7 +874,7 @@ retry:
 				es->es_len = orig_es.es_len;
 				if ((err == -ENOMEM) &&
 				    __es_shrink(EXT4_SB(inode->i_sb),
-							128, EXT4_I(inode)))
+						128, EXT4_I(inode)))
 					goto retry;
 				goto out;
 			}
@@ -974,20 +962,16 @@ static int __es_shrink(struct ext4_sb_info *sbi, int nr_to_scan,
 		       struct ext4_inode_info *locked_ei)
 {
 	struct ext4_inode_info *ei;
-	struct ext4_es_stats *es_stats;
-	ktime_t start_time;
-	u64 scan_time;
-	int nr_to_walk;
 	int nr_shrunk = 0;
 	int retried = 0, nr_skipped = 0;
+	int nr_to_walk;
 
-	es_stats = &sbi->s_es_stats;
-	start_time = ktime_get();
 
 retry:
 	spin_lock(&sbi->s_es_lock);
 	nr_to_walk = sbi->s_es_nr_inode;
 	while (nr_to_walk-- > 0) {
+
 		if (list_empty(&sbi->s_es_list)) {
 			spin_unlock(&sbi->s_es_lock);
 			goto out;
@@ -1024,6 +1008,7 @@ retry:
 			goto out;
 		spin_lock(&sbi->s_es_lock);
 	}
+
 	spin_unlock(&sbi->s_es_lock);
 
 	/*
@@ -1039,141 +1024,43 @@ retry:
 		nr_shrunk = es_reclaim_extents(locked_ei, &nr_to_scan);
 
 out:
-	scan_time = ktime_to_ns(ktime_sub(ktime_get(), start_time));
-	if (likely(es_stats->es_stats_scan_time))
-		es_stats->es_stats_scan_time = (scan_time +
-				es_stats->es_stats_scan_time*3) / 4;
-	else
-		es_stats->es_stats_scan_time = scan_time;
-	if (scan_time > es_stats->es_stats_max_scan_time)
-		es_stats->es_stats_max_scan_time = scan_time;
-	if (likely(es_stats->es_stats_shrunk))
-		es_stats->es_stats_shrunk = (nr_shrunk +
-				es_stats->es_stats_shrunk*3) / 4;
-	else
-		es_stats->es_stats_shrunk = nr_shrunk;
-
-	trace_ext4_es_shrink(sbi->s_sb, nr_shrunk, scan_time,
-			     nr_skipped, retried);
 	return nr_shrunk;
 }
 
-static unsigned long ext4_es_count(struct shrinker *shrink,
-				   struct shrink_control *sc)
-{
-	unsigned long nr;
-	struct ext4_sb_info *sbi;
-
-	sbi = container_of(shrink, struct ext4_sb_info, s_es_shrinker);
-	nr = percpu_counter_read_positive(&sbi->s_es_stats.es_stats_shk_cnt);
-	trace_ext4_es_shrink_count(sbi->s_sb, sc->nr_to_scan, nr);
-	return nr;
-}
-
-static unsigned long ext4_es_scan(struct shrinker *shrink,
-				  struct shrink_control *sc)
+static int ext4_es_shrink(struct shrinker *shrink, struct shrink_control *sc)
 {
 	struct ext4_sb_info *sbi = container_of(shrink,
 					struct ext4_sb_info, s_es_shrinker);
 	int nr_to_scan = sc->nr_to_scan;
 	int ret, nr_shrunk;
 
-	ret = percpu_counter_read_positive(&sbi->s_es_stats.es_stats_shk_cnt);
-	trace_ext4_es_shrink_scan_enter(sbi->s_sb, nr_to_scan, ret);
+	ret = percpu_counter_read_positive(&sbi->s_extent_cache_cnt);
+	trace_ext4_es_shrink_enter(sbi->s_sb, nr_to_scan, ret);
 
 	if (!nr_to_scan)
 		return ret;
 
 	nr_shrunk = __es_shrink(sbi, nr_to_scan, NULL);
 
-	trace_ext4_es_shrink_scan_exit(sbi->s_sb, nr_shrunk, ret);
-	return nr_shrunk;
+	ret = percpu_counter_read_positive(&sbi->s_extent_cache_cnt);
+	trace_ext4_es_shrink_exit(sbi->s_sb, nr_shrunk, ret);
+	return ret;
 }
 
-int ext4_seq_es_shrinker_info_show(struct seq_file *seq, void *v)
+void ext4_es_register_shrinker(struct ext4_sb_info *sbi)
 {
-	struct ext4_sb_info *sbi = EXT4_SB((struct super_block *) seq->private);
-	struct ext4_es_stats *es_stats = &sbi->s_es_stats;
-	struct ext4_inode_info *ei, *max = NULL;
-	unsigned int inode_cnt = 0;
-
-	if (v != SEQ_START_TOKEN)
-		return 0;
-
-	/* here we just find an inode that has the max nr. of objects */
-	spin_lock(&sbi->s_es_lock);
-	list_for_each_entry(ei, &sbi->s_es_list, i_es_list) {
-		inode_cnt++;
-		if (max && max->i_es_all_nr < ei->i_es_all_nr)
-			max = ei;
-		else if (!max)
-			max = ei;
-	}
-	spin_unlock(&sbi->s_es_lock);
-
-	seq_printf(seq, "stats:\n  %lld objects\n  %lld reclaimable objects\n",
-		   percpu_counter_sum_positive(&es_stats->es_stats_all_cnt),
-		   percpu_counter_sum_positive(&es_stats->es_stats_shk_cnt));
-	seq_printf(seq, "  %lu/%lu cache hits/misses\n",
-		   es_stats->es_stats_cache_hits,
-		   es_stats->es_stats_cache_misses);
-	if (inode_cnt)
-		seq_printf(seq, "  %d inodes on list\n", inode_cnt);
-
-	seq_printf(seq, "average:\n  %llu us scan time\n",
-	    div_u64(es_stats->es_stats_scan_time, 1000));
-	seq_printf(seq, "  %lu shrunk objects\n", es_stats->es_stats_shrunk);
-	if (inode_cnt)
-		seq_printf(seq,
-		    "maximum:\n  %lu inode (%u objects, %u reclaimable)\n"
-		    "  %llu us max scan time\n",
-		    max->vfs_inode.i_ino, max->i_es_all_nr, max->i_es_shk_nr,
-		    div_u64(es_stats->es_stats_max_scan_time, 1000));
-
-	return 0;
-}
-
-int ext4_es_register_shrinker(struct ext4_sb_info *sbi)
-{
-	int err;
-
 	/* Make sure we have enough bits for physical block number */
 	BUILD_BUG_ON(ES_SHIFT < 48);
 	INIT_LIST_HEAD(&sbi->s_es_list);
 	sbi->s_es_nr_inode = 0;
 	spin_lock_init(&sbi->s_es_lock);
-	sbi->s_es_stats.es_stats_shrunk = 0;
-	sbi->s_es_stats.es_stats_cache_hits = 0;
-	sbi->s_es_stats.es_stats_cache_misses = 0;
-	sbi->s_es_stats.es_stats_scan_time = 0;
-	sbi->s_es_stats.es_stats_max_scan_time = 0;
-	err = percpu_counter_init(&sbi->s_es_stats.es_stats_all_cnt, 0, GFP_KERNEL);
-	if (err)
-		return err;
-	err = percpu_counter_init(&sbi->s_es_stats.es_stats_shk_cnt, 0, GFP_KERNEL);
-	if (err)
-		goto err1;
-
-	sbi->s_es_shrinker.scan_objects = ext4_es_scan;
-	sbi->s_es_shrinker.count_objects = ext4_es_count;
+	sbi->s_es_shrinker.shrink = ext4_es_shrink;
 	sbi->s_es_shrinker.seeks = DEFAULT_SEEKS;
-	err = register_shrinker(&sbi->s_es_shrinker);
-	if (err)
-		goto err2;
-
-	return 0;
-
-err2:
-	percpu_counter_destroy(&sbi->s_es_stats.es_stats_shk_cnt);
-err1:
-	percpu_counter_destroy(&sbi->s_es_stats.es_stats_all_cnt);
-	return err;
+	register_shrinker(&sbi->s_es_shrinker);
 }
 
 void ext4_es_unregister_shrinker(struct ext4_sb_info *sbi)
 {
-	percpu_counter_destroy(&sbi->s_es_stats.es_stats_all_cnt);
-	percpu_counter_destroy(&sbi->s_es_stats.es_stats_shk_cnt);
 	unregister_shrinker(&sbi->s_es_shrinker);
 }
 

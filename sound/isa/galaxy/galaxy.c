@@ -53,21 +53,21 @@ static int mpu_irq[SNDRV_CARDS] = SNDRV_DEFAULT_IRQ;
 static int dma1[SNDRV_CARDS] = SNDRV_DEFAULT_DMA;
 static int dma2[SNDRV_CARDS] = SNDRV_DEFAULT_DMA;
 
-module_param_hw_array(port, long, ioport, NULL, 0444);
+module_param_array(port, long, NULL, 0444);
 MODULE_PARM_DESC(port, "Port # for " CRD_NAME " driver.");
-module_param_hw_array(wss_port, long, ioport, NULL, 0444);
+module_param_array(wss_port, long, NULL, 0444);
 MODULE_PARM_DESC(wss_port, "WSS port # for " CRD_NAME " driver.");
-module_param_hw_array(mpu_port, long, ioport, NULL, 0444);
+module_param_array(mpu_port, long, NULL, 0444);
 MODULE_PARM_DESC(mpu_port, "MPU-401 port # for " CRD_NAME " driver.");
-module_param_hw_array(fm_port, long, ioport, NULL, 0444);
+module_param_array(fm_port, long, NULL, 0444);
 MODULE_PARM_DESC(fm_port, "FM port # for " CRD_NAME " driver.");
-module_param_hw_array(irq, int, irq, NULL, 0444);
+module_param_array(irq, int, NULL, 0444);
 MODULE_PARM_DESC(irq, "IRQ # for " CRD_NAME " driver.");
-module_param_hw_array(mpu_irq, int, irq, NULL, 0444);
+module_param_array(mpu_irq, int, NULL, 0444);
 MODULE_PARM_DESC(mpu_irq, "MPU-401 IRQ # for " CRD_NAME " driver.");
-module_param_hw_array(dma1, int, dma, NULL, 0444);
+module_param_array(dma1, int, NULL, 0444);
 MODULE_PARM_DESC(dma1, "Playback DMA # for " CRD_NAME " driver.");
-module_param_hw_array(dma2, int, dma, NULL, 0444);
+module_param_array(dma2, int, NULL, 0444);
 MODULE_PARM_DESC(dma2, "Capture DMA # for " CRD_NAME " driver.");
 
 /*
@@ -569,7 +569,7 @@ static int snd_galaxy_probe(struct device *dev, unsigned int n)
 	if (err < 0)
 		goto error;
 
-	err = snd_wss_pcm(chip, 0);
+	err = snd_wss_pcm(chip, 0, NULL);
 	if (err < 0)
 		goto error;
 
@@ -577,7 +577,7 @@ static int snd_galaxy_probe(struct device *dev, unsigned int n)
 	if (err < 0)
 		goto error;
 
-	err = snd_wss_timer(chip, 0);
+	err = snd_wss_timer(chip, 0, NULL);
 	if (err < 0)
 		goto error;
 
@@ -621,6 +621,7 @@ error:
 static int snd_galaxy_remove(struct device *dev, unsigned int n)
 {
 	snd_card_free(dev_get_drvdata(dev));
+	dev_set_drvdata(dev, NULL);
 	return 0;
 }
 
@@ -634,4 +635,15 @@ static struct isa_driver snd_galaxy_driver = {
 	}
 };
 
-module_isa_driver(snd_galaxy_driver, SNDRV_CARDS);
+static int __init alsa_card_galaxy_init(void)
+{
+	return isa_register_driver(&snd_galaxy_driver, SNDRV_CARDS);
+}
+
+static void __exit alsa_card_galaxy_exit(void)
+{
+	isa_unregister_driver(&snd_galaxy_driver);
+}
+
+module_init(alsa_card_galaxy_init);
+module_exit(alsa_card_galaxy_exit);

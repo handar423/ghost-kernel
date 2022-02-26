@@ -46,7 +46,7 @@
 
 static struct rtnl_link_ops vti_link_ops __read_mostly;
 
-static unsigned int vti_net_id __read_mostly;
+static int vti_net_id __read_mostly;
 static int vti_tunnel_init(struct net_device *dev);
 
 static int vti_input(struct sk_buff *skb, int nexthdr, __be32 spi,
@@ -59,7 +59,7 @@ static int vti_input(struct sk_buff *skb, int nexthdr, __be32 spi,
 
 	tunnel = ip_tunnel_lookup(itn, skb->dev->ifindex, TUNNEL_NO_KEY,
 				  iph->saddr, iph->daddr, 0);
-	if (tunnel) {
+	if (tunnel != NULL) {
 		if (!xfrm4_policy_check(NULL, XFRM_POLICY_IN, skb))
 			goto drop;
 
@@ -88,7 +88,6 @@ static int vti_rcv_cb(struct sk_buff *skb, int err)
 	struct net_device *dev;
 	struct pcpu_sw_netstats *tstats;
 	struct xfrm_state *x;
-	struct xfrm_mode *inner_mode;
 	struct ip_tunnel *tunnel = XFRM_TUNNEL_SKB_CB(skb)->tunnel.ip4;
 	u32 orig_mark = skb->mark;
 	int ret;
@@ -106,19 +105,7 @@ static int vti_rcv_cb(struct sk_buff *skb, int err)
 	}
 
 	x = xfrm_input_state(skb);
-
-	inner_mode = x->inner_mode;
-
-	if (x->sel.family == AF_UNSPEC) {
-		inner_mode = xfrm_ip2inner_mode(x, XFRM_MODE_SKB_CB(skb)->protocol);
-		if (inner_mode == NULL) {
-			XFRM_INC_STATS(dev_net(skb->dev),
-				       LINUX_MIB_XFRMINSTATEMODEERROR);
-			return -EINVAL;
-		}
-	}
-
-	family = inner_mode->afinfo->family;
+	family = x->inner_mode->afinfo->family;
 
 	skb->mark = be32_to_cpu(tunnel->parms.i_key);
 	ret = xfrm_policy_check(NULL, XFRM_POLICY_IN, skb, family);
@@ -198,6 +185,15 @@ static netdev_tx_t vti_xmit(struct sk_buff *skb, struct net_device *dev,
 		goto tx_error;
 	}
 
+	if (tunnel->err_count > 0) {
+		if (time_before(jiffies,
+				tunnel->err_time + IPTUNNEL_ERR_TIMEO)) {
+			tunnel->err_count--;
+			dst_link_failure(skb);
+		} else
+			tunnel->err_count = 0;
+	}
+
 	mtu = dst_mtu(dst);
 	if (skb->len > mtu) {
 		skb_dst_update_pmtu(skb, mtu);
@@ -219,7 +215,7 @@ static netdev_tx_t vti_xmit(struct sk_buff *skb, struct net_device *dev,
 	skb_dst_set(skb, dst);
 	skb->dev = skb_dst(skb)->dev;
 
-	err = dst_output(tunnel->net, skb->sk, skb);
+	err = dst_output(skb);
 	if (net_xmit_eval(err) == 0)
 		err = pkt_len;
 	iptunnel_xmit_stats(dev, err);
@@ -367,7 +363,7 @@ static const struct net_device_ops vti_netdev_ops = {
 	.ndo_uninit	= ip_tunnel_uninit,
 	.ndo_start_xmit	= vti_tunnel_xmit,
 	.ndo_do_ioctl	= vti_tunnel_ioctl,
-	.ndo_change_mtu	= ip_tunnel_change_mtu,
+	.ndo_change_mtu_rh74 = ip_tunnel_change_mtu,
 	.ndo_get_stats64 = ip_tunnel_get_stats64,
 	.ndo_get_iflink = ip_tunnel_get_iflink,
 };
@@ -387,8 +383,6 @@ static int vti_tunnel_init(struct net_device *dev)
 	memcpy(dev->dev_addr, &iph->saddr, 4);
 	memcpy(dev->broadcast, &iph->daddr, 4);
 
-	dev->hard_header_len	= LL_MAX_HEADER + sizeof(struct iphdr);
-	dev->mtu		= ETH_DATA_LEN;
 	dev->flags		= IFF_NOARP;
 	dev->addr_len		= 4;
 	dev->features		|= NETIF_F_LLTX;
@@ -444,27 +438,26 @@ static int __net_init vti_init_net(struct net *net)
 	return 0;
 }
 
-static void __net_exit vti_exit_batch_net(struct list_head *list_net)
+static void __net_exit vti_exit_net(struct net *net)
 {
-	ip_tunnel_delete_nets(list_net, vti_net_id, &vti_link_ops);
+	struct ip_tunnel_net *itn = net_generic(net, vti_net_id);
+	ip_tunnel_delete_net(itn, &vti_link_ops);
 }
 
 static struct pernet_operations vti_net_ops = {
 	.init = vti_init_net,
-	.exit_batch = vti_exit_batch_net,
+	.exit = vti_exit_net,
 	.id   = &vti_net_id,
 	.size = sizeof(struct ip_tunnel_net),
 };
 
-static int vti_tunnel_validate(struct nlattr *tb[], struct nlattr *data[],
-			       struct netlink_ext_ack *extack)
+static int vti_tunnel_validate(struct nlattr *tb[], struct nlattr *data[])
 {
 	return 0;
 }
 
 static void vti_netlink_parms(struct nlattr *data[],
-			      struct ip_tunnel_parm *parms,
-			      __u32 *fwmark)
+			      struct ip_tunnel_parm *parms)
 {
 	memset(parms, 0, sizeof(*parms));
 
@@ -490,31 +483,24 @@ static void vti_netlink_parms(struct nlattr *data[],
 	if (data[IFLA_VTI_REMOTE])
 		parms->iph.daddr = nla_get_in_addr(data[IFLA_VTI_REMOTE]);
 
-	if (data[IFLA_VTI_FWMARK])
-		*fwmark = nla_get_u32(data[IFLA_VTI_FWMARK]);
 }
 
 static int vti_newlink(struct net *src_net, struct net_device *dev,
-		       struct nlattr *tb[], struct nlattr *data[],
-		       struct netlink_ext_ack *extack)
+		       struct nlattr *tb[], struct nlattr *data[])
 {
 	struct ip_tunnel_parm parms;
-	__u32 fwmark = 0;
 
-	vti_netlink_parms(data, &parms, &fwmark);
-	return ip_tunnel_newlink(dev, tb, &parms, fwmark);
+	vti_netlink_parms(data, &parms);
+	return ip_tunnel_newlink(dev, tb, &parms);
 }
 
 static int vti_changelink(struct net_device *dev, struct nlattr *tb[],
-			  struct nlattr *data[],
-			  struct netlink_ext_ack *extack)
+			  struct nlattr *data[])
 {
-	struct ip_tunnel *t = netdev_priv(dev);
-	__u32 fwmark = t->fwmark;
 	struct ip_tunnel_parm p;
 
-	vti_netlink_parms(data, &p, &fwmark);
-	return ip_tunnel_changelink(dev, tb, &p, fwmark);
+	vti_netlink_parms(data, &p);
+	return ip_tunnel_changelink(dev, tb, &p);
 }
 
 static size_t vti_get_size(const struct net_device *dev)
@@ -530,8 +516,6 @@ static size_t vti_get_size(const struct net_device *dev)
 		nla_total_size(4) +
 		/* IFLA_VTI_REMOTE */
 		nla_total_size(4) +
-		/* IFLA_VTI_FWMARK */
-		nla_total_size(4) +
 		0;
 }
 
@@ -540,13 +524,11 @@ static int vti_fill_info(struct sk_buff *skb, const struct net_device *dev)
 	struct ip_tunnel *t = netdev_priv(dev);
 	struct ip_tunnel_parm *p = &t->parms;
 
-	if (nla_put_u32(skb, IFLA_VTI_LINK, p->link) ||
-	    nla_put_be32(skb, IFLA_VTI_IKEY, p->i_key) ||
-	    nla_put_be32(skb, IFLA_VTI_OKEY, p->o_key) ||
-	    nla_put_in_addr(skb, IFLA_VTI_LOCAL, p->iph.saddr) ||
-	    nla_put_in_addr(skb, IFLA_VTI_REMOTE, p->iph.daddr) ||
-	    nla_put_u32(skb, IFLA_VTI_FWMARK, t->fwmark))
-		return -EMSGSIZE;
+	nla_put_u32(skb, IFLA_VTI_LINK, p->link);
+	nla_put_be32(skb, IFLA_VTI_IKEY, p->i_key);
+	nla_put_be32(skb, IFLA_VTI_OKEY, p->o_key);
+	nla_put_in_addr(skb, IFLA_VTI_LOCAL, p->iph.saddr);
+	nla_put_in_addr(skb, IFLA_VTI_REMOTE, p->iph.daddr);
 
 	return 0;
 }
@@ -557,7 +539,6 @@ static const struct nla_policy vti_policy[IFLA_VTI_MAX + 1] = {
 	[IFLA_VTI_OKEY]		= { .type = NLA_U32 },
 	[IFLA_VTI_LOCAL]	= { .len = FIELD_SIZEOF(struct iphdr, saddr) },
 	[IFLA_VTI_REMOTE]	= { .len = FIELD_SIZEOF(struct iphdr, daddr) },
-	[IFLA_VTI_FWMARK]	= { .type = NLA_U32 },
 };
 
 static struct rtnl_link_ops vti_link_ops __read_mostly = {
@@ -569,10 +550,37 @@ static struct rtnl_link_ops vti_link_ops __read_mostly = {
 	.validate	= vti_tunnel_validate,
 	.newlink	= vti_newlink,
 	.changelink	= vti_changelink,
-	.dellink        = ip_tunnel_dellink,
+	.dellink	= ip_tunnel_dellink,
 	.get_size	= vti_get_size,
 	.fill_info	= vti_fill_info,
 	.get_link_net	= ip_tunnel_get_link_net,
+};
+
+static bool is_vti_tunnel(const struct net_device *dev)
+{
+	return dev->netdev_ops == &vti_netdev_ops;
+}
+
+static int vti_device_event(struct notifier_block *unused,
+			    unsigned long event, void *ptr)
+{
+	struct net_device *dev = netdev_notifier_info_to_dev(ptr);
+	struct ip_tunnel *tunnel = netdev_priv(dev);
+
+	if (!is_vti_tunnel(dev))
+		return NOTIFY_DONE;
+
+	switch (event) {
+	case NETDEV_DOWN:
+		if (!net_eq(tunnel->net, dev_net(dev)))
+			xfrm_garbage_collect(tunnel->net);
+		break;
+	}
+	return NOTIFY_DONE;
+}
+
+static struct notifier_block vti_notifier_block __read_mostly = {
+	.notifier_call = vti_device_event,
 };
 
 static int __init vti_init(void)
@@ -581,6 +589,8 @@ static int __init vti_init(void)
 	int err;
 
 	pr_info("IPv4 over IPsec tunneling driver\n");
+
+	register_netdevice_notifier_rh(&vti_notifier_block);
 
 	msg = "tunnel device";
 	err = register_pernet_device(&vti_net_ops);
@@ -614,6 +624,7 @@ xfrm_proto_ah_failed:
 xfrm_proto_esp_failed:
 	unregister_pernet_device(&vti_net_ops);
 pernet_dev_failed:
+	unregister_netdevice_notifier_rh(&vti_notifier_block);
 	pr_err("vti init: failed to register %s\n", msg);
 	return err;
 }
@@ -625,6 +636,7 @@ static void __exit vti_fini(void)
 	xfrm4_protocol_deregister(&vti_ah4_protocol, IPPROTO_AH);
 	xfrm4_protocol_deregister(&vti_esp4_protocol, IPPROTO_ESP);
 	unregister_pernet_device(&vti_net_ops);
+	unregister_netdevice_notifier_rh(&vti_notifier_block);
 }
 
 module_init(vti_init);

@@ -23,16 +23,10 @@
 #include <linux/types.h>
 #include <linux/kvm_host.h>
 
-/*
- * Number of available lpids. Only the low-order 6 bits of LPID rgister are
- * implemented on e500mc+ cores.
- */
+/* LPIDs we support with this build -- runtime limit may be lower */
 #define KVMPPC_NR_LPIDS                        64
 
-#define KVMPPC_INST_EHPRIV		0x7c00021c
-#define EHPRIV_OC_SHIFT			11
-/* "ehpriv 1" : ehpriv with OC = 1 is used for debug emulation */
-#define EHPRIV_OC_DEBUG			1
+#define KVMPPC_INST_EHPRIV	0x7c00021c
 
 static inline void kvmppc_set_gpr(struct kvm_vcpu *vcpu, int num, ulong val)
 {

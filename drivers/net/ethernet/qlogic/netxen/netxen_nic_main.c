@@ -72,9 +72,6 @@ static void netxen_schedule_work(struct netxen_adapter *adapter,
 		work_func_t func, int delay);
 static void netxen_cancel_fw_work(struct netxen_adapter *adapter);
 static int netxen_nic_poll(struct napi_struct *napi, int budget);
-#ifdef CONFIG_NET_POLL_CONTROLLER
-static void netxen_nic_poll_controller(struct net_device *netdev);
-#endif
 
 static void netxen_create_sysfs_entries(struct netxen_adapter *adapter);
 static void netxen_remove_sysfs_entries(struct netxen_adapter *adapter);
@@ -570,6 +567,7 @@ static int netxen_set_features(struct net_device *dev,
 }
 
 static const struct net_device_ops netxen_netdev_ops = {
+	.ndo_size	   = sizeof(struct net_device_ops),
 	.ndo_open	   = netxen_nic_open,
 	.ndo_stop	   = netxen_nic_close,
 	.ndo_start_xmit    = netxen_nic_xmit_frame,
@@ -577,19 +575,11 @@ static const struct net_device_ops netxen_netdev_ops = {
 	.ndo_validate_addr = eth_validate_addr,
 	.ndo_set_rx_mode   = netxen_set_multicast_list,
 	.ndo_set_mac_address    = netxen_nic_set_mac,
-	.ndo_change_mtu	   = netxen_nic_change_mtu,
+	.extended.ndo_change_mtu = netxen_nic_change_mtu,
 	.ndo_tx_timeout	   = netxen_tx_timeout,
 	.ndo_fix_features = netxen_fix_features,
 	.ndo_set_features = netxen_set_features,
-#ifdef CONFIG_NET_POLL_CONTROLLER
-	.ndo_poll_controller = netxen_nic_poll_controller,
-#endif
 };
-
-static inline bool netxen_function_zero(struct pci_dev *pdev)
-{
-	return (PCI_FUNC(pdev->devfn) == 0) ? true : false;
-}
 
 static inline void netxen_set_interrupt_mode(struct netxen_adapter *adapter,
 					     u32 mode)
@@ -686,7 +676,7 @@ static int netxen_setup_intr(struct netxen_adapter *adapter)
 	netxen_initialize_interrupt_registers(adapter);
 	netxen_set_msix_bit(pdev, 0);
 
-	if (netxen_function_zero(pdev)) {
+	if (adapter->portnum == 0) {
 		if (!netxen_setup_msi_interrupts(adapter, num_msix))
 			netxen_set_interrupt_mode(adapter, NETXEN_MSI_MODE);
 		else
@@ -1573,11 +1563,11 @@ netxen_nic_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	}
 
 	/* MTU range: 0 - 8000 (P2) or 9600 (P3) */
-	netdev->min_mtu = 0;
+	netdev->extended->min_mtu = 0;
 	if (NX_IS_REVISION_P3(adapter->ahw.revision_id))
-		netdev->max_mtu = P3_MAX_MTU;
+		netdev->extended->max_mtu = P3_MAX_MTU;
 	else
-		netdev->max_mtu = P2_MAX_MTU;
+		netdev->extended->max_mtu = P2_MAX_MTU;
 
 	netxen_nic_clear_stats(adapter);
 
@@ -2073,7 +2063,7 @@ netxen_nic_xmit_frame(struct sk_buff *skb, struct net_device *netdev)
 	struct skb_frag_struct *frag;
 
 	u32 producer;
-	int frag_count, no_of_desc;
+	int frag_count;
 	u32 num_txd = tx_ring->num_desc;
 
 	frag_count = skb_shinfo(skb)->nr_frags + 1;
@@ -2093,8 +2083,6 @@ netxen_nic_xmit_frame(struct sk_buff *skb, struct net_device *netdev)
 
 		frag_count = 1 + skb_shinfo(skb)->nr_frags;
 	}
-	/* 4 fragments per cmd des */
-	no_of_desc = (frag_count + 3) >> 2;
 
 	if (unlikely(netxen_tx_avail(tx_ring) <= TX_STOP_THRESH)) {
 		netif_stop_queue(netdev);
@@ -2403,23 +2391,6 @@ static int netxen_nic_poll(struct napi_struct *napi, int budget)
 
 	return work_done;
 }
-
-#ifdef CONFIG_NET_POLL_CONTROLLER
-static void netxen_nic_poll_controller(struct net_device *netdev)
-{
-	int ring;
-	struct nx_host_sds_ring *sds_ring;
-	struct netxen_adapter *adapter = netdev_priv(netdev);
-	struct netxen_recv_context *recv_ctx = &adapter->recv_ctx;
-
-	disable_irq(adapter->irq);
-	for (ring = 0; ring < adapter->max_sds_rings; ring++) {
-		sds_ring = &recv_ctx->sds_rings[ring];
-		netxen_intr(adapter->irq, sds_ring);
-	}
-	enable_irq(adapter->irq);
-}
-#endif
 
 static int
 nx_incr_dev_ref_cnt(struct netxen_adapter *adapter)
@@ -2829,9 +2800,9 @@ netxen_show_bridged_mode(struct device *dev,
 }
 
 static const struct device_attribute dev_attr_bridged_mode = {
-       .attr = {.name = "bridged_mode", .mode = (S_IRUGO | S_IWUSR)},
-       .show = netxen_show_bridged_mode,
-       .store = netxen_store_bridged_mode,
+	.attr = { .name = "bridged_mode", .mode = 0644 },
+	.show = netxen_show_bridged_mode,
+	.store = netxen_store_bridged_mode,
 };
 
 static ssize_t
@@ -2861,7 +2832,7 @@ netxen_show_diag_mode(struct device *dev,
 }
 
 static const struct device_attribute dev_attr_diag_mode = {
-	.attr = {.name = "diag_mode", .mode = (S_IRUGO | S_IWUSR)},
+	.attr = { .name = "diag_mode", .mode = 0644 },
 	.show = netxen_show_diag_mode,
 	.store = netxen_store_diag_mode,
 };
@@ -3006,14 +2977,14 @@ static ssize_t netxen_sysfs_write_mem(struct file *filp, struct kobject *kobj,
 
 
 static const struct bin_attribute bin_attr_crb = {
-	.attr = {.name = "crb", .mode = (S_IRUGO | S_IWUSR)},
+	.attr = { .name = "crb", .mode = 0644 },
 	.size = 0,
 	.read = netxen_sysfs_read_crb,
 	.write = netxen_sysfs_write_crb,
 };
 
 static const struct bin_attribute bin_attr_mem = {
-	.attr = {.name = "mem", .mode = (S_IRUGO | S_IWUSR)},
+	.attr = { .name = "mem", .mode = 0644 },
 	.size = 0,
 	.read = netxen_sysfs_read_mem,
 	.write = netxen_sysfs_write_mem,
@@ -3142,7 +3113,7 @@ out:
 }
 
 static const struct bin_attribute bin_attr_dimm = {
-	.attr = { .name = "dimm", .mode = (S_IRUGO | S_IWUSR) },
+	.attr = { .name = "dimm", .mode = 0644 },
 	.size = sizeof(struct netxen_dimm_cfg),
 	.read = netxen_sysfs_read_dimm,
 };
@@ -3511,7 +3482,7 @@ static int __init netxen_init_module(void)
 	printk(KERN_INFO "%s\n", netxen_nic_driver_string);
 
 #ifdef CONFIG_INET
-	register_netdevice_notifier(&netxen_netdev_cb);
+	register_netdevice_notifier_rh(&netxen_netdev_cb);
 	register_inetaddr_notifier(&netxen_inetaddr_cb);
 #endif
 	return pci_register_driver(&netxen_driver);
@@ -3525,7 +3496,7 @@ static void __exit netxen_exit_module(void)
 
 #ifdef CONFIG_INET
 	unregister_inetaddr_notifier(&netxen_inetaddr_cb);
-	unregister_netdevice_notifier(&netxen_netdev_cb);
+	unregister_netdevice_notifier_rh(&netxen_netdev_cb);
 #endif
 }
 

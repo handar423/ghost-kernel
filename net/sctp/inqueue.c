@@ -24,16 +24,23 @@
  * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with GNU CC; see the file COPYING.  If not, see
- * <http://www.gnu.org/licenses/>.
+ * along with GNU CC; see the file COPYING.  If not, write to
+ * the Free Software Foundation, 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
  *
  * Please send any bug reports or fixes you make to the
  * email address(es):
- *    lksctp developers <linux-sctp@vger.kernel.org>
+ *    lksctp developers <lksctp-developers@lists.sourceforge.net>
+ *
+ * Or submit a bug report through the following website:
+ *    http://www.sf.net/projects/lksctp
  *
  * Written or modified by:
  *    La Monte H.P. Yarroll <piggy@acm.org>
  *    Karl Knutson <karl@athena.chicago.il.us>
+ *
+ * Any bugs reported given to us we will try to fix... any fixes shared will
+ * be incorporated into the next SCTP release.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -99,7 +106,7 @@ void sctp_inq_push(struct sctp_inq *q, struct sctp_chunk *chunk)
 struct sctp_chunkhdr *sctp_inq_peek(struct sctp_inq *queue)
 {
 	struct sctp_chunk *chunk;
-	struct sctp_chunkhdr *ch = NULL;
+	sctp_chunkhdr_t *ch = NULL;
 
 	chunk = queue->in_progress;
 	/* If there is no more chunks in this packet, say so */
@@ -108,7 +115,7 @@ struct sctp_chunkhdr *sctp_inq_peek(struct sctp_inq *queue)
 	    chunk->pdiscard)
 		    return NULL;
 
-	ch = (struct sctp_chunkhdr *)chunk->chunk_end;
+	ch = (sctp_chunkhdr_t *)chunk->chunk_end;
 
 	return ch;
 }
@@ -122,7 +129,7 @@ struct sctp_chunkhdr *sctp_inq_peek(struct sctp_inq *queue)
 struct sctp_chunk *sctp_inq_pop(struct sctp_inq *queue)
 {
 	struct sctp_chunk *chunk;
-	struct sctp_chunkhdr *ch = NULL;
+	sctp_chunkhdr_t *ch = NULL;
 
 	/* The assumption is that we are safe to process the chunks
 	 * at this time.
@@ -151,7 +158,7 @@ struct sctp_chunk *sctp_inq_pop(struct sctp_inq *queue)
 			chunk = queue->in_progress = NULL;
 		} else {
 			/* Nothing to do. Next chunk in the packet, please. */
-			ch = (struct sctp_chunkhdr *)chunk->chunk_end;
+			ch = (sctp_chunkhdr_t *) chunk->chunk_end;
 			/* Force chunk->skb->data to chunk->chunk_end.  */
 			skb_pull(chunk->skb, chunk->chunk_end - chunk->skb->data);
 			/* We are guaranteed to pull a SCTP header. */
@@ -182,7 +189,7 @@ next_chunk:
 				chunk->skb = skb_shinfo(chunk->skb)->frag_list;
 
 			if (WARN_ON(!chunk->skb)) {
-				__SCTP_INC_STATS(dev_net(chunk->skb->dev), SCTP_MIB_IN_PKT_DISCARDS);
+				SCTP_INC_STATS_BH(dev_net(chunk->skb->dev), SCTP_MIB_IN_PKT_DISCARDS);
 				sctp_chunk_free(chunk);
 				goto next_chunk;
 			}
@@ -195,7 +202,7 @@ next_chunk:
 
 new_skb:
 		/* This is the first chunk in the packet.  */
-		ch = (struct sctp_chunkhdr *)chunk->skb->data;
+		ch = (sctp_chunkhdr_t *) chunk->skb->data;
 		chunk->singleton = 1;
 		chunk->data_accepted = 0;
 		chunk->pdiscard = 0;
@@ -208,16 +215,16 @@ new_skb:
 				*head_cb = SCTP_INPUT_CB(chunk->head_skb);
 
 			cb->chunk = head_cb->chunk;
-			cb->af = head_cb->af;
 		}
 	}
 
 	chunk->chunk_hdr = ch;
 	chunk->chunk_end = ((__u8 *)ch) + SCTP_PAD4(ntohs(ch->length));
-	skb_pull(chunk->skb, sizeof(*ch));
+	skb_pull(chunk->skb, sizeof(sctp_chunkhdr_t));
 	chunk->subh.v = NULL; /* Subheader is no longer valid.  */
 
-	if (chunk->chunk_end + sizeof(*ch) < skb_tail_pointer(chunk->skb)) {
+	if (chunk->chunk_end + sizeof(sctp_chunkhdr_t) <=
+	    skb_tail_pointer(chunk->skb)) {
 		/* This is not a singleton */
 		chunk->singleton = 0;
 	} else if (chunk->chunk_end > skb_tail_pointer(chunk->skb)) {

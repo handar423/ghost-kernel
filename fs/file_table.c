@@ -13,7 +13,6 @@
 #include <linux/module.h>
 #include <linux/fs.h>
 #include <linux/security.h>
-#include <linux/cred.h>
 #include <linux/eventpoll.h>
 #include <linux/rcupdate.h>
 #include <linux/mount.h>
@@ -21,6 +20,7 @@
 #include <linux/cdev.h>
 #include <linux/fsnotify.h>
 #include <linux/sysctl.h>
+#include <linux/lglock.h>
 #include <linux/percpu_counter.h>
 #include <linux/percpu.h>
 #include <linux/hardirq.h>
@@ -77,14 +77,14 @@ EXPORT_SYMBOL_GPL(get_max_files);
  * Handle nr_files sysctl
  */
 #if defined(CONFIG_SYSCTL) && defined(CONFIG_PROC_FS)
-int proc_nr_files(struct ctl_table *table, int write,
+int proc_nr_files(ctl_table *table, int write,
                      void __user *buffer, size_t *lenp, loff_t *ppos)
 {
 	files_stat.nr_files = get_nr_files();
 	return proc_doulongvec_minmax(table, write, buffer, lenp, ppos);
 }
 #else
-int proc_nr_files(struct ctl_table *table, int write,
+int proc_nr_files(ctl_table *table, int write,
                      void __user *buffer, size_t *lenp, loff_t *ppos)
 {
 	return -ENOSYS;
@@ -132,6 +132,7 @@ struct file *get_empty_filp(void)
 		return ERR_PTR(error);
 	}
 
+	INIT_LIST_HEAD(&f->f_u.fu_list);
 	atomic_long_set(&f->f_count, 1);
 	rwlock_init(&f->f_owner.lock);
 	spin_lock_init(&f->f_lock);
@@ -151,12 +152,20 @@ over:
 
 /**
  * alloc_file - allocate and initialize a 'struct file'
- *
- * @path: the (dentry, vfsmount) pair for the new file
+ * @mnt: the vfsmount on which the file will reside
+ * @dentry: the dentry representing the new file
  * @mode: the mode with which the new file will be opened
  * @fop: the 'struct file_operations' for the new file
+ *
+ * Use this instead of get_empty_filp() to get a new
+ * 'struct file'.  Do so because of the same initialization
+ * pitfalls reasons listed for init_file().  This is a
+ * preferred interface to using init_file().
+ *
+ * If all the callers of init_file() are eliminated, its
+ * code should be moved into this function.
  */
-struct file *alloc_file(const struct path *path, fmode_t mode,
+struct file *alloc_file(struct path *path, fmode_t mode,
 		const struct file_operations *fop)
 {
 	struct file *file;
@@ -168,13 +177,6 @@ struct file *alloc_file(const struct path *path, fmode_t mode,
 	file->f_path = *path;
 	file->f_inode = path->dentry->d_inode;
 	file->f_mapping = path->dentry->d_inode->i_mapping;
-	file->f_wb_err = filemap_sample_wb_err(file->f_mapping);
-	if ((mode & FMODE_READ) &&
-	     likely(fop->read || fop->read_iter))
-		mode |= FMODE_CAN_READ;
-	if ((mode & FMODE_WRITE) &&
-	     likely(fop->write || fop->write_iter))
-		mode |= FMODE_CAN_WRITE;
 	file->f_mode = mode;
 	file->f_op = fop;
 	if ((mode & (FMODE_READ | FMODE_WRITE)) == FMODE_READ)
@@ -201,12 +203,12 @@ static void __fput(struct file *file)
 	eventpoll_release(file);
 	locks_remove_file(file);
 
-	ima_file_free(file);
 	if (unlikely(file->f_flags & FASYNC)) {
-		if (file->f_op->fasync)
+		if (file->f_op && file->f_op->fasync)
 			file->f_op->fasync(-1, file, 0);
 	}
-	if (file->f_op->release)
+	ima_file_free(file);
+	if (file->f_op && file->f_op->release)
 		file->f_op->release(inode, file);
 	security_file_free(file);
 	if (unlikely(S_ISCHR(inode->i_mode) && inode->i_cdev != NULL &&
@@ -229,14 +231,19 @@ static void __fput(struct file *file)
 	mntput(mnt);
 }
 
-static LLIST_HEAD(delayed_fput_list);
+static DEFINE_SPINLOCK(delayed_fput_lock);
+static LIST_HEAD(delayed_fput_list);
 static void delayed_fput(struct work_struct *unused)
 {
-	struct llist_node *node = llist_del_all(&delayed_fput_list);
-	struct file *f, *t;
-
-	llist_for_each_entry_safe(f, t, node, f_u.fu_llist)
+	LIST_HEAD(head);
+	spin_lock_irq(&delayed_fput_lock);
+	list_splice_init(&delayed_fput_list, &head);
+	spin_unlock_irq(&delayed_fput_lock);
+	while (!list_empty(&head)) {
+		struct file *f = list_first_entry(&head, struct file, f_u.fu_list);
+		list_del_init(&f->f_u.fu_list);
 		__fput(f);
+	}
 }
 
 static void ____fput(struct callback_head *work)
@@ -259,26 +266,23 @@ void flush_delayed_fput(void)
 	delayed_fput(NULL);
 }
 
-static DECLARE_DELAYED_WORK(delayed_fput_work, delayed_fput);
+static DECLARE_WORK(delayed_fput_work, delayed_fput);
 
 void fput(struct file *file)
 {
 	if (atomic_long_dec_and_test(&file->f_count)) {
 		struct task_struct *task = current;
+		unsigned long flags;
 
 		if (likely(!in_interrupt() && !(task->flags & PF_KTHREAD))) {
 			init_task_work(&file->f_u.fu_rcuhead, ____fput);
 			if (!task_work_add(task, &file->f_u.fu_rcuhead, true))
 				return;
-			/*
-			 * After this task has run exit_task_work(),
-			 * task_work_add() will fail.  Fall through to delayed
-			 * fput to avoid leaking *file.
-			 */
 		}
-
-		if (llist_add(&file->f_u.fu_llist, &delayed_fput_list))
-			schedule_delayed_work(&delayed_fput_work, 1);
+		spin_lock_irqsave(&delayed_fput_lock, flags);
+		list_add(&file->f_u.fu_list, &delayed_fput_list);
+		schedule_work(&delayed_fput_work);
+		spin_unlock_irqrestore(&delayed_fput_lock, flags);
 	}
 }
 
@@ -310,9 +314,9 @@ void put_filp(struct file *file)
 }
 
 void __init files_init(void)
-{
+{ 
 	filp_cachep = kmem_cache_create("filp", sizeof(struct file), 0,
-			SLAB_HWCACHE_ALIGN | SLAB_PANIC | SLAB_ACCOUNT, NULL);
+			SLAB_HWCACHE_ALIGN | SLAB_PANIC, NULL);
 	percpu_counter_init(&nr_files, 0, GFP_KERNEL);
 }
 
@@ -329,4 +333,4 @@ void __init files_maxfiles_init(void)
 	n = ((totalram_pages - memreserve) * (PAGE_SIZE / 1024)) / 10;
 
 	files_stat.max_files = max_t(unsigned long, n, NR_FILE);
-}
+} 

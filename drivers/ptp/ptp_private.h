@@ -22,7 +22,6 @@
 
 #include <linux/cdev.h>
 #include <linux/device.h>
-#include <linux/kthread.h>
 #include <linux/mutex.h>
 #include <linux/posix-clock.h>
 #include <linux/ptp_clock.h>
@@ -41,7 +40,7 @@ struct timestamp_event_queue {
 
 struct ptp_clock {
 	struct posix_clock clock;
-	struct device *dev;
+	struct device dev;
 	struct ptp_clock_info *info;
 	dev_t devid;
 	int index; /* index into clocks.map */
@@ -57,8 +56,6 @@ struct ptp_clock {
 	struct attribute_group pin_attr_group;
 	/* 1st entry is a pointer to the real group, 2nd is NULL terminator */
 	const struct attribute_group *pin_attr_groups[2];
-	struct kthread_worker *kworker;
-	struct kthread_delayed_work aux_work;
 };
 
 /*

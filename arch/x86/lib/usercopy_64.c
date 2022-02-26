@@ -5,8 +5,8 @@
  * Copyright 1997 Linus Torvalds
  * Copyright 2002 Andi Kleen <ak@suse.de>
  */
-#include <linux/export.h>
-#include <linux/uaccess.h>
+#include <linux/module.h>
+#include <asm/uaccess.h>
 #include <linux/highmem.h>
 
 /*
@@ -55,23 +55,58 @@ unsigned long clear_user(void __user *to, unsigned long n)
 }
 EXPORT_SYMBOL(clear_user);
 
+unsigned long copy_in_user(void __user *to, const void __user *from, unsigned len)
+{
+	if (access_ok(VERIFY_WRITE, to, len) && access_ok(VERIFY_READ, from, len)) { 
+		return copy_user_generic((__force void *)to, (__force void *)from, len);
+	} 
+	return len;		
+}
+EXPORT_SYMBOL(copy_in_user);
+
 /*
  * Try to copy last bytes and clear the rest if needed.
  * Since protection fault in copy_from/to_user is not a normal situation,
  * it is not necessary to optimize tail handling.
  */
-__visible unsigned long
-copy_user_handle_tail(char *to, char *from, unsigned len)
+unsigned long
+copy_user_handle_tail(char *to, char *from, unsigned len, unsigned zerorest)
 {
-	for (; len; --len, to++) {
-		char c;
+	char c;
+	unsigned zero_len;
 
+	for (; len; --len, to++) {
 		if (__get_user_nocheck(c, from++, sizeof(char)))
 			break;
 		if (__put_user_nocheck(c, to, sizeof(char)))
 			break;
 	}
+
+	for (c = 0, zero_len = len; zerorest && zero_len; --zero_len)
+		if (__put_user_nocheck(c, to++, sizeof(char)))
+			break;
 	clac();
+	return len;
+}
+
+/*
+ * Similar to copy_user_handle_tail, probe for the write fault point,
+ * but reuse __memcpy_mcsafe in case a new read error is encountered.
+ * clac() is handled in _copy_to_iter_mcsafe().
+ */
+__visible unsigned long
+mcsafe_handle_tail(char *to, char *from, unsigned len)
+{
+	for (; len; --len, to++, from++) {
+		/*
+		 * Call the assembly routine back directly since
+		 * memcpy_mcsafe() may silently fallback to memcpy.
+		 */
+		unsigned long rem = __memcpy_mcsafe(to, from, 1);
+
+		if (rem)
+			break;
+	}
 	return len;
 }
 

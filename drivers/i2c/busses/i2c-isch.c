@@ -29,6 +29,7 @@
 #include <linux/stddef.h>
 #include <linux/ioport.h>
 #include <linux/i2c.h>
+#include <linux/init.h>
 #include <linux/io.h>
 #include <linux/acpi.h>
 
@@ -270,8 +271,7 @@ static int smbus_sch_probe(struct platform_device *dev)
 	if (!res)
 		return -EBUSY;
 
-	if (!devm_request_region(&dev->dev, res->start, resource_size(res),
-				 dev->name)) {
+	if (!request_region(res->start, resource_size(res), dev->name)) {
 		dev_err(&dev->dev, "SMBus region 0x%x already in use!\n",
 			sch_smba);
 		return -EBUSY;
@@ -288,16 +288,22 @@ static int smbus_sch_probe(struct platform_device *dev)
 		"SMBus SCH adapter at %04x", sch_smba);
 
 	retval = i2c_add_adapter(&sch_adapter);
-	if (retval)
+	if (retval) {
+		dev_err(&dev->dev, "Couldn't register adapter!\n");
+		release_region(res->start, resource_size(res));
 		sch_smba = 0;
+	}
 
 	return retval;
 }
 
 static int smbus_sch_remove(struct platform_device *pdev)
 {
+	struct resource *res;
 	if (sch_smba) {
 		i2c_del_adapter(&sch_adapter);
+		res = platform_get_resource(pdev, IORESOURCE_IO, 0);
+		release_region(res->start, resource_size(res));
 		sch_smba = 0;
 	}
 
@@ -307,6 +313,7 @@ static int smbus_sch_remove(struct platform_device *pdev)
 static struct platform_driver smbus_sch_driver = {
 	.driver = {
 		.name = "isch_smbus",
+		.owner = THIS_MODULE,
 	},
 	.probe		= smbus_sch_probe,
 	.remove		= smbus_sch_remove,

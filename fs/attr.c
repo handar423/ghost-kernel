@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  *  linux/fs/attr.c
  *
@@ -10,7 +9,6 @@
 #include <linux/time.h>
 #include <linux/mm.h>
 #include <linux/string.h>
-#include <linux/sched/signal.h>
 #include <linux/capability.h>
 #include <linux/fsnotify.h>
 #include <linux/fcntl.h>
@@ -18,23 +16,46 @@
 #include <linux/evm.h>
 #include <linux/ima.h>
 
+static bool chown_ok(const struct inode *inode, kuid_t uid)
+{
+	if (uid_eq(current_fsuid(), inode->i_uid) &&
+	    uid_eq(uid, inode->i_uid))
+		return true;
+	if (capable_wrt_inode_uidgid(inode, CAP_CHOWN))
+		return true;
+	if (uid_eq(inode->i_uid, INVALID_UID) &&
+	    ns_capable(inode->i_sb->s_user_ns, CAP_CHOWN))
+		return true;
+	return false;
+}
+
+static bool chgrp_ok(const struct inode *inode, kgid_t gid)
+{
+	if (uid_eq(current_fsuid(), inode->i_uid) &&
+	    (in_group_p(gid) || gid_eq(gid, inode->i_gid)))
+		return true;
+	if (capable_wrt_inode_uidgid(inode, CAP_CHOWN))
+		return true;
+	if (gid_eq(inode->i_gid, INVALID_GID) &&
+	    ns_capable(inode->i_sb->s_user_ns, CAP_CHOWN))
+		return true;
+	return false;
+}
+
 /**
- * setattr_prepare - check if attribute changes to a dentry are allowed
- * @dentry:	dentry to check
+ * inode_change_ok - check if attribute changes to an inode are allowed
+ * @inode:	inode to check
  * @attr:	attributes to change
  *
  * Check if we are allowed to change the attributes contained in @attr
- * in the given dentry.  This includes the normal unix access permission
- * checks, as well as checks for rlimits and others. The function also clears
- * SGID bit from mode if user is not allowed to set it. Also file capabilities
- * and IMA extended attributes are cleared if ATTR_KILL_PRIV is set.
+ * in the given inode.  This includes the normal unix access permission
+ * checks, as well as checks for rlimits and others.
  *
  * Should be called as the first thing in ->setattr implementations,
  * possibly after taking additional locks.
  */
-int setattr_prepare(struct dentry *dentry, struct iattr *attr)
+int inode_change_ok(const struct inode *inode, struct iattr *attr)
 {
-	struct inode *inode = d_inode(dentry);
 	unsigned int ia_valid = attr->ia_valid;
 
 	/*
@@ -49,20 +70,14 @@ int setattr_prepare(struct dentry *dentry, struct iattr *attr)
 
 	/* If force is set do it anyway. */
 	if (ia_valid & ATTR_FORCE)
-		goto kill_priv;
+		return 0;
 
 	/* Make sure a caller can chown. */
-	if ((ia_valid & ATTR_UID) &&
-	    (!uid_eq(current_fsuid(), inode->i_uid) ||
-	     !uid_eq(attr->ia_uid, inode->i_uid)) &&
-	    !capable_wrt_inode_uidgid(inode, CAP_CHOWN))
+	if ((ia_valid & ATTR_UID) && !chown_ok(inode, attr->ia_uid))
 		return -EPERM;
 
 	/* Make sure caller can chgrp. */
-	if ((ia_valid & ATTR_GID) &&
-	    (!uid_eq(current_fsuid(), inode->i_uid) ||
-	    (!in_group_p(attr->ia_gid) && !gid_eq(attr->ia_gid, inode->i_gid))) &&
-	    !capable_wrt_inode_uidgid(inode, CAP_CHOWN))
+	if ((ia_valid & ATTR_GID) && !chgrp_ok(inode, attr->ia_gid))
 		return -EPERM;
 
 	/* Make sure a caller can chmod. */
@@ -82,19 +97,9 @@ int setattr_prepare(struct dentry *dentry, struct iattr *attr)
 			return -EPERM;
 	}
 
-kill_priv:
-	/* User has permission for the change */
-	if (ia_valid & ATTR_KILL_PRIV) {
-		int error;
-
-		error = security_inode_killpriv(dentry);
-		if (error)
-			return error;
-	}
-
 	return 0;
 }
-EXPORT_SYMBOL(setattr_prepare);
+EXPORT_SYMBOL(inode_change_ok);
 
 /**
  * inode_newsize_ok - may this inode be truncated to a given size
@@ -210,11 +215,16 @@ int notify_change(struct dentry * dentry, struct iattr * attr, struct inode **de
 	struct timespec now;
 	unsigned int ia_valid = attr->ia_valid;
 
-	WARN_ON_ONCE(!inode_is_locked(inode));
+	WARN_ON_ONCE(!mutex_is_locked(&inode->i_mutex));
 
 	if (ia_valid & (ATTR_MODE | ATTR_UID | ATTR_GID | ATTR_TIMES_SET)) {
 		if (IS_IMMUTABLE(inode) || IS_APPEND(inode))
 			return -EPERM;
+	}
+
+	if ((ia_valid & ATTR_SIZE) && IS_I_VERSION(inode)) {
+		if (attr->ia_size != inode->i_size)
+			inode_inc_iversion(inode);
 	}
 
 	/*
@@ -223,7 +233,7 @@ int notify_change(struct dentry * dentry, struct iattr * attr, struct inode **de
 	 */
 	if (ia_valid & ATTR_TOUCH) {
 		if (IS_IMMUTABLE(inode))
-			return -EPERM;
+			return -EACCES;
 
 		if (!inode_owner_or_capable(inode)) {
 			error = inode_permission(inode, MAY_WRITE);
@@ -239,7 +249,7 @@ int notify_change(struct dentry * dentry, struct iattr * attr, struct inode **de
 			inode->i_flags &= ~S_NOSEC;
 	}
 
-	now = current_time(inode);
+	now = current_fs_time(inode->i_sb);
 
 	attr->ia_ctime = now;
 	if (!(ia_valid & ATTR_ATIME_SET))
@@ -247,11 +257,13 @@ int notify_change(struct dentry * dentry, struct iattr * attr, struct inode **de
 	if (!(ia_valid & ATTR_MTIME_SET))
 		attr->ia_mtime = now;
 	if (ia_valid & ATTR_KILL_PRIV) {
+		attr->ia_valid &= ~ATTR_KILL_PRIV;
+		ia_valid &= ~ATTR_KILL_PRIV;
 		error = security_inode_need_killpriv(dentry);
-		if (error < 0)
+		if (error > 0)
+			error = security_inode_killpriv(dentry);
+		if (error)
 			return error;
-		if (error == 0)
-			ia_valid = attr->ia_valid &= ~ATTR_KILL_PRIV;
 	}
 
 	/*

@@ -13,10 +13,10 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; if not, see <http://www.gnu.org/licenses/>.
+ * along with this program; if not, write to the
+ * Free Software Foundation, Inc.,
+ * 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  */
-
-#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/module.h>
 #include <linux/slab.h>
@@ -24,22 +24,22 @@
 
 #include "mei_phy.h"
 
-struct mei_nfc_hdr {
-	u8 cmd;
+struct mei_nfc_cmd {
+	u8 command;
 	u8 status;
 	u16 req_id;
 	u32 reserved;
 	u16 data_size;
-} __packed;
-
-struct mei_nfc_cmd {
-	struct mei_nfc_hdr hdr;
 	u8 sub_command;
 	u8 data[];
 } __packed;
 
 struct mei_nfc_reply {
-	struct mei_nfc_hdr hdr;
+	u8 command;
+	u8 status;
+	u16 req_id;
+	u32 reserved;
+	u16 data_size;
 	u8 sub_command;
 	u8 reply_status;
 	u8 data[];
@@ -69,6 +69,13 @@ struct mei_nfc_connect_resp {
 	u16 me_build;
 } __packed;
 
+struct mei_nfc_hci_hdr {
+	u8 cmd;
+	u8 status;
+	u16 req_id;
+	u32 reserved;
+	u16 data_size;
+} __packed;
 
 #define MEI_NFC_CMD_MAINTENANCE 0x00
 #define MEI_NFC_CMD_HCI_SEND 0x01
@@ -76,6 +83,9 @@ struct mei_nfc_connect_resp {
 
 #define MEI_NFC_SUBCMD_CONNECT    0x00
 #define MEI_NFC_SUBCMD_IF_VERSION 0x01
+
+#define MEI_NFC_HEADER_SIZE 10
+
 
 #define MEI_NFC_MAX_READ (MEI_NFC_HEADER_SIZE + MEI_NFC_MAX_HCI_PAYLOAD)
 
@@ -93,17 +103,8 @@ do {								\
 			16, 1, (skb)->data, (skb)->len, false);	\
 } while (0)
 
-#define MEI_DUMP_NFC_HDR(info, _hdr)                                \
-do {                                                                \
-	pr_debug("%s:\n", info);                                    \
-	pr_debug("cmd=%02d status=%d req_id=%d rsvd=%d size=%d\n",  \
-		 (_hdr)->cmd, (_hdr)->status, (_hdr)->req_id,       \
-		 (_hdr)->reserved, (_hdr)->data_size);              \
-} while (0)
-
 static int mei_nfc_if_version(struct nfc_mei_phy *phy)
 {
-
 	struct mei_nfc_cmd cmd;
 	struct mei_nfc_reply *reply = NULL;
 	struct mei_nfc_if_version *version;
@@ -113,11 +114,10 @@ static int mei_nfc_if_version(struct nfc_mei_phy *phy)
 	pr_info("%s\n", __func__);
 
 	memset(&cmd, 0, sizeof(struct mei_nfc_cmd));
-	cmd.hdr.cmd = MEI_NFC_CMD_MAINTENANCE;
-	cmd.hdr.data_size = 1;
+	cmd.command = MEI_NFC_CMD_MAINTENANCE;
+	cmd.data_size = 1;
 	cmd.sub_command = MEI_NFC_SUBCMD_IF_VERSION;
 
-	MEI_DUMP_NFC_HDR("version", &cmd.hdr);
 	r = mei_cldev_send(phy->cldev, (u8 *)&cmd, sizeof(struct mei_nfc_cmd));
 	if (r < 0) {
 		pr_err("Could not send IF version cmd\n");
@@ -127,7 +127,6 @@ static int mei_nfc_if_version(struct nfc_mei_phy *phy)
 	/* to be sure on the stack we alloc memory */
 	if_version_length = sizeof(struct mei_nfc_reply) +
 		sizeof(struct mei_nfc_if_version);
-
 	reply = kzalloc(if_version_length, GFP_KERNEL);
 	if (!reply)
 		return -ENOMEM;
@@ -140,7 +139,6 @@ static int mei_nfc_if_version(struct nfc_mei_phy *phy)
 	}
 
 	version = (struct mei_nfc_if_version *)reply->data;
-
 	phy->fw_ivn = version->fw_ivn;
 	phy->vendor_id = version->vendor_id;
 	phy->radio_type = version->radio_type;
@@ -152,6 +150,7 @@ err:
 
 static int mei_nfc_connect(struct nfc_mei_phy *phy)
 {
+
 	struct mei_nfc_cmd *cmd, *reply;
 	struct mei_nfc_connect *connect;
 	struct mei_nfc_connect_resp *connect_resp;
@@ -179,31 +178,27 @@ static int mei_nfc_connect(struct nfc_mei_phy *phy)
 
 	connect_resp = (struct mei_nfc_connect_resp *)reply->data;
 
-	cmd->hdr.cmd = MEI_NFC_CMD_MAINTENANCE;
-	cmd->hdr.data_size = 3;
+	cmd->command = MEI_NFC_CMD_MAINTENANCE;
+	cmd->data_size = 3;
 	cmd->sub_command = MEI_NFC_SUBCMD_CONNECT;
 	connect->fw_ivn = phy->fw_ivn;
 	connect->vendor_id = phy->vendor_id;
 
-	MEI_DUMP_NFC_HDR("connect request", &cmd->hdr);
 	r = mei_cldev_send(phy->cldev, (u8 *)cmd, connect_length);
 	if (r < 0) {
 		pr_err("Could not send connect cmd %d\n", r);
 		goto err;
 	}
 
-	bytes_recv = mei_cldev_recv(phy->cldev, (u8 *)reply,
-				    connect_resp_length);
+	bytes_recv = mei_cldev_recv(phy->cldev, (u8 *)reply, connect_resp_length);
 	if (bytes_recv < 0) {
 		r = bytes_recv;
 		pr_err("Could not read connect response %d\n", r);
 		goto err;
 	}
 
-	MEI_DUMP_NFC_HDR("connect reply", &reply->hdr);
-
 	pr_info("IVN 0x%x Vendor ID 0x%x\n",
-		 connect_resp->fw_ivn, connect_resp->vendor_id);
+		connect_resp->fw_ivn, connect_resp->vendor_id);
 
 	pr_info("ME FW %d.%d.%d.%d\n",
 		connect_resp->me_major, connect_resp->me_minor,
@@ -220,7 +215,7 @@ err:
 
 static int mei_nfc_send(struct nfc_mei_phy *phy, u8 *buf, size_t length)
 {
-	struct mei_nfc_hdr *hdr;
+	struct mei_nfc_hci_hdr *hdr;
 	u8 *mei_buf;
 	int err;
 
@@ -229,14 +224,12 @@ static int mei_nfc_send(struct nfc_mei_phy *phy, u8 *buf, size_t length)
 	if (!mei_buf)
 		goto out;
 
-	hdr = (struct mei_nfc_hdr *)mei_buf;
+	hdr = (struct mei_nfc_hci_hdr *) mei_buf;
 	hdr->cmd = MEI_NFC_CMD_HCI_SEND;
 	hdr->status = 0;
 	hdr->req_id = phy->req_id;
 	hdr->reserved = 0;
 	hdr->data_size = length;
-
-	MEI_DUMP_NFC_HDR("send", hdr);
 
 	memcpy(mei_buf + MEI_NFC_HEADER_SIZE, buf, length);
 	err = mei_cldev_send(phy->cldev, mei_buf, length + MEI_NFC_HEADER_SIZE);
@@ -276,18 +269,17 @@ static int nfc_mei_phy_write(void *phy_id, struct sk_buff *skb)
 
 static int mei_nfc_recv(struct nfc_mei_phy *phy, u8 *buf, size_t length)
 {
-	struct mei_nfc_hdr *hdr;
+	struct mei_nfc_hci_hdr *hci_hdr;
 	int received_length;
 
 	received_length = mei_cldev_recv(phy->cldev, buf, length);
 	if (received_length < 0)
 		return received_length;
 
-	hdr = (struct mei_nfc_hdr *) buf;
+	hci_hdr = (struct mei_nfc_hci_hdr *) buf;
 
-	MEI_DUMP_NFC_HDR("receive", hdr);
-	if (hdr->cmd == MEI_NFC_CMD_HCI_SEND) {
-		phy->recv_req_id = hdr->req_id;
+	if (hci_hdr->cmd == MEI_NFC_CMD_HCI_SEND) {
+		phy->recv_req_id = hci_hdr->req_id;
 		wake_up(&phy->send_wq);
 
 		return 0;
@@ -297,34 +289,35 @@ static int mei_nfc_recv(struct nfc_mei_phy *phy, u8 *buf, size_t length)
 }
 
 
-static void nfc_mei_rx_cb(struct mei_cl_device *cldev)
+static void nfc_mei_event_cb(struct mei_cl_device *cldev, u32 events,
+			     void *context)
 {
-	struct nfc_mei_phy *phy = mei_cldev_get_drvdata(cldev);
-	struct sk_buff *skb;
-	int reply_size;
-
-	if (!phy)
-		return;
+	struct nfc_mei_phy *phy = context;
 
 	if (phy->hard_fault != 0)
 		return;
 
-	skb = alloc_skb(MEI_NFC_MAX_READ, GFP_KERNEL);
-	if (!skb)
-		return;
+	if (events & BIT(MEI_CL_EVENT_RX)) {
+		struct sk_buff *skb;
+		int reply_size;
 
-	reply_size = mei_nfc_recv(phy, skb->data, MEI_NFC_MAX_READ);
-	if (reply_size < MEI_NFC_HEADER_SIZE) {
-		kfree_skb(skb);
-		return;
+		skb = alloc_skb(MEI_NFC_MAX_READ, GFP_KERNEL);
+		if (!skb)
+			return;
+
+		reply_size = mei_nfc_recv(phy, skb->data, MEI_NFC_MAX_READ);
+		if (reply_size < MEI_NFC_HEADER_SIZE) {
+			kfree(skb);
+			return;
+		}
+
+		skb_put(skb, reply_size);
+		skb_pull(skb, MEI_NFC_HEADER_SIZE);
+
+		MEI_DUMP_SKB_IN("mei frame read", skb);
+
+		nfc_hci_recv_frame(phy->hdev, skb);
 	}
-
-	skb_put(skb, reply_size);
-	skb_pull(skb, MEI_NFC_HEADER_SIZE);
-
-	MEI_DUMP_SKB_IN("mei frame read", skb);
-
-	nfc_hci_recv_frame(phy->hdev, skb);
 }
 
 static int nfc_mei_phy_enable(void *phy_id)
@@ -337,7 +330,7 @@ static int nfc_mei_phy_enable(void *phy_id)
 	if (phy->powered == 1)
 		return 0;
 
-	r = mei_cldev_enable(phy->cldev);
+	r = mei_cldev_enable_device(phy->cldev);
 	if (r < 0) {
 		pr_err("Could not enable device %d\n", r);
 		return r;
@@ -355,7 +348,8 @@ static int nfc_mei_phy_enable(void *phy_id)
 		goto err;
 	}
 
-	r = mei_cldev_register_rx_cb(phy->cldev, nfc_mei_rx_cb);
+	r = mei_cldev_register_event_cb(phy->cldev, BIT(MEI_CL_EVENT_RX),
+				     nfc_mei_event_cb, phy);
 	if (r) {
 		pr_err("Event cb registration failed %d\n", r);
 		goto err;
@@ -367,7 +361,7 @@ static int nfc_mei_phy_enable(void *phy_id)
 
 err:
 	phy->powered = 0;
-	mei_cldev_disable(phy->cldev);
+	mei_cldev_disable_device(phy->cldev);
 	return r;
 }
 
@@ -377,7 +371,7 @@ static void nfc_mei_phy_disable(void *phy_id)
 
 	pr_info("%s\n", __func__);
 
-	mei_cldev_disable(phy->cldev);
+	mei_cldev_disable_device(phy->cldev);
 
 	phy->powered = 0;
 }
@@ -407,7 +401,7 @@ EXPORT_SYMBOL_GPL(nfc_mei_phy_alloc);
 
 void nfc_mei_phy_free(struct nfc_mei_phy *phy)
 {
-	mei_cldev_disable(phy->cldev);
+	mei_cldev_disable_device(phy->cldev);
 	kfree(phy);
 }
 EXPORT_SYMBOL_GPL(nfc_mei_phy_free);

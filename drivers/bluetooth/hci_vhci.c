@@ -146,8 +146,8 @@ static int __vhci_create_device(struct vhci_data *data, __u8 opcode)
 
 	hci_skb_pkt_type(skb) = HCI_VENDOR_PKT;
 
-	skb_put_u8(skb, 0xff);
-	skb_put_u8(skb, opcode);
+	*(u8 *)skb_put(skb, 1) = 0xff;
+	*(u8 *)skb_put(skb, 1) = opcode;
 	put_unaligned_le16(hdev->id, skb_put(skb, 2));
 	skb_queue_tail(&data->readq, skb);
 
@@ -167,11 +167,13 @@ static int vhci_create_device(struct vhci_data *data, __u8 opcode)
 }
 
 static inline ssize_t vhci_get_user(struct vhci_data *data,
-				    struct iov_iter *from)
+				    const struct iovec *iov,
+				    unsigned long count)
 {
-	size_t len = iov_iter_count(from);
+	size_t len = iov_length(iov, count);
 	struct sk_buff *skb;
 	__u8 pkt_type, opcode;
+	unsigned long i;
 	int ret;
 
 	if (len < 2 || len > HCI_MAX_FRAME_SIZE)
@@ -181,9 +183,12 @@ static inline ssize_t vhci_get_user(struct vhci_data *data,
 	if (!skb)
 		return -ENOMEM;
 
-	if (!copy_from_iter_full(skb_put(skb, len), len, from)) {
-		kfree_skb(skb);
-		return -EFAULT;
+	for (i = 0; i < count; i++) {
+		if (copy_from_user(skb_put(skb, iov[i].iov_len),
+				   iov[i].iov_base, iov[i].iov_len)) {
+			kfree_skb(skb);
+			return -EFAULT;
+		}
 	}
 
 	pkt_type = *((__u8 *) skb->data);
@@ -291,12 +296,13 @@ static ssize_t vhci_read(struct file *file,
 	return ret;
 }
 
-static ssize_t vhci_write(struct kiocb *iocb, struct iov_iter *from)
+static ssize_t vhci_write(struct kiocb *iocb, const struct iovec *iov,
+			  unsigned long count, loff_t pos)
 {
 	struct file *file = iocb->ki_filp;
 	struct vhci_data *data = file->private_data;
 
-	return vhci_get_user(data, from);
+	return vhci_get_user(data, iov, count);
 }
 
 static unsigned int vhci_poll(struct file *file, poll_table *wait)
@@ -365,7 +371,7 @@ static int vhci_release(struct inode *inode, struct file *file)
 static const struct file_operations vhci_fops = {
 	.owner		= THIS_MODULE,
 	.read		= vhci_read,
-	.write_iter	= vhci_write,
+	.aio_write	= vhci_write,
 	.poll		= vhci_poll,
 	.open		= vhci_open,
 	.release	= vhci_release,

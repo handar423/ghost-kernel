@@ -73,36 +73,36 @@ static void multipath_reschedule_retry (struct multipath_bh *mp_bh)
  * operation and are ready to return a success/failure code to the buffer
  * cache layer.
  */
-static void multipath_end_bh_io(struct multipath_bh *mp_bh, blk_status_t status)
+static void multipath_end_bh_io (struct multipath_bh *mp_bh, int err)
 {
 	struct bio *bio = mp_bh->master_bio;
 	struct mpconf *conf = mp_bh->mddev->private;
 
-	bio->bi_status = status;
-	bio_endio(bio);
+	bio_endio(bio, err);
 	mempool_free(mp_bh, conf->pool);
 }
 
-static void multipath_end_request(struct bio *bio)
+static void multipath_end_request(struct bio *bio, int error)
 {
+	int uptodate = test_bit(BIO_UPTODATE, &bio->bi_flags);
 	struct multipath_bh *mp_bh = bio->bi_private;
 	struct mpconf *conf = mp_bh->mddev->private;
 	struct md_rdev *rdev = conf->multipaths[mp_bh->path].rdev;
 
-	if (!bio->bi_status)
+	if (uptodate)
 		multipath_end_bh_io(mp_bh, 0);
-	else if (!(bio->bi_opf & REQ_RAHEAD)) {
+	else if (!(bio->bi_rw & REQ_RAHEAD)) {
 		/*
 		 * oops, IO error:
 		 */
 		char b[BDEVNAME_SIZE];
 		md_error (mp_bh->mddev, rdev);
 		pr_info("multipath: %s: rescheduling sector %llu\n",
-			bdevname(rdev->bdev,b),
-			(unsigned long long)bio->bi_iter.bi_sector);
+		       bdevname(rdev->bdev,b),
+		       (unsigned long long)bio->bi_sector);
 		multipath_reschedule_retry(mp_bh);
 	} else
-		multipath_end_bh_io(mp_bh, bio->bi_status);
+		multipath_end_bh_io(mp_bh, error);
 	rdev_dec_pending(rdev, conf->mddev);
 }
 
@@ -111,9 +111,26 @@ static bool multipath_make_request(struct mddev *mddev, struct bio * bio)
 	struct mpconf *conf = mddev->private;
 	struct multipath_bh * mp_bh;
 	struct multipath_info *multipath;
+	unsigned int max_sectors = blk_queue_get_max_sectors(mddev->queue,
+			bio->bi_rw);
+	const unsigned long do_discard = (bio->bi_rw
+					  & (REQ_DISCARD | REQ_SECURE));
+	const unsigned long do_same = (bio->bi_rw & REQ_WRITE_SAME);
 
-	if (unlikely(bio->bi_opf & REQ_PREFLUSH)) {
-		md_flush_request(mddev, bio);
+	if (unlikely(bio->bi_rw & REQ_FLUSH)
+	    && md_flush_request(mddev, bio))
+		return true;
+
+	if (!do_discard && !do_same && bio_sectors(bio) > max_sectors) {
+		struct bio_pair2 *bp = bio_split2(bio, max_sectors);
+		if (!bp) {
+			bio_io_error(bio);
+			return true;
+		}
+
+		generic_make_request(bp->bio1);
+		generic_make_request(bp->bio2);
+		bio_pair2_release(bp);
 		return true;
 	}
 
@@ -124,22 +141,19 @@ static bool multipath_make_request(struct mddev *mddev, struct bio * bio)
 
 	mp_bh->path = multipath_map(conf);
 	if (mp_bh->path < 0) {
-		bio_io_error(bio);
+		bio_endio(bio, -EIO);
 		mempool_free(mp_bh, conf->pool);
 		return true;
 	}
 	multipath = conf->multipaths + mp_bh->path;
 
-	bio_init(&mp_bh->bio, NULL, 0);
-	__bio_clone_fast(&mp_bh->bio, bio);
-
-	mp_bh->bio.bi_iter.bi_sector += multipath->rdev->data_offset;
-	bio_set_dev(&mp_bh->bio, multipath->rdev->bdev);
-	mp_bh->bio.bi_opf |= REQ_FAILFAST_TRANSPORT;
+	mp_bh->bio = *bio;
+	mp_bh->bio.bi_sector += multipath->rdev->data_offset;
+	mp_bh->bio.bi_bdev = multipath->rdev->bdev;
+	mp_bh->bio.bi_rw |= REQ_FAILFAST_TRANSPORT;
 	mp_bh->bio.bi_end_io = multipath_end_request;
 	mp_bh->bio.bi_private = mp_bh;
 	mddev_check_writesame(mddev, &mp_bh->bio);
-	mddev_check_write_zeroes(mddev, &mp_bh->bio);
 	generic_make_request(&mp_bh->bio);
 	return true;
 }
@@ -157,7 +171,7 @@ static void multipath_status(struct seq_file *seq, struct mddev *mddev)
 		seq_printf (seq, "%s", rdev && test_bit(In_sync, &rdev->flags) ? "U" : "_");
 	}
 	rcu_read_unlock();
-	seq_printf (seq, "]");
+	seq_putc(seq, ']');
 }
 
 static int multipath_congested(struct mddev *mddev, int bits)
@@ -171,7 +185,7 @@ static int multipath_congested(struct mddev *mddev, int bits)
 		if (rdev && !test_bit(Faulty, &rdev->flags)) {
 			struct request_queue *q = bdev_get_queue(rdev->bdev);
 
-			ret |= bdi_congested(q->backing_dev_info, bits);
+			ret |= bdi_congested(&q->backing_dev_info, bits);
 			/* Just like multipath_map, we just check the
 			 * first available device
 			 */
@@ -259,6 +273,18 @@ static int multipath_add_disk(struct mddev *mddev, struct md_rdev *rdev)
 			disk_stack_limits(mddev->gendisk, rdev->bdev,
 					  rdev->data_offset << 9);
 
+		/* as we don't honour merge_bvec_fn, we must never risk
+		 * violating it, so limit ->max_segments to one, lying
+		 * within a single page.
+		 * (Note: it is very unlikely that a device with
+		 * merge_bvec_fn will be involved in multipath.)
+		 */
+			if (q->merge_bvec_fn) {
+				blk_queue_max_segments(mddev->queue, 1);
+				blk_queue_segment_boundary(mddev->queue,
+							   PAGE_CACHE_SIZE - 1);
+			}
+
 			err = md_integrity_add_rdev(rdev, mddev);
 			if (err)
 				break;
@@ -339,22 +365,21 @@ static void multipathd(struct md_thread *thread)
 		spin_unlock_irqrestore(&conf->device_lock, flags);
 
 		bio = &mp_bh->bio;
-		bio->bi_iter.bi_sector = mp_bh->master_bio->bi_iter.bi_sector;
+		bio->bi_sector = mp_bh->master_bio->bi_sector;
 
 		if ((mp_bh->path = multipath_map (conf))<0) {
 			pr_err("multipath: %s: unrecoverable IO read error for block %llu\n",
-			       bio_devname(bio, b),
-			       (unsigned long long)bio->bi_iter.bi_sector);
-			multipath_end_bh_io(mp_bh, BLK_STS_IOERR);
+			       bdevname(bio->bi_bdev,b),
+			       (unsigned long long)bio->bi_sector);
+			multipath_end_bh_io(mp_bh, -EIO);
 		} else {
 			pr_err("multipath: %s: redirecting sector %llu to another IO path\n",
-			       bio_devname(bio, b),
-			       (unsigned long long)bio->bi_iter.bi_sector);
+			       bdevname(bio->bi_bdev,b),
+			       (unsigned long long)bio->bi_sector);
 			*bio = *(mp_bh->master_bio);
-			bio->bi_iter.bi_sector +=
-				conf->multipaths[mp_bh->path].rdev->data_offset;
-			bio_set_dev(bio, conf->multipaths[mp_bh->path].rdev->bdev);
-			bio->bi_opf |= REQ_FAILFAST_TRANSPORT;
+			bio->bi_sector += conf->multipaths[mp_bh->path].rdev->data_offset;
+			bio->bi_bdev = conf->multipaths[mp_bh->path].rdev->bdev;
+			bio->bi_rw |= REQ_FAILFAST_TRANSPORT;
 			bio->bi_end_io = multipath_end_request;
 			bio->bi_private = mp_bh;
 			generic_make_request(bio);
@@ -414,6 +439,15 @@ static int multipath_run (struct mddev *mddev)
 		disk->rdev = rdev;
 		disk_stack_limits(mddev->gendisk, rdev->bdev,
 				  rdev->data_offset << 9);
+
+		/* as we don't honour merge_bvec_fn, we must never risk
+		 * violating it, not that we ever expect a device with
+		 * a merge_bvec_fn to be involved in multipath */
+		if (rdev->bdev->bd_disk->queue->merge_bvec_fn) {
+			blk_queue_max_segments(mddev->queue, 1);
+			blk_queue_segment_boundary(mddev->queue,
+						   PAGE_CACHE_SIZE - 1);
+		}
 
 		if (!test_bit(Faulty, &rdev->flags))
 			working_disks++;

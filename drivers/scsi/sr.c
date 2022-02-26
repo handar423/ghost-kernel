@@ -46,7 +46,7 @@
 #include <linux/mutex.h>
 #include <linux/slab.h>
 #include <linux/pm_runtime.h>
-#include <linux/uaccess.h>
+#include <asm/uaccess.h>
 
 #include <scsi/scsi.h>
 #include <scsi/scsi_dbg.h>
@@ -83,14 +83,14 @@ static int sr_init_command(struct scsi_cmnd *SCpnt);
 static int sr_done(struct scsi_cmnd *);
 static int sr_runtime_suspend(struct device *dev);
 
-static const struct dev_pm_ops sr_pm_ops = {
+static struct dev_pm_ops sr_pm_ops = {
 	.runtime_suspend	= sr_runtime_suspend,
 };
 
 static struct scsi_driver sr_template = {
+	.owner			= THIS_MODULE,
 	.gendrv = {
 		.name   	= "sr",
-		.owner		= THIS_MODULE,
 		.probe		= sr_probe,
 		.remove		= sr_remove,
 		.pm		= &sr_pm_ops,
@@ -117,7 +117,7 @@ static unsigned int sr_check_events(struct cdrom_device_info *cdi,
 				    unsigned int clearing, int slot);
 static int sr_packet(struct cdrom_device_info *, struct packet_command *);
 
-static const struct cdrom_device_ops sr_dops = {
+static struct cdrom_device_ops sr_dops = {
 	.open			= sr_open,
 	.release	 	= sr_release,
 	.drive_status	 	= sr_drive_status,
@@ -166,10 +166,14 @@ static inline struct scsi_cd *scsi_cd_get(struct gendisk *disk)
 		goto out;
 	cd = scsi_cd(disk);
 	kref_get(&cd->kref);
-	if (scsi_device_get(cd->device)) {
-		kref_put(&cd->kref, sr_kref_release);
-		cd = NULL;
-	}
+	if (scsi_device_get(cd->device))
+		goto out_put;
+	if (!scsi_autopm_get_device(cd->device))
+		goto out;
+
+ out_put:
+	kref_put(&cd->kref, sr_kref_release);
+	cd = NULL;
  out:
 	mutex_unlock(&sr_ref_mutex);
 	return cd;
@@ -181,6 +185,7 @@ static void scsi_cd_put(struct scsi_cd *cd)
 
 	mutex_lock(&sr_ref_mutex);
 	kref_put(&cd->kref, sr_kref_release);
+	scsi_autopm_put_device(sdev);
 	scsi_device_put(sdev);
 	mutex_unlock(&sr_ref_mutex);
 }
@@ -390,10 +395,10 @@ static int sr_init_command(struct scsi_cmnd *SCpnt)
 	struct request *rq = SCpnt->request;
 	int ret;
 
-	ret = scsi_init_io(SCpnt);
+	ret = scsi_init_io(SCpnt, GFP_ATOMIC);
 	if (ret != BLKPREP_OK)
 		goto out;
-	WARN_ON_ONCE(SCpnt != rq->special);
+	SCpnt = rq->special;
 	cd = scsi_cd(rq->rq_disk);
 
 	/* from here on until we're complete, any goto out
@@ -437,17 +442,14 @@ static int sr_init_command(struct scsi_cmnd *SCpnt)
 		goto out;
 	}
 
-	switch (req_op(rq)) {
-	case REQ_OP_WRITE:
-		if (!cd->writeable)
+	if (rq_data_dir(rq) == WRITE) {
+		if (!cd->device->writeable)
 			goto out;
 		SCpnt->cmnd[0] = WRITE_10;
 		cd->cdi.media_written = 1;
-		break;
-	case REQ_OP_READ:
+	} else if (rq_data_dir(rq) == READ) {
 		SCpnt->cmnd[0] = READ_10;
-		break;
-	default:
+	} else {
 		blk_dump_rq_flags(rq, "Unknown sr command");
 		goto out;
 	}
@@ -525,6 +527,8 @@ static int sr_block_open(struct block_device *bdev, fmode_t mode)
 	struct scsi_cd *cd;
 	int ret = -ENXIO;
 
+	check_disk_change(bdev);
+
 	mutex_lock(&sr_mutex);
 	cd = scsi_cd_get(bdev->bd_disk);
 	if (cd) {
@@ -553,12 +557,9 @@ static int sr_block_ioctl(struct block_device *bdev, fmode_t mode, unsigned cmd,
 	void __user *argp = (void __user *)arg;
 	int ret;
 
-	mutex_lock(&sr_mutex);
+	scsi_autopm_get_device(cd->device);
 
-	ret = scsi_ioctl_block_when_processing_errors(sdev, cmd,
-			(mode & FMODE_NDELAY) != 0);
-	if (ret)
-		goto out;
+	mutex_lock(&sr_mutex);
 
 	/*
 	 * Send SCSI addressing ioctls directly to mid level, send other
@@ -575,28 +576,57 @@ static int sr_block_ioctl(struct block_device *bdev, fmode_t mode, unsigned cmd,
 	if (ret != -ENOSYS)
 		goto out;
 
+	/*
+	 * ENODEV means that we didn't recognise the ioctl, or that we
+	 * cannot execute it in the current device state.  In either
+	 * case fall through to scsi_ioctl, which will return ENDOEV again
+	 * if it doesn't recognise the ioctl
+	 */
+	ret = scsi_nonblockable_ioctl(sdev, cmd, argp,
+					(mode & FMODE_NDELAY) != 0);
+	if (ret != -ENODEV)
+		goto out;
 	ret = scsi_ioctl(sdev, cmd, argp);
 
 out:
 	mutex_unlock(&sr_mutex);
+	scsi_autopm_put_device(cd->device);
 	return ret;
 }
 
 static unsigned int sr_block_check_events(struct gendisk *disk,
 					  unsigned int clearing)
 {
-	struct scsi_cd *cd = scsi_cd(disk);
+	unsigned int ret;
+	struct scsi_cd *cd;
 
-	if (atomic_read(&cd->device->disk_events_disable_depth))
+	cd = scsi_cd_get(disk);
+	if (!cd)
 		return 0;
 
-	return cdrom_check_events(&cd->cdi, clearing);
+	if (atomic_read(&cd->device->disk_events_disable_depth) == 0) {
+		scsi_autopm_get_device(cd->device);
+		ret = cdrom_check_events(&cd->cdi, clearing);
+		scsi_autopm_put_device(cd->device);
+	} else {
+		ret = 0;
+	}
+
+	scsi_cd_put(cd);
+
+	return ret;
 }
 
 static int sr_block_revalidate_disk(struct gendisk *disk)
 {
-	struct scsi_cd *cd = scsi_cd(disk);
 	struct scsi_sense_hdr sshdr;
+	struct scsi_cd *cd;
+
+	cd = scsi_cd_get(disk);
+	if (!cd)
+		return -ENXIO;
+
+	scsi_autopm_get_device(cd->device);
 
 	/* if the unit is not ready, nothing more to do */
 	if (scsi_test_unit_ready(cd->device, SR_TIMEOUT, MAX_RETRIES, &sshdr))
@@ -605,6 +635,8 @@ static int sr_block_revalidate_disk(struct gendisk *disk)
 	sr_cd_check(&cd->cdi);
 	get_sectorsize(cd);
 out:
+	scsi_autopm_put_device(cd->device);
+	scsi_cd_put(cd);
 	return 0;
 }
 
@@ -716,6 +748,7 @@ static int sr_probe(struct device *dev)
 	get_capabilities(cd);
 	sr_vendor_init(cd);
 
+	disk->driverfs_dev = &sdev->sdev_gendev;
 	set_capacity(disk, cd->capacity);
 	disk->private_data = &cd->driver;
 	disk->queue = sdev->request_queue;
@@ -724,15 +757,9 @@ static int sr_probe(struct device *dev)
 	if (register_cdrom(&cd->cdi))
 		goto fail_put;
 
-	/*
-	 * Initialize block layer runtime PM stuffs before the
-	 * periodic event checking request gets started in add_disk.
-	 */
-	blk_pm_runtime_init(sdev->request_queue, dev);
-
 	dev_set_drvdata(dev, cd);
 	disk->flags |= GENHD_FL_REMOVABLE;
-	device_add_disk(&sdev->sdev_gendev, disk);
+	add_disk(disk);
 
 	sdev_printk(KERN_DEBUG, sdev,
 		    "Attached scsi CD-ROM %s\n", cd->cdi.name);
@@ -931,7 +958,7 @@ static void get_capabilities(struct scsi_cd *cd)
 	 */
 	if ((cd->cdi.mask & (CDC_DVD_RAM | CDC_MRW_W | CDC_RAM | CDC_CD_RW)) !=
 			(CDC_DVD_RAM | CDC_MRW_W | CDC_RAM | CDC_CD_RW)) {
-		cd->writeable = 1;
+		cd->device->writeable = 1;
 	}
 
 	kfree(buffer);

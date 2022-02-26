@@ -84,16 +84,18 @@ static struct ctl_table rds_tcp_sysctl_table[] = {
 /* doing it this way avoids calling tcp_sk() */
 void rds_tcp_nonagle(struct socket *sock)
 {
+	mm_segment_t oldfs = get_fs();
 	int val = 1;
 
-	kernel_setsockopt(sock, SOL_TCP, TCP_NODELAY, (void *)&val,
+	set_fs(KERNEL_DS);
+	sock->ops->setsockopt(sock, SOL_TCP, TCP_NODELAY, (char __user *)&val,
 			      sizeof(val));
+	set_fs(oldfs);
 }
 
-u32 rds_tcp_write_seq(struct rds_tcp_connection *tc)
+u32 rds_tcp_snd_nxt(struct rds_tcp_connection *tc)
 {
-	/* seq# of the last byte of data in tcp send buffer */
-	return tcp_sk(tc->t_sock->sk)->write_seq;
+	return tcp_sk(tc->t_sock->sk)->snd_nxt;
 }
 
 u32 rds_tcp_snd_una(struct rds_tcp_connection *tc)
@@ -364,7 +366,7 @@ struct rds_transport rds_tcp_transport = {
 	.t_mp_capable		= 1,
 };
 
-static unsigned int rds_tcp_netid;
+static int rds_tcp_netid;
 
 /* per-network namespace private data for this module */
 struct rds_tcp_net {
@@ -482,10 +484,9 @@ static void __net_exit rds_tcp_exit_net(struct net *net)
 	 * we do need to clean up the listen socket here.
 	 */
 	if (rtn->rds_tcp_listen_sock) {
-		struct socket *lsock = rtn->rds_tcp_listen_sock;
-
+		rds_tcp_listen_stop(rtn->rds_tcp_listen_sock);
 		rtn->rds_tcp_listen_sock = NULL;
-		rds_tcp_listen_stop(lsock, &rtn->rds_tcp_accept_w);
+		flush_work(&rtn->rds_tcp_accept_w);
 	}
 }
 
@@ -522,13 +523,13 @@ static void rds_tcp_kill_sock(struct net *net)
 	struct rds_tcp_connection *tc, *_tc;
 	LIST_HEAD(tmp_list);
 	struct rds_tcp_net *rtn = net_generic(net, rds_tcp_netid);
-	struct socket *lsock = rtn->rds_tcp_listen_sock;
 
+	rds_tcp_listen_stop(rtn->rds_tcp_listen_sock);
 	rtn->rds_tcp_listen_sock = NULL;
-	rds_tcp_listen_stop(lsock, &rtn->rds_tcp_accept_w);
+	flush_work(&rtn->rds_tcp_accept_w);
 	spin_lock_irq(&rds_tcp_conn_lock);
 	list_for_each_entry_safe(tc, _tc, &rds_tcp_conn_list, t_tcp_node) {
-		struct net *c_net = tc->t_cpath->cp_conn->c_net;
+		struct net *c_net = read_pnet(&tc->t_cpath->cp_conn->c_net);
 
 		if (net != c_net || !tc->t_sock)
 			continue;
@@ -545,12 +546,8 @@ static void rds_tcp_kill_sock(struct net *net)
 void *rds_tcp_listen_sock_def_readable(struct net *net)
 {
 	struct rds_tcp_net *rtn = net_generic(net, rds_tcp_netid);
-	struct socket *lsock = rtn->rds_tcp_listen_sock;
 
-	if (!lsock)
-		return NULL;
-
-	return lsock->sk->sk_user_data;
+	return rtn->rds_tcp_listen_sock->sk->sk_user_data;
 }
 
 static int rds_tcp_dev_event(struct notifier_block *this,
@@ -587,13 +584,13 @@ static void rds_tcp_sysctl_reset(struct net *net)
 
 	spin_lock_irq(&rds_tcp_conn_lock);
 	list_for_each_entry_safe(tc, _tc, &rds_tcp_conn_list, t_tcp_node) {
-		struct net *c_net = tc->t_cpath->cp_conn->c_net;
+		struct net *c_net = read_pnet(&tc->t_cpath->cp_conn->c_net);
 
 		if (net != c_net || !tc->t_sock)
 			continue;
 
 		/* reconnect with new parameters */
-		rds_conn_path_drop(tc->t_cpath, false);
+		rds_conn_path_drop(tc->t_cpath);
 	}
 	spin_unlock_irq(&rds_tcp_conn_lock);
 }
@@ -641,31 +638,35 @@ static int rds_tcp_init(void)
 		goto out;
 	}
 
-	ret = rds_tcp_recv_init();
-	if (ret)
-		goto out_slab;
-
-	ret = register_pernet_subsys(&rds_tcp_net_ops);
-	if (ret)
-		goto out_recv;
-
 	ret = register_netdevice_notifier(&rds_tcp_dev_notifier);
 	if (ret) {
 		pr_warn("could not register rds_tcp_dev_notifier\n");
-		goto out_pernet;
+		goto out;
 	}
 
-	rds_trans_register(&rds_tcp_transport);
+	ret = register_pernet_subsys(&rds_tcp_net_ops);
+	if (ret)
+		goto out_slab;
+
+	ret = rds_tcp_recv_init();
+	if (ret)
+		goto out_pernet;
+
+	ret = rds_trans_register(&rds_tcp_transport);
+	if (ret)
+		goto out_recv;
 
 	rds_info_register_func(RDS_INFO_TCP_SOCKETS, rds_tcp_tc_info);
 
 	goto out;
 
-out_pernet:
-	unregister_pernet_subsys(&rds_tcp_net_ops);
 out_recv:
 	rds_tcp_recv_exit();
+out_pernet:
+	unregister_pernet_subsys(&rds_tcp_net_ops);
 out_slab:
+	if (unregister_netdevice_notifier(&rds_tcp_dev_notifier))
+		pr_warn("could not unregister rds_tcp_dev_notifier\n");
 	kmem_cache_destroy(rds_tcp_conn_slab);
 out:
 	return ret;

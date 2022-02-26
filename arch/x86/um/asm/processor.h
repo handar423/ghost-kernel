@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __UM_PROCESSOR_H
 #define __UM_PROCESSOR_H
 
@@ -26,9 +25,7 @@ static inline void rep_nop(void)
 	__asm__ __volatile__("rep;nop": : :"memory");
 }
 
-#define cpu_relax()		rep_nop()
-
-#define task_pt_regs(t) (&(t)->thread.regs)
+#define cpu_relax()	rep_nop()
 
 #include <asm/processor-generic.h>
 

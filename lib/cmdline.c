@@ -23,14 +23,14 @@
  *	the values[M, M+1, ..., N] into the ints array in get_options.
  */
 
-static int get_range(char **str, int *pint, int n)
+static int get_range(char **str, int *pint)
 {
 	int x, inc_counter, upper_range;
 
 	(*str)++;
 	upper_range = simple_strtol((*str), NULL, 0);
 	inc_counter = upper_range - *pint;
-	for (x = *pint; n && x < upper_range; x++, n--)
+	for (x = *pint; x < upper_range; x++)
 		*pint++ = x;
 	return inc_counter;
 }
@@ -50,13 +50,13 @@ static int get_range(char **str, int *pint, int n)
  *	3 - hyphen found to denote a range
  */
 
-int get_option(char **str, int *pint)
+int get_option (char **str, int *pint)
 {
 	char *cur = *str;
 
 	if (!cur || !(*cur))
 		return 0;
-	*pint = simple_strtol(cur, str, 0);
+	*pint = simple_strtol (cur, str, 0);
 	if (cur == *str)
 		return 0;
 	if (**str == ',') {
@@ -68,7 +68,6 @@ int get_option(char **str, int *pint)
 
 	return 1;
 }
-EXPORT_SYMBOL(get_option);
 
 /**
  *	get_options - Parse a string into a list of integers
@@ -86,18 +85,18 @@ EXPORT_SYMBOL(get_option);
  *	the parse to end (typically a null terminator, if @str is
  *	completely parseable).
  */
-
+ 
 char *get_options(const char *str, int nints, int *ints)
 {
 	int res, i = 1;
 
 	while (i < nints) {
-		res = get_option((char **)&str, ints + i);
+		res = get_option ((char **)&str, ints + i);
 		if (res == 0)
 			break;
 		if (res == 3) {
 			int range_nums;
-			range_nums = get_range((char **)&str, ints + i, nints - i);
+			range_nums = get_range((char **)&str, ints + i);
 			if (range_nums < 0)
 				break;
 			/*
@@ -114,7 +113,6 @@ char *get_options(const char *str, int nints, int *ints)
 	ints[0] = i - 1;
 	return (char *)str;
 }
-EXPORT_SYMBOL(get_options);
 
 /**
  *	memparse - parse a string with mem suffixes into a number
@@ -160,7 +158,11 @@ unsigned long long memparse(const char *ptr, char **retptr)
 
 	return ret;
 }
+
+
 EXPORT_SYMBOL(memparse);
+EXPORT_SYMBOL(get_option);
+EXPORT_SYMBOL(get_options);
 
 /**
  *	parse_option_str - Parse a string and check an option is set or not
@@ -244,4 +246,5 @@ char *next_arg(char *args, char **param, char **val)
 
 	/* Chew up trailing spaces. */
 	return skip_spaces(next);
+	//return next;
 }

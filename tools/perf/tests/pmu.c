@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 #include "parse-events.h"
 #include "pmu.h"
 #include "util.h"
@@ -98,7 +97,7 @@ static char *test_format_dir_get(void)
 		struct test_format *format = &test_formats[i];
 		FILE *file;
 
-		snprintf(name, PATH_MAX, "%s/%s", dir, format->name);
+		scnprintf(name, PATH_MAX, "%s/%s", dir, format->name);
 
 		file = fopen(name, "w");
 		if (!file)

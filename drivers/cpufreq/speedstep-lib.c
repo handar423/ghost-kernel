@@ -8,8 +8,6 @@
  *  BIG FAT DISCLAIMER: Work in progress code. Possibly *dangerous*
  */
 
-#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
-
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
@@ -35,7 +33,7 @@ static int relaxed_check;
 static unsigned int pentium3_get_frequency(enum speedstep_processor processor)
 {
 	/* See table 14 of p3_ds.pdf and table 22 of 29834003.pdf */
-	static const struct {
+	struct {
 		unsigned int ratio;	/* Frequency Multiplier (x10) */
 		u8 bitmap;		/* power on configuration bits
 					[27, 25:22] (in MSR 0x2a) */
@@ -58,7 +56,7 @@ static unsigned int pentium3_get_frequency(enum speedstep_processor processor)
 	};
 
 	/* PIII(-M) FSB settings: see table b1-b of 24547206.pdf */
-	static const struct {
+	struct {
 		unsigned int value;	/* Front Side Bus speed in MHz */
 		u8 bitmap;		/* power on configuration bits [18: 19]
 					(in MSR 0x2a) */
@@ -155,7 +153,7 @@ static unsigned int pentium_core_get_frequency(void)
 		fsb = 333333;
 		break;
 	default:
-		pr_err("PCORE - MSR_FSB_FREQ undefined value\n");
+		printk(KERN_ERR "PCORE - MSR_FSB_FREQ undefined value");
 	}
 
 	rdmsr(MSR_IA32_EBL_CR_POWERON, msr_lo, msr_tmp);
@@ -367,7 +365,7 @@ unsigned int speedstep_detect_processor(void)
 			} else
 				return SPEEDSTEP_CPU_PIII_C;
 		}
-		/* fall through */
+
 	default:
 		return 0;
 	}
@@ -388,7 +386,7 @@ unsigned int speedstep_get_freqs(enum speedstep_processor processor,
 	unsigned int prev_speed;
 	unsigned int ret = 0;
 	unsigned long flags;
-	ktime_t tv1, tv2;
+	struct timeval tv1, tv2;
 
 	if ((!processor) || (!low_speed) || (!high_speed) || (!set_state))
 		return -EINVAL;
@@ -402,7 +400,6 @@ unsigned int speedstep_get_freqs(enum speedstep_processor processor,
 
 	pr_debug("previous speed is %u\n", prev_speed);
 
-	preempt_disable();
 	local_irq_save(flags);
 
 	/* switch to low state */
@@ -417,14 +414,14 @@ unsigned int speedstep_get_freqs(enum speedstep_processor processor,
 
 	/* start latency measurement */
 	if (transition_latency)
-		tv1 = ktime_get();
+		do_gettimeofday(&tv1);
 
 	/* switch to high state */
 	set_state(SPEEDSTEP_HIGH);
 
 	/* end latency measurement */
 	if (transition_latency)
-		tv2 = ktime_get();
+		do_gettimeofday(&tv2);
 
 	*high_speed = speedstep_get_frequency(processor);
 	if (!*high_speed) {
@@ -444,7 +441,8 @@ unsigned int speedstep_get_freqs(enum speedstep_processor processor,
 		set_state(SPEEDSTEP_LOW);
 
 	if (transition_latency) {
-		*transition_latency = ktime_to_us(ktime_sub(tv2, tv1));
+		*transition_latency = (tv2.tv_sec - tv1.tv_sec) * USEC_PER_SEC +
+			tv2.tv_usec - tv1.tv_usec;
 		pr_debug("transition latency is %u uSec\n", *transition_latency);
 
 		/* convert uSec to nSec and add 20% for safety reasons */
@@ -455,16 +453,17 @@ unsigned int speedstep_get_freqs(enum speedstep_processor processor,
 		 */
 		if (*transition_latency > 10000000 ||
 		    *transition_latency < 50000) {
-			pr_warn("frequency transition measured seems out of range (%u nSec), falling back to a safe one of %u nSec\n",
-				*transition_latency, 500000);
+			printk(KERN_WARNING PFX "frequency transition "
+					"measured seems out of range (%u "
+					"nSec), falling back to a safe one of"
+					"%u nSec.\n",
+					*transition_latency, 500000);
 			*transition_latency = 500000;
 		}
 	}
 
 out:
 	local_irq_restore(flags);
-	preempt_enable();
-
 	return ret;
 }
 EXPORT_SYMBOL_GPL(speedstep_get_freqs);

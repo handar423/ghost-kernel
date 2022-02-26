@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 #include <stdio.h>
 #include <bpf/libbpf.h>
 #include <util/llvm-utils.h>
@@ -6,7 +5,13 @@
 #include "llvm.h"
 #include "tests.h"
 #include "debug.h"
-#include "util.h"
+#include "config.h"
+
+static int perf_config_cb(const char *var, const char *val,
+			  void *arg __maybe_unused)
+{
+	return perf_default_config(var, val, arg);
+}
 
 #ifdef HAVE_LIBBPF_SUPPORT
 static int test__bpf_parsing(void *obj_buf, size_t obj_buf_sz)
@@ -73,11 +78,13 @@ test_llvm__fetch_bpf_obj(void **p_obj_buf,
 	if (should_load_fail)
 		*should_load_fail = bpf_source_table[idx].should_load_fail;
 
+	perf_config(perf_config_cb, NULL);
+
 	/*
 	 * Skip this test if user's .perfconfig doesn't set [llvm] section
 	 * and clang is not found in $PATH, and this is not perf test -v
 	 */
-	if (!force && (verbose <= 0 &&
+	if (!force && (verbose == 0 &&
 		       !llvm_param.user_set_param &&
 		       llvm__search_clang())) {
 		pr_debug("No clang and no verbosive, skip this test\n");
@@ -133,7 +140,7 @@ out:
 	return ret;
 }
 
-int test__llvm(struct test *test __maybe_unused, int subtest)
+int test__llvm(struct test *test __maybe_unused, int subtest __maybe_unused)
 {
 	int ret;
 	void *obj_buf = NULL;

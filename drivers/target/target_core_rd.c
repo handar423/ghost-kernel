@@ -26,12 +26,11 @@
 
 #include <linux/string.h>
 #include <linux/parser.h>
-#include <linux/highmem.h>
 #include <linux/timer.h>
-#include <linux/scatterlist.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
-#include <scsi/scsi_proto.h>
+#include <scsi/scsi.h>
+#include <scsi/scsi_host.h>
 
 #include <target/target_core_base.h>
 #include <target/target_core_backend.h>
@@ -339,14 +338,10 @@ static void rd_dev_call_rcu(struct rcu_head *p)
 
 static void rd_free_device(struct se_device *dev)
 {
-	call_rcu(&dev->rcu_head, rd_dev_call_rcu);
-}
-
-static void rd_destroy_device(struct se_device *dev)
-{
 	struct rd_dev *rd_dev = RD_DEV(dev);
 
 	rd_release_device_space(rd_dev);
+	call_rcu(&dev->rcu_head, rd_dev_call_rcu);
 }
 
 static struct rd_dev_sg_table *rd_get_sg_table(struct rd_dev *rd_dev, u32 page)
@@ -357,6 +352,7 @@ static struct rd_dev_sg_table *rd_get_sg_table(struct rd_dev *rd_dev, u32 page)
 
 	i = page / sg_per_table;
 	if (i < rd_dev->sg_table_count) {
+		gmb();
 		sg_table = &rd_dev->sg_table_array[i];
 		if ((sg_table->page_start_offset <= page) &&
 		    (sg_table->page_end_offset >= page))
@@ -377,6 +373,7 @@ static struct rd_dev_sg_table *rd_get_prot_table(struct rd_dev *rd_dev, u32 page
 
 	i = page / sg_per_table;
 	if (i < rd_dev->sg_prot_count) {
+		gmb();
 		sg_table = &rd_dev->sg_prot_array[i];
 		if ((sg_table->page_start_offset <= page) &&
 		     (sg_table->page_end_offset >= page))
@@ -655,7 +652,6 @@ static const struct target_backend_ops rd_mcp_ops = {
 	.detach_hba		= rd_detach_hba,
 	.alloc_device		= rd_alloc_device,
 	.configure_device	= rd_configure_device,
-	.destroy_device		= rd_destroy_device,
 	.free_device		= rd_free_device,
 	.parse_cdb		= rd_parse_cdb,
 	.set_configfs_dev_params = rd_set_configfs_dev_params,

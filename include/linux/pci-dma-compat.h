@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 /* include this file if the platform implements the dma_ DMA Mapping API
  * and wants to provide the pci_ DMA Mapping API in terms of it */
 
@@ -6,6 +5,12 @@
 #define _ASM_GENERIC_PCI_DMA_COMPAT_H
 
 #include <linux/dma-mapping.h>
+
+static inline int
+pci_dma_supported(struct pci_dev *hwdev, u64 mask)
+{
+	return dma_supported(hwdev == NULL ? NULL : &hwdev->dev, mask);
+}
 
 /* This defines the direction arg to the DMA mapping routines. */
 #define PCI_DMA_BIDIRECTIONAL	0

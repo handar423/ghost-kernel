@@ -24,18 +24,15 @@
 #include <linux/fs.h>
 #include <linux/string.h>
 #include <linux/kernel.h>
-#include <linux/kasan.h>
 #include <linux/bug.h>
 #include <linux/mm.h>
 #include <linux/gfp.h>
 #include <linux/jump_label.h>
 #include <linux/random.h>
 
-#include <asm/text-patching.h>
 #include <asm/page.h>
 #include <asm/pgtable.h>
 #include <asm/setup.h>
-#include <asm/unwind.h>
 
 #if 0
 #define DEBUGP(fmt, ...)				\
@@ -79,22 +76,13 @@ static unsigned long int get_module_load_offset(void)
 
 void *module_alloc(unsigned long size)
 {
-	void *p;
-
 	if (PAGE_ALIGN(size) > MODULES_LEN)
 		return NULL;
-
-	p = __vmalloc_node_range(size, MODULE_ALIGN,
+	return __vmalloc_node_range(size, 1,
 				    MODULES_VADDR + get_module_load_offset(),
-				    MODULES_END, GFP_KERNEL,
-				    PAGE_KERNEL_EXEC, 0, NUMA_NO_NODE,
+				    MODULES_END, GFP_KERNEL | __GFP_HIGHMEM,
+				    PAGE_KERNEL_EXEC, NUMA_NO_NODE,
 				    __builtin_return_address(0));
-	if (p && (kasan_module_alloc(p, size) < 0)) {
-		vfree(p);
-		return NULL;
-	}
-
-	return p;
 }
 
 #ifdef CONFIG_X86_32
@@ -149,10 +137,17 @@ int apply_relocate_add(Elf64_Shdr *sechdrs,
 	Elf64_Sym *sym;
 	void *loc;
 	u64 val;
+	bool rhel70 = check_module_rhelversion(me, "7.0");
+	bool warned = false;
 
 	DEBUGP("Applying relocate section %u to %u\n",
 	       relsec, sechdrs[relsec].sh_info);
+
 	for (i = 0; i < sechdrs[relsec].sh_size / sizeof(*rel); i++) {
+		Elf64_Sym kstack_sym;
+		bool apply_kstack_fixup = false;
+		const char *symname;
+
 		/* This is where to make the change */
 		loc = (void *)sechdrs[sechdrs[relsec].sh_info].sh_addr
 			+ rel[i].r_offset;
@@ -161,10 +156,36 @@ int apply_relocate_add(Elf64_Shdr *sechdrs,
 		   undefined symbols have been resolved.  */
 		sym = (Elf64_Sym *)sechdrs[symindex].sh_addr
 			+ ELF64_R_SYM(rel[i].r_info);
+		symname = strtab + sym->st_name;
 
-		DEBUGP("type %d st_value %Lx r_addend %Lx loc %Lx\n",
-		       (int)ELF64_R_TYPE(rel[i].r_info),
+		DEBUGP("symname %s type %d st_value %Lx r_addend %Lx loc %Lx\n",
+		       symname, (int)ELF64_R_TYPE(rel[i].r_info),
 		       sym->st_value, rel[i].r_addend, (u64)loc);
+
+		if (rhel70 && !strcmp(symname, "kernel_stack")) {
+			if (!warned)
+				printk(KERN_INFO "%s: applying kernel_stack fix up\n",
+					me->name);
+			apply_kstack_fixup = true;
+			warned = true;
+		}
+
+		/* kernel_stack is referenced to access current_thread_info in
+		 * a variety of places... if we're loading a module which
+		 * expects an 8K stack, fix up the symbol reference to look
+		 * at a second copy. Nobody should be using this symbol for
+		 * any other purpose.
+		 */
+		if (apply_kstack_fixup) {
+			const struct kernel_symbol *ksym2;
+			ksym2 = find_symbol("__kernel_stack_70__",
+					    NULL, NULL, true, true);
+			if (!IS_ERR(ksym2)) {
+				kstack_sym.st_value = ksym2->value;
+				sym = &kstack_sym;
+			} else
+				return PTR_ERR(ksym2) ?: -ENOEXEC;
+		}
 
 		val = sym->st_value + rel[i].r_addend;
 
@@ -191,6 +212,7 @@ int apply_relocate_add(Elf64_Shdr *sechdrs,
 				goto overflow;
 			break;
 		case R_X86_64_PC32:
+		case R_X86_64_PLT32:
 			if (*(u32 *)loc != 0)
 				goto invalid_relocation;
 			val -= (u64)loc;
@@ -227,7 +249,7 @@ int module_finalize(const Elf_Ehdr *hdr,
 		    struct module *me)
 {
 	const Elf_Shdr *s, *text = NULL, *alt = NULL, *locks = NULL,
-		*para = NULL, *orc = NULL, *orc_ip = NULL;
+		*para = NULL;
 	char *secstrings = (void *)hdr + sechdrs[hdr->e_shstrndx].sh_offset;
 
 	for (s = sechdrs; s < sechdrs + hdr->e_shnum; s++) {
@@ -239,10 +261,6 @@ int module_finalize(const Elf_Ehdr *hdr,
 			locks = s;
 		if (!strcmp(".parainstructions", secstrings + s->sh_name))
 			para = s;
-		if (!strcmp(".orc_unwind", secstrings + s->sh_name))
-			orc = s;
-		if (!strcmp(".orc_unwind_ip", secstrings + s->sh_name))
-			orc_ip = s;
 	}
 
 	if (alt) {
@@ -265,10 +283,6 @@ int module_finalize(const Elf_Ehdr *hdr,
 
 	/* make jump label nops */
 	jump_label_apply_nops(me);
-
-	if (orc && orc_ip)
-		unwind_module_init(me, (void *)orc_ip->sh_addr, orc_ip->sh_size,
-				   (void *)orc->sh_addr, orc->sh_size);
 
 	return 0;
 }

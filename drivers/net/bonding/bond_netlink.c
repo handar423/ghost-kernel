@@ -56,7 +56,7 @@ static int bond_fill_slave_info(struct sk_buff *skb,
 	if (nla_put_u16(skb, IFLA_BOND_SLAVE_QUEUE_ID, slave->queue_id))
 		goto nla_put_failure;
 
-	if (BOND_MODE(slave->bond) == BOND_MODE_8023AD) {
+	if (slave->bond->params.mode == BOND_MODE_8023AD) {
 		const struct aggregator *agg;
 		const struct port *ad_port;
 
@@ -118,8 +118,7 @@ static const struct nla_policy bond_slave_policy[IFLA_BOND_SLAVE_MAX + 1] = {
 	[IFLA_BOND_SLAVE_QUEUE_ID]	= { .type = NLA_U16 },
 };
 
-static int bond_validate(struct nlattr *tb[], struct nlattr *data[],
-			 struct netlink_ext_ack *extack)
+static int bond_validate(struct nlattr *tb[], struct nlattr *data[])
 {
 	if (tb[IFLA_ADDRESS]) {
 		if (nla_len(tb[IFLA_ADDRESS]) != ETH_ALEN)
@@ -132,8 +131,7 @@ static int bond_validate(struct nlattr *tb[], struct nlattr *data[],
 
 static int bond_slave_changelink(struct net_device *bond_dev,
 				 struct net_device *slave_dev,
-				 struct nlattr *tb[], struct nlattr *data[],
-				 struct netlink_ext_ack *extack)
+				 struct nlattr *tb[], struct nlattr *data[])
 {
 	struct bonding *bond = netdev_priv(bond_dev);
 	struct bond_opt_value newval;
@@ -158,9 +156,8 @@ static int bond_slave_changelink(struct net_device *bond_dev,
 	return 0;
 }
 
-static int bond_changelink(struct net_device *bond_dev, struct nlattr *tb[],
-			   struct nlattr *data[],
-			   struct netlink_ext_ack *extack)
+static int bond_changelink(struct net_device *bond_dev,
+			   struct nlattr *tb[], struct nlattr *data[])
 {
 	struct bonding *bond = netdev_priv(bond_dev);
 	struct bond_opt_value newval;
@@ -441,12 +438,11 @@ static int bond_changelink(struct net_device *bond_dev, struct nlattr *tb[],
 }
 
 static int bond_newlink(struct net *src_net, struct net_device *bond_dev,
-			struct nlattr *tb[], struct nlattr *data[],
-			struct netlink_ext_ack *extack)
+			struct nlattr *tb[], struct nlattr *data[])
 {
 	int err;
 
-	err = bond_changelink(bond_dev, tb, data, extack);
+	err = bond_changelink(bond_dev, tb, data);
 	if (err < 0)
 		return err;
 
@@ -638,8 +634,7 @@ static int bond_fill_info(struct sk_buff *skb,
 				goto nla_put_failure;
 
 			if (nla_put(skb, IFLA_BOND_AD_ACTOR_SYSTEM,
-				    sizeof(bond->params.ad_actor_system),
-				    &bond->params.ad_actor_system))
+				    ETH_ALEN, &bond->params.ad_actor_system))
 				goto nla_put_failure;
 		}
 		if (!bond_3ad_get_active_agg_info(bond, &info)) {
@@ -676,6 +671,71 @@ nla_put_failure:
 	return -EMSGSIZE;
 }
 
+static size_t bond_get_linkxstats_size(const struct net_device *dev, int attr)
+{
+	switch (attr) {
+	case IFLA_STATS_LINK_XSTATS:
+	case IFLA_STATS_LINK_XSTATS_SLAVE:
+		break;
+	default:
+		return 0;
+	}
+
+	return bond_3ad_stats_size() + nla_total_size(0);
+}
+
+static int bond_fill_linkxstats(struct sk_buff *skb,
+				const struct net_device *dev,
+				int *prividx, int attr)
+{
+	struct nlattr *nla __maybe_unused;
+	struct slave *slave = NULL;
+	struct nlattr *nest, *nest2;
+	struct bonding *bond;
+
+	switch (attr) {
+	case IFLA_STATS_LINK_XSTATS:
+		bond = netdev_priv(dev);
+		break;
+	case IFLA_STATS_LINK_XSTATS_SLAVE:
+		slave = bond_slave_get_rtnl(dev);
+		if (!slave)
+			return 0;
+		bond = slave->bond;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	nest = nla_nest_start(skb, LINK_XSTATS_TYPE_BOND);
+	if (!nest)
+		return -EMSGSIZE;
+	if (BOND_MODE(bond) == BOND_MODE_8023AD) {
+		struct bond_3ad_stats *stats;
+
+		if (slave)
+			stats = &SLAVE_AD_INFO(slave)->stats;
+		else
+			stats = &BOND_AD_INFO(bond).stats;
+
+		nest2 = nla_nest_start(skb, BOND_XSTATS_3AD);
+		if (!nest2) {
+			nla_nest_end(skb, nest);
+			return -EMSGSIZE;
+		}
+
+		if (bond_3ad_stats_fill(skb, stats)) {
+			nla_nest_cancel(skb, nest2);
+			nla_nest_end(skb, nest);
+			return -EMSGSIZE;
+		}
+		nla_nest_end(skb, nest2);
+	}
+	nla_nest_end(skb, nest);
+
+	return 0;
+}
+
 struct rtnl_link_ops bond_link_ops __read_mostly = {
 	.kind			= "bond",
 	.priv_size		= sizeof(struct bonding),
@@ -690,6 +750,8 @@ struct rtnl_link_ops bond_link_ops __read_mostly = {
 	.get_num_tx_queues	= bond_get_num_tx_queues,
 	.get_num_rx_queues	= bond_get_num_tx_queues, /* Use the same number
 							     as for TX queues */
+	.fill_linkxstats        = bond_fill_linkxstats,
+	.get_linkxstats_size    = bond_get_linkxstats_size,
 	.slave_maxtype		= IFLA_BOND_SLAVE_MAX,
 	.slave_policy		= bond_slave_policy,
 	.slave_changelink	= bond_slave_changelink,

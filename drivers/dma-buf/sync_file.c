@@ -397,8 +397,7 @@ static int sync_fill_fence_info(struct dma_fence *fence,
 		cpu_relax();
 	info->timestamp_ns =
 		test_bit(DMA_FENCE_FLAG_TIMESTAMP_BIT, &fence->flags) ?
-		ktime_to_ns(fence->timestamp) :
-		ktime_set(0, 0);
+		ktime_to_ns(fence->timestamp) : 0;
 
 	return info->status;
 }

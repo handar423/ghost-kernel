@@ -675,7 +675,7 @@ static ssize_t tower_write (struct file *file, const char __user *buffer, size_t
 
 	/* write the data into interrupt_out_buffer from userspace */
 	bytes_to_write = min_t(int, count, write_buffer_size);
-	dev_dbg(&dev->udev->dev, "%s: count = %zd, bytes_to_write = %zd\n",
+	dev_dbg(&dev->udev->dev, "%s: count = %Zd, bytes_to_write = %Zd\n",
 		__func__, count, bytes_to_write);
 
 	if (copy_from_user (dev->interrupt_out_buffer, buffer, bytes_to_write)) {
@@ -722,6 +722,7 @@ static void tower_interrupt_in_callback (struct urb *urb)
 	struct lego_usb_tower *dev = urb->context;
 	int status = urb->status;
 	int retval;
+	unsigned long flags;
 
 	lego_usb_tower_debug_data(&dev->udev->dev, __func__,
 				  urb->actual_length, urb->transfer_buffer);
@@ -740,7 +741,7 @@ static void tower_interrupt_in_callback (struct urb *urb)
 	}
 
 	if (urb->actual_length > 0) {
-		spin_lock (&dev->read_buffer_lock);
+		spin_lock_irqsave(&dev->read_buffer_lock, flags);
 		if (dev->read_buffer_length + urb->actual_length < read_buffer_size) {
 			memcpy (dev->read_buffer + dev->read_buffer_length,
 				dev->interrupt_in_buffer,
@@ -753,7 +754,7 @@ static void tower_interrupt_in_callback (struct urb *urb)
 			pr_warn("read_buffer overflow, %d bytes dropped\n",
 				urb->actual_length);
 		}
-		spin_unlock (&dev->read_buffer_lock);
+		spin_unlock_irqrestore(&dev->read_buffer_lock, flags);
 	}
 
 resubmit:

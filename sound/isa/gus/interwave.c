@@ -92,17 +92,17 @@ MODULE_PARM_DESC(enable, "Enable InterWave soundcard.");
 module_param_array(isapnp, bool, NULL, 0444);
 MODULE_PARM_DESC(isapnp, "ISA PnP detection for specified soundcard.");
 #endif
-module_param_hw_array(port, long, ioport, NULL, 0444);
+module_param_array(port, long, NULL, 0444);
 MODULE_PARM_DESC(port, "Port # for InterWave driver.");
 #ifdef SNDRV_STB
-module_param_hw_array(port_tc, long, ioport, NULL, 0444);
+module_param_array(port_tc, long, NULL, 0444);
 MODULE_PARM_DESC(port_tc, "Tone control (TEA6330T - i2c bus) port # for InterWave driver.");
 #endif
-module_param_hw_array(irq, int, irq, NULL, 0444);
+module_param_array(irq, int, NULL, 0444);
 MODULE_PARM_DESC(irq, "IRQ # for InterWave driver.");
-module_param_hw_array(dma1, int, dma, NULL, 0444);
+module_param_array(dma1, int, NULL, 0444);
 MODULE_PARM_DESC(dma1, "DMA1 # for InterWave driver.");
-module_param_hw_array(dma2, int, dma, NULL, 0444);
+module_param_array(dma2, int, NULL, 0444);
 MODULE_PARM_DESC(dma2, "DMA2 # for InterWave driver.");
 module_param_array(joystick_dac, int, NULL, 0444);
 MODULE_PARM_DESC(joystick_dac, "Joystick DAC level 0.59V-4.52V or 0.389V-2.98V for InterWave driver.");
@@ -136,7 +136,7 @@ struct snd_interwave {
 static int isa_registered;
 static int pnp_registered;
 
-static const struct pnp_card_device_id snd_interwave_pnpids[] = {
+static struct pnp_card_device_id snd_interwave_pnpids[] = {
 #ifndef SNDRV_STB
 	/* Gravis UltraSound Plug & Play */
 	{ .id = "GRV0001", .devs = { { .id = "GRV0000" } } },
@@ -442,11 +442,17 @@ static void snd_interwave_detect_memory(struct snd_gus_card *gus)
 	for (bank_pos = 0; bank_pos < 16L * 1024L * 1024L; bank_pos += 4L * 1024L * 1024L) {
 		for (i = 0; i < 8; ++i)
 			iwave[i] = snd_gf1_peek(gus, bank_pos + i);
+#ifdef CONFIG_SND_DEBUG_ROM
+		printk(KERN_DEBUG "ROM at 0x%06x = %8phC\n", bank_pos, iwave);
+#endif
 		if (strncmp(iwave, "INTRWAVE", 8))
 			continue;	/* first check */
 		csum = 0;
 		for (i = 0; i < sizeof(struct rom_hdr); i++)
 			csum += snd_gf1_peek(gus, bank_pos + i);
+#ifdef CONFIG_SND_DEBUG_ROM
+		printk(KERN_DEBUG "ROM checksum = 0x%x (computed)\n", csum);
+#endif
 		if (csum != 0)
 			continue;	/* not valid rom */
 		gus->gf1.rom_banks++;
@@ -647,6 +653,7 @@ static int snd_interwave_probe(struct snd_card *card, int dev)
 #ifdef SNDRV_STB
 	struct snd_i2c_bus *i2c_bus;
 #endif
+	struct snd_pcm *pcm;
 	char *str;
 	int err;
 
@@ -694,15 +701,14 @@ static int snd_interwave_probe(struct snd_card *card, int dev)
 	if (err < 0)
 		return err;
 
-	err = snd_wss_pcm(wss, 0);
+	err = snd_wss_pcm(wss, 0, &pcm);
 	if (err < 0)
 		return err;
 
-	sprintf(wss->pcm->name + strlen(wss->pcm->name), " rev %c",
-		gus->revision + 'A');
-	strcat(wss->pcm->name, " (codec)");
+	sprintf(pcm->name + strlen(pcm->name), " rev %c", gus->revision + 'A');
+	strcat(pcm->name, " (codec)");
 
-	err = snd_wss_timer(wss, 2);
+	err = snd_wss_timer(wss, 2, NULL);
 	if (err < 0)
 		return err;
 
@@ -711,7 +717,7 @@ static int snd_interwave_probe(struct snd_card *card, int dev)
 		return err;
 
 	if (pcm_channels[dev] > 0) {
-		err = snd_gf1_pcm_new(gus, 1, 1);
+		err = snd_gf1_pcm_new(gus, 1, 1, NULL);
 		if (err < 0)
 			return err;
 	}
@@ -740,7 +746,7 @@ static int snd_interwave_probe(struct snd_card *card, int dev)
 #endif
 
 	gus->uart_enable = midi[dev];
-	if ((err = snd_gf1_rawmidi_new(gus, 0)) < 0)
+	if ((err = snd_gf1_rawmidi_new(gus, 0, NULL)) < 0)
 		return err;
 
 #ifndef SNDRV_STB
@@ -842,6 +848,7 @@ static int snd_interwave_isa_probe(struct device *pdev,
 static int snd_interwave_isa_remove(struct device *devptr, unsigned int dev)
 {
 	snd_card_free(dev_get_drvdata(devptr));
+	dev_set_drvdata(devptr, NULL);
 	return 0;
 }
 

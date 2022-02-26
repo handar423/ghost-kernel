@@ -194,8 +194,6 @@ static void rds_ib_frag_free(struct rds_ib_connection *ic,
 	rdsdebug("frag %p page %p\n", frag, sg_page(&frag->f_sg));
 
 	rds_ib_recv_cache_put(&frag->f_cache_entry, &ic->i_cache_frags);
-	atomic_add(RDS_FRAG_SIZE / SZ_1K, &ic->i_cache_allocs);
-	rds_ib_stats_add(s_ib_recv_added_to_cache, RDS_FRAG_SIZE);
 }
 
 /* Recycle inc after freeing attached frags */
@@ -263,7 +261,6 @@ static struct rds_ib_incoming *rds_ib_refill_one_inc(struct rds_ib_connection *i
 			atomic_dec(&rds_ib_allocation);
 			return NULL;
 		}
-		rds_ib_stats_inc(s_ib_rx_total_incs);
 	}
 	INIT_LIST_HEAD(&ibinc->ii_frags);
 	rds_inc_init(&ibinc->ii_inc, ic->conn, ic->conn->c_faddr);
@@ -281,8 +278,6 @@ static struct rds_page_frag *rds_ib_refill_one_frag(struct rds_ib_connection *ic
 	cache_item = rds_ib_recv_cache_get(&ic->i_cache_frags);
 	if (cache_item) {
 		frag = container_of(cache_item, struct rds_page_frag, f_cache_entry);
-		atomic_sub(RDS_FRAG_SIZE / SZ_1K, &ic->i_cache_allocs);
-		rds_ib_stats_add(s_ib_recv_added_to_cache, RDS_FRAG_SIZE);
 	} else {
 		frag = kmem_cache_alloc(rds_ib_frag_slab, slab_mask);
 		if (!frag)
@@ -295,7 +290,6 @@ static struct rds_page_frag *rds_ib_refill_one_frag(struct rds_ib_connection *ic
 			kmem_cache_free(rds_ib_frag_slab, frag);
 			return NULL;
 		}
-		rds_ib_stats_inc(s_ib_rx_total_frags);
 	}
 
 	INIT_LIST_HEAD(&frag->f_item);
@@ -312,7 +306,7 @@ static int rds_ib_recv_refill_one(struct rds_connection *conn,
 	gfp_t slab_mask = GFP_NOWAIT;
 	gfp_t page_mask = GFP_NOWAIT;
 
-	if (gfp & __GFP_DIRECT_RECLAIM) {
+	if (gfp & __GFP_WAIT) {
 		slab_mask = GFP_KERNEL;
 		page_mask = GFP_HIGHUSER;
 	}
@@ -383,10 +377,9 @@ void rds_ib_recv_refill(struct rds_connection *conn, int prefill, gfp_t gfp)
 {
 	struct rds_ib_connection *ic = conn->c_transport_data;
 	struct rds_ib_recv_work *recv;
-	struct ib_recv_wr *failed_wr;
 	unsigned int posted = 0;
 	int ret = 0;
-	bool can_wait = !!(gfp & __GFP_DIRECT_RECLAIM);
+	bool can_wait = !!(gfp & __GFP_WAIT);
 	u32 pos;
 
 	/* the goal here is to just make sure that someone, somewhere
@@ -410,14 +403,14 @@ void rds_ib_recv_refill(struct rds_connection *conn, int prefill, gfp_t gfp)
 			break;
 		}
 
-		rdsdebug("recv %p ibinc %p page %p addr %lu\n", recv,
+		/* XXX when can this fail? */
+		ret = ib_post_recv(ic->i_cm_id->qp, &recv->r_wr, NULL);
+		rdsdebug("recv %p ibinc %p page %p addr %lu ret %d\n", recv,
 			 recv->r_ibinc, sg_page(&recv->r_frag->f_sg),
 			 (long) ib_sg_dma_address(
 				ic->i_cm_id->device,
-				&recv->r_frag->f_sg));
-
-		/* XXX when can this fail? */
-		ret = ib_post_recv(ic->i_cm_id->qp, &recv->r_wr, &failed_wr);
+				&recv->r_frag->f_sg),
+			ret);
 		if (ret) {
 			rds_ib_conn_error(conn, "recv post on "
 			       "%pI4 returned %d, disconnecting and "
@@ -472,7 +465,8 @@ static void rds_ib_recv_cache_put(struct list_head *new_item,
 				 struct rds_ib_refill_cache *cache)
 {
 	unsigned long flags;
-	struct list_head *old, *chpfirst;
+	struct list_head *old;
+	struct list_head __percpu *chpfirst;
 
 	local_irq_save(flags);
 
@@ -482,7 +476,7 @@ static void rds_ib_recv_cache_put(struct list_head *new_item,
 	else /* put on front */
 		list_add_tail(new_item, chpfirst);
 
-	__this_cpu_write(cache->percpu->first, new_item);
+	__this_cpu_write(chpfirst, new_item);
 	__this_cpu_inc(cache->percpu->count);
 
 	if (__this_cpu_read(cache->percpu->count) < RDS_IB_RECYCLE_BATCH_COUNT)
@@ -502,7 +496,7 @@ static void rds_ib_recv_cache_put(struct list_head *new_item,
 	} while (old);
 
 
-	__this_cpu_write(cache->percpu->first, NULL);
+	__this_cpu_write(chpfirst, NULL);
 	__this_cpu_write(cache->percpu->count, 0);
 end:
 	local_irq_restore(flags);
@@ -523,12 +517,15 @@ static struct list_head *rds_ib_recv_cache_get(struct rds_ib_refill_cache *cache
 	return head;
 }
 
-int rds_ib_inc_copy_to_user(struct rds_incoming *inc, struct iov_iter *to)
+int rds_ib_inc_copy_to_user(struct rds_incoming *inc, struct iovec *first_iov,
+			    size_t size)
 {
 	struct rds_ib_incoming *ibinc;
 	struct rds_page_frag *frag;
+	struct iovec *iov = first_iov;
 	unsigned long to_copy;
 	unsigned long frag_off = 0;
+	unsigned long iov_off = 0;
 	int copied = 0;
 	int ret;
 	u32 len;
@@ -537,25 +534,37 @@ int rds_ib_inc_copy_to_user(struct rds_incoming *inc, struct iov_iter *to)
 	frag = list_entry(ibinc->ii_frags.next, struct rds_page_frag, f_item);
 	len = be32_to_cpu(inc->i_hdr.h_len);
 
-	while (iov_iter_count(to) && copied < len) {
+	while (copied < size && copied < len) {
 		if (frag_off == RDS_FRAG_SIZE) {
 			frag = list_entry(frag->f_item.next,
 					  struct rds_page_frag, f_item);
 			frag_off = 0;
 		}
-		to_copy = min_t(unsigned long, iov_iter_count(to),
-				RDS_FRAG_SIZE - frag_off);
+		while (iov_off == iov->iov_len) {
+			iov_off = 0;
+			iov++;
+		}
+
+		to_copy = min(iov->iov_len - iov_off, RDS_FRAG_SIZE - frag_off);
+		to_copy = min_t(size_t, to_copy, size - copied);
 		to_copy = min_t(unsigned long, to_copy, len - copied);
 
-		/* XXX needs + offset for multiple recvs per page */
-		rds_stats_add(s_copy_to_user, to_copy);
-		ret = copy_page_to_iter(sg_page(&frag->f_sg),
-					frag->f_sg.offset + frag_off,
-					to_copy,
-					to);
-		if (ret != to_copy)
-			return -EFAULT;
+		rdsdebug("%lu bytes to user [%p, %zu] + %lu from frag "
+			 "[%p, %u] + %lu\n",
+			 to_copy, iov->iov_base, iov->iov_len, iov_off,
+			 sg_page(&frag->f_sg), frag->f_sg.offset, frag_off);
 
+		/* XXX needs + offset for multiple recvs per page */
+		ret = rds_page_copy_to_user(sg_page(&frag->f_sg),
+					    frag->f_sg.offset + frag_off,
+					    iov->iov_base + iov_off,
+					    to_copy);
+		if (ret) {
+			copied = ret;
+			break;
+		}
+
+		iov_off += to_copy;
 		frag_off += to_copy;
 		copied += to_copy;
 	}
@@ -632,7 +641,7 @@ void rds_ib_set_ack(struct rds_ib_connection *ic, u64 seq, int ack_required)
 {
 	atomic64_set(&ic->i_ack_next, seq);
 	if (ack_required) {
-		smp_mb__before_atomic();
+		smp_mb__before_clear_bit();
 		set_bit(IB_ACK_REQUESTED, &ic->i_ack_flags);
 	}
 }
@@ -640,7 +649,7 @@ void rds_ib_set_ack(struct rds_ib_connection *ic, u64 seq, int ack_required)
 static u64 rds_ib_get_ack(struct rds_ib_connection *ic)
 {
 	clear_bit(IB_ACK_REQUESTED, &ic->i_ack_flags);
-	smp_mb__after_atomic();
+	smp_mb__after_clear_bit();
 
 	return atomic64_read(&ic->i_ack_next);
 }
@@ -650,7 +659,6 @@ static u64 rds_ib_get_ack(struct rds_ib_connection *ic)
 static void rds_ib_send_ack(struct rds_ib_connection *ic, unsigned int adv_credits)
 {
 	struct rds_header *hdr = ic->i_ack;
-	struct ib_send_wr *failed_wr;
 	u64 seq;
 	int ret;
 
@@ -663,7 +671,7 @@ static void rds_ib_send_ack(struct rds_ib_connection *ic, unsigned int adv_credi
 	rds_message_make_checksum(hdr);
 	ic->i_ack_queued = jiffies;
 
-	ret = ib_post_send(ic->i_cm_id->qp, &ic->i_ack_wr, &failed_wr);
+	ret = ib_post_send(ic->i_cm_id->qp, &ic->i_ack_wr, NULL);
 	if (unlikely(ret)) {
 		/* Failed to send. Release the WR, and
 		 * force another ACK.
@@ -911,12 +919,8 @@ static void rds_ib_process_recv(struct rds_connection *conn,
 		ic->i_ibinc = ibinc;
 
 		hdr = &ibinc->ii_inc.i_hdr;
-		ibinc->ii_inc.i_rx_lat_trace[RDS_MSG_RX_HDR] =
-				local_clock();
 		memcpy(hdr, ihdr, sizeof(*hdr));
 		ic->i_recv_data_rem = be32_to_cpu(hdr->h_len);
-		ibinc->ii_inc.i_rx_lat_trace[RDS_MSG_RX_START] =
-				local_clock();
 
 		rdsdebug("ic %p ibinc %p rem %u flag 0x%x\n", ic, ibinc,
 			 ic->i_recv_data_rem, hdr->h_flags);
@@ -990,8 +994,8 @@ void rds_ib_recv_cqe_handler(struct rds_ib_connection *ic,
 	} else {
 		/* We expect errors as the qp is drained during shutdown */
 		if (rds_conn_up(conn) || rds_conn_connecting(conn))
-			rds_ib_conn_error(conn, "recv completion on <%pI4,%pI4> had status %u (%s), disconnecting and reconnecting\n",
-					  &conn->c_laddr, &conn->c_faddr,
+			rds_ib_conn_error(conn, "recv completion on %pI4 had status %u (%s), disconnecting and reconnecting\n",
+					  &conn->c_faddr,
 					  wc->status,
 					  ib_wc_status_msg(wc->status));
 	}
@@ -1015,10 +1019,8 @@ void rds_ib_recv_cqe_handler(struct rds_ib_connection *ic,
 	if (rds_ib_ring_empty(&ic->i_recv_ring))
 		rds_ib_stats_inc(s_ib_rx_ring_empty);
 
-	if (rds_ib_ring_low(&ic->i_recv_ring)) {
+	if (rds_ib_ring_low(&ic->i_recv_ring))
 		rds_ib_recv_refill(conn, 0, GFP_NOWAIT);
-		rds_ib_stats_inc(s_ib_rx_refill_from_cq);
-	}
 }
 
 int rds_ib_recv_path(struct rds_conn_path *cp)
@@ -1031,7 +1033,6 @@ int rds_ib_recv_path(struct rds_conn_path *cp)
 	if (rds_conn_up(conn)) {
 		rds_ib_attempt_ack(ic);
 		rds_ib_recv_refill(conn, 0, GFP_KERNEL);
-		rds_ib_stats_inc(s_ib_rx_refill_from_thread);
 	}
 
 	return ret;

@@ -34,6 +34,7 @@
 #include <linux/configfs.h>
 
 #include <target/target_core_base.h>
+#include <target/target_core_backend.h>
 #include <target/target_core_fabric.h>
 
 #include "target_core_internal.h"
@@ -145,7 +146,7 @@ static int target_fabric_mappedlun_link(
 	return core_dev_add_initiator_node_lun_acl(se_tpg, lacl, lun, lun_access_ro);
 }
 
-static void target_fabric_mappedlun_unlink(
+static int target_fabric_mappedlun_unlink(
 	struct config_item *lun_acl_ci,
 	struct config_item *lun_ci)
 {
@@ -154,7 +155,7 @@ static void target_fabric_mappedlun_unlink(
 	struct se_lun *lun = container_of(to_config_group(lun_ci),
 			struct se_lun, lun_group);
 
-	core_dev_del_initiator_node_lun_acl(lun, lacl);
+	return core_dev_del_initiator_node_lun_acl(lun, lacl);
 }
 
 static struct se_lun_acl *item_to_lun_acl(struct config_item *item)
@@ -202,7 +203,7 @@ static ssize_t target_fabric_mappedlun_write_protect_store(
 
 	pr_debug("%s_ConfigFS: Changed Initiator ACL: %s"
 		" Mapped LUN: %llu Write Protect bit to %s\n",
-		se_tpg->se_tpg_tfo->get_fabric_name(),
+		se_tpg->se_tpg_tfo->fabric_name,
 		se_nacl->initiatorname, lacl->mapped_lun, (wp) ? "ON" : "OFF");
 
 	return count;
@@ -642,7 +643,7 @@ static int target_fabric_port_link(
 	}
 	dev = container_of(to_config_group(se_dev_ci), struct se_device, dev_group);
 
-	if (!(dev->dev_flags & DF_CONFIGURED)) {
+	if (!target_dev_configured(dev)) {
 		pr_err("se_device not configured yet, cannot port link\n");
 		return -ENODEV;
 	}
@@ -677,7 +678,7 @@ out:
 	return ret;
 }
 
-static void target_fabric_port_unlink(
+static int target_fabric_port_unlink(
 	struct config_item *lun_ci,
 	struct config_item *se_dev_ci)
 {
@@ -696,6 +697,7 @@ static void target_fabric_port_unlink(
 	}
 
 	core_dev_del_lun(se_tpg, lun);
+	return 0;
 }
 
 static void target_fabric_port_release(struct config_item *item)

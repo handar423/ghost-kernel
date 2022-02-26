@@ -27,7 +27,6 @@
 #include <linux/types.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
-#include <linux/sched.h>
 #include <linux/vmalloc.h>
 #include <linux/fs.h>
 #include <linux/errno.h>
@@ -54,7 +53,7 @@
 #define K_INT_PERF_CNT K_BCM1480_INT_PERF_CNT
 #endif
 
-#include <linux/uaccess.h>
+#include <asm/uaccess.h>
 
 #define SBPROF_TB_MAJOR 240
 

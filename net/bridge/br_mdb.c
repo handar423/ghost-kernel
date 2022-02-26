@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 #include <linux/err.h>
 #include <linux/igmp.h>
 #include <linux/kernel.h>
@@ -292,46 +291,6 @@ err:
 	kfree(priv);
 }
 
-static void br_mdb_switchdev_host_port(struct net_device *dev,
-				       struct net_device *lower_dev,
-				       struct br_mdb_entry *entry, int type)
-{
-	struct switchdev_obj_port_mdb mdb = {
-		.obj = {
-			.id = SWITCHDEV_OBJ_ID_HOST_MDB,
-			.flags = SWITCHDEV_F_DEFER,
-		},
-		.vid = entry->vid,
-	};
-
-	if (entry->addr.proto == htons(ETH_P_IP))
-		ip_eth_mc_map(entry->addr.u.ip4, mdb.addr);
-#if IS_ENABLED(CONFIG_IPV6)
-	else
-		ipv6_eth_mc_map(&entry->addr.u.ip6, mdb.addr);
-#endif
-
-	mdb.obj.orig_dev = dev;
-	switch (type) {
-	case RTM_NEWMDB:
-		switchdev_port_obj_add(lower_dev, &mdb.obj);
-		break;
-	case RTM_DELMDB:
-		switchdev_port_obj_del(lower_dev, &mdb.obj);
-		break;
-	}
-}
-
-static void br_mdb_switchdev_host(struct net_device *dev,
-				  struct br_mdb_entry *entry, int type)
-{
-	struct net_device *lower_dev;
-	struct list_head *iter;
-
-	netdev_for_each_lower_dev(dev, lower_dev, iter)
-		br_mdb_switchdev_host_port(dev, lower_dev, entry, type);
-}
-
 static void __br_mdb_notify(struct net_device *dev, struct net_bridge_port *p,
 			    struct br_mdb_entry *entry, int type)
 {
@@ -357,7 +316,7 @@ static void __br_mdb_notify(struct net_device *dev, struct net_bridge_port *p,
 #endif
 
 	mdb.obj.orig_dev = port_dev;
-	if (p && port_dev && type == RTM_NEWMDB) {
+	if (port_dev && type == RTM_NEWMDB) {
 		complete_info = kmalloc(sizeof(*complete_info), GFP_ATOMIC);
 		if (complete_info) {
 			complete_info->port = p;
@@ -367,12 +326,9 @@ static void __br_mdb_notify(struct net_device *dev, struct net_bridge_port *p,
 			if (switchdev_port_obj_add(port_dev, &mdb.obj))
 				kfree(complete_info);
 		}
-	} else if (p && port_dev && type == RTM_DELMDB) {
+	} else if (port_dev && type == RTM_DELMDB) {
 		switchdev_port_obj_del(port_dev, &mdb.obj);
 	}
-
-	if (!p)
-		br_mdb_switchdev_host(dev, entry, type);
 
 	skb = nlmsg_new(rtnl_mdb_nlmsg_size(), GFP_ATOMIC);
 	if (!skb)
@@ -396,10 +352,7 @@ void br_mdb_notify(struct net_device *dev, struct net_bridge_port *port,
 	struct br_mdb_entry entry;
 
 	memset(&entry, 0, sizeof(entry));
-	if (port)
-		entry.ifindex = port->dev->ifindex;
-	else
-		entry.ifindex = dev->ifindex;
+	entry.ifindex = port->dev->ifindex;
 	entry.addr.proto = group->proto;
 	entry.addr.u.ip4 = group->u.ip4;
 #if IS_ENABLED(CONFIG_IPV6)
@@ -419,7 +372,7 @@ static int nlmsg_populate_rtr_fill(struct sk_buff *skb,
 	struct nlmsghdr *nlh;
 	struct nlattr *nest;
 
-	nlh = nlmsg_put(skb, pid, seq, type, sizeof(*bpm), NLM_F_MULTI);
+	nlh = nlmsg_put(skb, pid, seq, type, sizeof(*bpm), 0);
 	if (!nlh)
 		return -EMSGSIZE;
 
@@ -512,8 +465,7 @@ static int br_mdb_parse(struct sk_buff *skb, struct nlmsghdr *nlh,
 	struct net_device *dev;
 	int err;
 
-	err = nlmsg_parse(nlh, sizeof(*bpm), tb, MDBA_SET_ENTRY_MAX, NULL,
-			  NULL);
+	err = nlmsg_parse(nlh, sizeof(*bpm), tb, MDBA_SET_ENTRY_MAX, NULL);
 	if (err < 0)
 		return err;
 
@@ -617,8 +569,7 @@ static int __br_mdb_add(struct net *net, struct net_bridge *br,
 	return ret;
 }
 
-static int br_mdb_add(struct sk_buff *skb, struct nlmsghdr *nlh,
-		      struct netlink_ext_ack *extack)
+static int br_mdb_add(struct sk_buff *skb, struct nlmsghdr *nlh)
 {
 	struct net *net = sock_net(skb->sk);
 	struct net_bridge_vlan_group *vg;
@@ -701,7 +652,7 @@ static int __br_mdb_del(struct net_bridge *br, struct br_mdb_entry *entry)
 		call_rcu_bh(&p->rcu, br_multicast_free_pg);
 		err = 0;
 
-		if (!mp->ports && !mp->host_joined &&
+		if (!mp->ports && !mp->mglist &&
 		    netif_running(br->dev))
 			mod_timer(&mp->timer, jiffies);
 		break;
@@ -712,8 +663,7 @@ unlock:
 	return err;
 }
 
-static int br_mdb_del(struct sk_buff *skb, struct nlmsghdr *nlh,
-		      struct netlink_ext_ack *extack)
+static int br_mdb_del(struct sk_buff *skb, struct nlmsghdr *nlh)
 {
 	struct net *net = sock_net(skb->sk);
 	struct net_bridge_vlan_group *vg;
@@ -760,9 +710,9 @@ static int br_mdb_del(struct sk_buff *skb, struct nlmsghdr *nlh,
 
 void br_mdb_init(void)
 {
-	rtnl_register(PF_BRIDGE, RTM_GETMDB, NULL, br_mdb_dump, 0);
-	rtnl_register(PF_BRIDGE, RTM_NEWMDB, br_mdb_add, NULL, 0);
-	rtnl_register(PF_BRIDGE, RTM_DELMDB, br_mdb_del, NULL, 0);
+	rtnl_register(PF_BRIDGE, RTM_GETMDB, NULL, br_mdb_dump, NULL);
+	rtnl_register(PF_BRIDGE, RTM_NEWMDB, br_mdb_add, NULL, NULL);
+	rtnl_register(PF_BRIDGE, RTM_DELMDB, br_mdb_del, NULL, NULL);
 }
 
 void br_mdb_uninit(void)

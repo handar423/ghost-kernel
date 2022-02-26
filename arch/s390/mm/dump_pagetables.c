@@ -1,7 +1,6 @@
-// SPDX-License-Identifier: GPL-2.0
 #include <linux/seq_file.h>
 #include <linux/debugfs.h>
-#include <linux/sched.h>
+#include <linux/module.h>
 #include <linux/mm.h>
 #include <asm/sections.h>
 #include <asm/pgtable.h>
@@ -19,7 +18,9 @@ enum address_markers_idx {
 	KERNEL_END_NR,
 	VMEMMAP_NR,
 	VMALLOC_NR,
+#ifdef CONFIG_64BIT
 	MODULES_NR,
+#endif
 };
 
 static struct addr_marker address_markers[] = {
@@ -28,7 +29,9 @@ static struct addr_marker address_markers[] = {
 	[KERNEL_END_NR]	  = {(unsigned long)&_end, "Kernel Image End"},
 	[VMEMMAP_NR]	  = {0, "vmemmap Area"},
 	[VMALLOC_NR]	  = {0, "vmalloc Area"},
+#ifdef CONFIG_64BIT
 	[MODULES_NR]	  = {0, "Modules Area"},
+#endif
 	{ -1, NULL }
 };
 
@@ -125,6 +128,12 @@ static void walk_pte_level(struct seq_file *m, struct pg_state *st,
 	}
 }
 
+#ifdef CONFIG_64BIT
+#define _PMD_PROT_MASK (_SEGMENT_ENTRY_PROTECT | _SEGMENT_ENTRY_NOEXEC)
+#else
+#define _PMD_PROT_MASK 0
+#endif
+
 static void walk_pmd_level(struct seq_file *m, struct pg_state *st,
 			   pud_t *pud, unsigned long addr)
 {
@@ -137,9 +146,7 @@ static void walk_pmd_level(struct seq_file *m, struct pg_state *st,
 		pmd = pmd_offset(pud, addr);
 		if (!pmd_none(*pmd)) {
 			if (pmd_large(*pmd)) {
-				prot = pmd_val(*pmd) &
-					(_SEGMENT_ENTRY_PROTECT |
-					 _SEGMENT_ENTRY_NOEXEC);
+				prot = pmd_val(*pmd) & _PMD_PROT_MASK;
 				note_page(m, st, prot, 3);
 			} else
 				walk_pte_level(m, st, pmd, addr);
@@ -149,8 +156,14 @@ static void walk_pmd_level(struct seq_file *m, struct pg_state *st,
 	}
 }
 
+#ifdef CONFIG_64BIT
+#define _PUD_PROT_MASK (_REGION3_ENTRY_RO | _REGION_ENTRY_NOEXEC)
+#else
+#define _PUD_PROT_MASK 0
+#endif
+
 static void walk_pud_level(struct seq_file *m, struct pg_state *st,
-			   p4d_t *p4d, unsigned long addr)
+			   pgd_t *pgd, unsigned long addr)
 {
 	unsigned int prot;
 	pud_t *pud;
@@ -158,35 +171,16 @@ static void walk_pud_level(struct seq_file *m, struct pg_state *st,
 
 	for (i = 0; i < PTRS_PER_PUD && addr < max_addr; i++) {
 		st->current_address = addr;
-		pud = pud_offset(p4d, addr);
+		pud = pud_offset(pgd, addr);
 		if (!pud_none(*pud))
 			if (pud_large(*pud)) {
-				prot = pud_val(*pud) &
-					(_REGION_ENTRY_PROTECT |
-					 _REGION_ENTRY_NOEXEC);
+				prot = pud_val(*pud) & _PUD_PROT_MASK;
 				note_page(m, st, prot, 2);
 			} else
 				walk_pmd_level(m, st, pud, addr);
 		else
 			note_page(m, st, _PAGE_INVALID, 2);
 		addr += PUD_SIZE;
-	}
-}
-
-static void walk_p4d_level(struct seq_file *m, struct pg_state *st,
-			   pgd_t *pgd, unsigned long addr)
-{
-	p4d_t *p4d;
-	int i;
-
-	for (i = 0; i < PTRS_PER_P4D && addr < max_addr; i++) {
-		st->current_address = addr;
-		p4d = p4d_offset(pgd, addr);
-		if (!p4d_none(*p4d))
-			walk_pud_level(m, st, p4d, addr);
-		else
-			note_page(m, st, _PAGE_INVALID, 2);
-		addr += P4D_SIZE;
 	}
 }
 
@@ -202,11 +196,10 @@ static void walk_pgd_level(struct seq_file *m)
 		st.current_address = addr;
 		pgd = pgd_offset_k(addr);
 		if (!pgd_none(*pgd))
-			walk_p4d_level(m, &st, pgd, addr);
+			walk_pud_level(m, &st, pgd, addr);
 		else
 			note_page(m, &st, _PAGE_INVALID, 1);
 		addr += PGDIR_SIZE;
-		cond_resched();
 	}
 	/* Flush out the last page */
 	st.current_address = max_addr;
@@ -238,9 +231,13 @@ static int pt_dump_init(void)
 	 * kernel ASCE. We need this to keep the page table walker functions
 	 * from accessing non-existent entries.
 	 */
+#ifdef CONFIG_32BIT
+	max_addr = 1UL << 31;
+#else
 	max_addr = (S390_lowcore.kernel_asce & _REGION_ENTRY_TYPE_MASK) >> 2;
 	max_addr = 1UL << (max_addr * 11 + 31);
 	address_markers[MODULES_NR].start_address = MODULES_VADDR;
+#endif
 	address_markers[VMEMMAP_NR].start_address = (unsigned long) vmemmap;
 	address_markers[VMALLOC_NR].start_address = VMALLOC_START;
 	debugfs_create_file("kernel_page_tables", 0400, NULL, NULL, &ptdump_fops);

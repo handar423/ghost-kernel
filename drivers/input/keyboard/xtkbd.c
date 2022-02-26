@@ -29,6 +29,7 @@
 #include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/input.h>
+#include <linux/init.h>
 #include <linux/serio.h>
 
 #define DRIVER_DESC	"XT keyboard driver"
@@ -145,7 +146,7 @@ static void xtkbd_disconnect(struct serio *serio)
 	kfree(xtkbd);
 }
 
-static const struct serio_device_id xtkbd_serio_ids[] = {
+static struct serio_device_id xtkbd_serio_ids[] = {
 	{
 		.type	= SERIO_XT,
 		.proto	= SERIO_ANY,

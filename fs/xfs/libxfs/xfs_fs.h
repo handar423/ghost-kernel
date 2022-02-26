@@ -36,6 +36,40 @@ struct dioattr {
 #endif
 
 /*
+ * Structure for XFS_IOC_FSGETXATTR[A] and XFS_IOC_FSSETXATTR.
+ */
+#ifndef HAVE_FSXATTR
+struct fsxattr {
+	__u32		fsx_xflags;	/* xflags field value (get/set) */
+	__u32		fsx_extsize;	/* extsize field value (get/set)*/
+	__u32		fsx_nextents;	/* nextents field value (get)	*/
+	__u32		fsx_projid;	/* project identifier (get/set) */
+	unsigned char	fsx_pad[12];
+};
+#endif
+
+/*
+ * Flags for the bs_xflags/fsx_xflags field
+ * There should be a one-to-one correspondence between these flags and the
+ * XFS_DIFLAG_s.
+ */
+#define XFS_XFLAG_REALTIME	0x00000001	/* data in realtime volume */
+#define XFS_XFLAG_PREALLOC	0x00000002	/* preallocated file extents */
+#define XFS_XFLAG_IMMUTABLE	0x00000008	/* file cannot be modified */
+#define XFS_XFLAG_APPEND	0x00000010	/* all writes append */
+#define XFS_XFLAG_SYNC		0x00000020	/* all writes synchronous */
+#define XFS_XFLAG_NOATIME	0x00000040	/* do not update access time */
+#define XFS_XFLAG_NODUMP	0x00000080	/* do not include in backups */
+#define XFS_XFLAG_RTINHERIT	0x00000100	/* create with rt bit set */
+#define XFS_XFLAG_PROJINHERIT	0x00000200	/* create with parents projid */
+#define XFS_XFLAG_NOSYMLINKS	0x00000400	/* disallow symlink creation */
+#define XFS_XFLAG_EXTSIZE	0x00000800	/* extent size allocator hint */
+#define XFS_XFLAG_EXTSZINHERIT	0x00001000	/* inherit inode extent size */
+#define XFS_XFLAG_NODEFRAG	0x00002000  	/* do not defragment */
+#define XFS_XFLAG_FILESTREAM	0x00004000	/* use filestream allocator */
+#define XFS_XFLAG_HASATTR	0x80000000	/* no DIFLAG for this	*/
+
+/*
  * Structure for XFS_IOC_GETBMAP.
  * On input, fill in bmv_offset and bmv_length of the first structure
  * to indicate the area of interest in the file, and bmv_entries with
@@ -81,28 +115,14 @@ struct getbmapx {
 #define BMV_IF_PREALLOC		0x4	/* rtn status BMV_OF_PREALLOC if req */
 #define BMV_IF_DELALLOC		0x8	/* rtn status BMV_OF_DELALLOC if req */
 #define BMV_IF_NO_HOLES		0x10	/* Do not return holes */
-#define BMV_IF_COWFORK		0x20	/* return CoW fork rather than data */
 #define BMV_IF_VALID	\
 	(BMV_IF_ATTRFORK|BMV_IF_NO_DMAPI_READ|BMV_IF_PREALLOC|	\
-	 BMV_IF_DELALLOC|BMV_IF_NO_HOLES|BMV_IF_COWFORK)
+	 BMV_IF_DELALLOC|BMV_IF_NO_HOLES)
 
 /*	bmv_oflags values - returned for each non-header segment */
 #define BMV_OF_PREALLOC		0x1	/* segment = unwritten pre-allocation */
 #define BMV_OF_DELALLOC		0x2	/* segment = delayed allocation */
 #define BMV_OF_LAST		0x4	/* segment is the last in the file */
-#define BMV_OF_SHARED		0x8	/* segment shared with another file */
-
-/*	fmr_owner special values for FS_IOC_GETFSMAP */
-#define XFS_FMR_OWN_FREE	FMR_OWN_FREE      /* free space */
-#define XFS_FMR_OWN_UNKNOWN	FMR_OWN_UNKNOWN   /* unknown owner */
-#define XFS_FMR_OWN_FS		FMR_OWNER('X', 1) /* static fs metadata */
-#define XFS_FMR_OWN_LOG		FMR_OWNER('X', 2) /* journalling log */
-#define XFS_FMR_OWN_AG		FMR_OWNER('X', 3) /* per-AG metadata */
-#define XFS_FMR_OWN_INOBT	FMR_OWNER('X', 4) /* inode btree blocks */
-#define XFS_FMR_OWN_INODES	FMR_OWNER('X', 5) /* inodes */
-#define XFS_FMR_OWN_REFC	FMR_OWNER('X', 6) /* refcount tree */
-#define XFS_FMR_OWN_COW		FMR_OWNER('X', 7) /* cow staging */
-#define XFS_FMR_OWN_DEFECTIVE	FMR_OWNER('X', 8) /* bad blocks */
 
 /*
  * Structure for XFS_IOC_FSSETDM.
@@ -220,8 +240,6 @@ typedef struct xfs_fsop_resblks {
 #define XFS_FSOP_GEOM_FLAGS_FTYPE	0x10000	/* inode directory types */
 #define XFS_FSOP_GEOM_FLAGS_FINOBT	0x20000	/* free inode btree */
 #define XFS_FSOP_GEOM_FLAGS_SPINODES	0x40000	/* sparse inode chunks	*/
-#define XFS_FSOP_GEOM_FLAGS_RMAPBT	0x80000	/* reverse mapping btree */
-#define XFS_FSOP_GEOM_FLAGS_REFLINK	0x100000 /* files can share blocks */
 
 /*
  * Minimum and maximum sizes need for growth checks.
@@ -232,6 +250,13 @@ typedef struct xfs_fsop_resblks {
 #define XFS_MIN_LOG_BLOCKS	512ULL
 #define XFS_MAX_LOG_BLOCKS	(1024 * 1024ULL)
 #define XFS_MIN_LOG_BYTES	(10 * 1024 * 1024ULL)
+
+/*
+ * Limits on sb_agblocks/sb_agblklog -- mkfs won't format AGs smaller than
+ * 16MB or larger than 1TB.
+ */
+#define XFS_MIN_AG_BYTES	(1ULL << 24)	/* 16 MB */
+#define XFS_MAX_AG_BYTES	(1ULL << 40)	/* 1 TB */
 
 /* keep the maximum size under 2^31 by a small amount */
 #define XFS_MAX_LOG_BYTES \
@@ -290,8 +315,7 @@ typedef struct xfs_bstat {
 #define	bs_projid	bs_projid_lo	/* (previously just bs_projid)	*/
 	__u16		bs_forkoff;	/* inode fork offset in bytes	*/
 	__u16		bs_projid_hi;	/* higher part of project id	*/
-	unsigned char	bs_pad[6];	/* pad space, unused		*/
-	__u32		bs_cowextsize;	/* cow extent size		*/
+	unsigned char	bs_pad[10];	/* pad space, unused		*/
 	__u32		bs_dmevmask;	/* DMIG event mask		*/
 	__u16		bs_dmstate;	/* DMIG state info		*/
 	__u16		bs_aextents;	/* attribute number of extents	*/
@@ -468,82 +492,6 @@ typedef struct xfs_swapext
 #define XFS_FSOP_GOING_FLAGS_LOGFLUSH		0x1	/* flush log but not data */
 #define XFS_FSOP_GOING_FLAGS_NOLOGFLUSH		0x2	/* don't flush log nor data */
 
-/* metadata scrubbing */
-struct xfs_scrub_metadata {
-	__u32 sm_type;		/* What to check? */
-	__u32 sm_flags;		/* flags; see below. */
-	__u64 sm_ino;		/* inode number. */
-	__u32 sm_gen;		/* inode generation. */
-	__u32 sm_agno;		/* ag number. */
-	__u64 sm_reserved[5];	/* pad to 64 bytes */
-};
-
-/*
- * Metadata types and flags for scrub operation.
- */
-
-/* Scrub subcommands. */
-#define XFS_SCRUB_TYPE_PROBE	0	/* presence test ioctl */
-#define XFS_SCRUB_TYPE_SB	1	/* superblock */
-#define XFS_SCRUB_TYPE_AGF	2	/* AG free header */
-#define XFS_SCRUB_TYPE_AGFL	3	/* AG free list */
-#define XFS_SCRUB_TYPE_AGI	4	/* AG inode header */
-#define XFS_SCRUB_TYPE_BNOBT	5	/* freesp by block btree */
-#define XFS_SCRUB_TYPE_CNTBT	6	/* freesp by length btree */
-#define XFS_SCRUB_TYPE_INOBT	7	/* inode btree */
-#define XFS_SCRUB_TYPE_FINOBT	8	/* free inode btree */
-#define XFS_SCRUB_TYPE_RMAPBT	9	/* reverse mapping btree */
-#define XFS_SCRUB_TYPE_REFCNTBT	10	/* reference count btree */
-#define XFS_SCRUB_TYPE_INODE	11	/* inode record */
-#define XFS_SCRUB_TYPE_BMBTD	12	/* data fork block mapping */
-#define XFS_SCRUB_TYPE_BMBTA	13	/* attr fork block mapping */
-#define XFS_SCRUB_TYPE_BMBTC	14	/* CoW fork block mapping */
-#define XFS_SCRUB_TYPE_DIR	15	/* directory */
-#define XFS_SCRUB_TYPE_XATTR	16	/* extended attribute */
-#define XFS_SCRUB_TYPE_SYMLINK	17	/* symbolic link */
-#define XFS_SCRUB_TYPE_PARENT	18	/* parent pointers */
-#define XFS_SCRUB_TYPE_RTBITMAP	19	/* realtime bitmap */
-#define XFS_SCRUB_TYPE_RTSUM	20	/* realtime summary */
-#define XFS_SCRUB_TYPE_UQUOTA	21	/* user quotas */
-#define XFS_SCRUB_TYPE_GQUOTA	22	/* group quotas */
-#define XFS_SCRUB_TYPE_PQUOTA	23	/* project quotas */
-
-/* Number of scrub subcommands. */
-#define XFS_SCRUB_TYPE_NR	24
-
-/* i: Repair this metadata. */
-#define XFS_SCRUB_IFLAG_REPAIR		(1 << 0)
-
-/* o: Metadata object needs repair. */
-#define XFS_SCRUB_OFLAG_CORRUPT		(1 << 1)
-
-/*
- * o: Metadata object could be optimized.  It's not corrupt, but
- *    we could improve on it somehow.
- */
-#define XFS_SCRUB_OFLAG_PREEN		(1 << 2)
-
-/* o: Cross-referencing failed. */
-#define XFS_SCRUB_OFLAG_XFAIL		(1 << 3)
-
-/* o: Metadata object disagrees with cross-referenced metadata. */
-#define XFS_SCRUB_OFLAG_XCORRUPT	(1 << 4)
-
-/* o: Scan was not complete. */
-#define XFS_SCRUB_OFLAG_INCOMPLETE	(1 << 5)
-
-/* o: Metadata object looked funny but isn't corrupt. */
-#define XFS_SCRUB_OFLAG_WARNING		(1 << 6)
-
-#define XFS_SCRUB_FLAGS_IN	(XFS_SCRUB_IFLAG_REPAIR)
-#define XFS_SCRUB_FLAGS_OUT	(XFS_SCRUB_OFLAG_CORRUPT | \
-				 XFS_SCRUB_OFLAG_PREEN | \
-				 XFS_SCRUB_OFLAG_XFAIL | \
-				 XFS_SCRUB_OFLAG_XCORRUPT | \
-				 XFS_SCRUB_OFLAG_INCOMPLETE | \
-				 XFS_SCRUB_OFLAG_WARNING)
-#define XFS_SCRUB_FLAGS_ALL	(XFS_SCRUB_FLAGS_IN | XFS_SCRUB_FLAGS_OUT)
-
 /*
  * ioctl limits
  */
@@ -569,8 +517,8 @@ struct xfs_scrub_metadata {
 #define XFS_IOC_ALLOCSP		_IOW ('X', 10, struct xfs_flock64)
 #define XFS_IOC_FREESP		_IOW ('X', 11, struct xfs_flock64)
 #define XFS_IOC_DIOINFO		_IOR ('X', 30, struct dioattr)
-#define XFS_IOC_FSGETXATTR	FS_IOC_FSGETXATTR
-#define XFS_IOC_FSSETXATTR	FS_IOC_FSSETXATTR
+#define XFS_IOC_FSGETXATTR	_IOR ('X', 31, struct fsxattr)
+#define XFS_IOC_FSSETXATTR	_IOW ('X', 32, struct fsxattr)
 #define XFS_IOC_ALLOCSP64	_IOW ('X', 36, struct xfs_flock64)
 #define XFS_IOC_FREESP64	_IOW ('X', 37, struct xfs_flock64)
 #define XFS_IOC_GETBMAP		_IOWR('X', 38, struct getbmap)
@@ -586,8 +534,6 @@ struct xfs_scrub_metadata {
 #define XFS_IOC_GETBMAPX	_IOWR('X', 56, struct getbmap)
 #define XFS_IOC_ZERO_RANGE	_IOW ('X', 57, struct xfs_flock64)
 #define XFS_IOC_FREE_EOFBLOCKS	_IOR ('X', 58, struct xfs_fs_eofblocks)
-/*	XFS_IOC_GETFSMAP ------ hoisted 59         */
-#define XFS_IOC_SCRUB_METADATA	_IOWR('X', 60, struct xfs_scrub_metadata)
 
 /*
  * ioctl commands that replace IRIX syssgi()'s

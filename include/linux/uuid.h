@@ -1,7 +1,7 @@
 /*
  * UUID/GUID definition
  *
- * Copyright (C) 2010, 2016 Intel Corp.
+ * Copyright (C) 2010, Intel Corp.
  *	Huang Ying <ying.huang@intel.com>
  *
  * This program is free software; you can redistribute it and/or
@@ -12,6 +12,10 @@
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 #ifndef _LINUX_UUID_H_
 #define _LINUX_UUID_H_
@@ -84,12 +88,26 @@ int guid_parse(const char *uuid, guid_t *u);
 int uuid_parse(const char *uuid, uuid_t *u);
 
 /* backwards compatibility, don't use in new code */
+typedef uuid_t uuid_be;
+#define UUID_BE(a, _b, c, d0, d1, d2, d3, d4, d5, d6, d7) \
+	UUID_INIT(a, _b, c, d0, d1, d2, d3, d4, d5, d6, d7)
+#define NULL_UUID_BE 							\
+	UUID_BE(0x00000000, 0x0000, 0x0000, 0x00, 0x00, 0x00, 0x00,	\
+	     0x00, 0x00, 0x00, 0x00)
+
 #define uuid_le_gen(u)		guid_gen(u)
+#define uuid_be_gen(u)		uuid_gen(u)
 #define uuid_le_to_bin(guid, u)	guid_parse(guid, u)
+#define uuid_be_to_bin(uuid, u)	uuid_parse(uuid, u)
 
 static inline int uuid_le_cmp(const guid_t u1, const guid_t u2)
 {
 	return memcmp(&u1, &u2, sizeof(guid_t));
+}
+
+static inline int uuid_be_cmp(const uuid_t u1, const uuid_t u2)
+{
+	return memcmp(&u1, &u2, sizeof(uuid_t));
 }
 
 #endif

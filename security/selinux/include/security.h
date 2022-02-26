@@ -1,15 +1,13 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Security server interface.
  *
- * Author : Stephen Smalley, <sds@tycho.nsa.gov>
+ * Author : Stephen Smalley, <sds@epoch.ncsc.mil>
  *
  */
 
 #ifndef _SELINUX_SECURITY_H_
 #define _SELINUX_SECURITY_H_
 
-#include <linux/compiler.h>
 #include <linux/dcache.h>
 #include <linux/magic.h>
 #include <linux/types.h>
@@ -37,11 +35,15 @@
 #define POLICYDB_VERSION_DEFAULT_TYPE	28
 #define POLICYDB_VERSION_CONSTRAINT_NAMES	29
 #define POLICYDB_VERSION_XPERMS_IOCTL	30
-#define POLICYDB_VERSION_INFINIBAND		31
+#define POLICYDB_VERSION_INFINIBAND	31
 
 /* Range of policy versions we understand*/
 #define POLICYDB_VERSION_MIN   POLICYDB_VERSION_BASE
-#define POLICYDB_VERSION_MAX   POLICYDB_VERSION_INFINIBAND
+#ifdef CONFIG_SECURITY_SELINUX_POLICYDB_VERSION_MAX
+#define POLICYDB_VERSION_MAX	CONFIG_SECURITY_SELINUX_POLICYDB_VERSION_MAX_VALUE
+#else
+#define POLICYDB_VERSION_MAX	POLICYDB_VERSION_INFINIBAND
+#endif
 
 /* Mask for just the mount related flags */
 #define SE_MNTMASK	0x0f
@@ -79,12 +81,8 @@ enum {
 };
 #define POLICYDB_CAPABILITY_MAX (__POLICYDB_CAPABILITY_MAX - 1)
 
-extern char *selinux_policycap_names[__POLICYDB_CAPABILITY_MAX];
-
 extern int selinux_policycap_netpeer;
 extern int selinux_policycap_openperm;
-extern int selinux_policycap_extsockclass;
-extern int selinux_policycap_alwaysnetwork;
 extern int selinux_policycap_cgroupseclabel;
 extern int selinux_policycap_nnp_nosuid_transition;
 
@@ -169,9 +167,7 @@ int security_sid_to_context(u32 sid, char **scontext,
 int security_sid_to_context_force(u32 sid, char **scontext, u32 *scontext_len);
 
 int security_context_to_sid(const char *scontext, u32 scontext_len,
-			    u32 *out_sid, gfp_t gfp);
-
-int security_context_str_to_sid(const char *scontext, u32 *out_sid, gfp_t gfp);
+	u32 *out_sid);
 
 int security_context_to_sid_default(const char *scontext, u32 scontext_len,
 				    u32 *out_sid, u32 def_sid, gfp_t gfp_flags);
@@ -196,9 +192,6 @@ int security_node_sid(u16 domain, void *addr, u32 addrlen,
 int security_validate_transition(u32 oldsid, u32 newsid, u32 tasksid,
 				 u16 tclass);
 
-int security_validate_transition_user(u32 oldsid, u32 newsid, u32 tasksid,
-				      u16 tclass);
-
 int security_bounded_transition(u32 oldsid, u32 newsid);
 
 int security_sid_mls_copy(u32 sid, u32 mls_sid, u32 *new_sid);
@@ -221,7 +214,8 @@ int security_get_allow_unknown(void);
 #define SECURITY_FS_USE_NATIVE		7 /* use native label support */
 #define SECURITY_FS_USE_MAX		7 /* Highest SECURITY_FS_USE_XXX */
 
-int security_fs_use(struct super_block *sb);
+int security_fs_use(const char *fstype, unsigned int *behavior,
+	u32 *sid);
 
 int security_genfs_sid(const char *fstype, char *name, u16 sclass,
 	u32 *sid);
@@ -264,7 +258,7 @@ struct selinux_kernel_status {
 	/*
 	 * The version > 0 supports above members.
 	 */
-} __packed;
+} __attribute__((packed));
 
 extern void selinux_status_update_setenforce(int enforcing);
 extern void selinux_status_update_policyload(int seqno);

@@ -53,6 +53,7 @@ static int ade7758_trig_try_reen(struct iio_trigger *trig)
 }
 
 static const struct iio_trigger_ops ade7758_trigger_ops = {
+	.owner = THIS_MODULE,
 	.set_trigger_state = &ade7758_data_rdy_trigger_set_state,
 	.try_reenable = &ade7758_trig_try_reen,
 };
@@ -65,7 +66,7 @@ int ade7758_probe_trigger(struct iio_dev *indio_dev)
 	st->trig = iio_trigger_alloc("%s-dev%d",
 					spi_get_device_id(st->us)->name,
 					indio_dev->id);
-	if (!st->trig) {
+	if (st->trig == NULL) {
 		ret = -ENOMEM;
 		goto error_ret;
 	}
@@ -84,7 +85,7 @@ int ade7758_probe_trigger(struct iio_dev *indio_dev)
 	ret = iio_trigger_register(st->trig);
 
 	/* select default trigger */
-	indio_dev->trig = iio_trigger_get(st->trig);
+	indio_dev->trig = st->trig;
 	if (ret)
 		goto error_free_irq;
 

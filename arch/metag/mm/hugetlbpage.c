@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * arch/metag/mm/hugetlbpage.c
  *
@@ -68,15 +67,14 @@ pte_t *huge_pte_alloc(struct mm_struct *mm,
 	pgd = pgd_offset(mm, addr);
 	pud = pud_offset(pgd, addr);
 	pmd = pmd_offset(pud, addr);
-	pte = pte_alloc_map(mm, pmd, addr);
+	pte = pte_alloc_map(mm, NULL, pmd, addr);
 	pgd->pgd &= ~_PAGE_SZ_MASK;
 	pgd->pgd |= _PAGE_SZHUGE;
 
 	return pte;
 }
 
-pte_t *huge_pte_offset(struct mm_struct *mm,
-		       unsigned long addr, unsigned long sz)
+pte_t *huge_pte_offset(struct mm_struct *mm, unsigned long addr)
 {
 	pgd_t *pgd;
 	pud_t *pud;
@@ -89,6 +87,11 @@ pte_t *huge_pte_offset(struct mm_struct *mm,
 	pte = pte_offset_kernel(pmd, addr);
 
 	return pte;
+}
+
+int huge_pmd_unshare(struct mm_struct *mm, unsigned long *addr, pte_t *ptep)
+{
+	return 0;
 }
 
 int pmd_huge(pmd_t pmd)
@@ -164,7 +167,7 @@ new_search:
 				mm->context.part_huge = 0;
 			return addr;
 		}
-		if (vma->vm_flags & MAP_HUGETLB) {
+		if (vma && (vma->vm_flags & MAP_HUGETLB)) {
 			/* space after a huge vma in 2nd level page table? */
 			if (vma->vm_end & HUGEPT_MASK) {
 				after_huge = 1;
@@ -241,7 +244,6 @@ static __init int setup_hugepagesz(char *opt)
 	if (ps == (1 << HPAGE_SHIFT)) {
 		hugetlb_add_hstate(HPAGE_SHIFT - PAGE_SHIFT);
 	} else {
-		hugetlb_bad_size();
 		pr_err("hugepagesz: Unsupported page size %lu M\n",
 		       ps >> 20);
 		return 0;

@@ -30,7 +30,7 @@
 	((1L << MD_HAS_JOURNAL) |	\
 	 (1L << MD_JOURNAL_CLEAN) |	\
 	 (1L << MD_FAILFAST_SUPPORTED) |\
-	 (1L << MD_HAS_PPL) |		\
+	 (1L << MD_HAS_PPL) |           \
 	 (1L << MD_HAS_MULTIPLE_PPLS))
 
 static int raid0_congested(struct mddev *mddev, int bits)
@@ -43,7 +43,7 @@ static int raid0_congested(struct mddev *mddev, int bits)
 	for (i = 0; i < raid_disks && !ret ; i++) {
 		struct request_queue *q = bdev_get_queue(devlist[i]->bdev);
 
-		ret |= bdi_congested(q->backing_dev_info, bits);
+		ret |= bdi_congested(&q->backing_dev_info, bits);
 	}
 	return ret;
 }
@@ -211,6 +211,9 @@ static int create_strip_zones(struct mddev *mddev, struct r0conf **private_conf)
 		}
 		dev[j] = rdev1;
 
+		if (rdev1->bdev->bd_disk->queue->merge_bvec_fn)
+			conf->has_merge_bvec = 1;
+
 		if (!smallest || (rdev1->sectors < smallest->sectors))
 			smallest = rdev1;
 		cnt++;
@@ -307,7 +310,7 @@ static struct strip_zone *find_zone(struct r0conf *conf,
 
 /*
  * remaps the bio to the target device. we separate two flows.
- * power 2 flow and a general flow for the sake of performance
+ * power 2 flow and a general flow for the sake of perfromance
 */
 static struct md_rdev *map_sector(struct mddev *mddev, struct strip_zone *zone,
 				sector_t sector, sector_t *sector_offset)
@@ -342,6 +345,58 @@ static struct md_rdev *map_sector(struct mddev *mddev, struct strip_zone *zone,
 			     + sector_div(sector, zone->nb_dev)];
 }
 
+/**
+ *	raid0_mergeable_bvec -- tell bio layer if two requests can be merged
+ *	@mddev: the md device
+ *	@bvm: properties of new bio
+ *	@biovec: the request that could be merged to it.
+ *
+ *	Return amount of bytes we can accept at this offset
+ */
+static int raid0_mergeable_bvec(struct mddev *mddev,
+				struct bvec_merge_data *bvm,
+				struct bio_vec *biovec)
+{
+	struct r0conf *conf = mddev->private;
+	sector_t sector = bvm->bi_sector + get_start_sect(bvm->bi_bdev);
+	sector_t sector_offset = sector;
+	int max;
+	unsigned int chunk_sectors = mddev->chunk_sectors;
+	unsigned int bio_sectors = bvm->bi_size >> 9;
+	struct strip_zone *zone;
+	struct md_rdev *rdev;
+	struct request_queue *subq;
+
+	if (is_power_of_2(chunk_sectors))
+		max =  (chunk_sectors - ((sector & (chunk_sectors-1))
+						+ bio_sectors)) << 9;
+	else
+		max =  (chunk_sectors - (sector_div(sector, chunk_sectors)
+						+ bio_sectors)) << 9;
+	if (max < 0)
+		max = 0; /* bio_add cannot handle a negative return */
+	if (max <= biovec->bv_len && bio_sectors == 0)
+		return biovec->bv_len;
+	if (max < biovec->bv_len)
+		/* too small already, no need to check further */
+		return max;
+	if (!conf->has_merge_bvec)
+		return max;
+
+	/* May need to check subordinate device */
+	sector = sector_offset;
+	zone = find_zone(mddev->private, &sector_offset);
+	rdev = map_sector(mddev, zone, sector, &sector_offset);
+	subq = bdev_get_queue(rdev->bdev);
+	if (subq->merge_bvec_fn) {
+		bvm->bi_bdev = rdev->bdev;
+		bvm->bi_sector = sector_offset + zone->dev_start +
+			rdev->data_offset;
+		return min(max, subq->merge_bvec_fn(subq, bvm, biovec));
+	} else
+		return max;
+}
+
 static sector_t raid0_size(struct mddev *mddev, sector_t sectors, int raid_disks)
 {
 	sector_t array_sectors = 0;
@@ -363,6 +418,7 @@ static int raid0_run(struct mddev *mddev)
 {
 	struct r0conf *conf;
 	int ret;
+	bool no_sg_merge = false;
 
 	if (mddev->chunk_sectors == 0) {
 		pr_warn("md/raid0:%s: chunk size must be set.\n", mdname(mddev));
@@ -385,7 +441,6 @@ static int raid0_run(struct mddev *mddev)
 
 		blk_queue_max_hw_sectors(mddev->queue, mddev->chunk_sectors);
 		blk_queue_max_write_same_sectors(mddev->queue, mddev->chunk_sectors);
-		blk_queue_max_write_zeroes_sectors(mddev->queue, mddev->chunk_sectors);
 		blk_queue_max_discard_sectors(mddev->queue, UINT_MAX);
 
 		blk_queue_io_min(mddev->queue, mddev->chunk_sectors << 9);
@@ -397,11 +452,21 @@ static int raid0_run(struct mddev *mddev)
 					  rdev->data_offset << 9);
 			if (blk_queue_discard(bdev_get_queue(rdev->bdev)))
 				discard_supported = true;
+			if (test_bit(QUEUE_FLAG_NO_SG_MERGE,
+			    &bdev_get_queue(rdev->bdev)->queue_flags))
+				no_sg_merge = true;
 		}
+
 		if (!discard_supported)
 			queue_flag_clear_unlocked(QUEUE_FLAG_DISCARD, mddev->queue);
 		else
 			queue_flag_set_unlocked(QUEUE_FLAG_DISCARD, mddev->queue);
+		if (no_sg_merge)
+			queue_flag_set_unlocked(QUEUE_FLAG_NO_SG_MERGE,
+						mddev->queue);
+		else
+			queue_flag_clear_unlocked(QUEUE_FLAG_NO_SG_MERGE,
+						mddev->queue);
 	}
 
 	/* calculate array device size */
@@ -423,8 +488,8 @@ static int raid0_run(struct mddev *mddev)
 		 */
 		int stripe = mddev->raid_disks *
 			(mddev->chunk_sectors << 9) / PAGE_SIZE;
-		if (mddev->queue->backing_dev_info->ra_pages < 2* stripe)
-			mddev->queue->backing_dev_info->ra_pages = 2* stripe;
+		if (mddev->queue->backing_dev_info.ra_pages < 2* stripe)
+			mddev->queue->backing_dev_info.ra_pages = 2* stripe;
 	}
 
 	dump_zones(mddev);
@@ -450,21 +515,105 @@ static inline int is_io_in_chunk_boundary(struct mddev *mddev,
 			unsigned int chunk_sects, struct bio *bio)
 {
 	if (likely(is_power_of_2(chunk_sects))) {
-		return chunk_sects >=
-			((bio->bi_iter.bi_sector & (chunk_sects-1))
+		return chunk_sects >= ((bio->bi_sector & (chunk_sects-1))
 					+ bio_sectors(bio));
 	} else{
-		sector_t sector = bio->bi_iter.bi_sector;
+		sector_t sector = bio->bi_sector;
 		return chunk_sects >= (sector_div(sector, chunk_sects)
 						+ bio_sectors(bio));
 	}
+}
+
+static struct bio *next_bio(struct bio *bio, int rw, unsigned int nr_pages,
+			   gfp_t gfp)
+{
+	struct bio *new = bio_alloc(gfp, nr_pages);
+
+	if (bio) {
+		bio_chain(bio, new);
+		submit_bio(rw, bio);
+	}
+
+	return new;
+}
+
+static int __blkdev_issue_discard(struct block_device *bdev, sector_t sector,
+				 sector_t nr_sects, gfp_t gfp_mask, int type,
+				 struct bio **biop)
+{
+	struct request_queue *q = bdev_get_queue(bdev);
+	struct bio *bio = *biop;
+	unsigned int max_discard_sectors, granularity;
+	int alignment;
+
+	if (!q)
+		return -ENXIO;
+	if (!blk_queue_discard(q))
+		return -EOPNOTSUPP;
+	if ((type & REQ_SECURE) && !blk_queue_secdiscard(q))
+		return -EOPNOTSUPP;
+
+	/* Zero-sector (unknown) and one-sector granularities are the same.  */
+	granularity = max(q->limits.discard_granularity >> 9, 1U);
+	alignment = (bdev_discard_alignment(bdev) >> 9) % granularity;
+
+	/*
+	 * Ensure that max_discard_sectors is of the proper
+	 * granularity, so that requests stay aligned after a split.
+	 */
+	max_discard_sectors = min(q->limits.max_discard_sectors, UINT_MAX >> 9);
+	max_discard_sectors -= max_discard_sectors % granularity;
+	if (unlikely(!max_discard_sectors)) {
+		/* Avoid infinite loop below. Being cautious never hurts. */
+		return -EOPNOTSUPP;
+	}
+
+	while (nr_sects) {
+		unsigned int req_sects;
+		sector_t end_sect, tmp;
+
+		req_sects = min_t(sector_t, nr_sects, max_discard_sectors);
+
+		/**
+		 * If splitting a request, and the next starting sector would be
+		 * misaligned, stop the discard at the previous aligned sector.
+		 */
+		end_sect = sector + req_sects;
+		tmp = end_sect;
+		if (req_sects < nr_sects &&
+		    sector_div(tmp, granularity) != alignment) {
+			end_sect = end_sect - alignment;
+			sector_div(end_sect, granularity);
+			end_sect = end_sect * granularity + alignment;
+			req_sects = end_sect - sector;
+		}
+
+		bio = next_bio(bio, type, 1, gfp_mask);
+		bio->bi_sector = sector;
+		bio->bi_bdev = bdev;
+
+		bio->bi_size = req_sects << 9;
+		nr_sects -= req_sects;
+		sector = end_sect;
+
+		/*
+		 * We can loop for a long time in here, if someone does
+		 * full device discards (like mkfs). Be nice and allow
+		 * us to schedule out to avoid softlocking if preempt
+		 * is disabled.
+		 */
+		cond_resched();
+	}
+
+	*biop = bio;
+	return 0;
 }
 
 static void raid0_handle_discard(struct mddev *mddev, struct bio *bio)
 {
 	struct r0conf *conf = mddev->private;
 	struct strip_zone *zone;
-	sector_t start = bio->bi_iter.bi_sector;
+	sector_t start = bio->bi_sector;
 	sector_t end;
 	unsigned int stripe_size;
 	sector_t first_stripe_index, last_stripe_index;
@@ -477,13 +626,12 @@ static void raid0_handle_discard(struct mddev *mddev, struct bio *bio)
 	zone = find_zone(conf, &start);
 
 	if (bio_end_sector(bio) > zone->zone_end) {
-		struct bio *split = bio_split(bio,
-			zone->zone_end - bio->bi_iter.bi_sector, GFP_NOIO,
-			mddev->bio_set);
-		bio_chain(split, bio);
-		generic_make_request(bio);
-		bio = split;
-		end = zone->zone_end;
+		struct bio_pair *bp = bio_split(bio, zone->zone_end -
+						     bio->bi_sector);
+		raid0_handle_discard(mddev, &bp->bio1);
+		raid0_handle_discard(mddev, &bp->bio2);
+		bio_pair_release(bp);
+		return;
 	} else
 		end = bio_end_sector(bio);
 
@@ -534,72 +682,81 @@ static void raid0_handle_discard(struct mddev *mddev, struct bio *bio)
 
 		rdev = conf->devlist[(zone - conf->strip_zone) *
 			conf->strip_zone[0].nb_dev + disk];
+
 		if (__blkdev_issue_discard(rdev->bdev,
 			dev_start + zone->dev_start + rdev->data_offset,
-			dev_end - dev_start, GFP_NOIO, 0, &discard_bio) ||
+			dev_end - dev_start, GFP_NOIO, REQ_WRITE | REQ_DISCARD,
+			&discard_bio) ||
 		    !discard_bio)
 			continue;
 		bio_chain(discard_bio, bio);
-		bio_clone_blkcg_association(discard_bio, bio);
-		if (mddev->gendisk)
-			trace_block_bio_remap(bdev_get_queue(rdev->bdev),
-				discard_bio, disk_devt(mddev->gendisk),
-				bio->bi_iter.bi_sector);
-		generic_make_request(discard_bio);
+		submit_bio(REQ_WRITE | REQ_DISCARD, discard_bio);
 	}
-	bio_endio(bio);
+	bio_endio(bio, 0);
 }
+
 
 static bool raid0_make_request(struct mddev *mddev, struct bio *bio)
 {
+	unsigned int chunk_sects;
+	sector_t sector_offset;
 	struct strip_zone *zone;
 	struct md_rdev *tmp_dev;
-	sector_t bio_sector;
-	sector_t sector;
-	unsigned chunk_sects;
-	unsigned sectors;
 
-	if (unlikely(bio->bi_opf & REQ_PREFLUSH)) {
-		md_flush_request(mddev, bio);
+	if (unlikely(bio->bi_rw & REQ_FLUSH)
+	    && md_flush_request(mddev, bio))
 		return true;
-	}
 
 	if (unlikely((bio_op(bio) == REQ_OP_DISCARD))) {
 		raid0_handle_discard(mddev, bio);
 		return true;
 	}
 
-	bio_sector = bio->bi_iter.bi_sector;
-	sector = bio_sector;
 	chunk_sects = mddev->chunk_sectors;
-
-	sectors = chunk_sects -
-		(likely(is_power_of_2(chunk_sects))
-		 ? (sector & (chunk_sects-1))
-		 : sector_div(sector, chunk_sects));
-
-	/* Restore due to sector_div */
-	sector = bio_sector;
-
-	if (sectors < bio_sectors(bio)) {
-		struct bio *split = bio_split(bio, sectors, GFP_NOIO, mddev->bio_set);
-		bio_chain(split, bio);
-		generic_make_request(bio);
-		bio = split;
+	if (unlikely(!is_io_in_chunk_boundary(mddev, chunk_sects, bio))) {
+		sector_t sector = bio->bi_sector;
+		struct bio_pair *bp;
+		/* Sanity check -- queue functions should prevent this happening */
+		if (bio_segments(bio) > 1)
+			goto bad_map;
+		/* This is a one page bio that upper layers
+		 * refuse to split for us, so we need to split it.
+		 */
+		if (likely(is_power_of_2(chunk_sects)))
+			bp = bio_split(bio, chunk_sects - (sector &
+							   (chunk_sects-1)));
+		else
+			bp = bio_split(bio, chunk_sects -
+				       sector_div(sector, chunk_sects));
+		raid0_make_request(mddev, &bp->bio1);
+		raid0_make_request(mddev, &bp->bio2);
+		bio_pair_release(bp);
+		return true;
 	}
 
-	zone = find_zone(mddev->private, &sector);
-	tmp_dev = map_sector(mddev, zone, sector, &sector);
-	bio_set_dev(bio, tmp_dev->bdev);
-	bio->bi_iter.bi_sector = sector + zone->dev_start +
+	sector_offset = bio->bi_sector;
+	zone = find_zone(mddev->private, &sector_offset);
+	tmp_dev = map_sector(mddev, zone, bio->bi_sector,
+			     &sector_offset);
+	bio->bi_bdev = tmp_dev->bdev;
+	bio->bi_sector = sector_offset + zone->dev_start +
 		tmp_dev->data_offset;
 
-	if (mddev->gendisk)
-		trace_block_bio_remap(bio->bi_disk->queue, bio,
-				disk_devt(mddev->gendisk), bio_sector);
 	mddev_check_writesame(mddev, bio);
-	mddev_check_write_zeroes(mddev, bio);
+	if (mddev->gendisk)
+		trace_block_bio_remap(bdev_get_queue(bio->bi_bdev),
+				      bio, disk_devt(mddev->gendisk),
+				      bio->bi_sector);
 	generic_make_request(bio);
+	return true;
+
+bad_map:
+	printk("md/raid0:%s: make_request bug: can't convert block across chunks"
+	       " or bigger than %dk %llu %d\n",
+	       mdname(mddev), chunk_sects / 2,
+	       (unsigned long long)bio->bi_sector, bio_sectors(bio) / 2);
+
+	bio_io_error(bio);
 	return true;
 }
 
@@ -785,6 +942,7 @@ static struct md_personality raid0_personality=
 	.takeover	= raid0_takeover,
 	.quiesce	= raid0_quiesce,
 	.congested	= raid0_congested,
+	.mergeable_bvec	= raid0_mergeable_bvec,
 };
 
 static int __init raid0_init (void)

@@ -1,9 +1,51 @@
-/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 #ifndef __LINUX_PKT_CLS_H
 #define __LINUX_PKT_CLS_H
 
 #include <linux/types.h>
 #include <linux/pkt_sched.h>
+
+#ifdef __KERNEL__
+/* I think i could have done better macros ; for now this is stolen from
+ * some arch/mips code - jhs
+*/
+#define _TC_MAKE32(x) ((x))
+
+#define _TC_MAKEMASK1(n) (_TC_MAKE32(1) << _TC_MAKE32(n))
+#define _TC_MAKEMASK(v,n) (_TC_MAKE32((_TC_MAKE32(1)<<(v))-1) << _TC_MAKE32(n))
+#define _TC_MAKEVALUE(v,n) (_TC_MAKE32(v) << _TC_MAKE32(n))
+#define _TC_GETVALUE(v,n,m) ((_TC_MAKE32(v) & _TC_MAKE32(m)) >> _TC_MAKE32(n))
+
+/* verdict bit breakdown 
+ *
+bit 6,7: Where this packet was last seen 
+0: Above the transmit example at the socket level
+1: on the Ingress
+2: on the Egress
+
+bit 8: when set --> Request not to classify on ingress. 
+
+ *
+ * */
+
+#define S_TC_FROM          _TC_MAKE32(6)
+#define M_TC_FROM          _TC_MAKEMASK(2,S_TC_FROM)
+#define G_TC_FROM(x)       _TC_GETVALUE(x,S_TC_FROM,M_TC_FROM)
+#define V_TC_FROM(x)       _TC_MAKEVALUE(x,S_TC_FROM)
+#define SET_TC_FROM(v,n)   ((V_TC_FROM(n)) | (v & ~M_TC_FROM))
+#define AT_STACK	0x0
+#define AT_INGRESS	0x1
+#define AT_EGRESS	0x2
+
+#define TC_NCLS          _TC_MAKEMASK1(8)
+#define SET_TC_NCLS(v)   ( TC_NCLS | (v & ~TC_NCLS))
+#define CLR_TC_NCLS(v)   ( v & ~TC_NCLS)
+
+#define S_TC_AT          _TC_MAKE32(12)
+#define M_TC_AT          _TC_MAKEMASK(2,S_TC_AT)
+#define G_TC_AT(x)       _TC_GETVALUE(x,S_TC_AT,M_TC_AT)
+#define V_TC_AT(x)       _TC_MAKEVALUE(x,S_TC_AT)
+#define SET_TC_AT(v,n)   ((V_TC_AT(n)) | (v & ~M_TC_AT))
+#endif
 
 #define TC_COOKIE_MAX_SIZE 16
 
@@ -37,7 +79,6 @@ enum {
 #define TC_ACT_STOLEN		4
 #define TC_ACT_QUEUED		5
 #define TC_ACT_REPEAT		6
-#define TC_ACT_REDIRECT		7
 #define TC_ACT_TRAP		8 /* For hw path, this means "trap to cpu"
 				   * and don't further process the frame
 				   * in hardware. For sw path, this is
@@ -356,8 +397,6 @@ enum {
 
 /* BPF classifier */
 
-#define TCA_BPF_FLAG_ACT_DIRECT		(1 << 0)
-
 enum {
 	TCA_BPF_UNSPEC,
 	TCA_BPF_ACT,
@@ -365,12 +404,6 @@ enum {
 	TCA_BPF_CLASSID,
 	TCA_BPF_OPS_LEN,
 	TCA_BPF_OPS,
-	TCA_BPF_FD,
-	TCA_BPF_NAME,
-	TCA_BPF_FLAGS,
-	TCA_BPF_FLAGS_GEN,
-	TCA_BPF_TAG,
-	TCA_BPF_ID,
 	__TCA_BPF_MAX,
 };
 
@@ -468,13 +501,49 @@ enum {
 	TCA_FLOWER_KEY_IP_TTL,		/* u8 */
 	TCA_FLOWER_KEY_IP_TTL_MASK,	/* u8 */
 
+	TCA_FLOWER_KEY_CVLAN_ID,	/* be16 */
+	TCA_FLOWER_KEY_CVLAN_PRIO,	/* u8   */
+	TCA_FLOWER_KEY_CVLAN_ETH_TYPE,	/* be16 */
+
+	TCA_FLOWER_KEY_ENC_IP_TOS,	/* u8 */
+	TCA_FLOWER_KEY_ENC_IP_TOS_MASK,	/* u8 */
+	TCA_FLOWER_KEY_ENC_IP_TTL,	/* u8 */
+	TCA_FLOWER_KEY_ENC_IP_TTL_MASK,	/* u8 */
+
+	TCA_FLOWER_KEY_ENC_OPTS,
+	TCA_FLOWER_KEY_ENC_OPTS_MASK,
+
 	__TCA_FLOWER_MAX,
 };
 
 #define TCA_FLOWER_MAX (__TCA_FLOWER_MAX - 1)
 
 enum {
+	TCA_FLOWER_KEY_ENC_OPTS_UNSPEC,
+	TCA_FLOWER_KEY_ENC_OPTS_GENEVE, /* Nested
+					 * TCA_FLOWER_KEY_ENC_OPT_GENEVE_
+					 * attributes
+					 */
+	__TCA_FLOWER_KEY_ENC_OPTS_MAX,
+};
+
+#define TCA_FLOWER_KEY_ENC_OPTS_MAX (__TCA_FLOWER_KEY_ENC_OPTS_MAX - 1)
+
+enum {
+	TCA_FLOWER_KEY_ENC_OPT_GENEVE_UNSPEC,
+	TCA_FLOWER_KEY_ENC_OPT_GENEVE_CLASS,            /* u16 */
+	TCA_FLOWER_KEY_ENC_OPT_GENEVE_TYPE,             /* u8 */
+	TCA_FLOWER_KEY_ENC_OPT_GENEVE_DATA,             /* 4 to 128 bytes */
+
+	__TCA_FLOWER_KEY_ENC_OPT_GENEVE_MAX,
+};
+
+#define TCA_FLOWER_KEY_ENC_OPT_GENEVE_MAX \
+		(__TCA_FLOWER_KEY_ENC_OPT_GENEVE_MAX - 1)
+
+enum {
 	TCA_FLOWER_KEY_FLAGS_IS_FRAGMENT = (1 << 0),
+	TCA_FLOWER_KEY_FLAGS_FRAG_IS_FIRST = (1 << 1),
 };
 
 /* Match-all classifier */

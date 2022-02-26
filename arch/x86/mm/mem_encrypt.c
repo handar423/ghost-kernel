@@ -10,8 +10,6 @@
  * published by the Free Software Foundation.
  */
 
-#define DISABLE_BRANCH_PROFILING
-
 #include <linux/linkage.h>
 #include <linux/init.h>
 #include <linux/mm.h>
@@ -23,7 +21,6 @@
 #include <asm/fixmap.h>
 #include <asm/setup.h>
 #include <asm/bootparam.h>
-#include <asm/set_memory.h>
 #include <asm/cacheflush.h>
 #include <asm/sections.h>
 #include <asm/processor-flags.h>
@@ -31,6 +28,19 @@
 #include <asm/cmdline.h>
 
 #include "mm_internal.h"
+
+/*
+ * This work area lives in the .sme section, which lives outside of
+ * the kernel proper. It is sized to hold the intermediate copy buffer
+ * and more than enough pagetable pages.
+ *
+ * By using this section, the kernel can be encrypted in place and we
+ * avoid any possibility of boot parameters or initramfs images being
+ * placed such that the in-place encryption logic overwrites them.  This
+ * section is 2MB aligned to allow for simple pagetable setup using only
+ * PMD entries (see vmlinux.lds.S).
+ */
+static char sme_workarea[2 * PMD_PAGE_SIZE] __section(.sme);
 
 static char sme_cmdline_arg[] __initdata = "mem_encrypt";
 static char sme_cmdline_on[]  __initdata = "on";
@@ -43,7 +53,7 @@ static char sme_cmdline_off[] __initdata = "off";
  */
 u64 sme_me_mask __section(.data) = 0;
 EXPORT_SYMBOL(sme_me_mask);
-DEFINE_STATIC_KEY_FALSE(sev_enable_key);
+struct static_key sev_enable_key = STATIC_KEY_INIT_FALSE;
 EXPORT_SYMBOL_GPL(sev_enable_key);
 
 static bool sev_enabled __section(.data);
@@ -197,11 +207,11 @@ void __init sme_early_init(void)
 		protection_map[i] = pgprot_encrypted(protection_map[i]);
 
 	if (sev_active())
-		swiotlb_force = SWIOTLB_FORCE;
+		swiotlb_force = 1;
 }
 
 static void *sev_alloc(struct device *dev, size_t size, dma_addr_t *dma_handle,
-		       gfp_t gfp, unsigned long attrs)
+		       gfp_t gfp, struct dma_attrs *attrs)
 {
 	unsigned long dma_mask;
 	unsigned int order;
@@ -251,7 +261,7 @@ static void *sev_alloc(struct device *dev, size_t size, dma_addr_t *dma_handle,
 }
 
 static void sev_free(struct device *dev, size_t size, void *vaddr,
-		     dma_addr_t dma_handle, unsigned long attrs)
+		     dma_addr_t dma_handle, struct dma_attrs *attrs)
 {
 	/* Set the SME encryption bit for re-use if not swiotlb area */
 	if (!is_swiotlb_buffer(dma_to_phys(dev, dma_handle)))
@@ -274,11 +284,11 @@ static void __init __set_clr_pte_enc(pte_t *kpte, int level, bool enc)
 		break;
 	case PG_LEVEL_2M:
 		pfn = pmd_pfn(*(pmd_t *)kpte);
-		old_prot = pmd_pgprot(*(pmd_t *)kpte);
+		old_prot = __pgprot(pmd_flags(*(pmd_t *)kpte));
 		break;
 	case PG_LEVEL_1G:
 		pfn = pud_pfn(*(pud_t *)kpte);
-		old_prot = pud_pgprot(*(pud_t *)kpte);
+		old_prot = __pgprot(pud_flags(*(pud_t *)kpte));
 		break;
 	default:
 		return;
@@ -413,7 +423,7 @@ bool sev_active(void)
 }
 EXPORT_SYMBOL(sev_active);
 
-static const struct dma_map_ops sev_dma_ops = {
+static struct dma_map_ops sev_dma_ops = {
 	.alloc                  = sev_alloc,
 	.free                   = sev_free,
 	.map_page               = swiotlb_map_page,
@@ -448,7 +458,8 @@ void __init mem_encrypt_init(void)
 	 * With SEV, we need to unroll the rep string I/O instructions.
 	 */
 	if (sev_active())
-		static_branch_enable(&sev_enable_key);
+		static_key_slow_inc(&sev_enable_key);
+
 
 	pr_info("AMD %s active\n",
 		sev_active() ? "Secure Encrypted Virtualization (SEV)"
@@ -515,49 +526,21 @@ static void __init sme_clear_pgd(struct sme_populate_pgd_data *ppd)
 static pmd_t __init *sme_prepare_pgd(struct sme_populate_pgd_data *ppd)
 {
 	pgd_t *pgd_p;
-	p4d_t *p4d_p;
 	pud_t *pud_p;
 	pmd_t *pmd_p;
 
 	pgd_p = ppd->pgd + pgd_index(ppd->vaddr);
 	if (native_pgd_val(*pgd_p)) {
-		if (IS_ENABLED(CONFIG_X86_5LEVEL))
-			p4d_p = (p4d_t *)(native_pgd_val(*pgd_p) & ~PTE_FLAGS_MASK);
-		else
-			pud_p = (pud_t *)(native_pgd_val(*pgd_p) & ~PTE_FLAGS_MASK);
+		pud_p = (pud_t *)(native_pgd_val(*pgd_p) & ~PTE_FLAGS_MASK);
 	} else {
 		pgd_t pgd;
 
-		if (IS_ENABLED(CONFIG_X86_5LEVEL)) {
-			p4d_p = ppd->pgtable_area;
-			memset(p4d_p, 0, sizeof(*p4d_p) * PTRS_PER_P4D);
-			ppd->pgtable_area += sizeof(*p4d_p) * PTRS_PER_P4D;
+		pud_p = ppd->pgtable_area;
+		memset(pud_p, 0, sizeof(*pud_p) * PTRS_PER_PUD);
+		ppd->pgtable_area += sizeof(*pud_p) * PTRS_PER_PUD;
 
-			pgd = native_make_pgd((pgdval_t)p4d_p + PGD_FLAGS);
-		} else {
-			pud_p = ppd->pgtable_area;
-			memset(pud_p, 0, sizeof(*pud_p) * PTRS_PER_PUD);
-			ppd->pgtable_area += sizeof(*pud_p) * PTRS_PER_PUD;
-
-			pgd = native_make_pgd((pgdval_t)pud_p + PGD_FLAGS);
-		}
+		pgd = native_make_pgd((pgdval_t)pud_p + PGD_FLAGS);
 		native_set_pgd(pgd_p, pgd);
-	}
-
-	if (IS_ENABLED(CONFIG_X86_5LEVEL)) {
-		p4d_p += p4d_index(ppd->vaddr);
-		if (native_p4d_val(*p4d_p)) {
-			pud_p = (pud_t *)(native_p4d_val(*p4d_p) & ~PTE_FLAGS_MASK);
-		} else {
-			p4d_t p4d;
-
-			pud_p = ppd->pgtable_area;
-			memset(pud_p, 0, sizeof(*pud_p) * PTRS_PER_PUD);
-			ppd->pgtable_area += sizeof(*pud_p) * PTRS_PER_PUD;
-
-			p4d = native_make_p4d((pudval_t)pud_p + P4D_FLAGS);
-			native_set_p4d(p4d_p, p4d);
-		}
 	}
 
 	pud_p += pud_index(ppd->vaddr);
@@ -685,14 +668,14 @@ static void __init sme_map_range_decrypted_wp(struct sme_populate_pgd_data *ppd)
 
 static unsigned long __init sme_pgtable_calc(unsigned long len)
 {
-	unsigned long p4d_size, pud_size, pmd_size, pte_size;
+	unsigned long pud_size, pmd_size, pte_size;
 	unsigned long total;
 
 	/*
 	 * Perform a relatively simplistic calculation of the pagetable
 	 * entries that are needed. Those mappings will be covered mostly
 	 * by 2MB PMD entries so we can conservatively calculate the required
-	 * number of P4D, PUD and PMD structures needed to perform the
+	 * number of PUD and PMD structures needed to perform the
 	 * mappings.  For mappings that are not 2MB aligned, PTE mappings
 	 * would be needed for the start and end portion of the address range
 	 * that fall outside of the 2MB alignment.  This results in, at most,
@@ -700,40 +683,24 @@ static unsigned long __init sme_pgtable_calc(unsigned long len)
 	 * Incrementing the count for each covers the case where the addresses
 	 * cross entries.
 	 */
-	if (IS_ENABLED(CONFIG_X86_5LEVEL)) {
-		p4d_size = (ALIGN(len, PGDIR_SIZE) / PGDIR_SIZE) + 1;
-		p4d_size *= sizeof(p4d_t) * PTRS_PER_P4D;
-		pud_size = (ALIGN(len, P4D_SIZE) / P4D_SIZE) + 1;
-		pud_size *= sizeof(pud_t) * PTRS_PER_PUD;
-	} else {
-		p4d_size = 0;
-		pud_size = (ALIGN(len, PGDIR_SIZE) / PGDIR_SIZE) + 1;
-		pud_size *= sizeof(pud_t) * PTRS_PER_PUD;
-	}
+	pud_size = (ALIGN(len, PGDIR_SIZE) / PGDIR_SIZE) + 1;
+	pud_size *= sizeof(pud_t) * PTRS_PER_PUD;
 	pmd_size = (ALIGN(len, PUD_SIZE) / PUD_SIZE) + 1;
 	pmd_size *= sizeof(pmd_t) * PTRS_PER_PMD;
 	pte_size = 2 * sizeof(pte_t) * PTRS_PER_PTE;
 
-	total = p4d_size + pud_size + pmd_size + pte_size;
+	total = pud_size + pmd_size + pte_size;
 
 	/*
 	 * Now calculate the added pagetable structures needed to populate
 	 * the new pagetables.
 	 */
-	if (IS_ENABLED(CONFIG_X86_5LEVEL)) {
-		p4d_size = ALIGN(total, PGDIR_SIZE) / PGDIR_SIZE;
-		p4d_size *= sizeof(p4d_t) * PTRS_PER_P4D;
-		pud_size = ALIGN(total, P4D_SIZE) / P4D_SIZE;
-		pud_size *= sizeof(pud_t) * PTRS_PER_PUD;
-	} else {
-		p4d_size = 0;
-		pud_size = ALIGN(total, PGDIR_SIZE) / PGDIR_SIZE;
-		pud_size *= sizeof(pud_t) * PTRS_PER_PUD;
-	}
+	pud_size = ALIGN(total, PGDIR_SIZE) / PGDIR_SIZE;
+	pud_size *= sizeof(pud_t) * PTRS_PER_PUD;
 	pmd_size = ALIGN(total, PUD_SIZE) / PUD_SIZE;
 	pmd_size *= sizeof(pmd_t) * PTRS_PER_PMD;
 
-	total += p4d_size + pud_size + pmd_size;
+	total += pud_size + pmd_size;
 
 	return total;
 }
@@ -785,8 +752,13 @@ void __init __nostackprotector sme_encrypt_kernel(struct boot_params *bp)
 	}
 #endif
 
-	/* Set the encryption workarea to be immediately after the kernel */
-	workarea_start = kernel_end;
+	/*
+	 * We're running identity mapped, so we must obtain the address to the
+	 * SME encryption workarea using rip-relative addressing.
+	 */
+	asm ("lea sme_workarea(%%rip), %0"
+	     : "=r" (workarea_start)
+	     : "p" (sme_workarea));
 
 	/*
 	 * Calculate required number of workarea bytes needed:
@@ -843,7 +815,7 @@ void __init __nostackprotector sme_encrypt_kernel(struct boot_params *bp)
 	sme_map_range_decrypted(&ppd);
 
 	/* Flush the TLB - no globals so cr3 is enough */
-	native_write_cr3(__native_read_cr3());
+	native_write_cr3(native_read_cr3());
 
 	/*
 	 * A new pagetable structure is being built to allow for the kernel
@@ -937,7 +909,7 @@ void __init __nostackprotector sme_encrypt_kernel(struct boot_params *bp)
 	sme_clear_pgd(&ppd);
 
 	/* Flush the TLB - no globals so cr3 is enough */
-	native_write_cr3(__native_read_cr3());
+	native_write_cr3(native_read_cr3());
 }
 
 void __init __nostackprotector sme_enable(struct boot_params *bp)
@@ -987,12 +959,12 @@ void __init __nostackprotector sme_enable(struct boot_params *bp)
 	/* Check if memory encryption is enabled */
 	if (feature_mask == AMD_SME_BIT) {
 		/* For SME, check the SYSCFG MSR */
-		msr = __rdmsr(MSR_K8_SYSCFG);
+		msr = native_read_msr(MSR_K8_SYSCFG);
 		if (!(msr & MSR_K8_SYSCFG_MEM_ENCRYPT))
 			return;
 	} else {
 		/* For SEV, check the SEV MSR */
-		msr = __rdmsr(MSR_AMD64_SEV);
+		msr = native_read_msr(MSR_AMD64_SEV);
 		if (!(msr & MSR_AMD64_SEV_ENABLED))
 			return;
 

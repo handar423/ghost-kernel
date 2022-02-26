@@ -7,12 +7,9 @@
  */
 
 #include <linux/perf_event.h>
-#include <linux/init.h>
-#include <linux/export.h>
+#include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/ptrace.h>
-#include <linux/syscore_ops.h>
-#include <linux/sched/clock.h>
 
 #include <asm/apic.h>
 
@@ -678,7 +675,7 @@ out:
 	return 1;
 }
 
-static int
+static int __kprobes
 perf_ibs_nmi_handler(unsigned int cmd, struct pt_regs *regs)
 {
 	u64 stamp = sched_clock();
@@ -694,7 +691,6 @@ perf_ibs_nmi_handler(unsigned int cmd, struct pt_regs *regs)
 
 	return handled;
 }
-NOKPROBE_SYMBOL(perf_ibs_nmi_handler);
 
 static __init int perf_ibs_pmu_init(struct perf_ibs *perf_ibs, char *name)
 {
@@ -727,9 +723,12 @@ static __init int perf_ibs_pmu_init(struct perf_ibs *perf_ibs, char *name)
 	return ret;
 }
 
-static __init void perf_event_ibs_init(void)
+static __init int perf_event_ibs_init(void)
 {
 	struct attribute **attr = ibs_op_format_attrs;
+
+	if (!ibs_caps)
+		return -ENODEV;	/* ibs not supported by the cpu */
 
 	perf_ibs_pmu_init(&perf_ibs_fetch, "ibs_fetch");
 
@@ -740,12 +739,14 @@ static __init void perf_event_ibs_init(void)
 	perf_ibs_pmu_init(&perf_ibs_op, "ibs_op");
 
 	register_nmi_handler(NMI_LOCAL, perf_ibs_nmi_handler, 0, "perf_ibs");
-	pr_info("perf: AMD IBS detected (0x%08x)\n", ibs_caps);
+	printk(KERN_INFO "perf: AMD IBS detected (0x%08x)\n", ibs_caps);
+
+	return 0;
 }
 
 #else /* defined(CONFIG_PERF_EVENTS) && defined(CONFIG_CPU_SUP_AMD) */
 
-static __init void perf_event_ibs_init(void) { }
+static __init int perf_event_ibs_init(void) { return 0; }
 
 #endif
 
@@ -842,14 +843,14 @@ static int setup_ibs_ctl(int ibs_eilvt_off)
 		pci_read_config_dword(cpu_cfg, IBSCTL, &value);
 		if (value != (ibs_eilvt_off | IBSCTL_LVT_OFFSET_VALID)) {
 			pci_dev_put(cpu_cfg);
-			pr_debug("Failed to setup IBS LVT offset, IBSCTL = 0x%08x\n",
-				 value);
+			printk(KERN_DEBUG "Failed to setup IBS LVT offset, "
+			       "IBSCTL = 0x%08x\n", value);
 			return -EINVAL;
 		}
 	} while (1);
 
 	if (!nodes) {
-		pr_debug("No CPU node configured for IBS\n");
+		printk(KERN_DEBUG "No CPU node configured for IBS\n");
 		return -ENODEV;
 	}
 
@@ -878,7 +879,7 @@ static void force_ibs_eilvt_setup(void)
 	preempt_enable();
 
 	if (offset == APIC_EILVT_NR_MAX) {
-		pr_debug("No EILVT entry available\n");
+		printk(KERN_DEBUG "No EILVT entry available\n");
 		return;
 	}
 
@@ -899,18 +900,6 @@ out:
 	return;
 }
 
-static void ibs_eilvt_setup(void)
-{
-	/*
-	 * Force LVT offset assignment for family 10h: The offsets are
-	 * not assigned by the BIOS for this family, so the OS is
-	 * responsible for doing it. If the OS assignment fails, fall
-	 * back to BIOS settings and try to setup this.
-	 */
-	if (boot_cpu_data.x86 == 0x10)
-		force_ibs_eilvt_setup();
-}
-
 static inline int get_ibs_lvt_offset(void)
 {
 	u64 val;
@@ -922,7 +911,7 @@ static inline int get_ibs_lvt_offset(void)
 	return val & IBSCTL_LVT_OFFSET_MASK;
 }
 
-static void setup_APIC_ibs(void)
+static void setup_APIC_ibs(void *dummy)
 {
 	int offset;
 
@@ -937,7 +926,7 @@ failed:
 		smp_processor_id());
 }
 
-static void clear_APIC_ibs(void)
+static void clear_APIC_ibs(void *dummy)
 {
 	int offset;
 
@@ -946,78 +935,57 @@ static void clear_APIC_ibs(void)
 		setup_APIC_eilvt(offset, 0, APIC_EILVT_MSG_FIX, 1);
 }
 
-static int x86_pmu_amd_ibs_starting_cpu(unsigned int cpu)
+static int
+perf_ibs_cpu_notifier(struct notifier_block *self, unsigned long action, void *hcpu)
 {
-	setup_APIC_ibs();
-	return 0;
-}
+	switch (action & ~CPU_TASKS_FROZEN) {
+	case CPU_STARTING:
+		setup_APIC_ibs(NULL);
+		break;
+	case CPU_DYING:
+		clear_APIC_ibs(NULL);
+		break;
+	default:
+		break;
+	}
 
-#ifdef CONFIG_PM
-
-static int perf_ibs_suspend(void)
-{
-	clear_APIC_ibs();
-	return 0;
-}
-
-static void perf_ibs_resume(void)
-{
-	ibs_eilvt_setup();
-	setup_APIC_ibs();
-}
-
-static struct syscore_ops perf_ibs_syscore_ops = {
-	.resume		= perf_ibs_resume,
-	.suspend	= perf_ibs_suspend,
-};
-
-static void perf_ibs_pm_init(void)
-{
-	register_syscore_ops(&perf_ibs_syscore_ops);
-}
-
-#else
-
-static inline void perf_ibs_pm_init(void) { }
-
-#endif
-
-static int x86_pmu_amd_ibs_dying_cpu(unsigned int cpu)
-{
-	clear_APIC_ibs();
-	return 0;
+	return NOTIFY_OK;
 }
 
 static __init int amd_ibs_init(void)
 {
 	u32 caps;
+	int ret = -EINVAL;
 
 	caps = __get_ibs_caps();
 	if (!caps)
 		return -ENODEV;	/* ibs not supported by the cpu */
 
-	ibs_eilvt_setup();
+	/*
+	 * Force LVT offset assignment for family 10h: The offsets are
+	 * not assigned by the BIOS for this family, so the OS is
+	 * responsible for doing it. If the OS assignment fails, fall
+	 * back to BIOS settings and try to setup this.
+	 */
+	if (boot_cpu_data.x86 == 0x10)
+		force_ibs_eilvt_setup();
 
 	if (!ibs_eilvt_valid())
-		return -EINVAL;
+		goto out;
 
-	perf_ibs_pm_init();
-
+	cpu_notifier_register_begin();
 	ibs_caps = caps;
 	/* make ibs_caps visible to other cpus: */
 	smp_mb();
-	/*
-	 * x86_pmu_amd_ibs_starting_cpu will be called from core on
-	 * all online cpus.
-	 */
-	cpuhp_setup_state(CPUHP_AP_PERF_X86_AMD_IBS_STARTING,
-			  "perf/x86/amd/ibs:starting",
-			  x86_pmu_amd_ibs_starting_cpu,
-			  x86_pmu_amd_ibs_dying_cpu);
+	smp_call_function(setup_APIC_ibs, NULL, 1);
+	__perf_cpu_notifier(perf_ibs_cpu_notifier);
+	cpu_notifier_register_done();
 
-	perf_event_ibs_init();
-
-	return 0;
+	ret = perf_event_ibs_init();
+out:
+	if (ret)
+		pr_err("Failed to setup IBS, %d\n", ret);
+	return ret;
 }
 
 /* Since we need the pci subsystem to init ibs we can't do this earlier: */

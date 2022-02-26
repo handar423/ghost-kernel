@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __ASM_SH_PROCESSOR_H
 #define __ASM_SH_PROCESSOR_H
 
@@ -16,7 +15,7 @@
  */
 enum cpu_type {
 	/* SH-2 types */
-	CPU_SH7619, CPU_J2,
+	CPU_SH7619,
 
 	/* SH-2A types */
 	CPU_SH7201, CPU_SH7203, CPU_SH7206, CPU_SH7263, CPU_SH7264, CPU_SH7269,

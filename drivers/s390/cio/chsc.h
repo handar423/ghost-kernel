@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef S390_CHSC_H
 #define S390_CHSC_H
 
@@ -113,9 +112,8 @@ struct chsc_scpd {
 	u32 last_chpid:8;
 	u32 zeroes1;
 	struct chsc_header response;
-	u32:32;
-	u8 data[0];
-} __packed;
+	u8 data[PAGE_SIZE - 20];
+} __attribute__ ((packed));
 
 struct chsc_sda_area {
 	struct chsc_header request;
@@ -242,8 +240,6 @@ int chsc_pnso_brinfo(struct subchannel_id schid,
 		struct chsc_pnso_area *brinfo_area,
 		struct chsc_brinfo_resume_token resume_token,
 		int cnc);
-
-int __init chsc_get_cssid(int idx);
 
 #ifdef CONFIG_SCM_BUS
 int scm_update_information(void);

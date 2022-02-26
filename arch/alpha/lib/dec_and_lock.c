@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * arch/alpha/lib/dec_and_lock.c
  *
@@ -8,7 +7,6 @@
 
 #include <linux/spinlock.h>
 #include <linux/atomic.h>
-#include <linux/export.h>
 
   asm (".text					\n\
 	.global _atomic_dec_and_lock		\n\
@@ -41,4 +39,3 @@ static int __used atomic_dec_and_lock_1(atomic_t *atomic, spinlock_t *lock)
 	spin_unlock(lock);
 	return 0;
 }
-EXPORT_SYMBOL(_atomic_dec_and_lock);

@@ -144,7 +144,7 @@ static unsigned switch_region_table_read(struct switch_ctx *sctx, unsigned long 
 
 	switch_get_position(sctx, region_nr, &region_index, &bit);
 
-	return (READ_ONCE(sctx->region_table[region_index]) >> bit) &
+	return (ACCESS_ONCE(sctx->region_table[region_index]) >> bit) &
 		((1 << sctx->region_table_entry_bits) - 1);
 }
 
@@ -319,11 +319,11 @@ error:
 static int switch_map(struct dm_target *ti, struct bio *bio)
 {
 	struct switch_ctx *sctx = ti->private;
-	sector_t offset = dm_target_offset(ti, bio->bi_iter.bi_sector);
+	sector_t offset = dm_target_offset(ti, bio->bi_sector);
 	unsigned path_nr = switch_get_path_nr(sctx, offset);
 
-	bio_set_dev(bio, sctx->path_list[path_nr].dmdev->bdev);
-	bio->bi_iter.bi_sector = sctx->path_list[path_nr].start + offset;
+	bio->bi_bdev = sctx->path_list[path_nr].dmdev->bdev;
+	bio->bi_sector = sctx->path_list[path_nr].start + offset;
 
 	return DM_MAPIO_REMAPPED;
 }
@@ -511,8 +511,7 @@ static void switch_status(struct dm_target *ti, status_type_t type,
  *
  * Passthrough all ioctls to the path for sector 0
  */
-static int switch_prepare_ioctl(struct dm_target *ti,
-		struct block_device **bdev, fmode_t *mode)
+static int switch_prepare_ioctl(struct dm_target *ti, struct block_device **bdev)
 {
 	struct switch_ctx *sctx = ti->private;
 	unsigned path_nr;
@@ -520,7 +519,6 @@ static int switch_prepare_ioctl(struct dm_target *ti,
 	path_nr = switch_get_path_nr(sctx, 0);
 
 	*bdev = sctx->path_list[path_nr].dmdev->bdev;
-	*mode = sctx->path_list[path_nr].dmdev->mode;
 
 	/*
 	 * Only pass ioctls through if the device sizes match exactly.

@@ -1,7 +1,21 @@
-// SPDX-License-Identifier: GPL-2.0+
-/* Copyright (C) 2007,2008 Freescale Semiconductor, Inc. */
+/* Copyright (C) 2007,2008 Freescale Semiconductor, Inc.
+ *
+ * This program is free software; you can redistribute  it and/or modify it
+ * under  the terms of  the GNU General  Public License as published by the
+ * Free Software Foundation;  either version 2 of the  License, or (at your
+ * option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the  GNU General Public License along
+ * with this program; if not, write  to the Free Software Foundation, Inc.,
+ * 675 Mass Ave, Cambridge, MA 02139, USA.
+ */
 
-#include <linux/usb/otg-fsm.h>
+#include "phy-fsm-usb.h"
 #include <linux/usb/otg.h>
 #include <linux/ioctl.h>
 
@@ -284,7 +298,7 @@
 /* SE0 Time Before SRP */
 #define TB_SE0_SRP	(2)	/* b_idle,minimum 2 ms, section:5.3.2 */
 
-#define SET_OTG_STATE(phy, newstate)	((phy)->otg->state = newstate)
+#define SET_OTG_STATE(otg_ptr, newstate)	((otg_ptr)->state = newstate)
 
 struct usb_dr_mmap {
 	/* Capability register */
@@ -387,6 +401,6 @@ struct fsl_otg_config {
 #define GET_A_BUS_REQ		_IOR(OTG_IOCTL_MAGIC, 8, int)
 #define GET_B_BUS_REQ		_IOR(OTG_IOCTL_MAGIC, 9, int)
 
-void fsl_otg_add_timer(struct otg_fsm *fsm, void *timer);
-void fsl_otg_del_timer(struct otg_fsm *fsm, void *timer);
+void fsl_otg_add_timer(void *timer);
+void fsl_otg_del_timer(void *timer);
 void fsl_otg_pulse_vbus(void);

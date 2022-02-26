@@ -30,7 +30,7 @@ typedef int64_t		xfs_fsize_t;	/* bytes in a file */
 typedef uint64_t	xfs_ufsize_t;	/* unsigned bytes in a file */
 
 typedef int32_t		xfs_suminfo_t;	/* type of bitmap summary info */
-typedef int32_t		xfs_rtword_t;	/* word type for bitmap manipulations */
+typedef uint32_t	xfs_rtword_t;	/* word type for bitmap manipulations */
 
 typedef int64_t		xfs_lsn_t;	/* log sequence number */
 typedef int32_t		xfs_tid_t;	/* transaction identifier */
@@ -98,7 +98,6 @@ typedef void *		xfs_failaddr_t;
  */
 #define	XFS_DATA_FORK	0
 #define	XFS_ATTR_FORK	1
-#define	XFS_COW_FORK	2
 
 /*
  * Min numbers of data/attr fork btree root pointers.
@@ -117,8 +116,8 @@ typedef enum {
 } xfs_lookup_t;
 
 typedef enum {
-	XFS_BTNUM_BNOi, XFS_BTNUM_CNTi, XFS_BTNUM_RMAPi, XFS_BTNUM_BMAPi,
-	XFS_BTNUM_INOi, XFS_BTNUM_FINOi, XFS_BTNUM_REFCi, XFS_BTNUM_MAX
+	XFS_BTNUM_BNOi, XFS_BTNUM_CNTi, XFS_BTNUM_BMAPi, XFS_BTNUM_INOi,
+	XFS_BTNUM_FINOi, XFS_BTNUM_MAX
 } xfs_btnum_t;
 
 struct xfs_name {

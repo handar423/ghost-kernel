@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Copyright IBM Corp. 2000, 2008
  * Author(s): Utz Bacher <utz.bacher@de.ibm.com>
@@ -81,7 +80,7 @@ struct qdr {
 	u32 qkey   : 4;
 	u32	   : 28;
 	struct qdesfmt0 qdf0[126];
-} __packed __aligned(PAGE_SIZE);
+} __attribute__ ((packed, aligned(4096)));
 
 #define QIB_AC_OUTBOUND_PCI_SUPPORTED	0x40
 #define QIB_RFLAGS_ENABLE_QEBSM		0x80
@@ -212,6 +211,11 @@ struct qdio_buffer_element {
 	u8 scount;
 	u8 sflags;
 	u32 length;
+#ifdef CONFIG_32BIT
+	/* private: */
+	void *res2;
+	/* public: */
+#endif
 	void *addr;
 } __attribute__ ((packed, aligned(16)));
 
@@ -228,6 +232,11 @@ struct qdio_buffer {
  * @sbal: absolute SBAL address
  */
 struct sl_element {
+#ifdef CONFIG_32BIT
+	/* private: */
+	unsigned long reserved;
+	/* public: */
+#endif
 	unsigned long sbal;
 } __attribute__ ((packed));
 
@@ -262,7 +271,6 @@ struct qdio_outbuf_state {
 	void *user;
 };
 
-#define QDIO_OUTBUF_STATE_FLAG_NONE	0x00
 #define QDIO_OUTBUF_STATE_FLAG_PENDING	0x01
 
 #define CHSC_AC1_INITIATE_INPUTQ	0x80
@@ -327,7 +335,7 @@ typedef void qdio_handler_t(struct ccw_device *, unsigned int, int,
 #define QDIO_FLAG_CLEANUP_USING_HALT		0x02
 
 /**
- * struct qdio_initialize - qdio initialization data
+ * struct qdio_initialize - qdio initalization data
  * @cdev: associated ccw device
  * @q_format: queue format
  * @adapter_name: name for the adapter
@@ -405,10 +413,6 @@ struct qdio_brinfo_entry_l2 {
 #define QDIO_FLAG_SYNC_INPUT		0x01
 #define QDIO_FLAG_SYNC_OUTPUT		0x02
 #define QDIO_FLAG_PCI_OUT		0x10
-
-int qdio_alloc_buffers(struct qdio_buffer **buf, unsigned int count);
-void qdio_free_buffers(struct qdio_buffer **buf, unsigned int count);
-void qdio_reset_buffers(struct qdio_buffer **buf, unsigned int count);
 
 extern int qdio_allocate(struct qdio_initialize *);
 extern int qdio_establish(struct qdio_initialize *);

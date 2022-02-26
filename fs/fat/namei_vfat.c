@@ -16,23 +16,12 @@
  */
 
 #include <linux/module.h>
+#include <linux/jiffies.h>
 #include <linux/ctype.h>
 #include <linux/slab.h>
+#include <linux/buffer_head.h>
 #include <linux/namei.h>
-#include <linux/kernel.h>
-
 #include "fat.h"
-
-static inline unsigned long vfat_d_version(struct dentry *dentry)
-{
-	return (unsigned long) dentry->d_fsdata;
-}
-
-static inline void vfat_d_version_set(struct dentry *dentry,
-				      unsigned long version)
-{
-	dentry->d_fsdata = (void *) version;
-}
 
 /*
  * If new entry was created in the parent, it could create the 8.3
@@ -46,7 +35,7 @@ static int vfat_revalidate_shortname(struct dentry *dentry)
 {
 	int ret = 1;
 	spin_lock(&dentry->d_lock);
-	if (vfat_d_version(dentry) != d_inode(dentry->d_parent)->i_version)
+	if (dentry->d_time != dentry->d_parent->d_inode->i_version)
 		ret = 0;
 	spin_unlock(&dentry->d_lock);
 	return ret;
@@ -58,7 +47,7 @@ static int vfat_revalidate(struct dentry *dentry, unsigned int flags)
 		return -ECHILD;
 
 	/* This is not negative dentry. Always valid. */
-	if (d_really_is_positive(dentry))
+	if (dentry->d_inode)
 		return 1;
 	return vfat_revalidate_shortname(dentry);
 }
@@ -78,7 +67,7 @@ static int vfat_revalidate_ci(struct dentry *dentry, unsigned int flags)
 	 * positive dentry isn't good idea. So it's unsupported like
 	 * rename("filename", "FILENAME") for now.
 	 */
-	if (d_really_is_positive(dentry))
+	if (dentry->d_inode)
 		return 1;
 
 	/*
@@ -120,7 +109,7 @@ static unsigned int vfat_striptail_len(const struct qstr *qstr)
  */
 static int vfat_hash(const struct dentry *dentry, struct qstr *qstr)
 {
-	qstr->hash = full_name_hash(dentry, qstr->name, vfat_striptail_len(qstr));
+	qstr->hash = full_name_hash(qstr->name, vfat_striptail_len(qstr));
 	return 0;
 }
 
@@ -140,7 +129,7 @@ static int vfat_hashi(const struct dentry *dentry, struct qstr *qstr)
 	name = qstr->name;
 	len = vfat_striptail_len(qstr);
 
-	hash = init_name_hash(dentry);
+	hash = init_name_hash();
 	while (len--)
 		hash = partial_name_hash(nls_tolower(t, *name++), hash);
 	qstr->hash = end_name_hash(hash);
@@ -151,10 +140,10 @@ static int vfat_hashi(const struct dentry *dentry, struct qstr *qstr)
 /*
  * Case insensitive compare of two vfat names.
  */
-static int vfat_cmpi(const struct dentry *dentry,
+static int vfat_cmpi(const struct dentry *parent, const struct dentry *dentry,
 		unsigned int len, const char *str, const struct qstr *name)
 {
-	struct nls_table *t = MSDOS_SB(dentry->d_sb)->nls_io;
+	struct nls_table *t = MSDOS_SB(parent->d_sb)->nls_io;
 	unsigned int alen, blen;
 
 	/* A filename cannot end in '.' or we treat it like it has none */
@@ -170,7 +159,7 @@ static int vfat_cmpi(const struct dentry *dentry,
 /*
  * Case sensitive compare of two vfat names.
  */
-static int vfat_cmp(const struct dentry *dentry,
+static int vfat_cmp(const struct dentry *parent, const struct dentry *dentry,
 		unsigned int len, const char *str, const struct qstr *name)
 {
 	unsigned int alen, blen;
@@ -512,8 +501,10 @@ xlate_to_uni(const unsigned char *name, int len, unsigned char *outname,
 	     struct nls_table *nls)
 {
 	const unsigned char *ip;
+	unsigned char nc;
 	unsigned char *op;
-	int i, fill;
+	unsigned int ec;
+	int i, k, fill;
 	int charlen;
 
 	if (utf8) {
@@ -530,22 +521,33 @@ xlate_to_uni(const unsigned char *name, int len, unsigned char *outname,
 			 i < len && *outlen < FAT_LFN_LEN;
 			 *outlen += 1) {
 			if (escape && (*ip == ':')) {
-				u8 uc[2];
-
 				if (i > len - 5)
 					return -EINVAL;
-
-				if (hex2bin(uc, ip + 1, 2) < 0)
+				ec = 0;
+				for (k = 1; k < 5; k++) {
+					nc = ip[k];
+					ec <<= 4;
+					if (nc >= '0' && nc <= '9') {
+						ec |= nc - '0';
+						continue;
+					}
+					if (nc >= 'a' && nc <= 'f') {
+						ec |= nc - ('a' - 10);
+						continue;
+					}
+					if (nc >= 'A' && nc <= 'F') {
+						ec |= nc - ('A' - 10);
+						continue;
+					}
 					return -EINVAL;
-
-				*(wchar_t *)op = uc[0] << 8 | uc[1];
-
-				op += 2;
+				}
+				*op++ = ec & 0xFF;
+				*op++ = ec >> 8;
 				ip += 5;
 				i += 5;
 			} else {
 				charlen = nls->char2uni(ip, len - i,
-							(wchar_t *)op);
+									(wchar_t *)op);
 				if (charlen < 0)
 					return -EINVAL;
 				ip += charlen;
@@ -652,8 +654,8 @@ out_free:
 	return err;
 }
 
-static int vfat_add_entry(struct inode *dir, const struct qstr *qname,
-			  int is_dir, int cluster, struct timespec *ts,
+static int vfat_add_entry(struct inode *dir, struct qstr *qname, int is_dir,
+			  int cluster, struct timespec *ts,
 			  struct fat_slot_info *sinfo)
 {
 	struct msdos_dir_slot *slots;
@@ -688,7 +690,7 @@ cleanup:
 	return err;
 }
 
-static int vfat_find(struct inode *dir, const struct qstr *qname,
+static int vfat_find(struct inode *dir, struct qstr *qname,
 		     struct fat_slot_info *sinfo)
 {
 	unsigned int len = vfat_striptail_len(qname);
@@ -734,12 +736,7 @@ static struct dentry *vfat_lookup(struct inode *dir, struct dentry *dentry,
 	}
 
 	alias = d_find_alias(inode);
-	/*
-	 * Checking "alias->d_parent == dentry->d_parent" to make sure
-	 * FS is not corrupted (especially double linked dir).
-	 */
-	if (alias && alias->d_parent == dentry->d_parent &&
-	    !vfat_d_anon_disconn(alias)) {
+	if (alias && !vfat_d_anon_disconn(alias)) {
 		/*
 		 * This inode has non anonymous-DCACHE_DISCONNECTED
 		 * dentry. This means, the user did ->lookup() by an
@@ -758,9 +755,12 @@ static struct dentry *vfat_lookup(struct inode *dir, struct dentry *dentry,
 
 out:
 	mutex_unlock(&MSDOS_SB(sb)->s_lock);
-	if (!inode)
-		vfat_d_version_set(dentry, dir->i_version);
-	return d_splice_alias(inode, dentry);
+	dentry->d_time = dentry->d_parent->d_inode->i_version;
+	dentry = d_splice_alias(inode, dentry);
+	if (dentry)
+		dentry->d_time = dentry->d_parent->d_inode->i_version;
+	return dentry;
+
 error:
 	mutex_unlock(&MSDOS_SB(sb)->s_lock);
 	return ERR_PTR(err);
@@ -777,7 +777,7 @@ static int vfat_create(struct inode *dir, struct dentry *dentry, umode_t mode,
 
 	mutex_lock(&MSDOS_SB(sb)->s_lock);
 
-	ts = current_time(dir);
+	ts = CURRENT_TIME_SEC;
 	err = vfat_add_entry(dir, &dentry->d_name, 0, 0, &ts, &sinfo);
 	if (err)
 		goto out;
@@ -793,6 +793,7 @@ static int vfat_create(struct inode *dir, struct dentry *dentry, umode_t mode,
 	inode->i_mtime = inode->i_atime = inode->i_ctime = ts;
 	/* timestamp is already written, so mark_inode_dirty() is unneeded. */
 
+	dentry->d_time = dentry->d_parent->d_inode->i_version;
 	d_instantiate(dentry, inode);
 out:
 	mutex_unlock(&MSDOS_SB(sb)->s_lock);
@@ -801,7 +802,7 @@ out:
 
 static int vfat_rmdir(struct inode *dir, struct dentry *dentry)
 {
-	struct inode *inode = d_inode(dentry);
+	struct inode *inode = dentry->d_inode;
 	struct super_block *sb = dir->i_sb;
 	struct fat_slot_info sinfo;
 	int err;
@@ -821,9 +822,8 @@ static int vfat_rmdir(struct inode *dir, struct dentry *dentry)
 	drop_nlink(dir);
 
 	clear_nlink(inode);
-	inode->i_mtime = inode->i_atime = current_time(inode);
+	inode->i_mtime = inode->i_atime = CURRENT_TIME_SEC;
 	fat_detach(inode);
-	vfat_d_version_set(dentry, dir->i_version);
 out:
 	mutex_unlock(&MSDOS_SB(sb)->s_lock);
 
@@ -832,7 +832,7 @@ out:
 
 static int vfat_unlink(struct inode *dir, struct dentry *dentry)
 {
-	struct inode *inode = d_inode(dentry);
+	struct inode *inode = dentry->d_inode;
 	struct super_block *sb = dir->i_sb;
 	struct fat_slot_info sinfo;
 	int err;
@@ -847,9 +847,8 @@ static int vfat_unlink(struct inode *dir, struct dentry *dentry)
 	if (err)
 		goto out;
 	clear_nlink(inode);
-	inode->i_mtime = inode->i_atime = current_time(inode);
+	inode->i_mtime = inode->i_atime = CURRENT_TIME_SEC;
 	fat_detach(inode);
-	vfat_d_version_set(dentry, dir->i_version);
 out:
 	mutex_unlock(&MSDOS_SB(sb)->s_lock);
 
@@ -866,7 +865,7 @@ static int vfat_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
 
 	mutex_lock(&MSDOS_SB(sb)->s_lock);
 
-	ts = current_time(dir);
+	ts = CURRENT_TIME_SEC;
 	cluster = fat_alloc_new_dir(dir, &ts);
 	if (cluster < 0) {
 		err = cluster;
@@ -890,6 +889,7 @@ static int vfat_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
 	inode->i_mtime = inode->i_atime = inode->i_ctime = ts;
 	/* timestamp is already written, so mark_inode_dirty() is unneeded. */
 
+	dentry->d_time = dentry->d_parent->d_inode->i_version;
 	d_instantiate(dentry, inode);
 
 	mutex_unlock(&MSDOS_SB(sb)->s_lock);
@@ -903,8 +903,7 @@ out:
 }
 
 static int vfat_rename(struct inode *old_dir, struct dentry *old_dentry,
-		       struct inode *new_dir, struct dentry *new_dentry,
-		       unsigned int flags)
+		       struct inode *new_dir, struct dentry *new_dentry)
 {
 	struct buffer_head *dotdot_bh;
 	struct msdos_dir_entry *dotdot_de;
@@ -915,12 +914,9 @@ static int vfat_rename(struct inode *old_dir, struct dentry *old_dentry,
 	int err, is_dir, update_dotdot, corrupt = 0;
 	struct super_block *sb = old_dir->i_sb;
 
-	if (flags & ~RENAME_NOREPLACE)
-		return -EINVAL;
-
 	old_sinfo.bh = sinfo.bh = dotdot_bh = NULL;
-	old_inode = d_inode(old_dentry);
-	new_inode = d_inode(new_dentry);
+	old_inode = old_dentry->d_inode;
+	new_inode = new_dentry->d_inode;
 	mutex_lock(&MSDOS_SB(sb)->s_lock);
 	err = vfat_find(old_dir, &old_dentry->d_name, &old_sinfo);
 	if (err)
@@ -935,7 +931,7 @@ static int vfat_rename(struct inode *old_dir, struct dentry *old_dentry,
 		}
 	}
 
-	ts = current_time(old_dir);
+	ts = CURRENT_TIME_SEC;
 	if (new_inode) {
 		if (is_dir) {
 			err = fat_dir_empty(new_inode);

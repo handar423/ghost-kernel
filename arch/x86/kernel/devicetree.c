@@ -1,10 +1,10 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * Architecture specific OF callbacks.
  */
 #include <linux/bootmem.h>
 #include <linux/export.h>
 #include <linux/io.h>
+#include <linux/irqdomain.h>
 #include <linux/interrupt.h>
 #include <linux/list.h>
 #include <linux/of.h>
@@ -17,11 +17,9 @@
 #include <linux/of_pci.h>
 #include <linux/initrd.h>
 
-#include <asm/irqdomain.h>
 #include <asm/hpet.h>
 #include <asm/apic.h>
 #include <asm/pci_x86.h>
-#include <asm/setup.h>
 #include <asm/i8259.h>
 
 __initdata u64 initial_dtb;
@@ -43,6 +41,16 @@ void * __init early_init_dt_alloc_memory_arch(u64 size, u64 align)
 {
 	return __alloc_bootmem(size, align, __pa(MAX_DMA_ADDRESS));
 }
+
+#ifdef CONFIG_BLK_DEV_INITRD
+void __init early_init_dt_setup_initrd_arch(unsigned long start,
+					    unsigned long end)
+{
+	initrd_start = (unsigned long)__va(start);
+	initrd_end = (unsigned long)__va(end);
+	initrd_below_start_ok = 1;
+}
+#endif
 
 void __init add_dtb(u64 data)
 {
@@ -66,7 +74,7 @@ static int __init add_bus_probe(void)
 
 	return of_platform_bus_probe(NULL, ce4100_ids, NULL);
 }
-device_initcall(add_bus_probe);
+module_init(add_bus_probe);
 
 #ifdef CONFIG_PCI
 struct device_node *pcibios_get_phb_of_node(struct pci_bus *bus)
@@ -89,6 +97,7 @@ struct device_node *pcibios_get_phb_of_node(struct pci_bus *bus)
 
 static int x86_of_pci_irq_enable(struct pci_dev *dev)
 {
+	struct of_irq oirq;
 	u32 virq;
 	int ret;
 	u8 pin;
@@ -99,7 +108,12 @@ static int x86_of_pci_irq_enable(struct pci_dev *dev)
 	if (!pin)
 		return 0;
 
-	virq = of_irq_parse_and_map_pci(dev, 0, 0);
+	ret = of_irq_map_pci(dev, &oirq);
+	if (ret)
+		return ret;
+
+	virq = irq_create_of_mapping(oirq.controller, oirq.specifier,
+			oirq.size);
 	if (virq == 0)
 		return -EINVAL;
 	dev->irq = virq;
@@ -152,7 +166,7 @@ static void __init dtb_lapic_setup(void)
 		return;
 
 	/* Did the boot loader setup the local APIC ? */
-	if (!boot_cpu_has(X86_FEATURE_APIC)) {
+	if (!cpu_has_apic) {
 		if (apic_force_enable(r.start))
 			return;
 	}
@@ -197,31 +211,38 @@ static struct of_ioapic_type of_ioapic_type[] =
 	},
 };
 
-static int dt_irqdomain_alloc(struct irq_domain *domain, unsigned int virq,
-			      unsigned int nr_irqs, void *arg)
+static int ioapic_xlate(struct irq_domain *domain,
+			struct device_node *controller,
+			const u32 *intspec, u32 intsize,
+			irq_hw_number_t *out_hwirq, u32 *out_type)
 {
-	struct of_phandle_args *irq_data = (void *)arg;
 	struct of_ioapic_type *it;
-	struct irq_alloc_info tmp;
+	u32 line, idx, gsi;
 
-	if (WARN_ON(irq_data->args_count < 2))
-		return -EINVAL;
-	if (irq_data->args[1] >= ARRAY_SIZE(of_ioapic_type))
+	if (WARN_ON(intsize < 2))
 		return -EINVAL;
 
-	it = &of_ioapic_type[irq_data->args[1]];
-	ioapic_set_alloc_attr(&tmp, NUMA_NO_NODE, it->trigger, it->polarity);
-	tmp.ioapic_id = mpc_ioapic_id(mp_irqdomain_ioapic_idx(domain));
-	tmp.ioapic_pin = irq_data->args[0];
+	line = intspec[0];
 
-	return mp_irqdomain_alloc(domain, virq, nr_irqs, &tmp);
+	if (intspec[1] >= ARRAY_SIZE(of_ioapic_type))
+		return -EINVAL;
+
+	it = &of_ioapic_type[intspec[1]];
+
+	idx = (u32)(long)domain->host_data;
+	gsi = mp_pin_to_gsi(idx, line);
+	if (mp_set_gsi_attr(gsi, it->trigger, it->polarity, cpu_to_node(0)))
+		return -EBUSY;
+
+	*out_hwirq = line;
+	*out_type = it->out_type;
+	return 0;
 }
 
-static const struct irq_domain_ops ioapic_irq_domain_ops = {
-	.alloc		= dt_irqdomain_alloc,
-	.free		= mp_irqdomain_free,
-	.activate	= mp_irqdomain_activate,
-	.deactivate	= mp_irqdomain_deactivate,
+const struct irq_domain_ops ioapic_irq_domain_ops = {
+	.map = mp_irqdomain_map,
+	.unmap = mp_irqdomain_unmap,
+	.xlate = ioapic_xlate,
 };
 
 static void __init dtb_add_ioapic(struct device_node *dn)
@@ -236,7 +257,8 @@ static void __init dtb_add_ioapic(struct device_node *dn)
 
 	ret = of_address_to_resource(dn, 0, &r);
 	if (ret) {
-		printk(KERN_ERR "Can't obtain address from device node %pOF.\n", dn);
+		printk(KERN_ERR "Can't obtain address from node %s.\n",
+				dn->full_name);
 		return;
 	}
 	mp_register_ioapic(++ioapic_id, r.start, gsi_top, &cfg);
@@ -279,13 +301,13 @@ static void __init x86_flattree_get_config(void)
 	initial_boot_params = dt = early_memremap(initial_dtb, map_len);
 	size = of_get_flat_dt_size();
 	if (map_len < size) {
-		early_memunmap(dt, map_len);
+		early_iounmap(dt, map_len);
 		initial_boot_params = dt = early_memremap(initial_dtb, size);
 		map_len = size;
 	}
 
 	unflatten_and_copy_device_tree();
-	early_memunmap(dt, map_len);
+	early_iounmap(dt, map_len);
 }
 #else
 static inline void x86_flattree_get_config(void) { }

@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * Functions related to interrupt-poll handling in the block layer. This
  * is similar to NAPI for network devices.
@@ -37,6 +36,7 @@ void irq_poll_sched(struct irq_poll *iop)
 	list_add_tail(&iop->list, this_cpu_ptr(&blk_cpu_iopoll));
 	__raise_softirq_irqoff(IRQ_POLL_SOFTIRQ);
 	local_irq_restore(flags);
+	preempt_check_resched_rt();
 }
 EXPORT_SYMBOL(irq_poll_sched);
 
@@ -51,7 +51,7 @@ EXPORT_SYMBOL(irq_poll_sched);
 static void __irq_poll_complete(struct irq_poll *iop)
 {
 	list_del(&iop->list);
-	smp_mb__before_atomic();
+	smp_mb__before_clear_bit();
 	clear_bit_unlock(IRQ_POLL_F_SCHED, &iop->state);
 }
 
@@ -72,10 +72,11 @@ void irq_poll_complete(struct irq_poll *iop)
 	local_irq_save(flags);
 	__irq_poll_complete(iop);
 	local_irq_restore(flags);
+	preempt_check_resched_rt();
 }
 EXPORT_SYMBOL(irq_poll_complete);
 
-static void __latent_entropy irq_poll_softirq(struct softirq_action *h)
+static void irq_poll_softirq(struct softirq_action *h)
 {
 	struct list_head *list = this_cpu_ptr(&blk_cpu_iopoll);
 	int rearm = 0, budget = irq_poll_budget;
@@ -96,6 +97,7 @@ static void __latent_entropy irq_poll_softirq(struct softirq_action *h)
 		}
 
 		local_irq_enable();
+		preempt_check_resched_rt();
 
 		/* Even though interrupts have been re-enabled, this
 		 * access is safe because interrupts can only add new
@@ -133,6 +135,7 @@ static void __latent_entropy irq_poll_softirq(struct softirq_action *h)
 		__raise_softirq_irqoff(IRQ_POLL_SOFTIRQ);
 
 	local_irq_enable();
+	preempt_check_resched_rt();
 }
 
 /**
@@ -162,7 +165,7 @@ EXPORT_SYMBOL(irq_poll_disable);
 void irq_poll_enable(struct irq_poll *iop)
 {
 	BUG_ON(!test_bit(IRQ_POLL_F_SCHED, &iop->state));
-	smp_mb__before_atomic();
+	smp_mb__before_clear_bit();
 	clear_bit_unlock(IRQ_POLL_F_SCHED, &iop->state);
 }
 EXPORT_SYMBOL(irq_poll_enable);
@@ -185,20 +188,30 @@ void irq_poll_init(struct irq_poll *iop, int weight, irq_poll_fn *poll_fn)
 }
 EXPORT_SYMBOL(irq_poll_init);
 
-static int irq_poll_cpu_dead(unsigned int cpu)
+static int irq_poll_cpu_notify(struct notifier_block *self,
+				 unsigned long action, void *hcpu)
 {
 	/*
 	 * If a CPU goes away, splice its entries to the current CPU
 	 * and trigger a run of the softirq
 	 */
-	local_irq_disable();
-	list_splice_init(&per_cpu(blk_cpu_iopoll, cpu),
-			 this_cpu_ptr(&blk_cpu_iopoll));
-	__raise_softirq_irqoff(IRQ_POLL_SOFTIRQ);
-	local_irq_enable();
+	if (action == CPU_DEAD || action == CPU_DEAD_FROZEN) {
+		int cpu = (unsigned long) hcpu;
 
-	return 0;
+		local_irq_disable();
+		list_splice_init(&per_cpu(blk_cpu_iopoll, cpu),
+				 this_cpu_ptr(&blk_cpu_iopoll));
+		__raise_softirq_irqoff(IRQ_POLL_SOFTIRQ);
+		local_irq_enable();
+		preempt_check_resched_rt();
+	}
+
+	return NOTIFY_OK;
 }
+
+static struct notifier_block irq_poll_cpu_notifier = {
+	.notifier_call	= irq_poll_cpu_notify,
+};
 
 static __init int irq_poll_setup(void)
 {
@@ -208,8 +221,7 @@ static __init int irq_poll_setup(void)
 		INIT_LIST_HEAD(&per_cpu(blk_cpu_iopoll, i));
 
 	open_softirq(IRQ_POLL_SOFTIRQ, irq_poll_softirq);
-	cpuhp_setup_state_nocalls(CPUHP_IRQ_POLL_DEAD, "irq_poll:dead", NULL,
-				  irq_poll_cpu_dead);
+	register_hotcpu_notifier(&irq_poll_cpu_notifier);
 	return 0;
 }
 subsys_initcall(irq_poll_setup);

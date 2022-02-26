@@ -1,9 +1,8 @@
-# SPDX-License-Identifier: GPL-2.0
 #
 # Makefile for ACPICA Core interpreter
 #
 
-ccflags-y			:= -Os -D_LINUX -DBUILDING_ACPICA
+ccflags-y			:= -Os
 ccflags-$(CONFIG_ACPI_DEBUG)	+= -DACPI_DEBUG_OUTPUT
 
 # use acpi.o to put all files here into acpi.o modparam namespace
@@ -12,14 +11,12 @@ obj-y	+= acpi.o
 acpi-y :=		\
 	dsargs.o	\
 	dscontrol.o	\
-	dsdebug.o	\
 	dsfield.o	\
 	dsinit.o	\
 	dsmethod.o	\
 	dsmthdat.o	\
 	dsobject.o	\
 	dsopcode.o	\
-	dspkginit.o	\
 	dsutils.o	\
 	dswexec.o	\
 	dswload.o	\
@@ -45,7 +42,6 @@ acpi-y +=		\
 	evxfregn.o
 
 acpi-y +=		\
-	exconcat.o	\
 	exconfig.o	\
 	exconvrt.o	\
 	excreate.o	\
@@ -53,7 +49,6 @@ acpi-y +=		\
 	exdump.o	\
 	exfield.o	\
 	exfldio.o	\
-	exmisc.o	\
 	exmutex.o	\
 	exnames.o	\
 	exoparg1.o	\
@@ -61,6 +56,7 @@ acpi-y +=		\
 	exoparg3.o	\
 	exoparg6.o	\
 	exprep.o	\
+	exmisc.o	\
 	exregion.o	\
 	exresnte.o	\
 	exresolv.o	\
@@ -69,7 +65,6 @@ acpi-y +=		\
 	exstoren.o	\
 	exstorob.o	\
 	exsystem.o	\
-	extrace.o	\
 	exutils.o
 
 acpi-y +=		\
@@ -127,7 +122,6 @@ acpi-y +=		\
 	rsaddr.o	\
 	rscalc.o	\
 	rscreate.o	\
-	rsdumpinfo.o	\
 	rsinfo.o	\
 	rsio.o		\
 	rsirq.o		\
@@ -137,6 +131,8 @@ acpi-y +=		\
 	rsserial.o	\
 	rsutils.o	\
 	rsxface.o
+
+acpi-$(ACPI_FUTURE_USAGE) += rsdump.o rsdumpinfo.o
 
 acpi-y +=		\
 	tbdata.o	\
@@ -169,40 +165,20 @@ acpi-y +=		\
 	utmath.o	\
 	utmisc.o	\
 	utmutex.o	\
-	utnonansi.o	\
 	utobject.o	\
 	utosi.o		\
 	utownerid.o	\
 	utpredef.o	\
-	utresdecode.o	\
 	utresrc.o	\
 	utstate.o	\
 	utstring.o	\
-	utstrsuppt.o	\
 	utstrtoul64.o	\
 	utxface.o	\
 	utxfinit.o	\
 	utxferror.o	\
 	utxfmutex.o
 
-acpi-$(CONFIG_ACPI_DEBUGGER) +=	\
-	dbcmds.o		\
-	dbconvert.o		\
-	dbdisply.o		\
-	dbexec.o		\
-	dbhistry.o		\
-	dbinput.o		\
-	dbmethod.o		\
-	dbnames.o		\
-	dbobject.o		\
-	dbstats.o		\
-	dbutils.o		\
-	dbxface.o		\
-	rsdump.o		\
-
 acpi-$(ACPI_FUTURE_USAGE) +=	\
-	dbfileio.o		\
-	dbtest.o		\
 	utcache.o		\
 	utprint.o		\
 	uttrack.o		\

@@ -1,6 +1,7 @@
-// SPDX-License-Identifier: GPL-2.0
+
 #include <linux/cred.h>
 #include <linux/init.h>
+#include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/quotaops.h>
 #include <linux/sched.h>
@@ -13,7 +14,7 @@ static const struct genl_multicast_group quota_mcgrps[] = {
 };
 
 /* Netlink family structure for quota */
-static struct genl_family quota_genl_family __ro_after_init = {
+static struct genl_family quota_genl_family = {
 	.module = THIS_MODULE,
 	.hdrsize = 0,
 	.name = "VFS_DQUOT",
@@ -25,7 +26,8 @@ static struct genl_family quota_genl_family __ro_after_init = {
 
 /**
  * quota_send_warning - Send warning to userspace about exceeded quota
- * @qid: The kernel internal quota identifier.
+ * @type: The quota type: USRQQUOTA, GRPQUOTA,...
+ * @id: The user or group id of the quota that was exceeded
  * @dev: The device on which the fs is mounted (sb->s_dev)
  * @warntype: The type of the warning: QUOTA_NL_...
  *
@@ -100,4 +102,5 @@ static int __init quota_init(void)
 		       "VFS: Failed to create quota netlink interface.\n");
 	return 0;
 };
-fs_initcall(quota_init);
+
+module_init(quota_init);

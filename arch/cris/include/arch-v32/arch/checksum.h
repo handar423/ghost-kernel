@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_CRIS_ARCH_CHECKSUM_H
 #define _ASM_CRIS_ARCH_CHECKSUM_H
 
@@ -12,7 +11,7 @@
  */
 static inline __wsum
 csum_tcpudp_nofold(__be32 saddr, __be32 daddr,
-		   __u32 len, __u8 proto, __wsum sum)
+		   unsigned short len, unsigned short proto, __wsum sum)
 {
 	__wsum res;
 

@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_X86_AMD_NB_H
 #define _ASM_X86_AMD_NB_H
 
@@ -21,7 +20,7 @@ extern int amd_cache_northbridges(void);
 extern void amd_flush_garts(void);
 extern int amd_numa_init(void);
 extern int amd_get_subcaches(int);
-extern int amd_set_subcaches(int, unsigned long);
+extern int amd_set_subcaches(int, int);
 
 extern int amd_smn_read(u16 node, u32 address, u32 *value);
 extern int amd_smn_write(u16 node, u32 address, u32 value);
@@ -84,7 +83,7 @@ u16 amd_nb_num(void);
 bool amd_nb_has_feature(unsigned int feature);
 struct amd_northbridge *node_to_amd_nb(int node);
 
-static inline u16 amd_pci_dev_to_node_id(struct pci_dev *pdev)
+static inline u16 amd_get_node_id(struct pci_dev *pdev)
 {
 	struct pci_dev *misc;
 	int i;

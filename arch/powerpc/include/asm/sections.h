@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_POWERPC_SECTIONS_H
 #define _ASM_POWERPC_SECTIONS_H
 #ifdef __KERNEL__
@@ -6,8 +5,6 @@
 #include <linux/elf.h>
 #include <linux/uaccess.h>
 #include <asm-generic/sections.h>
-
-extern char __head_end[];
 
 #ifdef __powerpc64__
 
@@ -52,17 +49,6 @@ static inline int overlaps_kernel_text(unsigned long start, unsigned long end)
 {
 	return start < (unsigned long)__init_end &&
 		(unsigned long)_stext < end;
-}
-
-static inline int overlaps_kvm_tmp(unsigned long start, unsigned long end)
-{
-#ifdef CONFIG_KVM_GUEST
-	extern char kvm_tmp[];
-	return start < (unsigned long)kvm_tmp &&
-		(unsigned long)&kvm_tmp[1024 * 1024] < end;
-#else
-	return 0;
-#endif
 }
 
 #ifdef PPC64_ELF_ABI_v1

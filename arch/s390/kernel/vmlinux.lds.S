@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 /* ld script to make s390 Linux kernel
  * Written by Martin Schwidefsky (schwidefsky@de.ibm.com)
  */
@@ -12,15 +11,19 @@
  */
 #define BSS_FIRST_SECTIONS *(.bss..swapper_pg_dir)
 
-/* Handle ro_after_init data on our own. */
-#define RO_AFTER_INIT_DATA
-
 #include <asm-generic/vmlinux.lds.h>
 
+#ifndef CONFIG_64BIT
+OUTPUT_FORMAT("elf32-s390", "elf32-s390", "elf32-s390")
+OUTPUT_ARCH(s390:31-bit)
+ENTRY(startup)
+jiffies = jiffies_64 + 4;
+#else
 OUTPUT_FORMAT("elf64-s390", "elf64-s390", "elf64-s390")
 OUTPUT_ARCH(s390:64-bit)
 ENTRY(startup)
 jiffies = jiffies_64;
+#endif
 
 PHDRS {
 	text PT_LOAD FLAGS(5);	/* R_E */
@@ -46,7 +49,6 @@ SECTIONS
 		LOCK_TEXT
 		KPROBES_TEXT
 		IRQENTRY_TEXT
-		SOFTIRQENTRY_TEXT
 		*(.fixup)
 		*(.gnu.warning)
 	} :text = 0x0700
@@ -60,17 +62,15 @@ SECTIONS
 
 	RO_DATA_SECTION(PAGE_SIZE)
 
-	. = ALIGN(PAGE_SIZE);
-	_sdata = .;		/* Start of data section */
+#ifdef CONFIG_SHARED_KERNEL
+	. = ALIGN(0x100000);	/* VM shared segments are 1MB aligned */
+#endif
 
 	. = ALIGN(PAGE_SIZE);
-	__start_ro_after_init = .;
-	.data..ro_after_init : {
-		 *(.data..ro_after_init)
-	}
-	EXCEPTION_TABLE(16)
-	. = ALIGN(PAGE_SIZE);
-	__end_ro_after_init = .;
+	_eshared = .;		/* End of shareable data */
+	_sdata = .;		/* Start of data section */
+
+	EXCEPTION_TABLE(16) :data
 
 	RW_DATA_SECTION(0x100, PAGE_SIZE, THREAD_SIZE)
 
@@ -121,6 +121,20 @@ SECTIONS
 	 */
 	.altinstr_replacement : {
 		*(.altinstr_replacement)
+	}
+
+	/*
+	 * Table with the patch locations to undo expolines
+	*/
+	.nospec_call_table : {
+		__nospec_call_start = . ;
+		*(.s390_indirect*)
+		__nospec_call_end = . ;
+	}
+	.nospec_return_table : {
+		__nospec_return_start = . ;
+		*(.s390_return*)
+		__nospec_return_end = . ;
 	}
 
 	/* early.c uses stsi, which requires page aligned data. */

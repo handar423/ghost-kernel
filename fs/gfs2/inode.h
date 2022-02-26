@@ -85,7 +85,7 @@ static inline int gfs2_check_internal_file_size(struct inode *inode,
 	u64 size = i_size_read(inode);
 	if (size < minsize || size > maxsize)
 		goto err;
-	if (size & (BIT(inode->i_blkbits) - 1))
+	if (size & ((1 << inode->i_blkbits) - 1))
 		goto err;
 	return 0;
 err:
@@ -113,7 +113,7 @@ extern loff_t gfs2_seek_data(struct file *file, loff_t offset);
 extern loff_t gfs2_seek_hole(struct file *file, loff_t offset);
 
 extern const struct inode_operations gfs2_file_iops;
-extern const struct inode_operations gfs2_dir_iops;
+extern const struct inode_operations_wrapper gfs2_dir_iops;
 extern const struct inode_operations gfs2_symlink_iops;
 extern const struct file_operations gfs2_file_fops_nolock;
 extern const struct file_operations gfs2_dir_fops_nolock;

@@ -28,9 +28,6 @@
  *
  * Also, for certain devices, the interrupt endpoint is used to convey
  * status of a command.
- *
- * Please see http://www.one-eyed-alien.net/~mdharm/linux-usb for more
- * information about this driver.
  */
 
 #ifdef CONFIG_USB_STORAGE_DEBUG
@@ -211,8 +208,8 @@ int usb_stor_reset_resume(struct usb_interface *iface)
 	usb_stor_report_bus_reset(us);
 
 	/*
-	 * FIXME: Notify the subdrivers that they need to reinitialize
-	 * the device
+	 * If any of the subdrivers implemented a reinitialization scheme,
+	 * this is where the callback would be invoked.
 	 */
 	return 0;
 }
@@ -243,8 +240,8 @@ int usb_stor_post_reset(struct usb_interface *iface)
 	usb_stor_report_bus_reset(us);
 
 	/*
-	 * FIXME: Notify the subdrivers that they need to reinitialize
-	 * the device
+	 * If any of the subdrivers implemented a reinitialization scheme,
+	 * this is where the callback would be invoked.
 	 */
 
 	mutex_unlock(&us->dev_mutex);
@@ -349,16 +346,14 @@ static int usb_stor_control_thread(void * __us)
 		 */
 		else if (srb->device->id &&
 				!(us->fflags & US_FL_SCM_MULT_TARG)) {
-			usb_stor_dbg(us, "Bad target number (%d:%llu)\n",
-				     srb->device->id,
-				     srb->device->lun);
+			usb_stor_dbg(us, "Bad target number (%d:%d)\n",
+				     srb->device->id, srb->device->lun);
 			srb->result = DID_BAD_TARGET << 16;
 		}
 
 		else if (srb->device->lun > us->max_lun) {
-			usb_stor_dbg(us, "Bad LUN (%d:%llu)\n",
-				     srb->device->id,
-				     srb->device->lun);
+			usb_stor_dbg(us, "Bad LUN (%d:%d)\n",
+				     srb->device->id, srb->device->lun);
 			srb->result = DID_BAD_TARGET << 16;
 		}
 

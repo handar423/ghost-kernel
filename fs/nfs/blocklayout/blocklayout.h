@@ -40,8 +40,8 @@
 #include "../pnfs.h"
 #include "../netns.h"
 
-#define PAGE_CACHE_SECTORS (PAGE_SIZE >> SECTOR_SHIFT)
-#define PAGE_CACHE_SECTOR_SHIFT (PAGE_SHIFT - SECTOR_SHIFT)
+#define PAGE_CACHE_SECTORS (PAGE_CACHE_SIZE >> SECTOR_SHIFT)
+#define PAGE_CACHE_SECTOR_SHIFT (PAGE_CACHE_SHIFT - SECTOR_SHIFT)
 #define SECTOR_SIZE (1 << SECTOR_SHIFT)
 
 struct pnfs_block_dev;
@@ -92,10 +92,9 @@ struct pnfs_block_volume {
 };
 
 struct pnfs_block_dev_map {
-	sector_t			start;
-	sector_t			len;
-
-	sector_t			disk_offset;
+	u64			start;
+	u64			len;
+	u64			disk_offset;
 	struct block_device		*bdev;
 };
 

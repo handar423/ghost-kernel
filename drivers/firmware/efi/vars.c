@@ -210,44 +210,29 @@ static const struct variable_validate variable_validate[] = {
 	{ NULL_GUID, "", NULL },
 };
 
-/*
- * Check if @var_name matches the pattern given in @match_name.
- *
- * @var_name: an array of @len non-NUL characters.
- * @match_name: a NUL-terminated pattern string, optionally ending in "*". A
- *              final "*" character matches any trailing characters @var_name,
- *              including the case when there are none left in @var_name.
- * @match: on output, the number of non-wildcard characters in @match_name
- *         that @var_name matches, regardless of the return value.
- * @return: whether @var_name fully matches @match_name.
- */
 static bool
 variable_matches(const char *var_name, size_t len, const char *match_name,
 		 int *match)
 {
 	for (*match = 0; ; (*match)++) {
 		char c = match_name[*match];
+		char u = var_name[*match];
 
-		switch (c) {
-		case '*':
-			/* Wildcard in @match_name means we've matched. */
+		/* Wildcard in the matching name means we've matched */
+		if (c == '*')
 			return true;
 
-		case '\0':
-			/* @match_name has ended. Has @var_name too? */
-			return (*match == len);
+		/* Case sensitive match */
+		if (!c && *match == len)
+			return true;
 
-		default:
-			/*
-			 * We've reached a non-wildcard char in @match_name.
-			 * Continue only if there's an identical character in
-			 * @var_name.
-			 */
-			if (*match < len && c == var_name[*match])
-				continue;
+		if (c != u)
 			return false;
-		}
+
+		if (!c)
+			return true;
 	}
+	return true;
 }
 
 bool
@@ -337,6 +322,39 @@ check_var_size_nonblocking(u32 attributes, unsigned long size)
 	return fops->query_variable_store(attributes, size, true);
 }
 
+static int efi_status_to_err(efi_status_t status)
+{
+	int err;
+
+	switch (status) {
+	case EFI_SUCCESS:
+		err = 0;
+		break;
+	case EFI_INVALID_PARAMETER:
+		err = -EINVAL;
+		break;
+	case EFI_OUT_OF_RESOURCES:
+		err = -ENOSPC;
+		break;
+	case EFI_DEVICE_ERROR:
+		err = -EIO;
+		break;
+	case EFI_WRITE_PROTECTED:
+		err = -EROFS;
+		break;
+	case EFI_SECURITY_VIOLATION:
+		err = -EACCES;
+		break;
+	case EFI_NOT_FOUND:
+		err = -ENOENT;
+		break;
+	default:
+		err = -EINVAL;
+	}
+
+	return err;
+}
+
 static bool variable_is_present(efi_char16_t *variable_name, efi_guid_t *vendor,
 				struct list_head *head)
 {
@@ -388,11 +406,11 @@ static unsigned long var_name_strnsize(efi_char16_t *variable_name,
  * Print a warning when duplicate EFI variables are encountered and
  * disable the sysfs workqueue since the firmware is buggy.
  */
-static void dup_variable_bug(efi_char16_t *str16, efi_guid_t *vendor_guid,
+static void dup_variable_bug(efi_char16_t *s16, efi_guid_t *vendor_guid,
 			     unsigned long len16)
 {
 	size_t i, len8 = len16 / sizeof(efi_char16_t);
-	char *str8;
+	char *s8;
 
 	/*
 	 * Disable the workqueue since the algorithm it uses for
@@ -401,16 +419,16 @@ static void dup_variable_bug(efi_char16_t *str16, efi_guid_t *vendor_guid,
 	 */
 	efivar_wq_enabled = false;
 
-	str8 = kzalloc(len8, GFP_KERNEL);
-	if (!str8)
+	s8 = kzalloc(len8, GFP_KERNEL);
+	if (!s8)
 		return;
 
 	for (i = 0; i < len8; i++)
-		str8[i] = str16[i];
+		s8[i] = s16[i];
 
 	printk(KERN_WARNING "efivars: duplicate variable: %s-%pUl\n",
-	       str8, vendor_guid);
-	kfree(str8);
+	       s8, vendor_guid);
+	kfree(s8);
 }
 
 /**

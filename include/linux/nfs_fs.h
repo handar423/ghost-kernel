@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 /*
  *  linux/include/linux/nfs_fs.h
  *
@@ -23,7 +22,6 @@
 #include <linux/mm.h>
 #include <linux/pagemap.h>
 #include <linux/rbtree.h>
-#include <linux/refcount.h>
 #include <linux/rwsem.h>
 #include <linux/wait.h>
 
@@ -51,13 +49,14 @@
 struct nfs_access_entry {
 	struct rb_node		rb_node;
 	struct list_head	lru;
+	unsigned long		jiffies;
 	struct rpc_cred *	cred;
-	__u32			mask;
+	int			mask;
 	struct rcu_head		rcu_head;
 };
 
 struct nfs_lock_context {
-	refcount_t count;
+	atomic_t count;
 	struct list_head list;
 	struct nfs_open_context *open_context;
 	fl_owner_t lockowner;
@@ -148,6 +147,10 @@ struct nfs_inode {
 	struct rb_root		access_cache;
 	struct list_head	access_cache_entry_lru;
 	struct list_head	access_cache_inode_lru;
+#ifdef CONFIG_NFS_V3_ACL
+	struct posix_acl	*acl_access;
+	struct posix_acl	*acl_default;
+#endif
 
 	/*
 	 * This is the cookie verifier used for NFSv3 readdir
@@ -155,16 +158,17 @@ struct nfs_inode {
 	 */
 	__be32			cookieverf[2];
 
-	atomic_long_t		nrequests;
+	unsigned long		nrequests;
 	struct nfs_mds_commit_info commit_info;
 
 	/* Open contexts for shared mmap writes */
 	struct list_head	open_files;
 
-	/* Readers: in-flight sillydelete RPC calls */
-	/* Writers: rmdir */
-	struct rw_semaphore	rmdir_sem;
-	struct mutex		commit_mutex;
+	/* Number of in-flight sillydelete RPC calls */
+	atomic_t		silly_count;
+	/* List of deferred sillydelete requests */
+	struct hlist_head	silly_list;
+	wait_queue_head_t	waitqueue;
 
 #if IS_ENABLED(CONFIG_NFS_V4)
 	struct nfs4_cached_acl	*nfs4_acl;
@@ -182,18 +186,12 @@ struct nfs_inode {
 #ifdef CONFIG_NFS_FSCACHE
 	struct fscache_cookie	*fscache;
 #endif
+	/* RH note, these two are half of a generic semaphore to do read/writes
+	 * exclusively via direct or buffered IO.  The other mutex in the
+	 * semaphore is i_mutex:
+	 */
 	struct inode		vfs_inode;
 };
-
-/*
- * Access bit flags
- */
-#define NFS_ACCESS_READ        0x0001
-#define NFS_ACCESS_LOOKUP      0x0002
-#define NFS_ACCESS_MODIFY      0x0004
-#define NFS_ACCESS_EXTEND      0x0008
-#define NFS_ACCESS_DELETE      0x0010
-#define NFS_ACCESS_EXECUTE     0x0020
 
 /*
  * Cache validity bit flags
@@ -344,22 +342,22 @@ extern void nfs_zap_caches(struct inode *);
 extern void nfs_invalidate_atime(struct inode *);
 extern struct inode *nfs_fhget(struct super_block *, struct nfs_fh *,
 				struct nfs_fattr *, struct nfs4_label *);
-struct inode *nfs_ilookup(struct super_block *sb, struct nfs_fattr *, struct nfs_fh *);
 extern int nfs_refresh_inode(struct inode *, struct nfs_fattr *);
 extern int nfs_post_op_update_inode(struct inode *inode, struct nfs_fattr *fattr);
 extern int nfs_post_op_update_inode_force_wcc(struct inode *inode, struct nfs_fattr *fattr);
 extern int nfs_post_op_update_inode_force_wcc_locked(struct inode *inode, struct nfs_fattr *fattr);
-extern int nfs_getattr(const struct path *, struct kstat *, u32, unsigned int);
+extern int nfs_getattr(struct vfsmount *, struct dentry *, struct kstat *);
 extern void nfs_access_add_cache(struct inode *, struct nfs_access_entry *);
 extern void nfs_access_set_mask(struct nfs_access_entry *, u32);
 extern int nfs_permission(struct inode *, int);
 extern int nfs_open(struct inode *, struct file *);
+extern int nfs_attribute_timeout(struct inode *inode);
 extern int nfs_attribute_cache_expired(struct inode *inode);
 extern int nfs_revalidate_inode(struct nfs_server *server, struct inode *inode);
+extern int nfs_revalidate_inode_rcu(struct nfs_server *server, struct inode *inode);
 extern int __nfs_revalidate_inode(struct nfs_server *, struct inode *);
-extern bool nfs_mapping_need_revalidate_inode(struct inode *inode);
 extern int nfs_revalidate_mapping(struct inode *inode, struct address_space *mapping);
-extern int nfs_revalidate_mapping_rcu(struct inode *inode);
+extern int nfs_revalidate_mapping_protected(struct inode *inode, struct address_space *mapping);
 extern int nfs_setattr(struct dentry *, struct iattr *);
 extern void nfs_setattr_update_inode(struct inode *inode, struct iattr *attr, struct nfs_fattr *);
 extern void nfs_setsecurity(struct inode *inode, struct nfs_fattr *fattr,
@@ -427,7 +425,7 @@ extern __be32 root_nfs_parse_addr(char *name); /*__init*/
  */
 extern const struct file_operations nfs_file_operations;
 #if IS_ENABLED(CONFIG_NFS_V4)
-extern const struct file_operations nfs4_file_operations;
+extern const struct file_operations_extend nfs4_file_operations;
 #endif /* CONFIG_NFS_V4 */
 extern const struct address_space_operations nfs_file_aops;
 extern const struct address_space_operations nfs_dir_aops;
@@ -451,11 +449,14 @@ static inline struct rpc_cred *nfs_file_cred(struct file *file)
 /*
  * linux/fs/nfs/direct.c
  */
-extern ssize_t nfs_direct_IO(struct kiocb *, struct iov_iter *);
+extern ssize_t nfs_direct_IO(int, struct kiocb *, const struct iovec *, loff_t,
+			unsigned long);
 extern ssize_t nfs_file_direct_read(struct kiocb *iocb,
-			struct iov_iter *iter);
+			const struct iovec *iov, unsigned long nr_segs,
+			loff_t pos, bool uio);
 extern ssize_t nfs_file_direct_write(struct kiocb *iocb,
-			struct iov_iter *iter);
+			const struct iovec *iov, unsigned long nr_segs,
+			loff_t pos, bool uio);
 
 /*
  * linux/fs/nfs/dir.c
@@ -497,6 +498,9 @@ extern void nfs_release_automount_timer(void);
  * linux/fs/nfs/unlink.c
  */
 extern void nfs_complete_unlink(struct dentry *dentry, struct inode *);
+extern void nfs_wait_on_sillyrename(struct dentry *dentry);
+extern void nfs_block_sillyrename(struct dentry *dentry);
+extern void nfs_unblock_sillyrename(struct dentry *dentry);
 
 /*
  * linux/fs/nfs/write.c
@@ -513,16 +517,28 @@ extern int  nfs_updatepage(struct file *, struct page *, unsigned int, unsigned 
  */
 extern int nfs_sync_inode(struct inode *inode);
 extern int nfs_wb_all(struct inode *inode);
-extern int nfs_wb_page(struct inode *inode, struct page *page);
+extern int nfs_wb_single_page(struct inode *inode, struct page *page, bool launder);
 extern int nfs_wb_page_cancel(struct inode *inode, struct page* page);
 extern int  nfs_commit_inode(struct inode *, int);
-extern struct nfs_commit_data *nfs_commitdata_alloc(bool never_fail);
+extern struct nfs_commit_data *nfs_commitdata_alloc(void);
 extern void nfs_commit_free(struct nfs_commit_data *data);
+
+static inline int
+nfs_wb_launder_page(struct inode *inode, struct page *page)
+{
+	return nfs_wb_single_page(inode, page, true);
+}
+
+static inline int
+nfs_wb_page(struct inode *inode, struct page *page)
+{
+	return nfs_wb_single_page(inode, page, false);
+}
 
 static inline int
 nfs_have_writebacks(struct inode *inode)
 {
-	return atomic_long_read(&NFS_I(inode)->nrequests) != 0;
+	return NFS_I(inode)->nrequests != 0;
 }
 
 /*
@@ -533,7 +549,6 @@ extern int  nfs_readpages(struct file *, struct address_space *,
 		struct list_head *, unsigned);
 extern int  nfs_readpage_async(struct nfs_open_context *, struct inode *,
 			       struct page *);
-
 /*
  * inline functions
  */

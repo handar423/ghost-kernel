@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * Intel specific MCE features.
  * Copyright 2004 Zwane Mwaikambo <zwane@linuxpower.ca>
@@ -87,7 +86,7 @@ static int cmci_supported(int *banks)
 	 */
 	if (boot_cpu_data.x86_vendor != X86_VENDOR_INTEL)
 		return 0;
-	if (!boot_cpu_has(X86_FEATURE_APIC) || lapic_get_maxlvt() < 6)
+	if (!cpu_has_apic || lapic_get_maxlvt() < 6)
 		return 0;
 	rdmsrl(MSR_IA32_MCG_CAP, cap);
 	*banks = min_t(unsigned, MAX_NR_BANKS, cap & 0xff);
@@ -133,7 +132,7 @@ bool mce_intel_cmci_poll(void)
 	 * Reset the counter if we've logged an error in the last poll
 	 * during the storm.
 	 */
-	if (machine_check_poll(0, this_cpu_ptr(&mce_banks_owned)))
+	if (machine_check_poll(MCP_TIMESTAMP, this_cpu_ptr(&mce_banks_owned)))
 		this_cpu_write(cmci_backoff_cnt, INITIAL_CHECK_INTERVAL);
 	else
 		this_cpu_dec(cmci_backoff_cnt);
@@ -156,7 +155,7 @@ static void cmci_toggle_interrupt_mode(bool on)
 	u64 val;
 
 	raw_spin_lock_irqsave(&cmci_discover_lock, flags);
-	owned = this_cpu_ptr(mce_banks_owned);
+	owned = __get_cpu_var(mce_banks_owned);
 	for_each_set_bit(bank, owned, MAX_NR_BANKS) {
 		rdmsrl(MSR_IA32_MCx_CTL2(bank), val);
 
@@ -253,7 +252,7 @@ static void intel_threshold_interrupt(void)
 	if (cmci_storm_detect())
 		return;
 
-	machine_check_poll(MCP_TIMESTAMP, this_cpu_ptr(&mce_banks_owned));
+	machine_check_poll(MCP_TIMESTAMP, &__get_cpu_var(mce_banks_owned));
 }
 
 /*
@@ -263,7 +262,7 @@ static void intel_threshold_interrupt(void)
  */
 static void cmci_discover(int banks)
 {
-	unsigned long *owned = (void *)this_cpu_ptr(&mce_banks_owned);
+	unsigned long *owned = (void *)&__get_cpu_var(mce_banks_owned);
 	unsigned long flags;
 	int i;
 	int bios_wrong_thresh = 0;
@@ -285,7 +284,7 @@ static void cmci_discover(int banks)
 		/* Already owned by someone else? */
 		if (val & MCI_CTL2_CMCI_EN) {
 			clear_bit(i, owned);
-			__clear_bit(i, this_cpu_ptr(mce_poll_banks));
+			__clear_bit(i, __get_cpu_var(mce_poll_banks));
 			continue;
 		}
 
@@ -309,7 +308,7 @@ static void cmci_discover(int banks)
 		/* Did the enable bit stick? -- the bank supports CMCI */
 		if (val & MCI_CTL2_CMCI_EN) {
 			set_bit(i, owned);
-			__clear_bit(i, this_cpu_ptr(mce_poll_banks));
+			__clear_bit(i, __get_cpu_var(mce_poll_banks));
 			/*
 			 * We are able to set thresholds for some banks that
 			 * had a threshold of 0. This means the BIOS has not
@@ -320,7 +319,7 @@ static void cmci_discover(int banks)
 					(val & MCI_CTL2_CMCI_THRESHOLD_MASK))
 				bios_wrong_thresh = 1;
 		} else {
-			WARN_ON(!test_bit(i, this_cpu_ptr(mce_poll_banks)));
+			WARN_ON(!test_bit(i, __get_cpu_var(mce_poll_banks)));
 		}
 	}
 	raw_spin_unlock_irqrestore(&cmci_discover_lock, flags);
@@ -341,11 +340,11 @@ void cmci_recheck(void)
 	unsigned long flags;
 	int banks;
 
-	if (!mce_available(raw_cpu_ptr(&cpu_info)) || !cmci_supported(&banks))
+	if (!mce_available(__this_cpu_ptr(&cpu_info)) || !cmci_supported(&banks))
 		return;
 
 	local_irq_save(flags);
-	machine_check_poll(0, this_cpu_ptr(&mce_banks_owned));
+	machine_check_poll(MCP_TIMESTAMP, &__get_cpu_var(mce_banks_owned));
 	local_irq_restore(flags);
 }
 
@@ -354,12 +353,12 @@ static void __cmci_disable_bank(int bank)
 {
 	u64 val;
 
-	if (!test_bit(bank, this_cpu_ptr(mce_banks_owned)))
+	if (!test_bit(bank, __get_cpu_var(mce_banks_owned)))
 		return;
 	rdmsrl(MSR_IA32_MCx_CTL2(bank), val);
 	val &= ~MCI_CTL2_CMCI_EN;
 	wrmsrl(MSR_IA32_MCx_CTL2(bank), val);
-	__clear_bit(bank, this_cpu_ptr(mce_banks_owned));
+	__clear_bit(bank, __get_cpu_var(mce_banks_owned));
 }
 
 /*

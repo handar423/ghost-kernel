@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * arch/ia64/kernel/crash.c
  *
@@ -216,7 +215,7 @@ kdump_init_notifier(struct notifier_block *self, unsigned long val, void *data)
 }
 
 #ifdef CONFIG_SYSCTL
-static struct ctl_table kdump_ctl_table[] = {
+static ctl_table kdump_ctl_table[] = {
 	{
 		.procname = "kdump_on_init",
 		.data = &kdump_on_init,
@@ -234,7 +233,7 @@ static struct ctl_table kdump_ctl_table[] = {
 	{ }
 };
 
-static struct ctl_table sys_table[] = {
+static ctl_table sys_table[] = {
 	{
 	  .procname = "kernel",
 	  .mode = 0555,

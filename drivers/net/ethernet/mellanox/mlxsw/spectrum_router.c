@@ -1,10 +1,10 @@
 /*
  * drivers/net/ethernet/mellanox/mlxsw/spectrum_router.c
- * Copyright (c) 2016-2017 Mellanox Technologies. All rights reserved.
+ * Copyright (c) 2016-2018 Mellanox Technologies. All rights reserved.
  * Copyright (c) 2016 Jiri Pirko <jiri@mellanox.com>
  * Copyright (c) 2016 Ido Schimmel <idosch@mellanox.com>
  * Copyright (c) 2016 Yotam Gigi <yotamg@mellanox.com>
- * Copyright (c) 2017 Petr Machata <petrm@mellanox.com>
+ * Copyright (c) 2017-2018 Petr Machata <petrm@mellanox.com>
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -55,10 +55,9 @@
 #include <net/ip6_fib.h>
 #include <net/fib_rules.h>
 #include <net/ip_tunnels.h>
-#include <net/l3mdev.h>
+#include "l3mdev.h"
 #include <net/addrconf.h>
 #include <net/ndisc.h>
-#include <net/ipv6.h>
 #include <net/fib_notifier.h>
 
 #include "spectrum.h"
@@ -70,7 +69,9 @@
 #include "spectrum_mr.h"
 #include "spectrum_mr_tcam.h"
 #include "spectrum_router.h"
+#include "spectrum_span.h"
 
+struct mlxsw_sp_fib;
 struct mlxsw_sp_vr;
 struct mlxsw_sp_lpm_tree;
 struct mlxsw_sp_rif_ops;
@@ -84,6 +85,8 @@ struct mlxsw_sp_router {
 	struct rhashtable nexthop_ht;
 	struct list_head nexthop_list;
 	struct {
+		/* One tree for each protocol: IPv4 and IPv6 */
+		struct mlxsw_sp_lpm_tree *proto_trees[2];
 		struct mlxsw_sp_lpm_tree *trees;
 		unsigned int tree_count;
 	} lpm;
@@ -161,6 +164,15 @@ struct mlxsw_sp_rif_ops {
 	void (*deconfigure)(struct mlxsw_sp_rif *rif);
 	struct mlxsw_sp_fid * (*fid_get)(struct mlxsw_sp_rif *rif);
 };
+
+static void mlxsw_sp_lpm_tree_hold(struct mlxsw_sp_lpm_tree *lpm_tree);
+static void mlxsw_sp_lpm_tree_put(struct mlxsw_sp *mlxsw_sp,
+				  struct mlxsw_sp_lpm_tree *lpm_tree);
+static int mlxsw_sp_vr_lpm_tree_bind(struct mlxsw_sp *mlxsw_sp,
+				     const struct mlxsw_sp_fib *fib,
+				     u8 tree_id);
+static int mlxsw_sp_vr_lpm_tree_unbind(struct mlxsw_sp *mlxsw_sp,
+				       const struct mlxsw_sp_fib *fib);
 
 static unsigned int *
 mlxsw_sp_rif_p_counter_get(struct mlxsw_sp_rif *rif,
@@ -349,14 +361,6 @@ mlxsw_sp_prefix_usage_eq(struct mlxsw_sp_prefix_usage *prefix_usage1,
 	return !memcmp(prefix_usage1, prefix_usage2, sizeof(*prefix_usage1));
 }
 
-static bool
-mlxsw_sp_prefix_usage_none(struct mlxsw_sp_prefix_usage *prefix_usage)
-{
-	struct mlxsw_sp_prefix_usage prefix_usage_none = {{ 0 } };
-
-	return mlxsw_sp_prefix_usage_eq(prefix_usage, &prefix_usage_none);
-}
-
 static void
 mlxsw_sp_prefix_usage_cpy(struct mlxsw_sp_prefix_usage *prefix_usage1,
 			  struct mlxsw_sp_prefix_usage *prefix_usage2)
@@ -398,7 +402,6 @@ enum mlxsw_sp_fib_entry_type {
 };
 
 struct mlxsw_sp_nexthop_group;
-struct mlxsw_sp_fib;
 
 struct mlxsw_sp_fib_node {
 	struct list_head entry_list;
@@ -445,6 +448,7 @@ struct mlxsw_sp_lpm_tree {
 	u8 id; /* tree ID */
 	unsigned int ref_count;
 	enum mlxsw_sp_l3proto proto;
+	unsigned long prefix_ref_count[MLXSW_SP_PREFIX_COUNT];
 	struct mlxsw_sp_prefix_usage prefix_usage;
 };
 
@@ -453,8 +457,6 @@ struct mlxsw_sp_fib {
 	struct list_head node_list;
 	struct mlxsw_sp_vr *vr;
 	struct mlxsw_sp_lpm_tree *lpm_tree;
-	unsigned long prefix_ref_count[MLXSW_SP_PREFIX_COUNT];
-	struct mlxsw_sp_prefix_usage prefix_usage;
 	enum mlxsw_sp_l3proto proto;
 };
 
@@ -469,12 +471,15 @@ struct mlxsw_sp_vr {
 
 static const struct rhashtable_params mlxsw_sp_fib_ht_params;
 
-static struct mlxsw_sp_fib *mlxsw_sp_fib_create(struct mlxsw_sp_vr *vr,
+static struct mlxsw_sp_fib *mlxsw_sp_fib_create(struct mlxsw_sp *mlxsw_sp,
+						struct mlxsw_sp_vr *vr,
 						enum mlxsw_sp_l3proto proto)
 {
+	struct mlxsw_sp_lpm_tree *lpm_tree;
 	struct mlxsw_sp_fib *fib;
 	int err;
 
+	lpm_tree = mlxsw_sp->router->lpm.proto_trees[proto];
 	fib = kzalloc(sizeof(*fib), GFP_KERNEL);
 	if (!fib)
 		return ERR_PTR(-ENOMEM);
@@ -484,17 +489,26 @@ static struct mlxsw_sp_fib *mlxsw_sp_fib_create(struct mlxsw_sp_vr *vr,
 	INIT_LIST_HEAD(&fib->node_list);
 	fib->proto = proto;
 	fib->vr = vr;
+	fib->lpm_tree = lpm_tree;
+	mlxsw_sp_lpm_tree_hold(lpm_tree);
+	err = mlxsw_sp_vr_lpm_tree_bind(mlxsw_sp, fib, lpm_tree->id);
+	if (err)
+		goto err_lpm_tree_bind;
 	return fib;
 
+err_lpm_tree_bind:
+	mlxsw_sp_lpm_tree_put(mlxsw_sp, lpm_tree);
 err_rhashtable_init:
 	kfree(fib);
 	return ERR_PTR(err);
 }
 
-static void mlxsw_sp_fib_destroy(struct mlxsw_sp_fib *fib)
+static void mlxsw_sp_fib_destroy(struct mlxsw_sp *mlxsw_sp,
+				 struct mlxsw_sp_fib *fib)
 {
+	mlxsw_sp_vr_lpm_tree_unbind(mlxsw_sp, fib);
+	mlxsw_sp_lpm_tree_put(mlxsw_sp, fib->lpm_tree);
 	WARN_ON(!list_empty(&fib->node_list));
-	WARN_ON(fib->lpm_tree);
 	rhashtable_destroy(&fib->ht);
 	kfree(fib);
 }
@@ -581,6 +595,9 @@ mlxsw_sp_lpm_tree_create(struct mlxsw_sp *mlxsw_sp,
 		goto err_left_struct_set;
 	memcpy(&lpm_tree->prefix_usage, prefix_usage,
 	       sizeof(lpm_tree->prefix_usage));
+	memset(&lpm_tree->prefix_ref_count, 0,
+	       sizeof(lpm_tree->prefix_ref_count));
+	lpm_tree->ref_count = 1;
 	return lpm_tree;
 
 err_left_struct_set:
@@ -607,8 +624,10 @@ mlxsw_sp_lpm_tree_get(struct mlxsw_sp *mlxsw_sp,
 		if (lpm_tree->ref_count != 0 &&
 		    lpm_tree->proto == proto &&
 		    mlxsw_sp_prefix_usage_eq(&lpm_tree->prefix_usage,
-					     prefix_usage))
+					     prefix_usage)) {
+			mlxsw_sp_lpm_tree_hold(lpm_tree);
 			return lpm_tree;
+		}
 	}
 	return mlxsw_sp_lpm_tree_create(mlxsw_sp, prefix_usage, proto);
 }
@@ -629,9 +648,10 @@ static void mlxsw_sp_lpm_tree_put(struct mlxsw_sp *mlxsw_sp,
 
 static int mlxsw_sp_lpm_init(struct mlxsw_sp *mlxsw_sp)
 {
+	struct mlxsw_sp_prefix_usage req_prefix_usage = {{ 0 } };
 	struct mlxsw_sp_lpm_tree *lpm_tree;
 	u64 max_trees;
-	int i;
+	int err, i;
 
 	if (!MLXSW_CORE_RES_VALID(mlxsw_sp->core, MAX_LPM_TREES))
 		return -EIO;
@@ -649,11 +669,42 @@ static int mlxsw_sp_lpm_init(struct mlxsw_sp *mlxsw_sp)
 		lpm_tree->id = i + MLXSW_SP_LPM_TREE_MIN;
 	}
 
+	lpm_tree = mlxsw_sp_lpm_tree_get(mlxsw_sp, &req_prefix_usage,
+					 MLXSW_SP_L3_PROTO_IPV4);
+	if (IS_ERR(lpm_tree)) {
+		err = PTR_ERR(lpm_tree);
+		goto err_ipv4_tree_get;
+	}
+	mlxsw_sp->router->lpm.proto_trees[MLXSW_SP_L3_PROTO_IPV4] = lpm_tree;
+
+	lpm_tree = mlxsw_sp_lpm_tree_get(mlxsw_sp, &req_prefix_usage,
+					 MLXSW_SP_L3_PROTO_IPV6);
+	if (IS_ERR(lpm_tree)) {
+		err = PTR_ERR(lpm_tree);
+		goto err_ipv6_tree_get;
+	}
+	mlxsw_sp->router->lpm.proto_trees[MLXSW_SP_L3_PROTO_IPV6] = lpm_tree;
+
 	return 0;
+
+err_ipv6_tree_get:
+	lpm_tree = mlxsw_sp->router->lpm.proto_trees[MLXSW_SP_L3_PROTO_IPV4];
+	mlxsw_sp_lpm_tree_put(mlxsw_sp, lpm_tree);
+err_ipv4_tree_get:
+	kfree(mlxsw_sp->router->lpm.trees);
+	return err;
 }
 
 static void mlxsw_sp_lpm_fini(struct mlxsw_sp *mlxsw_sp)
 {
+	struct mlxsw_sp_lpm_tree *lpm_tree;
+
+	lpm_tree = mlxsw_sp->router->lpm.proto_trees[MLXSW_SP_L3_PROTO_IPV6];
+	mlxsw_sp_lpm_tree_put(mlxsw_sp, lpm_tree);
+
+	lpm_tree = mlxsw_sp->router->lpm.proto_trees[MLXSW_SP_L3_PROTO_IPV4];
+	mlxsw_sp_lpm_tree_put(mlxsw_sp, lpm_tree);
+
 	kfree(mlxsw_sp->router->lpm.trees);
 }
 
@@ -734,9 +785,11 @@ static struct mlxsw_sp_fib *mlxsw_sp_vr_fib(const struct mlxsw_sp_vr *vr,
 }
 
 static struct mlxsw_sp_vr *mlxsw_sp_vr_create(struct mlxsw_sp *mlxsw_sp,
-					      u32 tb_id,
-					      struct netlink_ext_ack *extack)
+					      u32 tb_id)
 {
+	struct mlxsw_sp_mr_table *mr4_table;
+	struct mlxsw_sp_fib *fib4;
+	struct mlxsw_sp_fib *fib6;
 	struct mlxsw_sp_vr *vr;
 	int err;
 
@@ -745,60 +798,61 @@ static struct mlxsw_sp_vr *mlxsw_sp_vr_create(struct mlxsw_sp *mlxsw_sp,
 		NL_SET_ERR_MSG(extack, "spectrum: Exceeded number of supported virtual routers");
 		return ERR_PTR(-EBUSY);
 	}
-	vr->fib4 = mlxsw_sp_fib_create(vr, MLXSW_SP_L3_PROTO_IPV4);
-	if (IS_ERR(vr->fib4))
-		return ERR_CAST(vr->fib4);
-	vr->fib6 = mlxsw_sp_fib_create(vr, MLXSW_SP_L3_PROTO_IPV6);
-	if (IS_ERR(vr->fib6)) {
-		err = PTR_ERR(vr->fib6);
+	fib4 = mlxsw_sp_fib_create(mlxsw_sp, vr, MLXSW_SP_L3_PROTO_IPV4);
+	if (IS_ERR(fib4))
+		return ERR_CAST(fib4);
+	fib6 = mlxsw_sp_fib_create(mlxsw_sp, vr, MLXSW_SP_L3_PROTO_IPV6);
+	if (IS_ERR(fib6)) {
+		err = PTR_ERR(fib6);
 		goto err_fib6_create;
 	}
-	vr->mr4_table = mlxsw_sp_mr_table_create(mlxsw_sp, vr->id,
-						 MLXSW_SP_L3_PROTO_IPV4);
-	if (IS_ERR(vr->mr4_table)) {
-		err = PTR_ERR(vr->mr4_table);
+	mr4_table = mlxsw_sp_mr_table_create(mlxsw_sp, vr->id,
+					     MLXSW_SP_L3_PROTO_IPV4);
+	if (IS_ERR(mr4_table)) {
+		err = PTR_ERR(mr4_table);
 		goto err_mr_table_create;
 	}
+	vr->fib4 = fib4;
+	vr->fib6 = fib6;
+	vr->mr4_table = mr4_table;
 	vr->tb_id = tb_id;
 	return vr;
 
 err_mr_table_create:
-	mlxsw_sp_fib_destroy(vr->fib6);
-	vr->fib6 = NULL;
+	mlxsw_sp_fib_destroy(mlxsw_sp, fib6);
 err_fib6_create:
-	mlxsw_sp_fib_destroy(vr->fib4);
-	vr->fib4 = NULL;
+	mlxsw_sp_fib_destroy(mlxsw_sp, fib4);
 	return ERR_PTR(err);
 }
 
-static void mlxsw_sp_vr_destroy(struct mlxsw_sp_vr *vr)
+static void mlxsw_sp_vr_destroy(struct mlxsw_sp *mlxsw_sp,
+				struct mlxsw_sp_vr *vr)
 {
 	mlxsw_sp_mr_table_destroy(vr->mr4_table);
 	vr->mr4_table = NULL;
-	mlxsw_sp_fib_destroy(vr->fib6);
+	mlxsw_sp_fib_destroy(mlxsw_sp, vr->fib6);
 	vr->fib6 = NULL;
-	mlxsw_sp_fib_destroy(vr->fib4);
+	mlxsw_sp_fib_destroy(mlxsw_sp, vr->fib4);
 	vr->fib4 = NULL;
 }
 
-static struct mlxsw_sp_vr *mlxsw_sp_vr_get(struct mlxsw_sp *mlxsw_sp, u32 tb_id,
-					   struct netlink_ext_ack *extack)
+static struct mlxsw_sp_vr *mlxsw_sp_vr_get(struct mlxsw_sp *mlxsw_sp, u32 tb_id)
 {
 	struct mlxsw_sp_vr *vr;
 
 	tb_id = mlxsw_sp_fix_tb_id(tb_id);
 	vr = mlxsw_sp_vr_find(mlxsw_sp, tb_id);
 	if (!vr)
-		vr = mlxsw_sp_vr_create(mlxsw_sp, tb_id, extack);
+		vr = mlxsw_sp_vr_create(mlxsw_sp, tb_id);
 	return vr;
 }
 
-static void mlxsw_sp_vr_put(struct mlxsw_sp_vr *vr)
+static void mlxsw_sp_vr_put(struct mlxsw_sp *mlxsw_sp, struct mlxsw_sp_vr *vr)
 {
 	if (!vr->rif_count && list_empty(&vr->fib4->node_list) &&
 	    list_empty(&vr->fib6->node_list) &&
 	    mlxsw_sp_mr_table_empty(vr->mr4_table))
-		mlxsw_sp_vr_destroy(vr);
+		mlxsw_sp_vr_destroy(mlxsw_sp, vr);
 }
 
 static bool
@@ -809,7 +863,7 @@ mlxsw_sp_vr_lpm_tree_should_replace(struct mlxsw_sp_vr *vr,
 
 	if (!mlxsw_sp_vr_is_used(vr))
 		return false;
-	if (fib->lpm_tree && fib->lpm_tree->id == tree_id)
+	if (fib->lpm_tree->id == tree_id)
 		return true;
 	return false;
 }
@@ -839,14 +893,13 @@ static int mlxsw_sp_vrs_lpm_tree_replace(struct mlxsw_sp *mlxsw_sp,
 					 struct mlxsw_sp_fib *fib,
 					 struct mlxsw_sp_lpm_tree *new_tree)
 {
-	struct mlxsw_sp_lpm_tree *old_tree = fib->lpm_tree;
 	enum mlxsw_sp_l3proto proto = fib->proto;
+	struct mlxsw_sp_lpm_tree *old_tree;
 	u8 old_id, new_id = new_tree->id;
 	struct mlxsw_sp_vr *vr;
 	int i, err;
 
-	if (!old_tree)
-		goto no_replace;
+	old_tree = mlxsw_sp->router->lpm.proto_trees[proto];
 	old_id = old_tree->id;
 
 	for (i = 0; i < MLXSW_CORE_RES_GET(mlxsw_sp->core, MAX_VRS); i++) {
@@ -860,6 +913,11 @@ static int mlxsw_sp_vrs_lpm_tree_replace(struct mlxsw_sp *mlxsw_sp,
 			goto err_tree_replace;
 	}
 
+	memcpy(new_tree->prefix_ref_count, old_tree->prefix_ref_count,
+	       sizeof(new_tree->prefix_ref_count));
+	mlxsw_sp->router->lpm.proto_trees[proto] = new_tree;
+	mlxsw_sp_lpm_tree_put(mlxsw_sp, old_tree);
+
 	return 0;
 
 err_tree_replace:
@@ -871,36 +929,6 @@ err_tree_replace:
 					     old_tree);
 	}
 	return err;
-
-no_replace:
-	fib->lpm_tree = new_tree;
-	mlxsw_sp_lpm_tree_hold(new_tree);
-	err = mlxsw_sp_vr_lpm_tree_bind(mlxsw_sp, fib, new_tree->id);
-	if (err) {
-		mlxsw_sp_lpm_tree_put(mlxsw_sp, new_tree);
-		fib->lpm_tree = NULL;
-		return err;
-	}
-	return 0;
-}
-
-static void
-mlxsw_sp_vrs_prefixes(struct mlxsw_sp *mlxsw_sp,
-		      enum mlxsw_sp_l3proto proto,
-		      struct mlxsw_sp_prefix_usage *req_prefix_usage)
-{
-	int i;
-
-	for (i = 0; i < MLXSW_CORE_RES_GET(mlxsw_sp->core, MAX_VRS); i++) {
-		struct mlxsw_sp_vr *vr = &mlxsw_sp->router->vrs[i];
-		struct mlxsw_sp_fib *fib = mlxsw_sp_vr_fib(vr, proto);
-		unsigned char prefix;
-
-		if (!mlxsw_sp_vr_is_used(vr))
-			continue;
-		mlxsw_sp_prefix_usage_for_each(prefix, &fib->prefix_usage)
-			mlxsw_sp_prefix_usage_set(req_prefix_usage, prefix);
-	}
 }
 
 static int mlxsw_sp_vrs_init(struct mlxsw_sp *mlxsw_sp)
@@ -963,14 +991,12 @@ u32 mlxsw_sp_ipip_dev_ul_tb_id(const struct net_device *ol_dev)
 
 static struct mlxsw_sp_rif *
 mlxsw_sp_rif_create(struct mlxsw_sp *mlxsw_sp,
-		    const struct mlxsw_sp_rif_params *params,
-		    struct netlink_ext_ack *extack);
+		    const struct mlxsw_sp_rif_params *params);
 
 static struct mlxsw_sp_rif_ipip_lb *
 mlxsw_sp_ipip_ol_ipip_lb_create(struct mlxsw_sp *mlxsw_sp,
 				enum mlxsw_sp_ipip_type ipipt,
-				struct net_device *ol_dev,
-				struct netlink_ext_ack *extack)
+				struct net_device *ol_dev)
 {
 	struct mlxsw_sp_rif_params_ipip_lb lb_params;
 	const struct mlxsw_sp_ipip_ops *ipip_ops;
@@ -983,7 +1009,7 @@ mlxsw_sp_ipip_ol_ipip_lb_create(struct mlxsw_sp *mlxsw_sp,
 		.lb_config = ipip_ops->ol_loopback_config(mlxsw_sp, ol_dev),
 	};
 
-	rif = mlxsw_sp_rif_create(mlxsw_sp, &lb_params.common, extack);
+	rif = mlxsw_sp_rif_create(mlxsw_sp, &lb_params.common);
 	if (IS_ERR(rif))
 		return ERR_CAST(rif);
 	return container_of(rif, struct mlxsw_sp_rif_ipip_lb, common);
@@ -994,15 +1020,17 @@ mlxsw_sp_ipip_entry_alloc(struct mlxsw_sp *mlxsw_sp,
 			  enum mlxsw_sp_ipip_type ipipt,
 			  struct net_device *ol_dev)
 {
+	const struct mlxsw_sp_ipip_ops *ipip_ops;
 	struct mlxsw_sp_ipip_entry *ipip_entry;
 	struct mlxsw_sp_ipip_entry *ret = NULL;
 
+	ipip_ops = mlxsw_sp->router->ipip_ops_arr[ipipt];
 	ipip_entry = kzalloc(sizeof(*ipip_entry), GFP_KERNEL);
 	if (!ipip_entry)
 		return ERR_PTR(-ENOMEM);
 
 	ipip_entry->ol_lb = mlxsw_sp_ipip_ol_ipip_lb_create(mlxsw_sp, ipipt,
-							    ol_dev, NULL);
+							    ol_dev);
 	if (IS_ERR(ipip_entry->ol_lb)) {
 		ret = ERR_CAST(ipip_entry->ol_lb);
 		goto err_ol_ipip_lb_create;
@@ -1010,7 +1038,15 @@ mlxsw_sp_ipip_entry_alloc(struct mlxsw_sp *mlxsw_sp,
 
 	ipip_entry->ipipt = ipipt;
 	ipip_entry->ol_dev = ol_dev;
-	ipip_entry->parms = mlxsw_sp_ipip_netdev_parms(ol_dev);
+
+	switch (ipip_ops->ul_proto) {
+	case MLXSW_SP_L3_PROTO_IPV4:
+		ipip_entry->parms4 = mlxsw_sp_ipip_netdev_parms4(ol_dev);
+		break;
+	case MLXSW_SP_L3_PROTO_IPV6:
+		WARN_ON(1);
+		break;
+	}
 
 	return ipip_entry;
 
@@ -1350,6 +1386,55 @@ mlxsw_sp_ipip_entry_ol_up_event(struct mlxsw_sp *mlxsw_sp,
 						  decap_fib_entry);
 }
 
+static int
+mlxsw_sp_rif_ipip_lb_op(struct mlxsw_sp_rif_ipip_lb *lb_rif,
+			struct mlxsw_sp_vr *ul_vr, bool enable)
+{
+	struct mlxsw_sp_rif_ipip_lb_config lb_cf = lb_rif->lb_config;
+	struct mlxsw_sp_rif *rif = &lb_rif->common;
+	struct mlxsw_sp *mlxsw_sp = rif->mlxsw_sp;
+	char ritr_pl[MLXSW_REG_RITR_LEN];
+	u32 saddr4;
+
+	switch (lb_cf.ul_protocol) {
+	case MLXSW_SP_L3_PROTO_IPV4:
+		saddr4 = be32_to_cpu(lb_cf.saddr.addr4);
+		mlxsw_reg_ritr_pack(ritr_pl, enable, MLXSW_REG_RITR_LOOPBACK_IF,
+				    rif->rif_index, rif->vr_id, rif->dev->mtu);
+		mlxsw_reg_ritr_loopback_ipip4_pack(ritr_pl, lb_cf.lb_ipipt,
+			    MLXSW_REG_RITR_LOOPBACK_IPIP_OPTIONS_GRE_KEY_PRESET,
+			    ul_vr->id, saddr4, lb_cf.okey);
+		break;
+
+	case MLXSW_SP_L3_PROTO_IPV6:
+		return -EAFNOSUPPORT;
+	}
+
+	return mlxsw_reg_write(mlxsw_sp->core, MLXSW_REG(ritr), ritr_pl);
+}
+
+static int mlxsw_sp_netdevice_ipip_ol_update_mtu(struct mlxsw_sp *mlxsw_sp,
+						 struct net_device *ol_dev)
+{
+	struct mlxsw_sp_ipip_entry *ipip_entry;
+	struct mlxsw_sp_rif_ipip_lb *lb_rif;
+	struct mlxsw_sp_vr *ul_vr;
+	int err = 0;
+
+	ipip_entry = mlxsw_sp_ipip_entry_find_by_ol_dev(mlxsw_sp, ol_dev);
+	if (ipip_entry) {
+		lb_rif = ipip_entry->ol_lb;
+		ul_vr = &mlxsw_sp->router->vrs[lb_rif->ul_vr_id];
+		err = mlxsw_sp_rif_ipip_lb_op(lb_rif, ul_vr, true);
+		if (err)
+			goto out;
+		lb_rif->common.mtu = ol_dev->mtu;
+	}
+
+out:
+	return err;
+}
+
 static void mlxsw_sp_netdevice_ipip_ol_up_event(struct mlxsw_sp *mlxsw_sp,
 						struct net_device *ol_dev)
 {
@@ -1384,16 +1469,14 @@ static void mlxsw_sp_nexthop_rif_migrate(struct mlxsw_sp *mlxsw_sp,
 static int
 mlxsw_sp_ipip_entry_ol_lb_update(struct mlxsw_sp *mlxsw_sp,
 				 struct mlxsw_sp_ipip_entry *ipip_entry,
-				 bool keep_encap,
-				 struct netlink_ext_ack *extack)
+				 bool keep_encap)
 {
 	struct mlxsw_sp_rif_ipip_lb *old_lb_rif = ipip_entry->ol_lb;
 	struct mlxsw_sp_rif_ipip_lb *new_lb_rif;
 
 	new_lb_rif = mlxsw_sp_ipip_ol_ipip_lb_create(mlxsw_sp,
 						     ipip_entry->ipipt,
-						     ipip_entry->ol_dev,
-						     extack);
+						     ipip_entry->ol_dev);
 	if (IS_ERR(new_lb_rif))
 		return PTR_ERR(new_lb_rif);
 	ipip_entry->ol_lb = new_lb_rif;
@@ -1423,8 +1506,7 @@ int __mlxsw_sp_ipip_entry_update_tunnel(struct mlxsw_sp *mlxsw_sp,
 					struct mlxsw_sp_ipip_entry *ipip_entry,
 					bool recreate_loopback,
 					bool keep_encap,
-					bool update_nexthops,
-					struct netlink_ext_ack *extack)
+					bool update_nexthops)
 {
 	int err;
 
@@ -1439,7 +1521,7 @@ int __mlxsw_sp_ipip_entry_update_tunnel(struct mlxsw_sp *mlxsw_sp,
 
 	if (recreate_loopback) {
 		err = mlxsw_sp_ipip_entry_ol_lb_update(mlxsw_sp, ipip_entry,
-						       keep_encap, extack);
+						       keep_encap);
 		if (err)
 			return err;
 	} else if (update_nexthops) {
@@ -1454,8 +1536,7 @@ int __mlxsw_sp_ipip_entry_update_tunnel(struct mlxsw_sp *mlxsw_sp,
 }
 
 static int mlxsw_sp_netdevice_ipip_ol_vrf_event(struct mlxsw_sp *mlxsw_sp,
-						struct net_device *ol_dev,
-						struct netlink_ext_ack *extack)
+						struct net_device *ol_dev)
 {
 	struct mlxsw_sp_ipip_entry *ipip_entry =
 		mlxsw_sp_ipip_entry_find_by_ol_dev(mlxsw_sp, ol_dev);
@@ -1481,17 +1562,16 @@ static int mlxsw_sp_netdevice_ipip_ol_vrf_event(struct mlxsw_sp *mlxsw_sp,
 	}
 
 	return __mlxsw_sp_ipip_entry_update_tunnel(mlxsw_sp, ipip_entry,
-						   true, false, false, extack);
+						   true, false, false);
 }
 
 static int
 mlxsw_sp_netdevice_ipip_ul_vrf_event(struct mlxsw_sp *mlxsw_sp,
 				     struct mlxsw_sp_ipip_entry *ipip_entry,
-				     struct net_device *ul_dev,
-				     struct netlink_ext_ack *extack)
+				     struct net_device *ul_dev)
 {
 	return __mlxsw_sp_ipip_entry_update_tunnel(mlxsw_sp, ipip_entry,
-						   true, true, false, extack);
+						   true, true, false);
 }
 
 static int
@@ -1500,7 +1580,7 @@ mlxsw_sp_netdevice_ipip_ul_up_event(struct mlxsw_sp *mlxsw_sp,
 				    struct net_device *ul_dev)
 {
 	return __mlxsw_sp_ipip_entry_update_tunnel(mlxsw_sp, ipip_entry,
-						   false, false, true, NULL);
+						   false, false, true);
 }
 
 static int
@@ -1513,13 +1593,12 @@ mlxsw_sp_netdevice_ipip_ul_down_event(struct mlxsw_sp *mlxsw_sp,
 	 * touching anything else.
 	 */
 	return __mlxsw_sp_ipip_entry_update_tunnel(mlxsw_sp, ipip_entry,
-						   false, false, true, NULL);
+						   false, false, true);
 }
 
 static int
 mlxsw_sp_netdevice_ipip_ol_change_event(struct mlxsw_sp *mlxsw_sp,
-					struct net_device *ol_dev,
-					struct netlink_ext_ack *extack)
+					struct net_device *ol_dev)
 {
 	const struct mlxsw_sp_ipip_ops *ipip_ops;
 	struct mlxsw_sp_ipip_entry *ipip_entry;
@@ -1541,7 +1620,7 @@ mlxsw_sp_netdevice_ipip_ol_change_event(struct mlxsw_sp *mlxsw_sp,
 	}
 
 	ipip_ops = mlxsw_sp->router->ipip_ops_arr[ipip_entry->ipipt];
-	err = ipip_ops->ol_netdev_change(mlxsw_sp, ipip_entry, extack);
+	err = ipip_ops->ol_netdev_change(mlxsw_sp, ipip_entry);
 	return err;
 }
 
@@ -1604,7 +1683,6 @@ int mlxsw_sp_netdevice_ipip_ol_event(struct mlxsw_sp *mlxsw_sp,
 				     struct netdev_notifier_info *info)
 {
 	struct netdev_notifier_changeupper_info *chup;
-	struct netlink_ext_ack *extack;
 
 	switch (event) {
 	case NETDEV_REGISTER:
@@ -1620,16 +1698,15 @@ int mlxsw_sp_netdevice_ipip_ol_event(struct mlxsw_sp *mlxsw_sp,
 		return 0;
 	case NETDEV_CHANGEUPPER:
 		chup = container_of(info, typeof(*chup), info);
-		extack = info->extack;
 		if (netif_is_l3_master(chup->upper_dev))
 			return mlxsw_sp_netdevice_ipip_ol_vrf_event(mlxsw_sp,
-								    ol_dev,
-								    extack);
+								    ol_dev);
 		return 0;
 	case NETDEV_CHANGE:
-		extack = info->extack;
 		return mlxsw_sp_netdevice_ipip_ol_change_event(mlxsw_sp,
-							       ol_dev, extack);
+							       ol_dev);
+	case NETDEV_CHANGEMTU:
+		return mlxsw_sp_netdevice_ipip_ol_update_mtu(mlxsw_sp, ol_dev);
 	}
 	return 0;
 }
@@ -1642,17 +1719,14 @@ __mlxsw_sp_netdevice_ipip_ul_event(struct mlxsw_sp *mlxsw_sp,
 				   struct netdev_notifier_info *info)
 {
 	struct netdev_notifier_changeupper_info *chup;
-	struct netlink_ext_ack *extack;
 
 	switch (event) {
 	case NETDEV_CHANGEUPPER:
 		chup = container_of(info, typeof(*chup), info);
-		extack = info->extack;
 		if (netif_is_l3_master(chup->upper_dev))
 			return mlxsw_sp_netdevice_ipip_ul_vrf_event(mlxsw_sp,
 								    ipip_entry,
-								    ul_dev,
-								    extack);
+								    ul_dev);
 		break;
 
 	case NETDEV_UP:
@@ -2290,6 +2364,8 @@ static void mlxsw_sp_router_neigh_event_work(struct work_struct *work)
 	read_unlock_bh(&n->lock);
 
 	rtnl_lock();
+	mlxsw_sp_span_respin(mlxsw_sp);
+
 	entry_connected = nud_state & NUD_VALID && !dead;
 	neigh_entry = mlxsw_sp_neigh_entry_lookup(mlxsw_sp, n);
 	if (!entry_connected && !neigh_entry)
@@ -2387,7 +2463,7 @@ static int mlxsw_sp_router_netevent_event(struct notifier_block *nb,
 		mlxsw_core_schedule_work(&net_work->work);
 		mlxsw_sp_port_dev_put(mlxsw_sp_port);
 		break;
-	case NETEVENT_MULTIPATH_HASH_UPDATE:
+	case NETEVENT_IPV4_MPATH_HASH_UPDATE:
 		net = ptr;
 
 		if (!net_eq(net, &init_net))
@@ -2630,7 +2706,8 @@ struct mlxsw_sp_nexthop_group_cmp_arg {
 
 static bool
 mlxsw_sp_nexthop6_group_has_nexthop(const struct mlxsw_sp_nexthop_group *nh_grp,
-				    const struct in6_addr *gw, int ifindex)
+				    const struct in6_addr *gw, int ifindex,
+				    int weight)
 {
 	int i;
 
@@ -2638,7 +2715,7 @@ mlxsw_sp_nexthop6_group_has_nexthop(const struct mlxsw_sp_nexthop_group *nh_grp,
 		const struct mlxsw_sp_nexthop *nh;
 
 		nh = &nh_grp->nexthops[i];
-		if (nh->ifindex == ifindex &&
+		if (nh->ifindex == ifindex && nh->nh_weight == weight &&
 		    ipv6_addr_equal(gw, (struct in6_addr *) nh->gw_addr))
 			return true;
 	}
@@ -2657,11 +2734,13 @@ mlxsw_sp_nexthop6_group_cmp(const struct mlxsw_sp_nexthop_group *nh_grp,
 
 	list_for_each_entry(mlxsw_sp_rt6, &fib6_entry->rt6_list, list) {
 		struct in6_addr *gw;
-		int ifindex;
+		int ifindex, weight;
 
 		ifindex = mlxsw_sp_rt6->rt->dst.dev->ifindex;
+		weight = 1; /* RHEL doesn't have mlxsw_sp_rt6->rt->rt6i_nh_weight */
 		gw = &mlxsw_sp_rt6->rt->rt6i_gateway;
-		if (!mlxsw_sp_nexthop6_group_has_nexthop(nh_grp, gw, ifindex))
+		if (!mlxsw_sp_nexthop6_group_has_nexthop(nh_grp, gw, ifindex,
+							 weight))
 			return false;
 	}
 
@@ -3481,9 +3560,11 @@ static int mlxsw_sp_nexthop4_init(struct mlxsw_sp *mlxsw_sp,
 		return 0;
 
 	in_dev = __in_dev_get_rtnl(dev);
+#if 0 /* RHEL does not support LINKDOWN yet - the condition is always false */
 	if (in_dev && IN_DEV_IGNORE_ROUTES_WITH_LINKDOWN(in_dev) &&
 	    fib_nh->nh_flags & RTNH_F_LINKDOWN)
 		return 0;
+#endif
 
 	err = mlxsw_sp_nexthop4_type_init(mlxsw_sp, nh, fib_nh);
 	if (err)
@@ -3760,6 +3841,9 @@ mlxsw_sp_fib4_entry_offload_unset(struct mlxsw_sp_fib_entry *fib_entry)
 {
 	struct mlxsw_sp_nexthop_group *nh_grp = fib_entry->nh_group;
 	int i;
+
+	if (!list_is_singular(&nh_grp->fib_list))
+		return;
 
 	for (i = 0; i < nh_grp->count; i++) {
 		struct mlxsw_sp_nexthop *nh = &nh_grp->nexthops[i];
@@ -4192,68 +4276,66 @@ mlxsw_sp_fib_node_entry_is_first(const struct mlxsw_sp_fib_node *fib_node,
 }
 
 static int mlxsw_sp_fib_lpm_tree_link(struct mlxsw_sp *mlxsw_sp,
-				      struct mlxsw_sp_fib *fib,
 				      struct mlxsw_sp_fib_node *fib_node)
 {
-	struct mlxsw_sp_prefix_usage req_prefix_usage = {{ 0 } };
+	struct mlxsw_sp_prefix_usage req_prefix_usage;
+	struct mlxsw_sp_fib *fib = fib_node->fib;
 	struct mlxsw_sp_lpm_tree *lpm_tree;
 	int err;
 
-	/* Since the tree is shared between all virtual routers we must
-	 * make sure it contains all the required prefix lengths. This
-	 * can be computed by either adding the new prefix length to the
-	 * existing prefix usage of a bound tree, or by aggregating the
-	 * prefix lengths across all virtual routers and adding the new
-	 * one as well.
-	 */
-	if (fib->lpm_tree)
-		mlxsw_sp_prefix_usage_cpy(&req_prefix_usage,
-					  &fib->lpm_tree->prefix_usage);
-	else
-		mlxsw_sp_vrs_prefixes(mlxsw_sp, fib->proto, &req_prefix_usage);
-	mlxsw_sp_prefix_usage_set(&req_prefix_usage, fib_node->key.prefix_len);
+	lpm_tree = mlxsw_sp->router->lpm.proto_trees[fib->proto];
+	if (lpm_tree->prefix_ref_count[fib_node->key.prefix_len] != 0)
+		goto out;
 
+	mlxsw_sp_prefix_usage_cpy(&req_prefix_usage, &lpm_tree->prefix_usage);
+	mlxsw_sp_prefix_usage_set(&req_prefix_usage, fib_node->key.prefix_len);
 	lpm_tree = mlxsw_sp_lpm_tree_get(mlxsw_sp, &req_prefix_usage,
 					 fib->proto);
 	if (IS_ERR(lpm_tree))
 		return PTR_ERR(lpm_tree);
 
-	if (fib->lpm_tree && fib->lpm_tree->id == lpm_tree->id)
-		return 0;
-
 	err = mlxsw_sp_vrs_lpm_tree_replace(mlxsw_sp, fib, lpm_tree);
 	if (err)
-		return err;
+		goto err_lpm_tree_replace;
 
+out:
+	lpm_tree->prefix_ref_count[fib_node->key.prefix_len]++;
 	return 0;
+
+err_lpm_tree_replace:
+	mlxsw_sp_lpm_tree_put(mlxsw_sp, lpm_tree);
+	return err;
 }
 
 static void mlxsw_sp_fib_lpm_tree_unlink(struct mlxsw_sp *mlxsw_sp,
-					 struct mlxsw_sp_fib *fib)
+					 struct mlxsw_sp_fib_node *fib_node)
 {
-	if (!mlxsw_sp_prefix_usage_none(&fib->prefix_usage))
+	struct mlxsw_sp_lpm_tree *lpm_tree = fib_node->fib->lpm_tree;
+	struct mlxsw_sp_prefix_usage req_prefix_usage;
+	struct mlxsw_sp_fib *fib = fib_node->fib;
+	int err;
+
+	if (--lpm_tree->prefix_ref_count[fib_node->key.prefix_len] != 0)
 		return;
-	mlxsw_sp_vr_lpm_tree_unbind(mlxsw_sp, fib);
-	mlxsw_sp_lpm_tree_put(mlxsw_sp, fib->lpm_tree);
-	fib->lpm_tree = NULL;
-}
+	/* Try to construct a new LPM tree from the current prefix usage
+	 * minus the unused one. If we fail, continue using the old one.
+	 */
+	mlxsw_sp_prefix_usage_cpy(&req_prefix_usage, &lpm_tree->prefix_usage);
+	mlxsw_sp_prefix_usage_clear(&req_prefix_usage,
+				    fib_node->key.prefix_len);
+	lpm_tree = mlxsw_sp_lpm_tree_get(mlxsw_sp, &req_prefix_usage,
+					 fib->proto);
+	if (IS_ERR(lpm_tree))
+		return;
 
-static void mlxsw_sp_fib_node_prefix_inc(struct mlxsw_sp_fib_node *fib_node)
-{
-	unsigned char prefix_len = fib_node->key.prefix_len;
-	struct mlxsw_sp_fib *fib = fib_node->fib;
+	err = mlxsw_sp_vrs_lpm_tree_replace(mlxsw_sp, fib, lpm_tree);
+	if (err)
+		goto err_lpm_tree_replace;
 
-	if (fib->prefix_ref_count[prefix_len]++ == 0)
-		mlxsw_sp_prefix_usage_set(&fib->prefix_usage, prefix_len);
-}
+	return;
 
-static void mlxsw_sp_fib_node_prefix_dec(struct mlxsw_sp_fib_node *fib_node)
-{
-	unsigned char prefix_len = fib_node->key.prefix_len;
-	struct mlxsw_sp_fib *fib = fib_node->fib;
-
-	if (--fib->prefix_ref_count[prefix_len] == 0)
-		mlxsw_sp_prefix_usage_clear(&fib->prefix_usage, prefix_len);
+err_lpm_tree_replace:
+	mlxsw_sp_lpm_tree_put(mlxsw_sp, lpm_tree);
 }
 
 static int mlxsw_sp_fib_node_init(struct mlxsw_sp *mlxsw_sp,
@@ -4267,11 +4349,9 @@ static int mlxsw_sp_fib_node_init(struct mlxsw_sp *mlxsw_sp,
 		return err;
 	fib_node->fib = fib;
 
-	err = mlxsw_sp_fib_lpm_tree_link(mlxsw_sp, fib, fib_node);
+	err = mlxsw_sp_fib_lpm_tree_link(mlxsw_sp, fib_node);
 	if (err)
 		goto err_fib_lpm_tree_link;
-
-	mlxsw_sp_fib_node_prefix_inc(fib_node);
 
 	return 0;
 
@@ -4286,8 +4366,7 @@ static void mlxsw_sp_fib_node_fini(struct mlxsw_sp *mlxsw_sp,
 {
 	struct mlxsw_sp_fib *fib = fib_node->fib;
 
-	mlxsw_sp_fib_node_prefix_dec(fib_node);
-	mlxsw_sp_fib_lpm_tree_unlink(mlxsw_sp, fib);
+	mlxsw_sp_fib_lpm_tree_unlink(mlxsw_sp, fib_node);
 	fib_node->fib = NULL;
 	mlxsw_sp_fib_node_remove(fib, fib_node);
 }
@@ -4302,7 +4381,7 @@ mlxsw_sp_fib_node_get(struct mlxsw_sp *mlxsw_sp, u32 tb_id, const void *addr,
 	struct mlxsw_sp_vr *vr;
 	int err;
 
-	vr = mlxsw_sp_vr_get(mlxsw_sp, tb_id, NULL);
+	vr = mlxsw_sp_vr_get(mlxsw_sp, tb_id);
 	if (IS_ERR(vr))
 		return ERR_CAST(vr);
 	fib = mlxsw_sp_vr_fib(vr, proto);
@@ -4326,7 +4405,7 @@ mlxsw_sp_fib_node_get(struct mlxsw_sp *mlxsw_sp, u32 tb_id, const void *addr,
 err_fib_node_init:
 	mlxsw_sp_fib_node_destroy(fib_node);
 err_fib_node_create:
-	mlxsw_sp_vr_put(vr);
+	mlxsw_sp_vr_put(mlxsw_sp, vr);
 	return ERR_PTR(err);
 }
 
@@ -4339,7 +4418,7 @@ static void mlxsw_sp_fib_node_put(struct mlxsw_sp *mlxsw_sp,
 		return;
 	mlxsw_sp_fib_node_fini(mlxsw_sp, fib_node);
 	mlxsw_sp_fib_node_destroy(fib_node);
-	mlxsw_sp_vr_put(vr);
+	mlxsw_sp_vr_put(mlxsw_sp, vr);
 }
 
 static struct mlxsw_sp_fib4_entry *
@@ -4764,7 +4843,7 @@ static int mlxsw_sp_nexthop6_init(struct mlxsw_sp *mlxsw_sp,
 	struct net_device *dev = rt->dst.dev;
 
 	nh->nh_grp = nh_grp;
-	nh->nh_weight = 1;
+	nh->nh_weight = 1; /* RHEL doesn't have rt->rt6i_nh_weight */
 	memcpy(&nh->gw_addr, &rt->rt6i_gateway, sizeof(nh->gw_addr));
 	mlxsw_sp_nexthop_counter_alloc(mlxsw_sp, nh);
 
@@ -4981,7 +5060,7 @@ static void mlxsw_sp_fib6_entry_type_set(struct mlxsw_sp *mlxsw_sp,
 	 * local, which will cause them to be trapped with a lower
 	 * priority than packets that need to be locally received.
 	 */
-	if (rt->rt6i_flags & (RTF_LOCAL | RTF_ANYCAST))
+	if (rt->rt6i_flags & RTF_LOCAL)
 		fib_entry->type = MLXSW_SP_FIB_ENTRY_TYPE_TRAP;
 	else if (rt->rt6i_flags & RTF_REJECT)
 		fib_entry->type = MLXSW_SP_FIB_ENTRY_TYPE_LOCAL;
@@ -5342,7 +5421,7 @@ static int mlxsw_sp_router_fibmr_add(struct mlxsw_sp *mlxsw_sp,
 	if (mlxsw_sp->router->aborted)
 		return 0;
 
-	vr = mlxsw_sp_vr_get(mlxsw_sp, men_info->tb_id, NULL);
+	vr = mlxsw_sp_vr_get(mlxsw_sp, men_info->tb_id);
 	if (IS_ERR(vr))
 		return PTR_ERR(vr);
 
@@ -5362,7 +5441,7 @@ static void mlxsw_sp_router_fibmr_del(struct mlxsw_sp *mlxsw_sp,
 		return;
 
 	mlxsw_sp_mr_route4_del(vr->mr4_table, men_info->mfc);
-	mlxsw_sp_vr_put(vr);
+	mlxsw_sp_vr_put(mlxsw_sp, vr);
 }
 
 static int
@@ -5375,7 +5454,7 @@ mlxsw_sp_router_fibmr_vif_add(struct mlxsw_sp *mlxsw_sp,
 	if (mlxsw_sp->router->aborted)
 		return 0;
 
-	vr = mlxsw_sp_vr_get(mlxsw_sp, ven_info->tb_id, NULL);
+	vr = mlxsw_sp_vr_get(mlxsw_sp, ven_info->tb_id);
 	if (IS_ERR(vr))
 		return PTR_ERR(vr);
 
@@ -5399,7 +5478,7 @@ mlxsw_sp_router_fibmr_vif_del(struct mlxsw_sp *mlxsw_sp,
 		return;
 
 	mlxsw_sp_mr_vif_del(vr->mr4_table, ven_info->vif_index);
-	mlxsw_sp_vr_put(vr);
+	mlxsw_sp_vr_put(mlxsw_sp, vr);
 }
 
 static int mlxsw_sp_router_set_abort_trap(struct mlxsw_sp *mlxsw_sp)
@@ -5548,6 +5627,8 @@ static void mlxsw_sp_router_fib4_event_work(struct work_struct *work)
 
 	/* Protect internal structures from changes */
 	rtnl_lock();
+	mlxsw_sp_span_respin(mlxsw_sp);
+
 	switch (fib_work->event) {
 	case FIB_EVENT_ENTRY_REPLACE: /* fall through */
 	case FIB_EVENT_ENTRY_APPEND: /* fall through */
@@ -5590,6 +5671,8 @@ static void mlxsw_sp_router_fib6_event_work(struct work_struct *work)
 	int err;
 
 	rtnl_lock();
+	mlxsw_sp_span_respin(mlxsw_sp);
+
 	switch (fib_work->event) {
 	case FIB_EVENT_ENTRY_REPLACE: /* fall through */
 	case FIB_EVENT_ENTRY_ADD:
@@ -5731,7 +5814,6 @@ static int mlxsw_sp_router_fib_rule_event(unsigned long event,
 					  struct fib_notifier_info *info,
 					  struct mlxsw_sp *mlxsw_sp)
 {
-	struct netlink_ext_ack *extack = info->extack;
 	struct fib_rule_notifier_info *fr_info;
 	struct fib_rule *rule;
 	int err = 0;
@@ -5748,21 +5830,21 @@ static int mlxsw_sp_router_fib_rule_event(unsigned long event,
 
 	switch (info->family) {
 	case AF_INET:
-		if (!fib4_rule_default(rule) && !rule->l3mdev)
+		if (!fib4_rule_default(rule) /* && !rule->l3mdev */) /* VRF not in RHEL */
 			err = -1;
 		break;
 	case AF_INET6:
-		if (!fib6_rule_default(rule) && !rule->l3mdev)
+		if (!fib6_rule_default(rule) /* && !rule->l3mdev */) /* VRF not in RHEL */
 			err = -1;
 		break;
 	case RTNL_FAMILY_IPMR:
-		if (!ipmr_rule_default(rule) && !rule->l3mdev)
+		if (!ipmr_rule_default(rule) /* && !rule->l3mdev */) /* VRF not in RHEL */
 			err = -1;
 		break;
 	}
 
 	if (err < 0)
-		NL_SET_ERR_MSG(extack, "spectrum: FIB rules not supported. Aborting offload");
+		dev_err(mlxsw_sp->bus_info->dev, "spectrum: FIB rules not supported. Aborting offload");
 
 	return err;
 }
@@ -5979,8 +6061,7 @@ const struct net_device *mlxsw_sp_rif_dev(const struct mlxsw_sp_rif *rif)
 
 static struct mlxsw_sp_rif *
 mlxsw_sp_rif_create(struct mlxsw_sp *mlxsw_sp,
-		    const struct mlxsw_sp_rif_params *params,
-		    struct netlink_ext_ack *extack)
+		    const struct mlxsw_sp_rif_params *params)
 {
 	u32 tb_id = l3mdev_fib_table(params->dev);
 	const struct mlxsw_sp_rif_ops *ops;
@@ -5994,7 +6075,7 @@ mlxsw_sp_rif_create(struct mlxsw_sp *mlxsw_sp,
 	type = mlxsw_sp_dev_rif_type(mlxsw_sp, params->dev);
 	ops = mlxsw_sp->router->rif_ops_arr[type];
 
-	vr = mlxsw_sp_vr_get(mlxsw_sp, tb_id ? : RT_TABLE_MAIN, extack);
+	vr = mlxsw_sp_vr_get(mlxsw_sp, tb_id ? : RT_TABLE_MAIN);
 	if (IS_ERR(vr))
 		return ERR_CAST(vr);
 	vr->rif_count++;
@@ -6048,7 +6129,7 @@ err_fid_get:
 err_rif_alloc:
 err_rif_index_alloc:
 	vr->rif_count--;
-	mlxsw_sp_vr_put(vr);
+	mlxsw_sp_vr_put(mlxsw_sp, vr);
 	return ERR_PTR(err);
 }
 
@@ -6071,7 +6152,18 @@ void mlxsw_sp_rif_destroy(struct mlxsw_sp_rif *rif)
 		mlxsw_sp_fid_put(fid);
 	kfree(rif);
 	vr->rif_count--;
-	mlxsw_sp_vr_put(vr);
+	mlxsw_sp_vr_put(mlxsw_sp, vr);
+}
+
+void mlxsw_sp_rif_destroy_by_dev(struct mlxsw_sp *mlxsw_sp,
+				 struct net_device *dev)
+{
+	struct mlxsw_sp_rif *rif;
+
+	rif = mlxsw_sp_rif_find_by_dev(mlxsw_sp, dev);
+	if (!rif)
+		return;
+	mlxsw_sp_rif_destroy(rif);
 }
 
 static void
@@ -6090,8 +6182,7 @@ mlxsw_sp_rif_subport_params_init(struct mlxsw_sp_rif_params *params,
 
 static int
 mlxsw_sp_port_vlan_router_join(struct mlxsw_sp_port_vlan *mlxsw_sp_port_vlan,
-			       struct net_device *l3_dev,
-			       struct netlink_ext_ack *extack)
+			       struct net_device *l3_dev)
 {
 	struct mlxsw_sp_port *mlxsw_sp_port = mlxsw_sp_port_vlan->mlxsw_sp_port;
 	struct mlxsw_sp *mlxsw_sp = mlxsw_sp_port->mlxsw_sp;
@@ -6107,7 +6198,7 @@ mlxsw_sp_port_vlan_router_join(struct mlxsw_sp_port_vlan *mlxsw_sp_port_vlan,
 		};
 
 		mlxsw_sp_rif_subport_params_init(&params, mlxsw_sp_port_vlan);
-		rif = mlxsw_sp_rif_create(mlxsw_sp, &params, extack);
+		rif = mlxsw_sp_rif_create(mlxsw_sp, &params);
 		if (IS_ERR(rif))
 			return PTR_ERR(rif);
 	}
@@ -6162,8 +6253,7 @@ mlxsw_sp_port_vlan_router_leave(struct mlxsw_sp_port_vlan *mlxsw_sp_port_vlan)
 
 static int mlxsw_sp_inetaddr_port_vlan_event(struct net_device *l3_dev,
 					     struct net_device *port_dev,
-					     unsigned long event, u16 vid,
-					     struct netlink_ext_ack *extack)
+					     unsigned long event, u16 vid)
 {
 	struct mlxsw_sp_port *mlxsw_sp_port = netdev_priv(port_dev);
 	struct mlxsw_sp_port_vlan *mlxsw_sp_port_vlan;
@@ -6175,7 +6265,7 @@ static int mlxsw_sp_inetaddr_port_vlan_event(struct net_device *l3_dev,
 	switch (event) {
 	case NETDEV_UP:
 		return mlxsw_sp_port_vlan_router_join(mlxsw_sp_port_vlan,
-						      l3_dev, extack);
+						      l3_dev);
 	case NETDEV_DOWN:
 		mlxsw_sp_port_vlan_router_leave(mlxsw_sp_port_vlan);
 		break;
@@ -6185,22 +6275,19 @@ static int mlxsw_sp_inetaddr_port_vlan_event(struct net_device *l3_dev,
 }
 
 static int mlxsw_sp_inetaddr_port_event(struct net_device *port_dev,
-					unsigned long event,
-					struct netlink_ext_ack *extack)
+					unsigned long event)
 {
 	if (netif_is_bridge_port(port_dev) ||
 	    netif_is_lag_port(port_dev) ||
 	    netif_is_ovs_port(port_dev))
 		return 0;
 
-	return mlxsw_sp_inetaddr_port_vlan_event(port_dev, port_dev, event, 1,
-						 extack);
+	return mlxsw_sp_inetaddr_port_vlan_event(port_dev, port_dev, event, 1);
 }
 
 static int __mlxsw_sp_inetaddr_lag_event(struct net_device *l3_dev,
 					 struct net_device *lag_dev,
-					 unsigned long event, u16 vid,
-					 struct netlink_ext_ack *extack)
+					 unsigned long event, u16 vid)
 {
 	struct net_device *port_dev;
 	struct list_head *iter;
@@ -6210,8 +6297,7 @@ static int __mlxsw_sp_inetaddr_lag_event(struct net_device *l3_dev,
 		if (mlxsw_sp_port_dev_check(port_dev)) {
 			err = mlxsw_sp_inetaddr_port_vlan_event(l3_dev,
 								port_dev,
-								event, vid,
-								extack);
+								event, vid);
 			if (err)
 				return err;
 		}
@@ -6221,19 +6307,16 @@ static int __mlxsw_sp_inetaddr_lag_event(struct net_device *l3_dev,
 }
 
 static int mlxsw_sp_inetaddr_lag_event(struct net_device *lag_dev,
-				       unsigned long event,
-				       struct netlink_ext_ack *extack)
+				       unsigned long event)
 {
 	if (netif_is_bridge_port(lag_dev))
 		return 0;
 
-	return __mlxsw_sp_inetaddr_lag_event(lag_dev, lag_dev, event, 1,
-					     extack);
+	return __mlxsw_sp_inetaddr_lag_event(lag_dev, lag_dev, event, 1);
 }
 
 static int mlxsw_sp_inetaddr_bridge_event(struct net_device *l3_dev,
-					  unsigned long event,
-					  struct netlink_ext_ack *extack)
+					  unsigned long event)
 {
 	struct mlxsw_sp *mlxsw_sp = mlxsw_sp_lower_get(l3_dev);
 	struct mlxsw_sp_rif_params params = {
@@ -6243,7 +6326,7 @@ static int mlxsw_sp_inetaddr_bridge_event(struct net_device *l3_dev,
 
 	switch (event) {
 	case NETDEV_UP:
-		rif = mlxsw_sp_rif_create(mlxsw_sp, &params, extack);
+		rif = mlxsw_sp_rif_create(mlxsw_sp, &params);
 		if (IS_ERR(rif))
 			return PTR_ERR(rif);
 		break;
@@ -6257,8 +6340,7 @@ static int mlxsw_sp_inetaddr_bridge_event(struct net_device *l3_dev,
 }
 
 static int mlxsw_sp_inetaddr_vlan_event(struct net_device *vlan_dev,
-					unsigned long event,
-					struct netlink_ext_ack *extack)
+					unsigned long event)
 {
 	struct net_device *real_dev = vlan_dev_real_dev(vlan_dev);
 	u16 vid = vlan_dev_vlan_id(vlan_dev);
@@ -6268,28 +6350,27 @@ static int mlxsw_sp_inetaddr_vlan_event(struct net_device *vlan_dev,
 
 	if (mlxsw_sp_port_dev_check(real_dev))
 		return mlxsw_sp_inetaddr_port_vlan_event(vlan_dev, real_dev,
-							 event, vid, extack);
+							 event, vid);
 	else if (netif_is_lag_master(real_dev))
 		return __mlxsw_sp_inetaddr_lag_event(vlan_dev, real_dev, event,
-						     vid, extack);
+						     vid);
 	else if (netif_is_bridge_master(real_dev) && br_vlan_enabled(real_dev))
-		return mlxsw_sp_inetaddr_bridge_event(vlan_dev, event, extack);
+		return mlxsw_sp_inetaddr_bridge_event(vlan_dev, event);
 
 	return 0;
 }
 
 static int __mlxsw_sp_inetaddr_event(struct net_device *dev,
-				     unsigned long event,
-				     struct netlink_ext_ack *extack)
+				     unsigned long event)
 {
 	if (mlxsw_sp_port_dev_check(dev))
-		return mlxsw_sp_inetaddr_port_event(dev, event, extack);
+		return mlxsw_sp_inetaddr_port_event(dev, event);
 	else if (netif_is_lag_master(dev))
-		return mlxsw_sp_inetaddr_lag_event(dev, event, extack);
+		return mlxsw_sp_inetaddr_lag_event(dev, event);
 	else if (netif_is_bridge_master(dev))
-		return mlxsw_sp_inetaddr_bridge_event(dev, event, extack);
+		return mlxsw_sp_inetaddr_bridge_event(dev, event);
 	else if (is_vlan_dev(dev))
-		return mlxsw_sp_inetaddr_vlan_event(dev, event, extack);
+		return mlxsw_sp_inetaddr_vlan_event(dev, event);
 	else
 		return 0;
 }
@@ -6315,7 +6396,7 @@ int mlxsw_sp_inetaddr_event(struct notifier_block *unused,
 	if (!mlxsw_sp_rif_should_config(rif, dev, event))
 		goto out;
 
-	err = __mlxsw_sp_inetaddr_event(dev, event, NULL);
+	err = __mlxsw_sp_inetaddr_event(dev, event);
 out:
 	return notifier_from_errno(err);
 }
@@ -6337,7 +6418,7 @@ int mlxsw_sp_inetaddr_valid_event(struct notifier_block *unused,
 	if (!mlxsw_sp_rif_should_config(rif, dev, event))
 		goto out;
 
-	err = __mlxsw_sp_inetaddr_event(dev, event, ivi->extack);
+	err = __mlxsw_sp_inetaddr_event(dev, event);
 out:
 	return notifier_from_errno(err);
 }
@@ -6366,7 +6447,7 @@ static void mlxsw_sp_inet6addr_event_work(struct work_struct *work)
 	if (!mlxsw_sp_rif_should_config(rif, dev, event))
 		goto out;
 
-	__mlxsw_sp_inetaddr_event(dev, event, NULL);
+	__mlxsw_sp_inetaddr_event(dev, event);
 out:
 	rtnl_unlock();
 	dev_put(dev);
@@ -6418,7 +6499,7 @@ int mlxsw_sp_inet6addr_valid_event(struct notifier_block *unused,
 	if (!mlxsw_sp_rif_should_config(rif, dev, event))
 		goto out;
 
-	err = __mlxsw_sp_inetaddr_event(dev, event, i6vi->extack);
+	err = __mlxsw_sp_inetaddr_event(dev, event);
 out:
 	return notifier_from_errno(err);
 }
@@ -6495,8 +6576,7 @@ err_rif_edit:
 }
 
 static int mlxsw_sp_port_vrf_join(struct mlxsw_sp *mlxsw_sp,
-				  struct net_device *l3_dev,
-				  struct netlink_ext_ack *extack)
+				  struct net_device *l3_dev)
 {
 	struct mlxsw_sp_rif *rif;
 
@@ -6505,9 +6585,9 @@ static int mlxsw_sp_port_vrf_join(struct mlxsw_sp *mlxsw_sp,
 	 */
 	rif = mlxsw_sp_rif_find_by_dev(mlxsw_sp, l3_dev);
 	if (rif)
-		__mlxsw_sp_inetaddr_event(l3_dev, NETDEV_DOWN, extack);
+		__mlxsw_sp_inetaddr_event(l3_dev, NETDEV_DOWN);
 
-	return __mlxsw_sp_inetaddr_event(l3_dev, NETDEV_UP, extack);
+	return __mlxsw_sp_inetaddr_event(l3_dev, NETDEV_UP);
 }
 
 static void mlxsw_sp_port_vrf_leave(struct mlxsw_sp *mlxsw_sp,
@@ -6518,7 +6598,7 @@ static void mlxsw_sp_port_vrf_leave(struct mlxsw_sp *mlxsw_sp,
 	rif = mlxsw_sp_rif_find_by_dev(mlxsw_sp, l3_dev);
 	if (!rif)
 		return;
-	__mlxsw_sp_inetaddr_event(l3_dev, NETDEV_DOWN, NULL);
+	__mlxsw_sp_inetaddr_event(l3_dev, NETDEV_DOWN);
 }
 
 int mlxsw_sp_netdevice_vrf_event(struct net_device *l3_dev, unsigned long event,
@@ -6534,14 +6614,10 @@ int mlxsw_sp_netdevice_vrf_event(struct net_device *l3_dev, unsigned long event,
 	case NETDEV_PRECHANGEUPPER:
 		return 0;
 	case NETDEV_CHANGEUPPER:
-		if (info->linking) {
-			struct netlink_ext_ack *extack;
-
-			extack = netdev_notifier_info_to_extack(&info->info);
-			err = mlxsw_sp_port_vrf_join(mlxsw_sp, l3_dev, extack);
-		} else {
+		if (info->linking)
+			err = mlxsw_sp_port_vrf_join(mlxsw_sp, l3_dev);
+		else
 			mlxsw_sp_port_vrf_leave(mlxsw_sp, l3_dev);
-		}
 		break;
 	}
 
@@ -6813,33 +6889,6 @@ mlxsw_sp_rif_ipip_lb_setup(struct mlxsw_sp_rif *rif,
 }
 
 static int
-mlxsw_sp_rif_ipip_lb_op(struct mlxsw_sp_rif_ipip_lb *lb_rif,
-			struct mlxsw_sp_vr *ul_vr, bool enable)
-{
-	struct mlxsw_sp_rif_ipip_lb_config lb_cf = lb_rif->lb_config;
-	struct mlxsw_sp_rif *rif = &lb_rif->common;
-	struct mlxsw_sp *mlxsw_sp = rif->mlxsw_sp;
-	char ritr_pl[MLXSW_REG_RITR_LEN];
-	u32 saddr4;
-
-	switch (lb_cf.ul_protocol) {
-	case MLXSW_SP_L3_PROTO_IPV4:
-		saddr4 = be32_to_cpu(lb_cf.saddr.addr4);
-		mlxsw_reg_ritr_pack(ritr_pl, enable, MLXSW_REG_RITR_LOOPBACK_IF,
-				    rif->rif_index, rif->vr_id, rif->dev->mtu);
-		mlxsw_reg_ritr_loopback_ipip4_pack(ritr_pl, lb_cf.lb_ipipt,
-			    MLXSW_REG_RITR_LOOPBACK_IPIP_OPTIONS_GRE_KEY_PRESET,
-			    ul_vr->id, saddr4, lb_cf.okey);
-		break;
-
-	case MLXSW_SP_L3_PROTO_IPV6:
-		return -EAFNOSUPPORT;
-	}
-
-	return mlxsw_reg_write(mlxsw_sp->core, MLXSW_REG(ritr), ritr_pl);
-}
-
-static int
 mlxsw_sp_rif_ipip_lb_configure(struct mlxsw_sp_rif *rif)
 {
 	struct mlxsw_sp_rif_ipip_lb *lb_rif = mlxsw_sp_rif_ipip_lb_rif(rif);
@@ -6848,7 +6897,7 @@ mlxsw_sp_rif_ipip_lb_configure(struct mlxsw_sp_rif *rif)
 	struct mlxsw_sp_vr *ul_vr;
 	int err;
 
-	ul_vr = mlxsw_sp_vr_get(mlxsw_sp, ul_tb_id, NULL);
+	ul_vr = mlxsw_sp_vr_get(mlxsw_sp, ul_tb_id);
 	if (IS_ERR(ul_vr))
 		return PTR_ERR(ul_vr);
 
@@ -6861,7 +6910,7 @@ mlxsw_sp_rif_ipip_lb_configure(struct mlxsw_sp_rif *rif)
 	return 0;
 
 err_loopback_op:
-	mlxsw_sp_vr_put(ul_vr);
+	mlxsw_sp_vr_put(mlxsw_sp, ul_vr);
 	return err;
 }
 
@@ -6875,7 +6924,7 @@ static void mlxsw_sp_rif_ipip_lb_deconfigure(struct mlxsw_sp_rif *rif)
 	mlxsw_sp_rif_ipip_lb_op(lb_rif, ul_vr, false);
 
 	--ul_vr->rif_count;
-	mlxsw_sp_vr_put(ul_vr);
+	mlxsw_sp_vr_put(mlxsw_sp, ul_vr);
 }
 
 static const struct mlxsw_sp_rif_ops mlxsw_sp_rif_ipip_lb_ops = {
@@ -6965,7 +7014,7 @@ static void mlxsw_sp_mp_hash_field_set(char *recr2_pl, int field)
 
 static void mlxsw_sp_mp4_hash_init(char *recr2_pl)
 {
-	bool only_l3 = !init_net.ipv4.sysctl_fib_multipath_hash_policy;
+	bool only_l3 = !init_net.ipv4_sysctl_fib_multipath_hash_policy;
 
 	mlxsw_sp_mp_hash_header_set(recr2_pl,
 				    MLXSW_REG_RECR2_IPV4_EN_NOT_TCP_NOT_UDP);
@@ -7010,6 +7059,24 @@ static int mlxsw_sp_mp_hash_init(struct mlxsw_sp *mlxsw_sp)
 }
 #endif
 
+static int mlxsw_sp_dscp_init(struct mlxsw_sp *mlxsw_sp)
+{
+	char rdpm_pl[MLXSW_REG_RDPM_LEN];
+	unsigned int i;
+
+	MLXSW_REG_ZERO(rdpm, rdpm_pl);
+
+	/* HW is determining switch priority based on DSCP-bits, but the
+	 * kernel is still doing that based on the ToS. Since there's a
+	 * mismatch in bits we need to make sure to translate the right
+	 * value ToS would observe, skipping the 2 least-significant ECN bits.
+	 */
+	for (i = 0; i < MLXSW_REG_RDPM_DSCP_ENTRY_REC_MAX_COUNT; i++)
+		mlxsw_reg_rdpm_pack(rdpm_pl, i, rt_tos2priority(i << 2));
+
+	return mlxsw_reg_write(mlxsw_sp->core, MLXSW_REG(rdpm), rdpm_pl);
+}
+
 static int __mlxsw_sp_router_init(struct mlxsw_sp *mlxsw_sp)
 {
 	char rgcr_pl[MLXSW_REG_RGCR_LEN];
@@ -7022,6 +7089,7 @@ static int __mlxsw_sp_router_init(struct mlxsw_sp *mlxsw_sp)
 
 	mlxsw_reg_rgcr_pack(rgcr_pl, true, true);
 	mlxsw_reg_rgcr_max_router_interfaces_set(rgcr_pl, max_rifs);
+	mlxsw_reg_rgcr_usp_set(rgcr_pl, true);
 	err = mlxsw_reg_write(mlxsw_sp->core, MLXSW_REG(rgcr), rgcr_pl);
 	if (err)
 		return err;
@@ -7097,6 +7165,10 @@ int mlxsw_sp_router_init(struct mlxsw_sp *mlxsw_sp)
 	if (err)
 		goto err_mp_hash_init;
 
+	err = mlxsw_sp_dscp_init(mlxsw_sp);
+	if (err)
+		goto err_dscp_init;
+
 	mlxsw_sp->router->fib_nb.notifier_call = mlxsw_sp_router_fib_event;
 	err = register_fib_notifier(&mlxsw_sp->router->fib_nb,
 				    mlxsw_sp_router_fib_dump_flush);
@@ -7106,6 +7178,7 @@ int mlxsw_sp_router_init(struct mlxsw_sp *mlxsw_sp)
 	return 0;
 
 err_register_fib_notifier:
+err_dscp_init:
 err_mp_hash_init:
 	unregister_netevent_notifier(&mlxsw_sp->router->netevent_nb);
 err_register_netevent_notifier:

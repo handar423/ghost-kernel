@@ -24,6 +24,7 @@
 #include <linux/virtio.h>
 #include <linux/virtio_rng.h>
 #include <linux/module.h>
+#include <linux/idr.h>
 
 static DEFINE_IDA(rng_index_ida);
 
@@ -108,8 +109,8 @@ static int probe_common(struct virtio_device *vdev)
 
 	vi->index = index = ida_simple_get(&rng_index_ida, 0, 0, GFP_KERNEL);
 	if (index < 0) {
-		err = index;
-		goto err_ida;
+		kfree(vi);
+		return index;
 	}
 	sprintf(vi->name, "virtio_rng.%d", index);
 	init_completion(&vi->have_data);
@@ -127,16 +128,13 @@ static int probe_common(struct virtio_device *vdev)
 	vi->vq = virtio_find_single_vq(vdev, random_recv_done, "input");
 	if (IS_ERR(vi->vq)) {
 		err = PTR_ERR(vi->vq);
-		goto err_find;
+		vi->vq = NULL;
+		kfree(vi);
+		ida_simple_remove(&rng_index_ida, index);
+		return err;
 	}
 
 	return 0;
-
-err_find:
-	ida_simple_remove(&rng_index_ida, index);
-err_ida:
-	kfree(vi);
-	return err;
 }
 
 static void remove_common(struct virtio_device *vdev)
@@ -184,26 +182,7 @@ static int virtrng_freeze(struct virtio_device *vdev)
 
 static int virtrng_restore(struct virtio_device *vdev)
 {
-	int err;
-
-	err = probe_common(vdev);
-	if (!err) {
-		struct virtrng_info *vi = vdev->priv;
-
-		/*
-		 * Set hwrng_removed to ensure that virtio_read()
-		 * does not block waiting for data before the
-		 * registration is complete.
-		 */
-		vi->hwrng_removed = true;
-		err = hwrng_register(&vi->hwrng);
-		if (!err) {
-			vi->hwrng_register_done = true;
-			vi->hwrng_removed = false;
-		}
-	}
-
-	return err;
+	return probe_common(vdev);
 }
 #endif
 

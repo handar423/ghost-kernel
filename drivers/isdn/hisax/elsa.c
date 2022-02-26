@@ -509,8 +509,7 @@ static void
 set_arcofi(struct IsdnCardState *cs, int bc) {
 	cs->dc.isac.arcofi_bc = bc;
 	arcofi_fsm(cs, ARCOFI_START, &ARCOFI_COP_5);
-	wait_event_interruptible(cs->dc.isac.arcofi_wait,
-				 cs->dc.isac.arcofi_state == ARCOFI_NOP);
+	interruptible_sleep_on(&cs->dc.isac.arcofi_wait);
 }
 
 static int
@@ -529,15 +528,14 @@ check_arcofi(struct IsdnCardState *cs)
 		}
 	cs->dc.isac.arcofi_bc = 0;
 	arcofi_fsm(cs, ARCOFI_START, &ARCOFI_VERSION);
-	wait_event_interruptible(cs->dc.isac.arcofi_wait,
-				 cs->dc.isac.arcofi_state == ARCOFI_NOP);
+	interruptible_sleep_on(&cs->dc.isac.arcofi_wait);
 	if (!test_and_clear_bit(FLG_ARCOFI_ERROR, &cs->HW_Flags)) {
 		debugl1(cs, "Arcofi response received %d bytes", cs->dc.isac.mon_rxp);
 		p = cs->dc.isac.mon_rx;
 		t = tmp;
 		t += sprintf(tmp, "Arcofi data");
 		QuickHex(t, p, cs->dc.isac.mon_rxp);
-		debugl1(cs, "%s", tmp);
+		debugl1(cs, tmp);
 		if ((cs->dc.isac.mon_rxp == 2) && (cs->dc.isac.mon_rx[0] == 0xa0)) {
 			switch (cs->dc.isac.mon_rx[1]) {
 			case 0x80:
@@ -597,8 +595,7 @@ check_arcofi(struct IsdnCardState *cs)
 			       Elsa_Types[cs->subtyp],
 			       cs->hw.elsa.base + 8);
 		arcofi_fsm(cs, ARCOFI_START, &ARCOFI_XOP_0);
-		wait_event_interruptible(cs->dc.isac.arcofi_wait,
-				 cs->dc.isac.arcofi_state == ARCOFI_NOP);
+		interruptible_sleep_on(&cs->dc.isac.arcofi_wait);
 		return (1);
 	}
 	return (0);
@@ -606,9 +603,8 @@ check_arcofi(struct IsdnCardState *cs)
 #endif /* ARCOFI_USE */
 
 static void
-elsa_led_handler(struct timer_list *t)
+elsa_led_handler(struct IsdnCardState *cs)
 {
-	struct IsdnCardState *cs = from_timer(cs, t, hw.elsa.tl);
 	int blink = 0;
 
 	if (cs->subtyp == ELSA_PCMCIA || cs->subtyp == ELSA_PCMCIA_IPAC)
@@ -641,6 +637,7 @@ elsa_led_handler(struct timer_list *t)
 	} else
 		byteout(cs->hw.elsa.ctrl, cs->hw.elsa.ctrl_reg);
 	if (blink) {
+		init_timer(&cs->hw.elsa.tl);
 		cs->hw.elsa.tl.expires = jiffies + ((blink * HZ) / 1000);
 		add_timer(&cs->hw.elsa.tl);
 	}
@@ -715,7 +712,7 @@ Elsa_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 			init_modem(cs);
 		}
 #endif
-		elsa_led_handler(&cs->hw.elsa.tl);
+		elsa_led_handler(cs);
 		return (ret);
 	case (MDL_REMOVE | REQUEST):
 		cs->hw.elsa.status &= 0;
@@ -767,7 +764,7 @@ Elsa_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 		else
 			cs->hw.elsa.status &= ~ELSA_BAD_PWR;
 	}
-	elsa_led_handler(&cs->hw.elsa.tl);
+	elsa_led_handler(cs);
 	return (ret);
 }
 
@@ -945,7 +942,7 @@ static int setup_elsa_isapnp(struct IsdnCard *card)
 					card->para[1] = pnp_port_start(pnp_d, 0);
 					card->para[0] = pnp_irq(pnp_d, 0);
 
-					if (card->para[0] == -1 || !card->para[1]) {
+					if (!card->para[0] || !card->para[1]) {
 						printk(KERN_ERR "Elsa PnP:some resources are missing %ld/%lx\n",
 						       card->para[0], card->para[1]);
 						pnp_disable_dev(pnp_d);
@@ -1147,7 +1144,9 @@ static int setup_elsa_common(struct IsdnCard *card)
 	init_arcofi(cs);
 #endif
 	setup_isac(cs);
-	timer_setup(&cs->hw.elsa.tl, elsa_led_handler, 0);
+	cs->hw.elsa.tl.function = (void *) elsa_led_handler;
+	cs->hw.elsa.tl.data = (long) cs;
+	init_timer(&cs->hw.elsa.tl);
 	/* Teste Timer */
 	if (cs->hw.elsa.timer) {
 		byteout(cs->hw.elsa.trig, 0xff);

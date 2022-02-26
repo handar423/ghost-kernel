@@ -1,8 +1,11 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Adjunct processor (AP) interfaces
  *
  * Copyright IBM Corp. 2017
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License (version 2 only)
+ * as published by the Free Software Foundation.
  *
  * Author(s): Tony Krowiak <akrowia@linux.vnet.ibm.com>
  *	      Martin Schwidefsky <schwidefsky@de.ibm.com>
@@ -20,9 +23,9 @@
  */
 typedef unsigned int ap_qid_t;
 
-#define AP_MKQID(_card, _queue) (((_card) & 63) << 8 | ((_queue) & 255))
-#define AP_QID_CARD(_qid) (((_qid) >> 8) & 63)
-#define AP_QID_QUEUE(_qid) ((_qid) & 255)
+#define AP_MKQID(_card, _queue) (((_card) & 0xff) << 8 | ((_queue) & 0xff))
+#define AP_QID_CARD(_qid) (((_qid) >> 8) & 0xff)
+#define AP_QID_QUEUE(_qid) ((_qid) & 0xff)
 
 /**
  * struct ap_queue_status - Holds the AP queue status.
@@ -69,8 +72,8 @@ struct ap_config_info {
 	unsigned char Nd;		/* max # of Domains - 1 */
 	unsigned char _reserved3[10];
 	unsigned int apm[8];		/* AP ID mask */
-	unsigned int aqm[8];		/* AP queue mask */
-	unsigned int adm[8];		/* AP domain mask */
+	unsigned int aqm[8];		/* AP (usage) queue mask */
+	unsigned int adm[8];		/* AP (control) domain mask */
 	unsigned char _reserved4[16];
 } __aligned(8);
 

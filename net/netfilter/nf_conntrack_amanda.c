@@ -28,11 +28,13 @@
 static unsigned int master_timeout __read_mostly = 300;
 static char *ts_algo = "kmp";
 
+#define HELPER_NAME "amanda"
+
 MODULE_AUTHOR("Brian J. Murrell <netfilter@interlinx.bc.ca>");
 MODULE_DESCRIPTION("Amanda connection tracking module");
 MODULE_LICENSE("GPL");
 MODULE_ALIAS("ip_conntrack_amanda");
-MODULE_ALIAS_NFCT_HELPER("amanda");
+MODULE_ALIAS_NFCT_HELPER(HELPER_NAME);
 
 module_param(master_timeout, uint, 0600);
 MODULE_PARM_DESC(master_timeout, "timeout for the master connection");
@@ -174,13 +176,14 @@ static const struct nf_conntrack_expect_policy amanda_exp_policy = {
 
 static struct nf_conntrack_helper amanda_helper[2] __read_mostly = {
 	{
-		.name			= "amanda",
+		.name			= HELPER_NAME,
 		.me			= THIS_MODULE,
 		.help			= amanda_help,
 		.tuple.src.l3num	= AF_INET,
 		.tuple.src.u.udp.port	= cpu_to_be16(10080),
 		.tuple.dst.protonum	= IPPROTO_UDP,
 		.expect_policy		= &amanda_exp_policy,
+		.nat_mod_name		= NF_NAT_HELPER_NAME(HELPER_NAME),
 	},
 	{
 		.name			= "amanda",
@@ -190,6 +193,7 @@ static struct nf_conntrack_helper amanda_helper[2] __read_mostly = {
 		.tuple.src.u.udp.port	= cpu_to_be16(10080),
 		.tuple.dst.protonum	= IPPROTO_UDP,
 		.expect_policy		= &amanda_exp_policy,
+		.nat_mod_name		= NF_NAT_HELPER_NAME(HELPER_NAME),
 	},
 };
 
@@ -197,8 +201,8 @@ static void __exit nf_conntrack_amanda_fini(void)
 {
 	int i;
 
-	nf_conntrack_helpers_unregister(amanda_helper,
-					ARRAY_SIZE(amanda_helper));
+	nf_conntrack_helper_unregister(&amanda_helper[0]);
+	nf_conntrack_helper_unregister(&amanda_helper[1]);
 	for (i = 0; i < ARRAY_SIZE(search); i++)
 		textsearch_destroy(search[i].ts);
 }
@@ -206,8 +210,6 @@ static void __exit nf_conntrack_amanda_fini(void)
 static int __init nf_conntrack_amanda_init(void)
 {
 	int ret, i;
-
-	NF_CT_HELPER_BUILD_BUG_ON(0);
 
 	for (i = 0; i < ARRAY_SIZE(search); i++) {
 		search[i].ts = textsearch_prepare(ts_algo, search[i].string,
@@ -218,12 +220,16 @@ static int __init nf_conntrack_amanda_init(void)
 			goto err1;
 		}
 	}
-	ret = nf_conntrack_helpers_register(amanda_helper,
-					    ARRAY_SIZE(amanda_helper));
+	ret = nf_conntrack_helper_register(&amanda_helper[0]);
 	if (ret < 0)
 		goto err1;
+	ret = nf_conntrack_helper_register(&amanda_helper[1]);
+	if (ret < 0)
+		goto err2;
 	return 0;
 
+err2:
+	nf_conntrack_helper_unregister(&amanda_helper[0]);
 err1:
 	while (--i >= 0)
 		textsearch_destroy(search[i].ts);

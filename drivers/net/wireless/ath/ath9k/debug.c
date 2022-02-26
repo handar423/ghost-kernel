@@ -916,7 +916,7 @@ static int open_file_regdump(struct inode *inode, struct file *file)
 	u8 *buf;
 	int i, j = 0;
 	unsigned long num_regs, regdump_len, max_reg_offset;
-	static const struct reg_hole {
+	const struct reg_hole {
 		u32 start;
 		u32 end;
 	} reg_hole_list[] = {
@@ -1167,7 +1167,7 @@ static ssize_t write_file_tpc(struct file *file, const char __user *user_buf,
 	if (kstrtoul(buf, 0, &val))
 		return -EINVAL;
 
-	if (val > 1)
+	if (val < 0 || val > 1)
 		return -EINVAL;
 
 	tpc_enabled = !!val;
@@ -1416,14 +1416,14 @@ int ath9k_init_debug(struct ath_hw *ah)
 	debugfs_create_file("ani", S_IRUSR | S_IWUSR,
 			    sc->debug.debugfs_phy, sc, &fops_ani);
 	debugfs_create_bool("paprd", S_IRUSR | S_IWUSR, sc->debug.debugfs_phy,
-			    &sc->sc_ah->config.enable_paprd);
+			    (void *) &sc->sc_ah->config.enable_paprd);
 	debugfs_create_file("regidx", S_IRUSR | S_IWUSR, sc->debug.debugfs_phy,
 			    sc, &fops_regidx);
 	debugfs_create_file("regval", S_IRUSR | S_IWUSR, sc->debug.debugfs_phy,
 			    sc, &fops_regval);
 	debugfs_create_bool("ignore_extcca", S_IRUSR | S_IWUSR,
 			    sc->debug.debugfs_phy,
-			    &ah->config.cwm_ignore_extcca);
+			    (void *) &ah->config.cwm_ignore_extcca);
 	debugfs_create_file("regdump", S_IRUSR, sc->debug.debugfs_phy, sc,
 			    &fops_regdump);
 	debugfs_create_devm_seqfile(sc->dev, "dump_nfcal",

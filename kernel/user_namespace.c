@@ -8,7 +8,6 @@
 #include <linux/export.h>
 #include <linux/nsproxy.h>
 #include <linux/slab.h>
-#include <linux/sched/signal.h>
 #include <linux/user_namespace.h>
 #include <linux/proc_ns.h>
 #include <linux/highuid.h>
@@ -23,8 +22,6 @@
 #include <linux/ctype.h>
 #include <linux/projid.h>
 #include <linux/fs_struct.h>
-#include <linux/bsearch.h>
-#include <linux/sort.h>
 
 static struct kmem_cache *user_ns_cachep __read_mostly;
 static DEFINE_MUTEX(userns_state_mutex);
@@ -84,8 +81,20 @@ int create_user_ns(struct cred *new)
 		goto fail;
 
 	ucounts = inc_user_namespaces(parent_ns, owner);
-	if (!ucounts)
+	if (!ucounts) {
+		/*
+		 * Preserve bug comaptibility with previous versions of RHEL
+		 * and don't change the error code for user namespaces entirely
+		 * disabled.
+		 *
+		 * This allows old version of chrome to start.  Newer versions
+		 * can handle -ENOSPC properly.
+		 */
+		if ((parent_ns == &init_user_ns) &&
+		    (init_user_ns.ucount_max[UCOUNT_USER_NAMESPACES] == 0))
+			ret = -EINVAL;
 		goto fail;
+	}
 
 	/*
 	 * Verify that we can not violate the policy of which files
@@ -111,10 +120,9 @@ int create_user_ns(struct cred *new)
 	if (!ns)
 		goto fail_dec;
 
-	ret = ns_alloc_inum(&ns->ns);
+	ret = proc_alloc_inum(&ns->proc_inum);
 	if (ret)
 		goto fail_free;
-	ns->ns.ops = &userns_operations;
 
 	atomic_set(&ns->count, 1);
 	/* Leave the new->user_ns reference with the new user namespace. */
@@ -141,13 +149,14 @@ int create_user_ns(struct cred *new)
 		goto fail_keyring;
 
 	set_cred_user_ns(new, ns);
+
 	return 0;
 fail_keyring:
 #ifdef CONFIG_PERSISTENT_KEYRINGS
 	key_put(ns->persistent_keyring_register);
 #endif
-	ns_free_inum(&ns->ns);
 fail_free:
+	proc_free_inum(ns->proc_inum);
 	kmem_cache_free(user_ns_cachep, ns);
 fail_dec:
 	dec_user_namespaces(ucounts);
@@ -183,23 +192,11 @@ static void free_user_ns(struct work_struct *work)
 	do {
 		struct ucounts *ucounts = ns->ucounts;
 		parent = ns->parent;
-		if (ns->gid_map.nr_extents > UID_GID_MAP_MAX_BASE_EXTENTS) {
-			kfree(ns->gid_map.forward);
-			kfree(ns->gid_map.reverse);
-		}
-		if (ns->uid_map.nr_extents > UID_GID_MAP_MAX_BASE_EXTENTS) {
-			kfree(ns->uid_map.forward);
-			kfree(ns->uid_map.reverse);
-		}
-		if (ns->projid_map.nr_extents > UID_GID_MAP_MAX_BASE_EXTENTS) {
-			kfree(ns->projid_map.forward);
-			kfree(ns->projid_map.reverse);
-		}
 		retire_userns_sysctls(ns);
 #ifdef CONFIG_PERSISTENT_KEYRINGS
 		key_put(ns->persistent_keyring_register);
 #endif
-		ns_free_inum(&ns->ns);
+		proc_free_inum(ns->proc_inum);
 		kmem_cache_free(user_ns_cachep, ns);
 		dec_user_namespaces(ucounts);
 		ns = parent;
@@ -212,101 +209,26 @@ void __put_user_ns(struct user_namespace *ns)
 }
 EXPORT_SYMBOL(__put_user_ns);
 
-/**
- * idmap_key struct holds the information necessary to find an idmapping in a
- * sorted idmap array. It is passed to cmp_map_id() as first argument.
- */
-struct idmap_key {
-	bool map_up; /* true  -> id from kid; false -> kid from id */
-	u32 id; /* id to find */
-	u32 count; /* == 0 unless used with map_id_range_down() */
-};
-
-/**
- * cmp_map_id - Function to be passed to bsearch() to find the requested
- * idmapping. Expects struct idmap_key to be passed via @k.
- */
-static int cmp_map_id(const void *k, const void *e)
+static u32 map_id_range_down(struct uid_gid_map *map, u32 id, u32 count)
 {
-	u32 first, last, id2;
-	const struct idmap_key *key = k;
-	const struct uid_gid_extent *el = e;
-
-	id2 = key->id + key->count - 1;
-
-	/* handle map_id_{down,up}() */
-	if (key->map_up)
-		first = el->lower_first;
-	else
-		first = el->first;
-
-	last = first + el->count - 1;
-
-	if (key->id >= first && key->id <= last &&
-	    (id2 >= first && id2 <= last))
-		return 0;
-
-	if (key->id < first || id2 < first)
-		return -1;
-
-	return 1;
-}
-
-/**
- * map_id_range_down_max - Find idmap via binary search in ordered idmap array.
- * Can only be called if number of mappings exceeds UID_GID_MAP_MAX_BASE_EXTENTS.
- */
-static struct uid_gid_extent *
-map_id_range_down_max(unsigned extents, struct uid_gid_map *map, u32 id, u32 count)
-{
-	struct idmap_key key;
-
-	key.map_up = false;
-	key.count = count;
-	key.id = id;
-
-	return bsearch(&key, map->forward, extents,
-		       sizeof(struct uid_gid_extent), cmp_map_id);
-}
-
-/**
- * map_id_range_down_base - Find idmap via binary search in static extent array.
- * Can only be called if number of mappings is equal or less than
- * UID_GID_MAP_MAX_BASE_EXTENTS.
- */
-static struct uid_gid_extent *
-map_id_range_down_base(unsigned extents, struct uid_gid_map *map, u32 id, u32 count)
-{
-	unsigned idx;
+	unsigned idx, extents;
 	u32 first, last, id2;
 
 	id2 = id + count - 1;
 
 	/* Find the matching extent */
+	extents = map->nr_extents;
+	smp_rmb();
 	for (idx = 0; idx < extents; idx++) {
 		first = map->extent[idx].first;
 		last = first + map->extent[idx].count - 1;
 		if (id >= first && id <= last &&
 		    (id2 >= first && id2 <= last))
-			return &map->extent[idx];
+			break;
 	}
-	return NULL;
-}
-
-static u32 map_id_range_down(struct uid_gid_map *map, u32 id, u32 count)
-{
-	struct uid_gid_extent *extent;
-	unsigned extents = map->nr_extents;
-	smp_rmb();
-
-	if (extents <= UID_GID_MAP_MAX_BASE_EXTENTS)
-		extent = map_id_range_down_base(extents, map, id, count);
-	else
-		extent = map_id_range_down_max(extents, map, id, count);
-
 	/* Map the id or note failure */
-	if (extent)
-		id = (id - extent->first) + extent->lower_first;
+	if (idx < extents)
+		id = (id - first) + map->extent[idx].lower_first;
 	else
 		id = (u32) -1;
 
@@ -315,61 +237,44 @@ static u32 map_id_range_down(struct uid_gid_map *map, u32 id, u32 count)
 
 static u32 map_id_down(struct uid_gid_map *map, u32 id)
 {
-	return map_id_range_down(map, id, 1);
-}
-
-/**
- * map_id_up_base - Find idmap via binary search in static extent array.
- * Can only be called if number of mappings is equal or less than
- * UID_GID_MAP_MAX_BASE_EXTENTS.
- */
-static struct uid_gid_extent *
-map_id_up_base(unsigned extents, struct uid_gid_map *map, u32 id)
-{
-	unsigned idx;
+	unsigned idx, extents;
 	u32 first, last;
 
 	/* Find the matching extent */
+	extents = map->nr_extents;
+	smp_rmb();
 	for (idx = 0; idx < extents; idx++) {
-		first = map->extent[idx].lower_first;
+		first = map->extent[idx].first;
 		last = first + map->extent[idx].count - 1;
 		if (id >= first && id <= last)
-			return &map->extent[idx];
+			break;
 	}
-	return NULL;
-}
+	/* Map the id or note failure */
+	if (idx < extents)
+		id = (id - first) + map->extent[idx].lower_first;
+	else
+		id = (u32) -1;
 
-/**
- * map_id_up_max - Find idmap via binary search in ordered idmap array.
- * Can only be called if number of mappings exceeds UID_GID_MAP_MAX_BASE_EXTENTS.
- */
-static struct uid_gid_extent *
-map_id_up_max(unsigned extents, struct uid_gid_map *map, u32 id)
-{
-	struct idmap_key key;
-
-	key.map_up = true;
-	key.count = 1;
-	key.id = id;
-
-	return bsearch(&key, map->reverse, extents,
-		       sizeof(struct uid_gid_extent), cmp_map_id);
+	return id;
 }
 
 static u32 map_id_up(struct uid_gid_map *map, u32 id)
 {
-	struct uid_gid_extent *extent;
-	unsigned extents = map->nr_extents;
+	unsigned idx, extents;
+	u32 first, last;
+
+	/* Find the matching extent */
+	extents = map->nr_extents;
 	smp_rmb();
-
-	if (extents <= UID_GID_MAP_MAX_BASE_EXTENTS)
-		extent = map_id_up_base(extents, map, id);
-	else
-		extent = map_id_up_max(extents, map, id);
-
+	for (idx = 0; idx < extents; idx++) {
+		first = map->extent[idx].lower_first;
+		last = first + map->extent[idx].count - 1;
+		if (id >= first && id <= last)
+			break;
+	}
 	/* Map the id or note failure */
-	if (extent)
-		id = (id - extent->lower_first) + extent->first;
+	if (idx < extents)
+		id = (id - first) + map->extent[idx].first;
 	else
 		id = (u32) -1;
 
@@ -386,7 +291,7 @@ static u32 map_id_up(struct uid_gid_map *map, u32 id)
  *
  *	When there is no mapping defined for the user-namespace uid
  *	pair INVALID_UID is returned.  Callers are expected to test
- *	for and handle INVALID_UID being returned.  INVALID_UID
+ *	for and handle handle INVALID_UID being returned.  INVALID_UID
  *	may be tested for using uid_valid().
  */
 kuid_t make_kuid(struct user_namespace *ns, uid_t uid)
@@ -447,7 +352,7 @@ EXPORT_SYMBOL(from_kuid_munged);
 /**
  *	make_kgid - Map a user-namespace gid pair into a kgid.
  *	@ns:  User namespace that the gid is in
- *	@gid: group identifier
+ *	@uid: group identifier
  *
  *	Maps a user-namespace gid pair into a kernel internal kgid,
  *	and returns that kgid.
@@ -643,20 +548,17 @@ static int projid_m_show(struct seq_file *seq, void *v)
 	return 0;
 }
 
-static void *m_start(struct seq_file *seq, loff_t *ppos,
-		     struct uid_gid_map *map)
+static void *m_start(struct seq_file *seq, loff_t *ppos, struct uid_gid_map *map)
 {
+	struct uid_gid_extent *extent = NULL;
 	loff_t pos = *ppos;
-	unsigned extents = map->nr_extents;
-	smp_rmb();
 
-	if (pos >= extents)
-		return NULL;
+	if (pos < map->nr_extents) {
+		gmb();
+		extent = &map->extent[pos];
+	}
 
-	if (extents <= UID_GID_MAP_MAX_BASE_EXTENTS)
-		return &map->extent[pos];
-
-	return &map->forward[pos];
+	return extent;
 }
 
 static void *uid_m_start(struct seq_file *seq, loff_t *ppos)
@@ -691,29 +593,28 @@ static void m_stop(struct seq_file *seq, void *v)
 	return;
 }
 
-const struct seq_operations proc_uid_seq_operations = {
+struct seq_operations proc_uid_seq_operations = {
 	.start = uid_m_start,
 	.stop = m_stop,
 	.next = m_next,
 	.show = uid_m_show,
 };
 
-const struct seq_operations proc_gid_seq_operations = {
+struct seq_operations proc_gid_seq_operations = {
 	.start = gid_m_start,
 	.stop = m_stop,
 	.next = m_next,
 	.show = gid_m_show,
 };
 
-const struct seq_operations proc_projid_seq_operations = {
+struct seq_operations proc_projid_seq_operations = {
 	.start = projid_m_start,
 	.stop = m_stop,
 	.next = m_next,
 	.show = projid_m_show,
 };
 
-static bool mappings_overlap(struct uid_gid_map *new_map,
-			     struct uid_gid_extent *extent)
+static bool mappings_overlap(struct uid_gid_map *new_map, struct uid_gid_extent *extent)
 {
 	u32 upper_first, lower_first, upper_last, lower_last;
 	unsigned idx;
@@ -728,10 +629,7 @@ static bool mappings_overlap(struct uid_gid_map *new_map,
 		u32 prev_upper_last, prev_lower_last;
 		struct uid_gid_extent *prev;
 
-		if (new_map->nr_extents <= UID_GID_MAP_MAX_BASE_EXTENTS)
-			prev = &new_map->extent[idx];
-		else
-			prev = &new_map->forward[idx];
+		prev = &new_map->extent[idx];
 
 		prev_upper_first = prev->first;
 		prev_lower_first = prev->lower_first;
@@ -751,101 +649,6 @@ static bool mappings_overlap(struct uid_gid_map *new_map,
 	return false;
 }
 
-/**
- * insert_extent - Safely insert a new idmap extent into struct uid_gid_map.
- * Takes care to allocate a 4K block of memory if the number of mappings exceeds
- * UID_GID_MAP_MAX_BASE_EXTENTS.
- */
-static int insert_extent(struct uid_gid_map *map, struct uid_gid_extent *extent)
-{
-	struct uid_gid_extent *dest;
-
-	if (map->nr_extents == UID_GID_MAP_MAX_BASE_EXTENTS) {
-		struct uid_gid_extent *forward;
-
-		/* Allocate memory for 340 mappings. */
-		forward = kmalloc(sizeof(struct uid_gid_extent) *
-				 UID_GID_MAP_MAX_EXTENTS, GFP_KERNEL);
-		if (!forward)
-			return -ENOMEM;
-
-		/* Copy over memory. Only set up memory for the forward pointer.
-		 * Defer the memory setup for the reverse pointer.
-		 */
-		memcpy(forward, map->extent,
-		       map->nr_extents * sizeof(map->extent[0]));
-
-		map->forward = forward;
-		map->reverse = NULL;
-	}
-
-	if (map->nr_extents < UID_GID_MAP_MAX_BASE_EXTENTS)
-		dest = &map->extent[map->nr_extents];
-	else
-		dest = &map->forward[map->nr_extents];
-
-	*dest = *extent;
-	map->nr_extents++;
-	return 0;
-}
-
-/* cmp function to sort() forward mappings */
-static int cmp_extents_forward(const void *a, const void *b)
-{
-	const struct uid_gid_extent *e1 = a;
-	const struct uid_gid_extent *e2 = b;
-
-	if (e1->first < e2->first)
-		return -1;
-
-	if (e1->first > e2->first)
-		return 1;
-
-	return 0;
-}
-
-/* cmp function to sort() reverse mappings */
-static int cmp_extents_reverse(const void *a, const void *b)
-{
-	const struct uid_gid_extent *e1 = a;
-	const struct uid_gid_extent *e2 = b;
-
-	if (e1->lower_first < e2->lower_first)
-		return -1;
-
-	if (e1->lower_first > e2->lower_first)
-		return 1;
-
-	return 0;
-}
-
-/**
- * sort_idmaps - Sorts an array of idmap entries.
- * Can only be called if number of mappings exceeds UID_GID_MAP_MAX_BASE_EXTENTS.
- */
-static int sort_idmaps(struct uid_gid_map *map)
-{
-	if (map->nr_extents <= UID_GID_MAP_MAX_BASE_EXTENTS)
-		return 0;
-
-	/* Sort forward array. */
-	sort(map->forward, map->nr_extents, sizeof(struct uid_gid_extent),
-	     cmp_extents_forward, NULL);
-
-	/* Only copy the memory from forward we actually need. */
-	map->reverse = kmemdup(map->forward,
-			       map->nr_extents * sizeof(struct uid_gid_extent),
-			       GFP_KERNEL);
-	if (!map->reverse)
-		return -ENOMEM;
-
-	/* Sort reverse array. */
-	sort(map->reverse, map->nr_extents, sizeof(struct uid_gid_extent),
-	     cmp_extents_reverse, NULL);
-
-	return 0;
-}
-
 static ssize_t map_write(struct file *file, const char __user *buf,
 			 size_t count, loff_t *ppos,
 			 int cap_setid,
@@ -856,8 +659,9 @@ static ssize_t map_write(struct file *file, const char __user *buf,
 	struct user_namespace *ns = seq->private;
 	struct uid_gid_map new_map;
 	unsigned idx;
-	struct uid_gid_extent extent;
-	char *kbuf = NULL, *pos, *next_line;
+	struct uid_gid_extent *extent = NULL;
+	unsigned long page = 0;
+	char *kbuf, *pos, *next_line;
 	ssize_t ret = -EINVAL;
 
 	/*
@@ -881,8 +685,6 @@ static ssize_t map_write(struct file *file, const char __user *buf,
 	 */
 	mutex_lock(&userns_state_mutex);
 
-	memset(&new_map, 0, sizeof(struct uid_gid_map));
-
 	ret = -EPERM;
 	/* Only allow one successful write to the map */
 	if (map->nr_extents != 0)
@@ -894,23 +696,30 @@ static ssize_t map_write(struct file *file, const char __user *buf,
 	if (cap_valid(cap_setid) && !file_ns_capable(file, ns, CAP_SYS_ADMIN))
 		goto out;
 
+	/* Get a buffer */
+	ret = -ENOMEM;
+	page = __get_free_page(GFP_TEMPORARY);
+	kbuf = (char *) page;
+	if (!page)
+		goto out;
+
 	/* Only allow < page size writes at the beginning of the file */
 	ret = -EINVAL;
 	if ((*ppos != 0) || (count >= PAGE_SIZE))
 		goto out;
 
 	/* Slurp in the user data */
-	kbuf = memdup_user_nul(buf, count);
-	if (IS_ERR(kbuf)) {
-		ret = PTR_ERR(kbuf);
-		kbuf = NULL;
+	ret = -EFAULT;
+	if (copy_from_user(kbuf, buf, count))
 		goto out;
-	}
+	kbuf[count] = '\0';
 
 	/* Parse the user data */
 	ret = -EINVAL;
 	pos = kbuf;
-	for (; pos; pos = next_line) {
+	new_map.nr_extents = 0;
+	for (;pos; pos = next_line) {
+		extent = &new_map.extent[new_map.nr_extents];
 
 		/* Find the end of line and ensure I don't look past it */
 		next_line = strchr(pos, '\n');
@@ -922,17 +731,17 @@ static ssize_t map_write(struct file *file, const char __user *buf,
 		}
 
 		pos = skip_spaces(pos);
-		extent.first = simple_strtoul(pos, &pos, 10);
+		extent->first = simple_strtoul(pos, &pos, 10);
 		if (!isspace(*pos))
 			goto out;
 
 		pos = skip_spaces(pos);
-		extent.lower_first = simple_strtoul(pos, &pos, 10);
+		extent->lower_first = simple_strtoul(pos, &pos, 10);
 		if (!isspace(*pos))
 			goto out;
 
 		pos = skip_spaces(pos);
-		extent.count = simple_strtoul(pos, &pos, 10);
+		extent->count = simple_strtoul(pos, &pos, 10);
 		if (*pos && !isspace(*pos))
 			goto out;
 
@@ -942,31 +751,26 @@ static ssize_t map_write(struct file *file, const char __user *buf,
 			goto out;
 
 		/* Verify we have been given valid starting values */
-		if ((extent.first == (u32) -1) ||
-		    (extent.lower_first == (u32) -1))
+		if ((extent->first == (u32) -1) ||
+		    (extent->lower_first == (u32) -1 ))
 			goto out;
 
-		/* Verify count is not zero and does not cause the
-		 * extent to wrap
-		 */
-		if ((extent.first + extent.count) <= extent.first)
+		/* Verify count is not zero and does not cause the extent to wrap */
+		if ((extent->first + extent->count) <= extent->first)
 			goto out;
-		if ((extent.lower_first + extent.count) <=
-		     extent.lower_first)
+		if ((extent->lower_first + extent->count) <= extent->lower_first)
 			goto out;
 
 		/* Do the ranges in extent overlap any previous extents? */
-		if (mappings_overlap(&new_map, &extent))
+		if (mappings_overlap(&new_map, extent))
 			goto out;
 
-		if ((new_map.nr_extents + 1) == UID_GID_MAP_MAX_EXTENTS &&
+		new_map.nr_extents++;
+
+		/* Fail if the file contains too many extents */
+		if ((new_map.nr_extents == UID_GID_MAP_MAX_EXTENTS) &&
 		    (next_line != NULL))
 			goto out;
-
-		ret = insert_extent(&new_map, &extent);
-		if (ret < 0)
-			goto out;
-		ret = -EINVAL;
 	}
 	/* Be very certaint the new map actually exists */
 	if (new_map.nr_extents == 0)
@@ -977,26 +781,16 @@ static ssize_t map_write(struct file *file, const char __user *buf,
 	if (!new_idmap_permitted(file, ns, cap_setid, &new_map))
 		goto out;
 
-	ret = sort_idmaps(&new_map);
-	if (ret < 0)
-		goto out;
-
-	ret = -EPERM;
 	/* Map the lower ids from the parent user namespace to the
 	 * kernel global id space.
 	 */
 	for (idx = 0; idx < new_map.nr_extents; idx++) {
-		struct uid_gid_extent *e;
 		u32 lower_first;
-
-		if (new_map.nr_extents <= UID_GID_MAP_MAX_BASE_EXTENTS)
-			e = &new_map.extent[idx];
-		else
-			e = &new_map.forward[idx];
+		extent = &new_map.extent[idx];
 
 		lower_first = map_id_range_down(parent_map,
-						e->lower_first,
-						e->count);
+						extent->lower_first,
+						extent->count);
 
 		/* Fail if we can not map the specified extent to
 		 * the kernel global id space.
@@ -1004,38 +798,25 @@ static ssize_t map_write(struct file *file, const char __user *buf,
 		if (lower_first == (u32) -1)
 			goto out;
 
-		e->lower_first = lower_first;
+		extent->lower_first = lower_first;
 	}
 
 	/* Install the map */
-	if (new_map.nr_extents <= UID_GID_MAP_MAX_BASE_EXTENTS) {
-		memcpy(map->extent, new_map.extent,
-		       new_map.nr_extents * sizeof(new_map.extent[0]));
-	} else {
-		map->forward = new_map.forward;
-		map->reverse = new_map.reverse;
-	}
+	memcpy(map->extent, new_map.extent,
+		new_map.nr_extents*sizeof(new_map.extent[0]));
 	smp_wmb();
 	map->nr_extents = new_map.nr_extents;
 
 	*ppos = count;
 	ret = count;
 out:
-	if (ret < 0 && new_map.nr_extents > UID_GID_MAP_MAX_BASE_EXTENTS) {
-		kfree(new_map.forward);
-		kfree(new_map.reverse);
-		map->forward = NULL;
-		map->reverse = NULL;
-		map->nr_extents = 0;
-	}
-
 	mutex_unlock(&userns_state_mutex);
-	kfree(kbuf);
+	if (page)
+		free_page(page);
 	return ret;
 }
 
-ssize_t proc_uid_map_write(struct file *file, const char __user *buf,
-			   size_t size, loff_t *ppos)
+ssize_t proc_uid_map_write(struct file *file, const char __user *buf, size_t size, loff_t *ppos)
 {
 	struct seq_file *seq = file->private_data;
 	struct user_namespace *ns = seq->private;
@@ -1051,8 +832,7 @@ ssize_t proc_uid_map_write(struct file *file, const char __user *buf,
 			 &ns->uid_map, &ns->parent->uid_map);
 }
 
-ssize_t proc_gid_map_write(struct file *file, const char __user *buf,
-			   size_t size, loff_t *ppos)
+ssize_t proc_gid_map_write(struct file *file, const char __user *buf, size_t size, loff_t *ppos)
 {
 	struct seq_file *seq = file->private_data;
 	struct user_namespace *ns = seq->private;
@@ -1068,8 +848,7 @@ ssize_t proc_gid_map_write(struct file *file, const char __user *buf,
 			 &ns->gid_map, &ns->parent->gid_map);
 }
 
-ssize_t proc_projid_map_write(struct file *file, const char __user *buf,
-			      size_t size, loff_t *ppos)
+ssize_t proc_projid_map_write(struct file *file, const char __user *buf, size_t size, loff_t *ppos)
 {
 	struct seq_file *seq = file->private_data;
 	struct user_namespace *ns = seq->private;
@@ -1086,7 +865,7 @@ ssize_t proc_projid_map_write(struct file *file, const char __user *buf,
 			 &ns->projid_map, &ns->parent->projid_map);
 }
 
-static bool new_idmap_permitted(const struct file *file,
+static bool new_idmap_permitted(const struct file *file, 
 				struct user_namespace *ns, int cap_setid,
 				struct uid_gid_map *new_map)
 {
@@ -1127,7 +906,7 @@ static bool new_idmap_permitted(const struct file *file,
 int proc_setgroups_show(struct seq_file *seq, void *v)
 {
 	struct user_namespace *ns = seq->private;
-	unsigned long userns_flags = READ_ONCE(ns->flags);
+	unsigned long userns_flags = ACCESS_ONCE(ns->flags);
 
 	seq_printf(seq, "%s\n",
 		   (userns_flags & USERNS_SETGROUPS_ALLOWED) ?
@@ -1219,29 +998,20 @@ bool userns_may_setgroups(const struct user_namespace *ns)
 }
 
 /*
- * Returns true if @child is the same namespace or a descendant of
- * @ancestor.
+ * Returns true if @ns is the same namespace as or a descendant of
+ * @target_ns.
  */
-bool in_userns(const struct user_namespace *ancestor,
-	       const struct user_namespace *child)
-{
-	const struct user_namespace *ns;
-	for (ns = child; ns->level > ancestor->level; ns = ns->parent)
-		;
-	return (ns == ancestor);
-}
-
 bool current_in_userns(const struct user_namespace *target_ns)
 {
-	return in_userns(target_ns, current_user_ns());
+	struct user_namespace *ns;
+	for (ns = current_user_ns(); ns; ns = ns->parent) {
+		if (ns == target_ns)
+			return true;
+	}
+	return false;
 }
 
-static inline struct user_namespace *to_user_ns(struct ns_common *ns)
-{
-	return container_of(ns, struct user_namespace, ns);
-}
-
-static struct ns_common *userns_get(struct task_struct *task)
+static void *userns_get(struct task_struct *task)
 {
 	struct user_namespace *user_ns;
 
@@ -1249,17 +1019,17 @@ static struct ns_common *userns_get(struct task_struct *task)
 	user_ns = get_user_ns(__task_cred(task)->user_ns);
 	rcu_read_unlock();
 
-	return user_ns ? &user_ns->ns : NULL;
+	return user_ns;
 }
 
-static void userns_put(struct ns_common *ns)
+static void userns_put(void *ns)
 {
-	put_user_ns(to_user_ns(ns));
+	put_user_ns(ns);
 }
 
-static int userns_install(struct nsproxy *nsproxy, struct ns_common *ns)
+static int userns_install(struct nsproxy *nsproxy, void *ns)
 {
-	struct user_namespace *user_ns = to_user_ns(ns);
+	struct user_namespace *user_ns = ns;
 	struct cred *cred;
 
 	/* Don't allow gaining capabilities by reentering
@@ -1268,8 +1038,8 @@ static int userns_install(struct nsproxy *nsproxy, struct ns_common *ns)
 	if (user_ns == current_user_ns())
 		return -EINVAL;
 
-	/* Tasks that share a thread group must share a user namespace */
-	if (!thread_group_empty(current))
+	/* Threaded processes may not enter a different user namespace */
+	if (atomic_read(&current->mm->mm_users) > 1)
 		return -EINVAL;
 
 	if (current->fs->users != 1)
@@ -1288,28 +1058,12 @@ static int userns_install(struct nsproxy *nsproxy, struct ns_common *ns)
 	return commit_creds(cred);
 }
 
-struct ns_common *ns_get_owner(struct ns_common *ns)
+static unsigned int userns_inum(void *ns)
 {
-	struct user_namespace *my_user_ns = current_user_ns();
-	struct user_namespace *owner, *p;
-
-	/* See if the owner is in the current user namespace */
-	owner = p = ns->ops->owner(ns);
-	for (;;) {
-		if (!p)
-			return ERR_PTR(-EPERM);
-		if (p == my_user_ns)
-			break;
-		p = p->parent;
-	}
-
-	return &get_user_ns(owner)->ns;
+	struct user_namespace *user_ns = ns;
+	return user_ns->proc_inum;
 }
-
-static struct user_namespace *userns_owner(struct ns_common *ns)
-{
-	return to_user_ns(ns)->parent;
-}
+EXPORT_SYMBOL(current_in_userns);
 
 const struct proc_ns_operations userns_operations = {
 	.name		= "user",
@@ -1317,13 +1071,16 @@ const struct proc_ns_operations userns_operations = {
 	.get		= userns_get,
 	.put		= userns_put,
 	.install	= userns_install,
-	.owner		= userns_owner,
-	.get_parent	= ns_get_owner,
+	.inum		= userns_inum,
 };
 
 static __init int user_namespaces_init(void)
 {
 	user_ns_cachep = KMEM_CACHE(user_namespace, SLAB_PANIC);
+	/* To make user namespaces something to opt in to for existing
+	 * RHEL users default ucount_max to 0.
+	 */
+	init_user_ns.ucount_max[UCOUNT_USER_NAMESPACES] = 0;
 	return 0;
 }
 subsys_initcall(user_namespaces_init);

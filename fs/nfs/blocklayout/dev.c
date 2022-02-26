@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (c) 2014-2016 Christoph Hellwig.
  */
@@ -66,8 +65,8 @@ nfs4_block_decode_volume(struct xdr_stream *xdr, struct pnfs_block_volume *b)
 		if (!p)
 			return -EIO;
 		b->simple.nr_sigs = be32_to_cpup(p++);
-		if (!b->simple.nr_sigs || b->simple.nr_sigs > PNFS_BLOCK_MAX_UUIDS) {
-			dprintk("Bad signature count: %d\n", b->simple.nr_sigs);
+		if (!b->simple.nr_sigs) {
+			dprintk("no signature\n");
 			return -EIO;
 		}
 
@@ -90,8 +89,7 @@ nfs4_block_decode_volume(struct xdr_stream *xdr, struct pnfs_block_volume *b)
 			memcpy(&b->simple.sigs[i].sig, p,
 				b->simple.sigs[i].sig_len);
 
-			b->simple.len += 8 + 4 + \
-				(XDR_QUADLEN(b->simple.sigs[i].sig_len) << 2);
+			b->simple.len += 8 + 4 + b->simple.sigs[i].sig_len;
 		}
 		break;
 	case PNFS_BLOCK_VOLUME_SLICE:
@@ -106,12 +104,7 @@ nfs4_block_decode_volume(struct xdr_stream *xdr, struct pnfs_block_volume *b)
 		p = xdr_inline_decode(xdr, 4);
 		if (!p)
 			return -EIO;
-
 		b->concat.volumes_count = be32_to_cpup(p++);
-		if (b->concat.volumes_count > PNFS_BLOCK_MAX_DEVICES) {
-			dprintk("Too many volumes: %d\n", b->concat.volumes_count);
-			return -EIO;
-		}
 
 		p = xdr_inline_decode(xdr, b->concat.volumes_count * 4);
 		if (!p)
@@ -123,13 +116,8 @@ nfs4_block_decode_volume(struct xdr_stream *xdr, struct pnfs_block_volume *b)
 		p = xdr_inline_decode(xdr, 8 + 4);
 		if (!p)
 			return -EIO;
-
 		p = xdr_decode_hyper(p, &b->stripe.chunk_size);
 		b->stripe.volumes_count = be32_to_cpup(p++);
-		if (b->stripe.volumes_count > PNFS_BLOCK_MAX_DEVICES) {
-			dprintk("Too many volumes: %d\n", b->stripe.volumes_count);
-			return -EIO;
-		}
 
 		p = xdr_inline_decode(xdr, b->stripe.volumes_count * 4);
 		if (!p)
@@ -204,7 +192,7 @@ static bool bl_map_stripe(struct pnfs_block_dev *dev, u64 offset,
 	chunk = div_u64(offset, dev->chunk_size);
 	div_u64_rem(chunk, dev->nr_children, &chunk_idx);
 
-	if (chunk_idx > dev->nr_children) {
+	if (chunk_idx >= dev->nr_children) {
 		dprintk("%s: invalid chunk idx %d (%lld/%lld)\n",
 			__func__, chunk_idx, offset, dev->chunk_size);
 		/* error, should not happen */
@@ -533,14 +521,11 @@ bl_alloc_deviceid_node(struct nfs_server *server, struct pnfs_device *pdev,
 		goto out_free_volumes;
 
 	ret = bl_parse_deviceid(server, top, volumes, nr_volumes - 1, gfp_mask);
-	if (ret) {
-		bl_free_device(top);
-		kfree(top);
-		goto out_free_volumes;
-	}
 
 	node = &top->node;
 	nfs4_init_deviceid_node(node, server, &pdev->dev_id);
+	if (ret)
+		nfs4_mark_deviceid_unavailable(node);
 
 out_free_volumes:
 	kfree(volumes);

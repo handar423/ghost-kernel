@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _LINUX_PAGE_COUNTER_H
 #define _LINUX_PAGE_COUNTER_H
 
@@ -35,15 +34,14 @@ static inline unsigned long page_counter_read(struct page_counter *counter)
 	return atomic_long_read(&counter->count);
 }
 
-void page_counter_cancel(struct page_counter *counter, unsigned long nr_pages);
+int page_counter_cancel(struct page_counter *counter, unsigned long nr_pages);
 void page_counter_charge(struct page_counter *counter, unsigned long nr_pages);
 bool page_counter_try_charge(struct page_counter *counter,
 			     unsigned long nr_pages,
 			     struct page_counter **fail);
-void page_counter_uncharge(struct page_counter *counter, unsigned long nr_pages);
+int page_counter_uncharge(struct page_counter *counter, unsigned long nr_pages);
 int page_counter_limit(struct page_counter *counter, unsigned long limit);
-int page_counter_memparse(const char *buf, const char *max,
-			  unsigned long *nr_pages);
+int page_counter_memparse(const char *buf, unsigned long *nr_pages);
 
 static inline void page_counter_reset_watermark(struct page_counter *counter)
 {

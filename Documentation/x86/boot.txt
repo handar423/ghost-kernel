@@ -58,7 +58,7 @@ Protocol 2.11:	(Kernel 3.6) Added a field for offset of EFI handover
 		protocol entry point.
 
 Protocol 2.12:	(Kernel 3.8) Added the xloadflags field and extension fields
-	 	to struct boot_params for loading bzImage and ramdisk
+	 	to struct boot_params for for loading bzImage and ramdisk
 		above 4G in 64bit.
 
 **** MEMORY LAYOUT
@@ -666,10 +666,9 @@ Protocol:	2.08+
   uncompressed data should be determined using the standard magic
   numbers.  The currently supported compression formats are gzip
   (magic numbers 1F 8B or 1F 9E), bzip2 (magic number 42 5A), LZMA
-  (magic number 5D 00), XZ (magic number FD 37), and LZ4 (magic number
-  02 21).  The uncompressed payload is currently always ELF (magic
-  number 7F 45 4C 46).
-
+  (magic number 5D 00), and XZ (magic number FD 37).  The uncompressed
+  payload is currently always ELF (magic number 7F 45 4C 46).
+  
 Field name:	payload_length
 Type:		read
 Offset/size:	0x24c/4
@@ -921,7 +920,7 @@ They should normally not be deleted from the kernel command line even
 though not all of them are actually meaningful to the kernel.  Boot
 loader authors who need additional command line options for the boot
 loader itself should get them registered in
-Documentation/admin-guide/kernel-parameters.rst to make sure they will not
+Documentation/kernel-parameters.txt to make sure they will not
 conflict with actual kernel options now or in the future.
 
   vga=<mode>
@@ -1124,6 +1123,7 @@ The boot loader *must* fill out the following fields in bp,
 
     o hdr.code32_start
     o hdr.cmd_line_ptr
+    o hdr.cmdline_size
     o hdr.ramdisk_image (if applicable)
     o hdr.ramdisk_size  (if applicable)
 

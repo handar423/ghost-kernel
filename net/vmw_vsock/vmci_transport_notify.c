@@ -315,7 +315,7 @@ vmci_transport_handle_wrote(struct sock *sk,
 	struct vsock_sock *vsk = vsock_sk(sk);
 	PKT_FIELD(vsk, sent_waiting_read) = false;
 #endif
-	sk->sk_data_ready(sk);
+	sk->sk_data_ready(sk, 0);
 }
 
 static void vmci_transport_notify_pkt_socket_init(struct sock *sk)
@@ -413,6 +413,7 @@ vmci_transport_notify_pkt_recv_init(
 		PKT_FIELD(vsk, write_notify_min_window) = target + 1;
 		if (PKT_FIELD(vsk, write_notify_window) <
 		    PKT_FIELD(vsk, write_notify_min_window)) {
+			gmb();
 			/* If the current window is smaller than the new
 			 * minimal window size, we need to reevaluate whether
 			 * we need to notify the sender. If the number of ready
@@ -661,20 +662,20 @@ static void vmci_transport_notify_pkt_process_negotiate(struct sock *sk)
 }
 
 /* Socket control packet based operations. */
-const struct vmci_transport_notify_ops vmci_transport_notify_pkt_ops = {
-	.socket_init = vmci_transport_notify_pkt_socket_init,
-	.socket_destruct = vmci_transport_notify_pkt_socket_destruct,
-	.poll_in = vmci_transport_notify_pkt_poll_in,
-	.poll_out = vmci_transport_notify_pkt_poll_out,
-	.handle_notify_pkt = vmci_transport_notify_pkt_handle_pkt,
-	.recv_init = vmci_transport_notify_pkt_recv_init,
-	.recv_pre_block = vmci_transport_notify_pkt_recv_pre_block,
-	.recv_pre_dequeue = vmci_transport_notify_pkt_recv_pre_dequeue,
-	.recv_post_dequeue = vmci_transport_notify_pkt_recv_post_dequeue,
-	.send_init = vmci_transport_notify_pkt_send_init,
-	.send_pre_block = vmci_transport_notify_pkt_send_pre_block,
-	.send_pre_enqueue = vmci_transport_notify_pkt_send_pre_enqueue,
-	.send_post_enqueue = vmci_transport_notify_pkt_send_post_enqueue,
-	.process_request = vmci_transport_notify_pkt_process_request,
-	.process_negotiate = vmci_transport_notify_pkt_process_negotiate,
+struct vmci_transport_notify_ops vmci_transport_notify_pkt_ops = {
+	vmci_transport_notify_pkt_socket_init,
+	vmci_transport_notify_pkt_socket_destruct,
+	vmci_transport_notify_pkt_poll_in,
+	vmci_transport_notify_pkt_poll_out,
+	vmci_transport_notify_pkt_handle_pkt,
+	vmci_transport_notify_pkt_recv_init,
+	vmci_transport_notify_pkt_recv_pre_block,
+	vmci_transport_notify_pkt_recv_pre_dequeue,
+	vmci_transport_notify_pkt_recv_post_dequeue,
+	vmci_transport_notify_pkt_send_init,
+	vmci_transport_notify_pkt_send_pre_block,
+	vmci_transport_notify_pkt_send_pre_enqueue,
+	vmci_transport_notify_pkt_send_post_enqueue,
+	vmci_transport_notify_pkt_process_request,
+	vmci_transport_notify_pkt_process_negotiate,
 };

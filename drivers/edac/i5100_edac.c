@@ -29,6 +29,7 @@
 #include <linux/mmzone.h>
 #include <linux/debugfs.h>
 
+#include "edac_core.h"
 #include "edac_module.h"
 
 /* register addresses */
@@ -277,6 +278,11 @@ static inline u32 i5100_recmema_bank(u32 a)
 static inline u32 i5100_recmema_rank(u32 a)
 {
 	return i5100_nrecmema_rank(a);
+}
+
+static inline u32 i5100_recmema_dm_buf_id(u32 a)
+{
+	return i5100_nrecmema_dm_buf_id(a);
 }
 
 static inline u32 i5100_recmemb_cas(u32 a)
@@ -574,7 +580,9 @@ static void i5100_check_error(struct mem_ctl_info *mci)
 
 static void i5100_refresh_scrubbing(struct work_struct *work)
 {
-	struct delayed_work *i5100_scrubbing = to_delayed_work(work);
+	struct delayed_work *i5100_scrubbing = container_of(work,
+							    struct delayed_work,
+							    work);
 	struct i5100_priv *priv = container_of(i5100_scrubbing,
 					       struct i5100_priv,
 					       i5100_scrubbing);
@@ -862,13 +870,16 @@ static void i5100_init_csrows(struct mem_ctl_info *mci)
 			       chan, rank, 0);
 
 		dimm->nr_pages = npages;
-		dimm->grain = 32;
-		dimm->dtype = (priv->mtr[chan][rank].width == 4) ?
-				DEV_X4 : DEV_X8;
-		dimm->mtype = MEM_RDDR2;
-		dimm->edac_mode = EDAC_SECDED;
-		snprintf(dimm->label, sizeof(dimm->label), "DIMM%u",
-			 i5100_rank_to_slot(mci, chan, rank));
+		if (npages) {
+			dimm->grain = 32;
+			dimm->dtype = (priv->mtr[chan][rank].width == 4) ?
+					DEV_X4 : DEV_X8;
+			dimm->mtype = MEM_RDDR2;
+			dimm->edac_mode = EDAC_SECDED;
+			snprintf(dimm->label, sizeof(dimm->label),
+				"DIMM%u",
+				i5100_rank_to_slot(mci, chan, rank));
+		}
 
 		edac_dbg(2, "dimm channel %d, rank %d, size %ld\n",
 			 chan, rank, (long)PAGES_TO_MiB(npages));
@@ -1108,6 +1119,7 @@ static int i5100_init_one(struct pci_dev *pdev, const struct pci_device_id *id)
 	mci->edac_ctl_cap = EDAC_FLAG_SECDED;
 	mci->edac_cap = EDAC_FLAG_SECDED;
 	mci->mod_name = "i5100_edac.c";
+	mci->mod_ver = "not versioned";
 	mci->ctl_name = "i5100";
 	mci->dev_name = pci_name(pdev);
 	mci->ctl_page_to_phys = NULL;

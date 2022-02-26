@@ -21,7 +21,6 @@
  */
 
 #include <linux/slab.h>
-#include <linux/sched/signal.h>
 #include <linux/time.h>
 #include <linux/math64.h>
 #include <linux/export.h>
@@ -153,7 +152,8 @@ EXPORT_SYMBOL(snd_pcm_debug_name);
 			dump_stack();				\
 	} while (0)
 
-static void xrun(struct snd_pcm_substream *substream)
+/* call with stream lock held */
+void __snd_pcm_xrun(struct snd_pcm_substream *substream)
 {
 	struct snd_pcm_runtime *runtime = substream->runtime;
 
@@ -191,10 +191,7 @@ int snd_pcm_update_state(struct snd_pcm_substream *substream,
 {
 	snd_pcm_uframes_t avail;
 
-	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
-		avail = snd_pcm_playback_avail(runtime);
-	else
-		avail = snd_pcm_capture_avail(runtime);
+	avail = snd_pcm_avail(substream);
 	if (avail > runtime->avail_max)
 		runtime->avail_max = avail;
 	if (runtime->status->state == SNDRV_PCM_STATE_DRAINING) {
@@ -204,7 +201,7 @@ int snd_pcm_update_state(struct snd_pcm_substream *substream,
 		}
 	} else {
 		if (avail >= runtime->stop_threshold) {
-			xrun(substream);
+			__snd_pcm_xrun(substream);
 			return -EPIPE;
 		}
 	}
@@ -300,7 +297,7 @@ static int snd_pcm_update_hw_ptr0(struct snd_pcm_substream *substream,
 	}
 
 	if (pos == SNDRV_PCM_POS_XRUN) {
-		xrun(substream);
+		__snd_pcm_xrun(substream);
 		return -EPIPE;
 	}
 	if (pos >= runtime->buffer_size) {
@@ -589,18 +586,22 @@ int snd_interval_refine(struct snd_interval *i, const struct snd_interval *v)
 	if (snd_BUG_ON(snd_interval_empty(i)))
 		return -EINVAL;
 	if (i->min < v->min) {
+		gmb();
 		i->min = v->min;
 		i->openmin = v->openmin;
 		changed = 1;
 	} else if (i->min == v->min && !i->openmin && v->openmin) {
+		gmb();
 		i->openmin = 1;
 		changed = 1;
 	}
 	if (i->max > v->max) {
+		gmb();
 		i->max = v->max;
 		i->openmax = v->openmax;
 		changed = 1;
 	} else if (i->max == v->max && !i->openmax && v->openmax) {
+		gmb();
 		i->openmax = 1;
 		changed = 1;
 	}
@@ -629,27 +630,33 @@ EXPORT_SYMBOL(snd_interval_refine);
 
 static int snd_interval_refine_first(struct snd_interval *i)
 {
+	const unsigned int last_max = i->max;
+
 	if (snd_BUG_ON(snd_interval_empty(i)))
 		return -EINVAL;
 	if (snd_interval_single(i))
 		return 0;
 	i->max = i->min;
-	i->openmax = i->openmin;
-	if (i->openmax)
+	if (i->openmin)
 		i->max++;
+	/* only exclude max value if also excluded before refine */
+	i->openmax = (i->openmax && i->max >= last_max);
 	return 1;
 }
 
 static int snd_interval_refine_last(struct snd_interval *i)
 {
+	const unsigned int last_min = i->min;
+
 	if (snd_BUG_ON(snd_interval_empty(i)))
 		return -EINVAL;
 	if (snd_interval_single(i))
 		return 0;
 	i->min = i->max;
-	i->openmin = i->openmax;
-	if (i->openmin)
+	if (i->openmax)
 		i->min--;
+	/* only exclude min value if also excluded before refine */
+	i->openmin = (i->openmin && i->min <= last_min);
 	return 1;
 }
 
@@ -810,8 +817,10 @@ int snd_interval_ratnum(struct snd_interval *i,
 		else {
 			unsigned int r;
 			r = (den - rats[k].den_min) % rats[k].den_step;
-			if (r != 0)
+			if (r != 0) {
+				gmb();
 				den -= r;
+			}
 		}
 		diff = num - q * den;
 		if (diff < 0)
@@ -851,8 +860,10 @@ int snd_interval_ratnum(struct snd_interval *i,
 		else {
 			unsigned int r;
 			r = (den - rats[k].den_min) % rats[k].den_step;
-			if (r != 0)
+			if (r != 0) {
+				gmb();
 				den += rats[k].den_step - r;
+			}
 		}
 		diff = q * den - num;
 		if (diff < 0)
@@ -924,8 +935,10 @@ static int snd_interval_ratden(struct snd_interval *i,
 		else {
 			unsigned int r;
 			r = (num - rats[k].num_min) % rats[k].num_step;
-			if (r != 0)
+			if (r != 0) {
+				gmb();
 				num += rats[k].num_step - r;
+			}
 		}
 		diff = num - q * den;
 		if (best_num == 0 ||
@@ -956,8 +969,10 @@ static int snd_interval_ratden(struct snd_interval *i,
 		else {
 			unsigned int r;
 			r = (num - rats[k].num_min) % rats[k].num_step;
-			if (r != 0)
+			if (r != 0) {
+				gmb();
 				num -= r;
+			}
 		}
 		diff = q * den - num;
 		if (best_num == 0 ||
@@ -1064,12 +1079,14 @@ int snd_interval_ranges(struct snd_interval *i, unsigned int count,
 			continue;
 
 		if (range.min < range_union.min) {
+			gmb();
 			range_union.min = range.min;
 			range_union.openmin = 1;
 		}
 		if (range.min == range_union.min && !range.openmin)
 			range_union.openmin = 0;
 		if (range.max > range_union.max) {
+			gmb();
 			range_union.max = range.max;
 			range_union.openmax = 1;
 		}
@@ -1129,15 +1146,11 @@ int snd_pcm_hw_rule_add(struct snd_pcm_runtime *runtime, unsigned int cond,
 	if (constrs->rules_num >= constrs->rules_all) {
 		struct snd_pcm_hw_rule *new;
 		unsigned int new_rules = constrs->rules_all + 16;
-		new = kcalloc(new_rules, sizeof(*c), GFP_KERNEL);
+		new = krealloc(constrs->rules, new_rules * sizeof(*c),
+			       GFP_KERNEL);
 		if (!new) {
 			va_end(args);
 			return -ENOMEM;
-		}
-		if (constrs->rules) {
-			memcpy(new, constrs->rules,
-			       constrs->rules_num * sizeof(*c));
-			kfree(constrs->rules);
 		}
 		constrs->rules = new;
 		constrs->rules_all = new_rules;
@@ -1602,7 +1615,7 @@ static int _snd_pcm_hw_param_first(struct snd_pcm_hw_params *params,
 		changed = snd_interval_refine_first(hw_param_interval(params, var));
 	else
 		return -EINVAL;
-	if (changed) {
+	if (changed > 0) {
 		params->cmask |= 1 << var;
 		params->rmask |= 1 << var;
 	}
@@ -1648,7 +1661,7 @@ static int _snd_pcm_hw_param_last(struct snd_pcm_hw_params *params,
 		changed = snd_interval_refine_last(hw_param_interval(params, var));
 	else
 		return -EINVAL;
-	if (changed) {
+	if (changed > 0) {
 		params->cmask |= 1 << var;
 		params->rmask |= 1 << var;
 	}
@@ -1827,7 +1840,7 @@ static int wait_for_avail(struct snd_pcm_substream *substream,
 {
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	int is_playback = substream->stream == SNDRV_PCM_STREAM_PLAYBACK;
-	wait_queue_entry_t wait;
+	wait_queue_t wait;
 	int err = 0;
 	snd_pcm_uframes_t avail = 0;
 	long wait_time, tout;
@@ -1839,12 +1852,19 @@ static int wait_for_avail(struct snd_pcm_substream *substream,
 	if (runtime->no_period_wakeup)
 		wait_time = MAX_SCHEDULE_TIMEOUT;
 	else {
-		wait_time = 10;
-		if (runtime->rate) {
-			long t = runtime->period_size * 2 / runtime->rate;
-			wait_time = max(t, wait_time);
+		/* use wait time from substream if available */
+		if (substream->wait_time) {
+			wait_time = substream->wait_time;
+		} else {
+			wait_time = 10;
+
+			if (runtime->rate) {
+				long t = runtime->period_size * 2 /
+					 runtime->rate;
+				wait_time = max(t, wait_time);
+			}
+			wait_time = msecs_to_jiffies(wait_time * 1000);
 		}
-		wait_time = msecs_to_jiffies(wait_time * 1000);
 	}
 
 	for (;;) {
@@ -1860,10 +1880,7 @@ static int wait_for_avail(struct snd_pcm_substream *substream,
 		 * This check must happen after been added to the waitqueue
 		 * and having current state be INTERRUPTIBLE.
 		 */
-		if (is_playback)
-			avail = snd_pcm_playback_avail(runtime);
-		else
-			avail = snd_pcm_capture_avail(runtime);
+		avail = snd_pcm_avail(substream);
 		if (avail >= runtime->twake)
 			break;
 		snd_pcm_stream_unlock_irq(substream);
@@ -2168,6 +2185,14 @@ snd_pcm_sframes_t __snd_pcm_lib_xfer(struct snd_pcm_substream *substream,
 	if (err < 0)
 		goto _end_unlock;
 
+	runtime->twake = runtime->control->avail_min ? : 1;
+	if (runtime->status->state == SNDRV_PCM_STATE_RUNNING)
+		snd_pcm_update_hw_ptr(substream);
+
+	/*
+	 * If size < start_threshold, wait indefinitely. Another
+	 * thread may start capture
+	 */
 	if (!is_playback &&
 	    runtime->status->state == SNDRV_PCM_STATE_PREPARED &&
 	    size >= runtime->start_threshold) {
@@ -2176,13 +2201,8 @@ snd_pcm_sframes_t __snd_pcm_lib_xfer(struct snd_pcm_substream *substream,
 			goto _end_unlock;
 	}
 
-	runtime->twake = runtime->control->avail_min ? : 1;
-	if (runtime->status->state == SNDRV_PCM_STATE_RUNNING)
-		snd_pcm_update_hw_ptr(substream);
-	if (is_playback)
-		avail = snd_pcm_playback_avail(runtime);
-	else
-		avail = snd_pcm_capture_avail(runtime);
+	avail = snd_pcm_avail(substream);
+
 	while (size > 0) {
 		snd_pcm_uframes_t frames, appl_ptr, appl_ofs;
 		snd_pcm_uframes_t cont;
@@ -2211,9 +2231,8 @@ snd_pcm_sframes_t __snd_pcm_lib_xfer(struct snd_pcm_substream *substream,
 		if (frames > cont)
 			frames = cont;
 		if (snd_BUG_ON(!frames)) {
-			runtime->twake = 0;
-			snd_pcm_stream_unlock_irq(substream);
-			return -EINVAL;
+			err = -EINVAL;
+			goto _end_unlock;
 		}
 		snd_pcm_stream_unlock_irq(substream);
 		err = writer(substream, appl_ofs, data, offset, frames,

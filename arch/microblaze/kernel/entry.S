@@ -208,7 +208,9 @@ syscall_debug_table:
 	mfs	r11, rmsr;		/* save MSR */			\
 	swi	r11, r1, PT_MSR;
 
-#define RESTORE_REGS_GP \
+#define RESTORE_REGS \
+	lwi	r11, r1, PT_MSR;					\
+	mts	rmsr , r11;						\
 	lwi	r2, r1, PT_R2;	/* restore SDA */		\
 	lwi	r3, r1, PT_R3;					\
 	lwi	r4, r1, PT_R4;					\
@@ -239,18 +241,6 @@ syscall_debug_table:
 	lwi	r29, r1, PT_R29;					\
 	lwi	r30, r1, PT_R30;					\
 	lwi	r31, r1, PT_R31;	/* Restore cur task reg */
-
-#define RESTORE_REGS \
-	lwi	r11, r1, PT_MSR;					\
-	mts	rmsr , r11;						\
-	RESTORE_REGS_GP
-
-#define RESTORE_REGS_RTBD \
-	lwi	r11, r1, PT_MSR;					\
-	andni	r11, r11, MSR_EIP;          /* clear EIP */             \
-	ori	r11, r11, MSR_EE | MSR_BIP; /* set EE and BIP */        \
-	mts	rmsr , r11;						\
-	RESTORE_REGS_GP
 
 #define SAVE_STATE	\
 	swi	r1, r0, TOPHYS(PER_CPU(ENTRY_SP)); /* save stack */	\
@@ -358,9 +348,8 @@ C_ENTRY(_user_exception):
  * The LP register should point to the location where the called function
  * should return.  [note that MAKE_SYS_CALL uses label 1] */
 	/* See if the system call number is valid */
-	blti	r12, 5f
 	addi	r11, r12, -__NR_syscalls;
-	bgei	r11, 5f;
+	bgei	r11,5f;
 	/* Figure out which function to use for this system call.  */
 	/* Note Microblaze barrel shift is optional, so don't rely on it */
 	add	r12, r12, r12;			/* convert num -> ptr */
@@ -386,7 +375,7 @@ C_ENTRY(_user_exception):
 
 	/* The syscall number is invalid, return an error.  */
 5:
-	braid	ret_from_trap
+	rtsd	r15, 8;		/* looks like a normal subroutine return */
 	addi	r3, r0, -ENOSYS;
 
 /* Entry point used to return from a syscall/trap */
@@ -422,7 +411,7 @@ C_ENTRY(ret_from_trap):
 	bri	1b
 
 	/* Maybe handle a signal */
-5:
+5:	
 	andi	r11, r19, _TIF_SIGPENDING | _TIF_NOTIFY_RESUME;
 	beqi	r11, 4f;		/* Signals to handle, handle them */
 
@@ -437,7 +426,7 @@ C_ENTRY(ret_from_trap):
 	swi	CURRENT_TASK, r0, PER_CPU(CURRENT_SAVE); /* save current */
 	VM_OFF;
 	tophys(r1,r1);
-	RESTORE_REGS_RTBD;
+	RESTORE_REGS;
 	addik	r1, r1, PT_SIZE		/* Clean up stack space.  */
 	lwi	r1, r1, PT_R1 - PT_SIZE;/* Restore user stack pointer. */
 	bri	6f;
@@ -446,7 +435,7 @@ C_ENTRY(ret_from_trap):
 2:	set_bip;			/*  Ints masked for state restore */
 	VM_OFF;
 	tophys(r1,r1);
-	RESTORE_REGS_RTBD;
+	RESTORE_REGS;
 	addik	r1, r1, PT_SIZE		/* Clean up stack space.  */
 	tovirt(r1,r1);
 6:
@@ -622,7 +611,7 @@ C_ENTRY(ret_from_exc):
 	VM_OFF;
 	tophys(r1,r1);
 
-	RESTORE_REGS_RTBD;
+	RESTORE_REGS;
 	addik	r1, r1, PT_SIZE		/* Clean up stack space.  */
 
 	lwi	r1, r1, PT_R1 - PT_SIZE; /* Restore user stack pointer. */
@@ -631,7 +620,7 @@ C_ENTRY(ret_from_exc):
 2:	set_bip;			/* Ints masked for state restore */
 	VM_OFF;
 	tophys(r1,r1);
-	RESTORE_REGS_RTBD;
+	RESTORE_REGS;
 	addik	r1, r1, PT_SIZE		/* Clean up stack space.  */
 
 	tovirt(r1,r1);
@@ -857,7 +846,7 @@ dbtrap_call: /* Return point for kernel/user entry + 8 because of rtsd r15, 8 */
 	VM_OFF;
 	tophys(r1,r1);
 	/* MS: Restore all regs */
-	RESTORE_REGS_RTBD
+	RESTORE_REGS
 	addik	r1, r1, PT_SIZE	 /* Clean up stack space */
 	lwi	r1, r1, PT_R1 - PT_SIZE; /* Restore user stack pointer */
 DBTRAP_return_user: /* MS: Make global symbol for debugging */
@@ -868,7 +857,7 @@ DBTRAP_return_user: /* MS: Make global symbol for debugging */
 2:	VM_OFF;
 	tophys(r1,r1);
 	/* MS: Restore all regs */
-	RESTORE_REGS_RTBD
+	RESTORE_REGS
 	lwi	r14, r1, PT_R14;
 	lwi	r16, r1, PT_PC;
 	addik	r1, r1, PT_SIZE; /* MS: Clean up stack space */

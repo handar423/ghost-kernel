@@ -113,6 +113,7 @@ struct misc_stats {
 	atomic64_t queue_fulls;
 	atomic64_t rport_not_ready;
 	atomic64_t frame_errors;
+	atomic64_t current_port_speed;
 };
 
 struct fnic_stats {
@@ -134,6 +135,6 @@ struct stats_debug_info {
 };
 
 int fnic_get_stats_data(struct stats_debug_info *, struct fnic_stats *);
-int fnic_stats_debugfs_init(struct fnic *);
+void fnic_stats_debugfs_init(struct fnic *);
 void fnic_stats_debugfs_remove(struct fnic *);
 #endif /* _FNIC_STATS_H_ */

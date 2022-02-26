@@ -6,20 +6,23 @@
  * Version 2.  See the file COPYING for more details.
  */
 
-#include <linux/crash_core.h>
 #include <linux/utsname.h>
+#include <linux/mm.h>
 #include <linux/vmalloc.h>
+#include <linux/hugetlb.h>
 
 #include <asm/page.h>
 #include <asm/sections.h>
+#ifdef CONFIG_KEXEC_AUTO_RESERVE
+#include <asm/kexec.h>
+#endif
+#include <linux/crash_core.h>
 
 /* vmcoreinfo stuff */
-static unsigned char *vmcoreinfo_data;
-static size_t vmcoreinfo_size;
-u32 *vmcoreinfo_note;
-
-/* trusted vmcoreinfo, e.g. we can make a copy in the crash memory */
-static unsigned char *vmcoreinfo_data_safecopy;
+static unsigned char vmcoreinfo_data[VMCOREINFO_BYTES];
+u32 vmcoreinfo_note[VMCOREINFO_NOTE_SIZE/4];
+size_t vmcoreinfo_size;
+size_t vmcoreinfo_max_size = sizeof(vmcoreinfo_data);
 
 /*
  * parsing the "crashkernel" commandline
@@ -108,8 +111,7 @@ static int __init parse_crashkernel_mem(char *cmdline,
 				return -EINVAL;
 			}
 		}
-	} else
-		pr_info("crashkernel size resulted in zero bytes\n");
+	}
 
 	return 0;
 }
@@ -136,7 +138,7 @@ static int __init parse_crashkernel_simple(char *cmdline,
 	if (*cur == '@')
 		*crash_base = memparse(cur+1, &cur);
 	else if (*cur != ' ' && *cur != '\0') {
-		pr_warn("crashkernel: unrecognized char: %c\n", *cur);
+		pr_warn("crashkernel: unrecognized char\n");
 		return -EINVAL;
 	}
 
@@ -151,6 +153,43 @@ static __initdata char *suffix_tbl[] = {
 	[SUFFIX_LOW]  = ",low",
 	[SUFFIX_NULL] = NULL,
 };
+
+#ifdef CONFIG_KEXEC_AUTO_RESERVE
+#ifndef arch_default_crash_size
+unsigned long long __init arch_default_crash_size(unsigned long long total_size)
+{
+	/*
+	 * BIOS usually will reserve some memory regions for it's own use.
+	 * so we will get less than actual memory in e820 usable areas.
+	 * We workaround this by round up the total size to 128M which is
+	 * enough for our current 2G kdump auto reserve threshold.
+	 */
+	if (roundup(total_size, 0x8000000) < KEXEC_AUTO_THRESHOLD)
+		return 0;
+	else {
+		/*
+		 * Filtering logic in kdump initrd requires 2bits per 4K page.
+		 * Hence reserve 2bits per 4K of RAM (or 1byte per 16K of RAM)
+		 * on top of base of 128M (KEXEC_AUTO_RESERVED_SIZE).
+		 */
+		return KEXEC_AUTO_RESERVED_SIZE +
+			roundup((total_size - KEXEC_AUTO_RESERVED_SIZE)
+				/ (1ULL<<14), 1ULL<<20);
+	}
+}
+#define arch_default_crash_size arch_default_crash_size
+#endif
+
+#ifndef arch_default_crash_base
+unsigned long long __init arch_default_crash_base(void)
+{
+	/* 0 means find the base address automatically. */
+	return 0;
+}
+#define arch_default_crash_base arch_default_crash_base
+#endif
+
+#endif /*CONFIG_KEXEC_AUTO_RESERVE*/
 
 /*
  * That function parses "suffix"  crashkernel command lines like
@@ -173,12 +212,12 @@ static int __init parse_crashkernel_suffix(char *cmdline,
 
 	/* check with suffix */
 	if (strncmp(cur, suffix, strlen(suffix))) {
-		pr_warn("crashkernel: unrecognized char: %c\n", *cur);
+		pr_warn("crashkernel: unrecognized char\n");
 		return -EINVAL;
 	}
 	cur += strlen(suffix);
 	if (*cur != ' ' && *cur != '\0') {
-		pr_warn("crashkernel: unrecognized char: %c\n", *cur);
+		pr_warn("crashkernel: unrecognized char\n");
 		return -EINVAL;
 	}
 
@@ -250,6 +289,21 @@ static int __init __parse_crashkernel(char *cmdline,
 	if (suffix)
 		return parse_crashkernel_suffix(ck_cmdline, crash_size,
 				suffix);
+#ifdef CONFIG_KEXEC_AUTO_RESERVE
+	if (strncmp(ck_cmdline, "auto", 4) == 0) {
+		unsigned long long size;
+
+		size = arch_default_crash_size(system_ram);
+		if (size != 0) {
+			*crash_size = size;
+			*crash_base = arch_default_crash_base();
+			return 0;
+		} else {
+			pr_warning("crashkernel=auto resulted in zero bytes of reserved memory.\n");
+			return -ENOMEM;
+		}
+	}
+#endif
 	/*
 	 * if the commandline contains a ':', then that's the extended
 	 * syntax -- if not, it must be the classic syntax
@@ -327,23 +381,8 @@ static void update_vmcoreinfo_note(void)
 	final_note(buf);
 }
 
-void crash_update_vmcoreinfo_safecopy(void *ptr)
-{
-	if (ptr)
-		memcpy(ptr, vmcoreinfo_data, vmcoreinfo_size);
-
-	vmcoreinfo_data_safecopy = ptr;
-}
-
 void crash_save_vmcoreinfo(void)
 {
-	if (!vmcoreinfo_note)
-		return;
-
-	/* Use the safe copy to generate vmcoreinfo note if have */
-	if (vmcoreinfo_data_safecopy)
-		vmcoreinfo_data = vmcoreinfo_data_safecopy;
-
 	vmcoreinfo_append_str("CRASHTIME=%ld\n", get_seconds());
 	update_vmcoreinfo_note();
 }
@@ -358,7 +397,7 @@ void vmcoreinfo_append_str(const char *fmt, ...)
 	r = vscnprintf(buf, sizeof(buf), fmt, args);
 	va_end(args);
 
-	r = min(r, (size_t)VMCOREINFO_BYTES - vmcoreinfo_size);
+	r = min(r, vmcoreinfo_max_size - vmcoreinfo_size);
 
 	memcpy(&vmcoreinfo_data[vmcoreinfo_size], buf, r);
 
@@ -372,28 +411,14 @@ void vmcoreinfo_append_str(const char *fmt, ...)
 void __weak arch_crash_save_vmcoreinfo(void)
 {}
 
-phys_addr_t __weak paddr_vmcoreinfo_note(void)
+unsigned long __weak paddr_vmcoreinfo_note(void)
 {
-	return __pa(vmcoreinfo_note);
+	return __pa((unsigned long)(char *)&vmcoreinfo_note);
 }
+EXPORT_SYMBOL(paddr_vmcoreinfo_note);
 
 static int __init crash_save_vmcoreinfo_init(void)
 {
-	vmcoreinfo_data = (unsigned char *)get_zeroed_page(GFP_KERNEL);
-	if (!vmcoreinfo_data) {
-		pr_warn("Memory allocation for vmcoreinfo_data failed\n");
-		return -ENOMEM;
-	}
-
-	vmcoreinfo_note = alloc_pages_exact(VMCOREINFO_NOTE_SIZE,
-						GFP_KERNEL | __GFP_ZERO);
-	if (!vmcoreinfo_note) {
-		free_page((unsigned long)vmcoreinfo_data);
-		vmcoreinfo_data = NULL;
-		pr_warn("Memory allocation for vmcoreinfo_note failed\n");
-		return -ENOMEM;
-	}
-
 	VMCOREINFO_OSRELEASE(init_uts_ns.name.release);
 	VMCOREINFO_PAGESIZE(PAGE_SIZE);
 
@@ -410,7 +435,7 @@ static int __init crash_save_vmcoreinfo_init(void)
 	VMCOREINFO_SYMBOL(contig_page_data);
 #endif
 #ifdef CONFIG_SPARSEMEM
-	VMCOREINFO_SYMBOL_ARRAY(mem_section);
+	VMCOREINFO_SYMBOL(mem_section);
 	VMCOREINFO_LENGTH(mem_section, NR_SECTION_ROOTS);
 	VMCOREINFO_STRUCT_SIZE(mem_section);
 	VMCOREINFO_OFFSET(mem_section, section_mem_map);
@@ -422,14 +447,11 @@ static int __init crash_save_vmcoreinfo_init(void)
 	VMCOREINFO_STRUCT_SIZE(list_head);
 	VMCOREINFO_SIZE(nodemask_t);
 	VMCOREINFO_OFFSET(page, flags);
-	VMCOREINFO_OFFSET(page, _refcount);
+	VMCOREINFO_OFFSET(page, _count);
 	VMCOREINFO_OFFSET(page, mapping);
 	VMCOREINFO_OFFSET(page, lru);
 	VMCOREINFO_OFFSET(page, _mapcount);
 	VMCOREINFO_OFFSET(page, private);
-	VMCOREINFO_OFFSET(page, compound_dtor);
-	VMCOREINFO_OFFSET(page, compound_order);
-	VMCOREINFO_OFFSET(page, compound_head);
 	VMCOREINFO_OFFSET(pglist_data, node_zones);
 	VMCOREINFO_OFFSET(pglist_data, nr_zones);
 #ifdef CONFIG_FLAT_NODE_MEM_MAP
@@ -459,8 +481,9 @@ static int __init crash_save_vmcoreinfo_init(void)
 #endif
 	VMCOREINFO_NUMBER(PG_head_mask);
 	VMCOREINFO_NUMBER(PAGE_BUDDY_MAPCOUNT_VALUE);
-#ifdef CONFIG_HUGETLB_PAGE
-	VMCOREINFO_NUMBER(HUGETLB_PAGE_DTOR);
+#ifdef CONFIG_HUGETLBFS
+	VMCOREINFO_SYMBOL(free_huge_page);
+	VMCOREINFO_NUMBER(PAGE_OFFLINE_MAPCOUNT_VALUE);
 #endif
 
 	arch_crash_save_vmcoreinfo();

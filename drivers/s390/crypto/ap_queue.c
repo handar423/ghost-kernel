@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright IBM Corp. 2016
  * Author(s): Martin Schwidefsky <schwidefsky@de.ibm.com>
@@ -600,7 +599,7 @@ static const struct attribute_group *ap_queue_dev_attr_groups[] = {
 	NULL
 };
 
-static struct device_type ap_queue_type = {
+struct device_type ap_queue_type = {
 	.name = "ap_queue",
 	.groups = ap_queue_dev_attr_groups,
 };
@@ -634,7 +633,7 @@ struct ap_queue *ap_queue_create(ap_qid_t qid, int device_type)
 	INIT_LIST_HEAD(&aq->list);
 	INIT_LIST_HEAD(&aq->pendingq);
 	INIT_LIST_HEAD(&aq->requestq);
-	timer_setup(&aq->timeout, ap_request_timeout, 0);
+	setup_timer(&aq->timeout, ap_request_timeout, (unsigned long) aq);
 
 	return aq;
 }

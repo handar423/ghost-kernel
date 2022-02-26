@@ -1,8 +1,12 @@
-// SPDX-License-Identifier: GPL-2.0+
 /*
  * Copyright (C) 2011 Marvell International Ltd. All rights reserved.
  * Author: Chao Xie <chao.xie@marvell.com>
  *	   Neil Zhang <zhangwm@marvell.com>
+ *
+ * This program is free software; you can redistribute  it and/or modify it
+ * under  the terms of  the GNU General  Public License as published by the
+ * Free Software Foundation;  either version 2 of the  License, or (at your
+ * option) any later version.
  */
 
 #include <linux/module.h>
@@ -25,8 +29,10 @@
 #include "phy-mv-usb.h"
 
 #define	DRIVER_DESC	"Marvell USB OTG transceiver driver"
+#define	DRIVER_VERSION	"Jan 20, 2010"
 
 MODULE_DESCRIPTION(DRIVER_DESC);
+MODULE_VERSION(DRIVER_VERSION);
 MODULE_LICENSE("GPL");
 
 static const char driver_name[] = "mv-otg";
@@ -50,7 +56,7 @@ static char *state_string[] = {
 
 static int mv_otg_set_vbus(struct usb_otg *otg, bool on)
 {
-	struct mv_otg *mvotg = container_of(otg->usb_phy, struct mv_otg, phy);
+	struct mv_otg *mvotg = container_of(otg->phy, struct mv_otg, phy);
 	if (mvotg->pdata->set_vbus == NULL)
 		return -ENODEV;
 
@@ -83,10 +89,9 @@ static void mv_otg_run_state_machine(struct mv_otg *mvotg,
 	queue_delayed_work(mvotg->qwork, &mvotg->work, delay);
 }
 
-static void mv_otg_timer_await_bcon(struct timer_list *t)
+static void mv_otg_timer_await_bcon(unsigned long data)
 {
-	struct mv_otg *mvotg = from_timer(mvotg, t,
-					  otg_ctrl.timer[A_WAIT_BCON_TIMER]);
+	struct mv_otg *mvotg = (struct mv_otg *) data;
 
 	mvotg->otg_ctrl.a_wait_bcon_timeout = 1;
 
@@ -114,7 +119,8 @@ static int mv_otg_cancel_timer(struct mv_otg *mvotg, unsigned int id)
 }
 
 static int mv_otg_set_timer(struct mv_otg *mvotg, unsigned int id,
-			    unsigned long interval)
+			    unsigned long interval,
+			    void (*callback) (unsigned long))
 {
 	struct timer_list *timer;
 
@@ -127,6 +133,9 @@ static int mv_otg_set_timer(struct mv_otg *mvotg, unsigned int id,
 		return -EBUSY;
 	}
 
+	init_timer(timer);
+	timer->data = (unsigned long) mvotg;
+	timer->function = callback;
 	timer->expires = jiffies + interval;
 	add_timer(timer);
 
@@ -203,12 +212,10 @@ static void mv_otg_start_host(struct mv_otg *mvotg, int on)
 
 	hcd = bus_to_hcd(otg->host);
 
-	if (on) {
+	if (on)
 		usb_add_hcd(hcd, hcd->irq, IRQF_SHARED);
-		device_wakeup_enable(hcd->self.controller);
-	} else {
+	else
 		usb_remove_hcd(hcd);
-	}
 #endif /* CONFIG_USB */
 }
 
@@ -329,68 +336,69 @@ static void mv_otg_update_inputs(struct mv_otg *mvotg)
 static void mv_otg_update_state(struct mv_otg *mvotg)
 {
 	struct mv_otg_ctrl *otg_ctrl = &mvotg->otg_ctrl;
-	int old_state = mvotg->phy.otg->state;
+	struct usb_phy *phy = &mvotg->phy;
+	int old_state = phy->state;
 
 	switch (old_state) {
 	case OTG_STATE_UNDEFINED:
-		mvotg->phy.otg->state = OTG_STATE_B_IDLE;
+		phy->state = OTG_STATE_B_IDLE;
 		/* FALL THROUGH */
 	case OTG_STATE_B_IDLE:
 		if (otg_ctrl->id == 0)
-			mvotg->phy.otg->state = OTG_STATE_A_IDLE;
+			phy->state = OTG_STATE_A_IDLE;
 		else if (otg_ctrl->b_sess_vld)
-			mvotg->phy.otg->state = OTG_STATE_B_PERIPHERAL;
+			phy->state = OTG_STATE_B_PERIPHERAL;
 		break;
 	case OTG_STATE_B_PERIPHERAL:
 		if (!otg_ctrl->b_sess_vld || otg_ctrl->id == 0)
-			mvotg->phy.otg->state = OTG_STATE_B_IDLE;
+			phy->state = OTG_STATE_B_IDLE;
 		break;
 	case OTG_STATE_A_IDLE:
 		if (otg_ctrl->id)
-			mvotg->phy.otg->state = OTG_STATE_B_IDLE;
+			phy->state = OTG_STATE_B_IDLE;
 		else if (!(otg_ctrl->a_bus_drop) &&
 			 (otg_ctrl->a_bus_req || otg_ctrl->a_srp_det))
-			mvotg->phy.otg->state = OTG_STATE_A_WAIT_VRISE;
+			phy->state = OTG_STATE_A_WAIT_VRISE;
 		break;
 	case OTG_STATE_A_WAIT_VRISE:
 		if (otg_ctrl->a_vbus_vld)
-			mvotg->phy.otg->state = OTG_STATE_A_WAIT_BCON;
+			phy->state = OTG_STATE_A_WAIT_BCON;
 		break;
 	case OTG_STATE_A_WAIT_BCON:
 		if (otg_ctrl->id || otg_ctrl->a_bus_drop
 		    || otg_ctrl->a_wait_bcon_timeout) {
 			mv_otg_cancel_timer(mvotg, A_WAIT_BCON_TIMER);
 			mvotg->otg_ctrl.a_wait_bcon_timeout = 0;
-			mvotg->phy.otg->state = OTG_STATE_A_WAIT_VFALL;
+			phy->state = OTG_STATE_A_WAIT_VFALL;
 			otg_ctrl->a_bus_req = 0;
 		} else if (!otg_ctrl->a_vbus_vld) {
 			mv_otg_cancel_timer(mvotg, A_WAIT_BCON_TIMER);
 			mvotg->otg_ctrl.a_wait_bcon_timeout = 0;
-			mvotg->phy.otg->state = OTG_STATE_A_VBUS_ERR;
+			phy->state = OTG_STATE_A_VBUS_ERR;
 		} else if (otg_ctrl->b_conn) {
 			mv_otg_cancel_timer(mvotg, A_WAIT_BCON_TIMER);
 			mvotg->otg_ctrl.a_wait_bcon_timeout = 0;
-			mvotg->phy.otg->state = OTG_STATE_A_HOST;
+			phy->state = OTG_STATE_A_HOST;
 		}
 		break;
 	case OTG_STATE_A_HOST:
 		if (otg_ctrl->id || !otg_ctrl->b_conn
 		    || otg_ctrl->a_bus_drop)
-			mvotg->phy.otg->state = OTG_STATE_A_WAIT_BCON;
+			phy->state = OTG_STATE_A_WAIT_BCON;
 		else if (!otg_ctrl->a_vbus_vld)
-			mvotg->phy.otg->state = OTG_STATE_A_VBUS_ERR;
+			phy->state = OTG_STATE_A_VBUS_ERR;
 		break;
 	case OTG_STATE_A_WAIT_VFALL:
 		if (otg_ctrl->id
 		    || (!otg_ctrl->b_conn && otg_ctrl->a_sess_vld)
 		    || otg_ctrl->a_bus_req)
-			mvotg->phy.otg->state = OTG_STATE_A_IDLE;
+			phy->state = OTG_STATE_A_IDLE;
 		break;
 	case OTG_STATE_A_VBUS_ERR:
 		if (otg_ctrl->id || otg_ctrl->a_clr_err
 		    || otg_ctrl->a_bus_drop) {
 			otg_ctrl->a_clr_err = 0;
-			mvotg->phy.otg->state = OTG_STATE_A_WAIT_VFALL;
+			phy->state = OTG_STATE_A_WAIT_VFALL;
 		}
 		break;
 	default:
@@ -410,8 +418,8 @@ static void mv_otg_work(struct work_struct *work)
 run:
 	/* work queue is single thread, or we need spin_lock to protect */
 	phy = &mvotg->phy;
-	otg = mvotg->phy.otg;
-	old_state = otg->state;
+	otg = phy->otg;
+	old_state = phy->state;
 
 	if (!mvotg->active)
 		return;
@@ -419,24 +427,22 @@ run:
 	mv_otg_update_inputs(mvotg);
 	mv_otg_update_state(mvotg);
 
-	if (old_state != mvotg->phy.otg->state) {
+	if (old_state != phy->state) {
 		dev_info(&mvotg->pdev->dev, "change from state %s to %s\n",
 			 state_string[old_state],
-			 state_string[mvotg->phy.otg->state]);
+			 state_string[phy->state]);
 
-		switch (mvotg->phy.otg->state) {
+		switch (phy->state) {
 		case OTG_STATE_B_IDLE:
 			otg->default_a = 0;
 			if (old_state == OTG_STATE_B_PERIPHERAL)
 				mv_otg_start_periphrals(mvotg, 0);
 			mv_otg_reset(mvotg);
 			mv_otg_disable(mvotg);
-			usb_phy_set_event(&mvotg->phy, USB_EVENT_NONE);
 			break;
 		case OTG_STATE_B_PERIPHERAL:
 			mv_otg_enable(mvotg);
 			mv_otg_start_periphrals(mvotg, 1);
-			usb_phy_set_event(&mvotg->phy, USB_EVENT_ENUMERATED);
 			break;
 		case OTG_STATE_A_IDLE:
 			otg->default_a = 1;
@@ -452,7 +458,8 @@ run:
 			if (old_state != OTG_STATE_A_HOST)
 				mv_otg_start_host(mvotg, 1);
 			mv_otg_set_timer(mvotg, A_WAIT_BCON_TIMER,
-					 T_A_WAIT_BCON);
+					 T_A_WAIT_BCON,
+					 mv_otg_timer_await_bcon);
 			/*
 			 * Now, we directly enter A_HOST. So set b_conn = 1
 			 * here. In fact, it need host driver to notify us.
@@ -536,8 +543,8 @@ set_a_bus_req(struct device *dev, struct device_attribute *attr,
 		return -1;
 
 	/* We will use this interface to change to A device */
-	if (mvotg->phy.otg->state != OTG_STATE_B_IDLE
-	    && mvotg->phy.otg->state != OTG_STATE_A_IDLE)
+	if (mvotg->phy.state != OTG_STATE_B_IDLE
+	    && mvotg->phy.state != OTG_STATE_A_IDLE)
 		return -1;
 
 	/* The clock may disabled and we need to set irq for ID detected */
@@ -640,12 +647,12 @@ static struct attribute *inputs_attrs[] = {
 	NULL,
 };
 
-static const struct attribute_group inputs_attr_group = {
+static struct attribute_group inputs_attr_group = {
 	.name = "inputs",
 	.attrs = inputs_attrs,
 };
 
-static int mv_otg_remove(struct platform_device *pdev)
+int mv_otg_remove(struct platform_device *pdev)
 {
 	struct mv_otg *mvotg = platform_get_drvdata(pdev);
 
@@ -665,7 +672,7 @@ static int mv_otg_remove(struct platform_device *pdev)
 
 static int mv_otg_probe(struct platform_device *pdev)
 {
-	struct mv_usb_platform_data *pdata = dev_get_platdata(&pdev->dev);
+	struct mv_usb_platform_data *pdata = pdev->dev.platform_data;
 	struct mv_otg *mvotg;
 	struct usb_otg *otg;
 	struct resource *r;
@@ -677,8 +684,10 @@ static int mv_otg_probe(struct platform_device *pdev)
 	}
 
 	mvotg = devm_kzalloc(&pdev->dev, sizeof(*mvotg), GFP_KERNEL);
-	if (!mvotg)
+	if (!mvotg) {
+		dev_err(&pdev->dev, "failed to allocate memory!\n");
 		return -ENOMEM;
+	}
 
 	otg = devm_kzalloc(&pdev->dev, sizeof(*otg), GFP_KERNEL);
 	if (!otg)
@@ -706,16 +715,15 @@ static int mv_otg_probe(struct platform_device *pdev)
 	mvotg->phy.dev = &pdev->dev;
 	mvotg->phy.otg = otg;
 	mvotg->phy.label = driver_name;
+	mvotg->phy.state = OTG_STATE_UNDEFINED;
 
-	otg->state = OTG_STATE_UNDEFINED;
-	otg->usb_phy = &mvotg->phy;
+	otg->phy = &mvotg->phy;
 	otg->set_host = mv_otg_set_host;
 	otg->set_peripheral = mv_otg_set_peripheral;
 	otg->set_vbus = mv_otg_set_vbus;
 
 	for (i = 0; i < OTG_TIMER_NUM; i++)
-		timer_setup(&mvotg->otg_ctrl.timer[i],
-			    mv_otg_timer_await_bcon, 0);
+		init_timer(&mvotg->otg_ctrl.timer[i]);
 
 	r = platform_get_resource_byname(mvotg->pdev,
 					 IORESOURCE_MEM, "phyregs");
@@ -848,10 +856,10 @@ static int mv_otg_suspend(struct platform_device *pdev, pm_message_t state)
 {
 	struct mv_otg *mvotg = platform_get_drvdata(pdev);
 
-	if (mvotg->phy.otg->state != OTG_STATE_B_IDLE) {
+	if (mvotg->phy.state != OTG_STATE_B_IDLE) {
 		dev_info(&pdev->dev,
 			 "OTG state is not B_IDLE, it is %d!\n",
-			 mvotg->phy.otg->state);
+			 mvotg->phy.state);
 		return -EAGAIN;
 	}
 
@@ -884,8 +892,9 @@ static int mv_otg_resume(struct platform_device *pdev)
 
 static struct platform_driver mv_otg_driver = {
 	.probe = mv_otg_probe,
-	.remove = mv_otg_remove,
+	.remove = __exit_p(mv_otg_remove),
 	.driver = {
+		   .owner = THIS_MODULE,
 		   .name = driver_name,
 		   },
 #ifdef CONFIG_PM

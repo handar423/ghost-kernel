@@ -1,7 +1,7 @@
 /*
  * AMD Cryptographic Coprocessor (CCP) driver
  *
- * Copyright (C) 2013,2017 Advanced Micro Devices, Inc.
+ * Copyright (C) 2013,2016 Advanced Micro Devices, Inc.
  *
  * Author: Tom Lendacky <thomas.lendacky@amd.com>
  * Author: Gary R Hook <gary.hook@amd.com>
@@ -27,8 +27,6 @@
 #include <linux/irqreturn.h>
 #include <linux/dmaengine.h>
 
-#include "sp-dev.h"
-
 #define MAX_CCP_NAME_LEN		16
 #define MAX_DMAPOOL_NAME_LEN		32
 
@@ -36,9 +34,6 @@
 #define MAX_CMD_QLEN			100
 
 #define TRNG_RETRIES			10
-
-#define CACHE_NONE			0x00
-#define CACHE_WB_NO_ALLOC		0xb7
 
 /****** Register Mappings ******/
 #define Q_MASK_REG			0x000
@@ -57,7 +52,7 @@
 #define CMD_Q_INT_STATUS_BASE		0x214
 #define CMD_Q_STATUS_INCR		0x20
 
-#define CMD_Q_CACHE_BASE		0x228
+#define CMD_Q_CACHE			0x228
 #define CMD_Q_CACHE_INC			0x20
 
 #define CMD_Q_ERROR(__qs)		((__qs) & 0x0000003f)
@@ -72,7 +67,6 @@
 #define LSB_PUBLIC_MASK_HI_OFFSET	0x1C
 #define LSB_PRIVATE_MASK_LO_OFFSET	0x20
 #define LSB_PRIVATE_MASK_HI_OFFSET	0x24
-#define CMD5_PSP_CCP_VERSION		0x100
 
 #define CMD5_Q_CONTROL_BASE		0x0000
 #define CMD5_Q_TAIL_LO_BASE		0x0004
@@ -112,8 +106,9 @@
 #define INT_COMPLETION			0x1
 #define INT_ERROR			0x2
 #define INT_QUEUE_STOPPED		0x4
-#define	INT_EMPTY_QUEUE			0x8
-#define SUPPORTED_INTERRUPTS		(INT_COMPLETION | INT_ERROR)
+#define ALL_INTERRUPTS			(INT_COMPLETION| \
+					 INT_ERROR| \
+					 INT_QUEUE_STOPPED)
 
 #define LSB_REGION_WIDTH		5
 #define MAX_LSB_CNT			8
@@ -181,10 +176,6 @@
 
 /* ------------------------ General CCP Defines ------------------------ */
 
-#define	CCP_DMA_DFLT			0x0
-#define	CCP_DMA_PRIV			0x1
-#define	CCP_DMA_PUB			0x2
-
 #define CCP_DMAPOOL_MAX_SIZE		64
 #define CCP_DMAPOOL_ALIGN		BIT(5)
 
@@ -194,16 +185,11 @@
 #define CCP_AES_CTX_SB_COUNT		1
 
 #define CCP_XTS_AES_KEY_SB_COUNT	1
-#define CCP5_XTS_AES_KEY_SB_COUNT	2
 #define CCP_XTS_AES_CTX_SB_COUNT	1
-
-#define CCP_DES3_KEY_SB_COUNT		1
-#define CCP_DES3_CTX_SB_COUNT		1
 
 #define CCP_SHA_SB_COUNT		1
 
 #define CCP_RSA_MAX_WIDTH		4096
-#define CCP5_RSA_MAX_WIDTH		16384
 
 #define CCP_PASSTHRU_BLOCKSIZE		256
 #define CCP_PASSTHRU_MASKSIZE		32
@@ -327,16 +313,6 @@ struct ccp_cmd_queue {
 	/* Interrupt wait queue */
 	wait_queue_head_t int_queue;
 	unsigned int int_rcvd;
-
-	/* Per-queue Statistics */
-	unsigned long total_ops;
-	unsigned long total_aes_ops;
-	unsigned long total_xts_aes_ops;
-	unsigned long total_3des_ops;
-	unsigned long total_sha_ops;
-	unsigned long total_rsa_ops;
-	unsigned long total_pt_ops;
-	unsigned long total_ecc_ops;
 } ____cacheline_aligned;
 
 struct ccp_device {
@@ -348,15 +324,13 @@ struct ccp_device {
 	char rngname[MAX_CCP_NAME_LEN];
 
 	struct device *dev;
-	struct sp_device *sp;
 
 	/* Bus specific device information
 	 */
 	void *dev_specific;
-	unsigned int qim;
+	int (*get_irq)(struct ccp_device *ccp);
+	void (*free_irq)(struct ccp_device *ccp);
 	unsigned int irq;
-	bool use_tasklet;
-	struct tasklet_struct irq_tasklet;
 
 	/* I/O area used for device communication. The register mapping
 	 * starts at an offset into the mapped bar.
@@ -365,6 +339,7 @@ struct ccp_device {
 	 *   them.
 	 */
 	struct mutex req_mutex ____cacheline_aligned;
+	void __iomem *io_map;
 	void __iomem *io_regs;
 
 	/* Master lists that all cmds are queued on. Because there can be
@@ -432,12 +407,6 @@ struct ccp_device {
 
 	/* DMA caching attribute support */
 	unsigned int axcache;
-
-	/* Device Statistics */
-	unsigned long total_interrupts;
-
-	/* DebugFS info */
-	struct dentry *debugfs_instance;
 };
 
 enum ccp_memtype {
@@ -448,32 +417,32 @@ enum ccp_memtype {
 };
 #define	CCP_MEMTYPE_LSB	CCP_MEMTYPE_KSB
 
-
 struct ccp_dma_info {
 	dma_addr_t address;
 	unsigned int offset;
 	unsigned int length;
 	enum dma_data_direction dir;
-} __packed __aligned(4);
+};
 
 struct ccp_dm_workarea {
 	struct device *dev;
 	struct dma_pool *dma_pool;
+	unsigned int length;
 
 	u8 *address;
 	struct ccp_dma_info dma;
-	unsigned int length;
 };
 
 struct ccp_sg_workarea {
 	struct scatterlist *sg;
 	int nents;
-	unsigned int sg_used;
 
 	struct scatterlist *dma_sg;
 	struct device *dma_dev;
 	unsigned int dma_count;
 	enum dma_data_direction dma_dir;
+
+	unsigned int sg_used;
 
 	u64 bytes_left;
 };
@@ -495,19 +464,11 @@ struct ccp_aes_op {
 	enum ccp_aes_type type;
 	enum ccp_aes_mode mode;
 	enum ccp_aes_action action;
-	unsigned int size;
 };
 
 struct ccp_xts_aes_op {
-	enum ccp_aes_type type;
 	enum ccp_aes_action action;
 	enum ccp_xts_aes_unit_size unit_size;
-};
-
-struct ccp_des3_op {
-	enum ccp_des3_type type;
-	enum ccp_des3_mode mode;
-	enum ccp_des3_action action;
 };
 
 struct ccp_sha_op {
@@ -547,7 +508,6 @@ struct ccp_op {
 	union {
 		struct ccp_aes_op aes;
 		struct ccp_xts_aes_op xts;
-		struct ccp_des3_op des3;
 		struct ccp_sha_op sha;
 		struct ccp_rsa_op rsa;
 		struct ccp_passthru_op passthru;
@@ -629,12 +589,15 @@ struct ccp5_desc {
 	struct dword7 dw7;
 };
 
+int ccp_pci_init(void);
+void ccp_pci_exit(void);
+
 void ccp_add_device(struct ccp_device *ccp);
 void ccp_del_device(struct ccp_device *ccp);
 
 extern void ccp_log_error(struct ccp_device *, int);
 
-struct ccp_device *ccp_alloc_struct(struct sp_device *sp);
+struct ccp_device *ccp_alloc_struct(struct device *dev);
 bool ccp_queues_suspended(struct ccp_device *ccp);
 int ccp_cmd_queue_thread(void *data);
 int ccp_trng_read(struct hwrng *rng, void *data, size_t max, bool wait);
@@ -646,27 +609,32 @@ void ccp_unregister_rng(struct ccp_device *ccp);
 int ccp_dmaengine_register(struct ccp_device *ccp);
 void ccp_dmaengine_unregister(struct ccp_device *ccp);
 
-void ccp5_debugfs_setup(struct ccp_device *ccp);
-void ccp5_debugfs_destroy(void);
-
 /* Structure for computation functions that are device-specific */
 struct ccp_actions {
 	int (*aes)(struct ccp_op *);
 	int (*xts_aes)(struct ccp_op *);
-	int (*des3)(struct ccp_op *);
 	int (*sha)(struct ccp_op *);
 	int (*rsa)(struct ccp_op *);
 	int (*passthru)(struct ccp_op *);
 	int (*ecc)(struct ccp_op *);
 	u32 (*sballoc)(struct ccp_cmd_queue *, unsigned int);
-	void (*sbfree)(struct ccp_cmd_queue *, unsigned int, unsigned int);
+	void (*sbfree)(struct ccp_cmd_queue *, unsigned int,
+			       unsigned int);
 	unsigned int (*get_free_slots)(struct ccp_cmd_queue *);
 	int (*init)(struct ccp_device *);
 	void (*destroy)(struct ccp_device *);
 	irqreturn_t (*irqhandler)(int, void *);
 };
 
-extern const struct ccp_vdata ccpv3_platform;
+/* Structure to hold CCP version-specific values */
+struct ccp_vdata {
+	const unsigned int version;
+	void (*setup)(struct ccp_device *);
+	const struct ccp_actions *perform;
+	const unsigned int bar;
+	const unsigned int offset;
+};
+
 extern const struct ccp_vdata ccpv3;
 extern const struct ccp_vdata ccpv5a;
 extern const struct ccp_vdata ccpv5b;

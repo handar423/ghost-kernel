@@ -5,7 +5,7 @@
  ******************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2017, Intel Corp.
+ * Copyright (C) 2000 - 2013, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -48,13 +48,115 @@
 #define _COMPONENT          ACPI_UTILITIES
 ACPI_MODULE_NAME("utstring")
 
+/*
+ * Non-ANSI C library functions - strlwr, strupr, stricmp, and "safe"
+ * string functions.
+ */
+#ifdef ACPI_ASL_COMPILER
+/*******************************************************************************
+ *
+ * FUNCTION:    acpi_ut_strlwr (strlwr)
+ *
+ * PARAMETERS:  src_string      - The source string to convert
+ *
+ * RETURN:      None
+ *
+ * DESCRIPTION: Convert string to lowercase
+ *
+ * NOTE: This is not a POSIX function, so it appears here, not in utclib.c
+ *
+ ******************************************************************************/
+void acpi_ut_strlwr(char *src_string)
+{
+	char *string;
+
+	ACPI_FUNCTION_ENTRY();
+
+	if (!src_string) {
+		return;
+	}
+
+	/* Walk entire string, lowercasing the letters */
+
+	for (string = src_string; *string; string++) {
+		*string = (char)tolower((int)*string);
+	}
+
+	return;
+}
+
+/******************************************************************************
+ *
+ * FUNCTION:    acpi_ut_stricmp (stricmp)
+ *
+ * PARAMETERS:  string1             - first string to compare
+ *              string2             - second string to compare
+ *
+ * RETURN:      int that signifies string relationship. Zero means strings
+ *              are equal.
+ *
+ * DESCRIPTION: Implementation of the non-ANSI stricmp function (compare
+ *              strings with no case sensitivity)
+ *
+ ******************************************************************************/
+
+int acpi_ut_stricmp(char *string1, char *string2)
+{
+	int c1;
+	int c2;
+
+	do {
+		c1 = tolower((int)*string1);
+		c2 = tolower((int)*string2);
+
+		string1++;
+		string2++;
+	}
+	while ((c1 == c2) && (c1));
+
+	return (c1 - c2);
+}
+#endif
+
+/*******************************************************************************
+ *
+ * FUNCTION:    acpi_ut_strupr (strupr)
+ *
+ * PARAMETERS:  src_string      - The source string to convert
+ *
+ * RETURN:      None
+ *
+ * DESCRIPTION: Convert string to uppercase
+ *
+ * NOTE: This is not a POSIX function, so it appears here, not in utclib.c
+ *
+ ******************************************************************************/
+
+void acpi_ut_strupr(char *src_string)
+{
+	char *string;
+
+	ACPI_FUNCTION_ENTRY();
+
+	if (!src_string) {
+		return;
+	}
+
+	/* Walk entire string, uppercasing the letters */
+
+	for (string = src_string; *string; string++) {
+		*string = (char)toupper((int)*string);
+	}
+
+	return;
+}
+
 /*******************************************************************************
  *
  * FUNCTION:    acpi_ut_print_string
  *
  * PARAMETERS:  string          - Null terminated ASCII string
- *              max_length      - Maximum output length. Used to constrain the
- *                                length of strings during debug output only.
+ *              max_length      - Maximum output length
  *
  * RETURN:      None
  *
@@ -62,7 +164,8 @@ ACPI_MODULE_NAME("utstring")
  *              sequences.
  *
  ******************************************************************************/
-void acpi_ut_print_string(char *string, u16 max_length)
+
+void acpi_ut_print_string(char *string, u8 max_length)
 {
 	u32 i;
 
@@ -130,12 +233,11 @@ void acpi_ut_print_string(char *string, u16 max_length)
 			} else {
 				/* All others will be Hex escapes */
 
-				acpi_os_printf("\\x%2.2X", (s32)string[i]);
+				acpi_os_printf("\\x%2.2X", (s32) string[i]);
 			}
 			break;
 		}
 	}
-
 	acpi_os_printf("\"");
 
 	if (i == max_length && string[i]) {
@@ -172,14 +274,6 @@ void acpi_ut_repair_name(char *name)
 	u32 original_name;
 
 	ACPI_FUNCTION_NAME(ut_repair_name);
-
-	/*
-	 * Special case for the root node. This can happen if we get an
-	 * error during the execution of module-level code.
-	 */
-	if (ACPI_COMPARE_NAME(name, "\\___")) {
-		return;
-	}
 
 	ACPI_MOVE_NAME(&original_name, name);
 

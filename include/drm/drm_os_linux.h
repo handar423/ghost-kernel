@@ -7,7 +7,7 @@
 #include <linux/interrupt.h>	/* For task queue support */
 #include <linux/sched/signal.h>
 #include <linux/delay.h>
-#include <linux/io-64-nonatomic-lo-hi.h>
+#include <asm-generic/io-64-nonatomic-lo-hi.h>
 
 /** Current process ID */
 #define DRM_CURRENTPID			task_pid_nr(current)

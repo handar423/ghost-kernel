@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 #ifndef _UAPI__LINUX_RTNETLINK_H
 #define _UAPI__LINUX_RTNETLINK_H
 
@@ -123,8 +122,6 @@ enum {
 
 	RTM_NEWNETCONF = 80,
 #define RTM_NEWNETCONF RTM_NEWNETCONF
-	RTM_DELNETCONF,
-#define RTM_DELNETCONF RTM_DELNETCONF
 	RTM_GETNETCONF = 82,
 #define RTM_GETNETCONF RTM_GETNETCONF
 
@@ -147,9 +144,6 @@ enum {
 	RTM_GETSTATS = 94,
 #define RTM_GETSTATS RTM_GETSTATS
 
-	RTM_NEWCACHEREPORT = 96,
-#define RTM_NEWCACHEREPORT RTM_NEWCACHEREPORT
-
 	__RTM_MAX,
 #define RTM_MAX		(((__RTM_MAX + 3) & ~3) - 1)
 };
@@ -171,7 +165,7 @@ struct rtattr {
 
 /* Macros to handle rtattributes */
 
-#define RTA_ALIGNTO	4U
+#define RTA_ALIGNTO	4
 #define RTA_ALIGN(len) ( ((len)+RTA_ALIGNTO-1) & ~(RTA_ALIGNTO-1) )
 #define RTA_OK(rta,len) ((len) >= (int)sizeof(struct rtattr) && \
 			 (rta)->rta_len >= sizeof(struct rtattr) && \
@@ -253,7 +247,6 @@ enum {
 #define RTPROT_NTK	15	/* Netsukuku */
 #define RTPROT_DHCP	16      /* DHCP client */
 #define RTPROT_MROUTED	17      /* Multicast daemon */
-#define RTPROT_BABEL	42      /* Babel daemon */
 
 /* rtm_scope
 
@@ -281,8 +274,6 @@ enum rt_scope_t {
 #define RTM_F_CLONED		0x200	/* This route is cloned		*/
 #define RTM_F_EQUALIZE		0x400	/* Multipath equalizer: NI	*/
 #define RTM_F_PREFIX		0x800	/* Prefix addresses		*/
-#define RTM_F_LOOKUP_TABLE	0x1000	/* set rtm_table to FIB lookup result */
-#define RTM_F_FIB_MATCH	        0x2000	/* return full fib lookup match */
 
 /* Reserved table identifiers */
 
@@ -319,14 +310,12 @@ enum rtattr_type_t {
 	RTA_MARK,
 	RTA_MFC_STATS,
 	RTA_VIA,
-	RTA_NEWDST,
+	__RH_RESERVED_RTA_NEWDST,
 	RTA_PREF,
 	RTA_ENCAP_TYPE,
 	RTA_ENCAP,
 	RTA_EXPIRES,
 	RTA_PAD,
-	RTA_UID,
-	RTA_TTL_PROPAGATE,
 	__RTA_MAX
 };
 
@@ -357,10 +346,6 @@ struct rtnexthop {
 #define RTNH_F_PERVASIVE	2	/* Do recursive gateway lookup	*/
 #define RTNH_F_ONLINK		4	/* Gateway is forced on link	*/
 #define RTNH_F_OFFLOAD		8	/* offloaded route */
-#define RTNH_F_LINKDOWN		16	/* carrier-down on nexthop */
-#define RTNH_F_UNRESOLVED	32	/* The entry is unresolved (ipmr) */
-
-#define RTNH_COMPARE_MASK	(RTNH_F_DEAD | RTNH_F_LINKDOWN | RTNH_F_OFFLOAD)
 
 /* Macros to handle hexthops */
 
@@ -372,12 +357,6 @@ struct rtnexthop {
 #define RTNH_LENGTH(len) (RTNH_ALIGN(sizeof(struct rtnexthop)) + (len))
 #define RTNH_SPACE(len)	RTNH_ALIGN(RTNH_LENGTH(len))
 #define RTNH_DATA(rtnh)   ((struct rtattr*)(((char*)(rtnh)) + RTNH_LENGTH(0)))
-
-/* RTA_VIA */
-struct rtvia {
-	__kernel_sa_family_t	rtvia_family;
-	__u8			rtvia_addr[0];
-};
 
 /* RTM_CACHEINFO */
 
@@ -431,8 +410,13 @@ enum {
 #define RTAX_QUICKACK RTAX_QUICKACK
 	RTAX_CC_ALGO,
 #define RTAX_CC_ALGO RTAX_CC_ALGO
-	RTAX_FASTOPEN_NO_COOKIE,
-#define RTAX_FASTOPEN_NO_COOKIE RTAX_FASTOPEN_NO_COOKIE
+	RTAX_RESERVED2,
+	RTAX_RESERVED3,
+	RTAX_RESERVED4,
+	RTAX_RESERVED5,
+	RTAX_RESERVED6,
+	RTAX_RESERVED7,
+	RTAX_RESERVED8,
 	__RTAX_MAX
 };
 
@@ -541,8 +525,18 @@ struct tcmsg {
 	int		tcm_ifindex;
 	__u32		tcm_handle;
 	__u32		tcm_parent;
+/* tcm_block_index is used instead of tcm_parent
+ * in case tcm_ifindex == TCM_IFINDEX_MAGIC_BLOCK
+ */
+#define tcm_block_index tcm_parent
 	__u32		tcm_info;
 };
+
+/* For manipulation of filters in shared block, tcm_ifindex is set to
+ * TCM_IFINDEX_MAGIC_BLOCK, and tcm_parent is aliased to tcm_block_index
+ * which is the block index.
+ */
+#define TCM_IFINDEX_MAGIC_BLOCK (0xFFFFFFFFU)
 
 enum {
 	TCA_UNSPEC,
@@ -558,6 +552,8 @@ enum {
 	TCA_DUMP_INVISIBLE,
 	TCA_CHAIN,
 	TCA_HW_OFFLOAD,
+	TCA_INGRESS_BLOCK,
+	TCA_EGRESS_BLOCK,
 	__TCA_MAX
 };
 
@@ -667,16 +663,9 @@ enum rtnetlink_groups {
 #define RTNLGRP_IPV6_NETCONF	RTNLGRP_IPV6_NETCONF
 	RTNLGRP_MDB,
 #define RTNLGRP_MDB		RTNLGRP_MDB
-	RTNLGRP_MPLS_ROUTE,
-#define RTNLGRP_MPLS_ROUTE	RTNLGRP_MPLS_ROUTE
+	__RH_RESERVED_RTNLGRP_MPLS_ROUTE,
 	RTNLGRP_NSID,
 #define RTNLGRP_NSID		RTNLGRP_NSID
-	RTNLGRP_MPLS_NETCONF,
-#define RTNLGRP_MPLS_NETCONF	RTNLGRP_MPLS_NETCONF
-	RTNLGRP_IPV4_MROUTE_R,
-#define RTNLGRP_IPV4_MROUTE_R	RTNLGRP_IPV4_MROUTE_R
-	RTNLGRP_IPV6_MROUTE_R,
-#define RTNLGRP_IPV6_MROUTE_R	RTNLGRP_IPV6_MROUTE_R
 	__RTNLGRP_MAX
 };
 #define RTNLGRP_MAX	(__RTNLGRP_MAX - 1)
@@ -715,7 +704,6 @@ enum {
 #define RTEXT_FILTER_VF		(1 << 0)
 #define RTEXT_FILTER_BRVLAN	(1 << 1)
 #define RTEXT_FILTER_BRVLAN_COMPRESSED	(1 << 2)
-#define	RTEXT_FILTER_SKIP_STATS	(1 << 3)
 
 /* End of information exported to user level */
 

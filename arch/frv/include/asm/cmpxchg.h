@@ -69,6 +69,8 @@ extern uint32_t __xchg_32(uint32_t i, volatile void *v);
 
 #endif
 
+#define tas(ptr) (xchg((ptr), 1))
+
 /*****************************************************************************/
 /*
  * compare and conditionally exchange value with memory
@@ -76,7 +78,6 @@ extern uint32_t __xchg_32(uint32_t i, volatile void *v);
  * - if (*ptr != test) then orig = *ptr;
  */
 extern uint64_t __cmpxchg_64(uint64_t test, uint64_t new, volatile uint64_t *v);
-#define cmpxchg64(p, o, n)	__cmpxchg_64((o), (n), (p))
 
 #ifndef CONFIG_FRV_OUTOFLINE_ATOMIC_OPS
 

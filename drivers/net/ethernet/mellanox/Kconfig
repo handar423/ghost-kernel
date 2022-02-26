@@ -7,7 +7,7 @@ config NET_VENDOR_MELLANOX
 	default y
 	depends on PCI || I2C
 	---help---
-	  If you have a network (Ethernet or RDMA) device belonging to this
+	  If you have a network (Ethernet or RDMA) card belonging to this
 	  class, say Y.
 
 	  Note that the answer to this question doesn't directly affect the

@@ -21,8 +21,6 @@
    SOFTWARE IS DISCLAIMED.
 */
 
-#include <linux/sched/signal.h>
-
 #include <net/bluetooth/bluetooth.h>
 #include <net/bluetooth/hci_core.h>
 #include <net/bluetooth/mgmt.h>
@@ -39,11 +37,6 @@ void hci_req_init(struct hci_request *req, struct hci_dev *hdev)
 	skb_queue_head_init(&req->cmd_q);
 	req->hdev = hdev;
 	req->err = 0;
-}
-
-void hci_req_purge(struct hci_request *req)
-{
-	skb_queue_purge(&req->cmd_q);
 }
 
 static int req_run(struct hci_request *req, hci_req_complete_t complete,
@@ -282,12 +275,16 @@ int hci_req_sync(struct hci_dev *hdev, int (*req)(struct hci_request *req,
 {
 	int ret;
 
-	if (!test_bit(HCI_UP, &hdev->flags))
-		return -ENETDOWN;
-
 	/* Serialize all requests */
 	hci_req_sync_lock(hdev);
-	ret = __hci_req_sync(hdev, req, opt, timeout, hci_status);
+	/* check the state after obtaing the lock to protect the HCI_UP
+	 * against any races from hci_dev_do_close when the controller
+	 * gets removed.
+	 */
+	if (test_bit(HCI_UP, &hdev->flags))
+		ret = __hci_req_sync(hdev, req, opt, timeout, hci_status);
+	else
+		ret = -ENETDOWN;
 	hci_req_sync_unlock(hdev);
 
 	return ret;
@@ -304,12 +301,12 @@ struct sk_buff *hci_prepare_cmd(struct hci_dev *hdev, u16 opcode, u32 plen,
 	if (!skb)
 		return NULL;
 
-	hdr = skb_put(skb, HCI_COMMAND_HDR_SIZE);
+	hdr = (struct hci_command_hdr *) skb_put(skb, HCI_COMMAND_HDR_SIZE);
 	hdr->opcode = cpu_to_le16(opcode);
 	hdr->plen   = plen;
 
 	if (plen)
-		skb_put_data(skb, param, plen);
+		memcpy(skb_put(skb, plen), param, plen);
 
 	BT_DBG("skb len %d", skb->len);
 
@@ -336,8 +333,8 @@ void hci_req_add_ev(struct hci_request *req, u16 opcode, u32 plen,
 
 	skb = hci_prepare_cmd(hdev, opcode, plen, param);
 	if (!skb) {
-		bt_dev_err(hdev, "no memory for command (opcode 0x%4.4x)",
-			   opcode);
+		BT_ERR("%s no memory for command (opcode 0x%4.4x)",
+		       hdev->name, opcode);
 		req->err = -ENOMEM;
 		return;
 	}
@@ -1426,7 +1423,7 @@ int hci_update_random_address(struct hci_request *req, bool require_privacy,
 
 		err = smp_generate_rpa(hdev, hdev->irk, &hdev->rpa);
 		if (err < 0) {
-			bt_dev_err(hdev, "failed to generate new RPA");
+			BT_ERR("%s failed to generate new RPA", hdev->name);
 			return err;
 		}
 
@@ -1788,7 +1785,7 @@ int hci_abort_conn(struct hci_conn *conn, u8 reason)
 
 	err = hci_req_run(&req, abort_conn_complete);
 	if (err && err != -ENODATA) {
-		bt_dev_err(conn->hdev, "failed to run HCI request: err %d", err);
+		BT_ERR("Failed to run HCI request: err %d", err);
 		return err;
 	}
 
@@ -1872,8 +1869,7 @@ static void le_scan_disable_work(struct work_struct *work)
 
 	hci_req_sync(hdev, le_scan_disable, 0, HCI_CMD_TIMEOUT, &status);
 	if (status) {
-		bt_dev_err(hdev, "failed to disable LE scan: status 0x%02x",
-			   status);
+		BT_ERR("Failed to disable LE scan: status 0x%02x", status);
 		return;
 	}
 
@@ -1904,7 +1900,7 @@ static void le_scan_disable_work(struct work_struct *work)
 	hci_req_sync(hdev, bredr_inquiry, DISCOV_INTERLEAVED_INQUIRY_LEN,
 		     HCI_CMD_TIMEOUT, &status);
 	if (status) {
-		bt_dev_err(hdev, "inquiry failed: status 0x%02x", status);
+		BT_ERR("Inquiry failed: status 0x%02x", status);
 		goto discov_stopped;
 	}
 
@@ -1946,8 +1942,7 @@ static void le_scan_restart_work(struct work_struct *work)
 
 	hci_req_sync(hdev, le_scan_restart, 0, HCI_CMD_TIMEOUT, &status);
 	if (status) {
-		bt_dev_err(hdev, "failed to restart LE scan: status %d",
-			   status);
+		BT_ERR("Failed to restart LE scan: status %d", status);
 		return;
 	}
 

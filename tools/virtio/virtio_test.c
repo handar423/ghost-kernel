@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 #define _GNU_SOURCE
 #include <getopt.h>
 #include <string.h>
@@ -12,7 +11,6 @@
 #include <sys/types.h>
 #include <fcntl.h>
 #include <stdbool.h>
-#include <linux/virtio_types.h>
 #include <linux/vhost.h>
 #include <linux/virtio.h>
 #include <linux/virtio_ring.h>
@@ -101,7 +99,7 @@ static void vq_info_add(struct vdev_info *dev, int num)
 	vring_init(&info->vring, num, info->ring, 4096);
 	info->vq = vring_new_virtqueue(info->idx,
 				       info->vring.num, 4096, &dev->vdev,
-				       true, false, info->ring,
+				       true, info->ring,
 				       vq_notify, vq_callback, "test");
 	assert(info->vq);
 	info->vq->priv = info;
@@ -173,8 +171,7 @@ static void run_test(struct vdev_info *dev, struct vq_info *vq,
 							 GFP_ATOMIC);
 				if (likely(r == 0)) {
 					++started;
-					if (unlikely(!virtqueue_kick(vq->vq)))
-						r = -1;
+					virtqueue_kick(vq->vq);
 				}
 			} else
 				r = -1;
@@ -203,7 +200,7 @@ static void run_test(struct vdev_info *dev, struct vq_info *vq,
 	test = 0;
 	r = ioctl(dev->control, VHOST_TEST_RUN, &test);
 	assert(r >= 0);
-	fprintf(stderr, "spurious wakeups: 0x%llx\n", spurious);
+	fprintf(stderr, "spurious wakeus: 0x%llx\n", spurious);
 }
 
 const char optstring[] = "h";
@@ -229,14 +226,6 @@ const struct option longopts[] = {
 		.val = 'i',
 	},
 	{
-		.name = "virtio-1",
-		.val = '1',
-	},
-	{
-		.name = "no-virtio-1",
-		.val = '0',
-	},
-	{
 		.name = "delayed-interrupt",
 		.val = 'D',
 	},
@@ -253,7 +242,6 @@ static void help(void)
 	fprintf(stderr, "Usage: virtio_test [--help]"
 		" [--no-indirect]"
 		" [--no-event-idx]"
-		" [--no-virtio-1]"
 		" [--delayed-interrupt]"
 		"\n");
 }
@@ -262,7 +250,7 @@ int main(int argc, char **argv)
 {
 	struct vdev_info dev;
 	unsigned long long features = (1ULL << VIRTIO_RING_F_INDIRECT_DESC) |
-		(1ULL << VIRTIO_RING_F_EVENT_IDX) | (1ULL << VIRTIO_F_VERSION_1);
+		(1ULL << VIRTIO_RING_F_EVENT_IDX);
 	int o;
 	bool delayed = false;
 
@@ -282,9 +270,6 @@ int main(int argc, char **argv)
 			goto done;
 		case 'i':
 			features &= ~(1ULL << VIRTIO_RING_F_INDIRECT_DESC);
-			break;
-		case '0':
-			features &= ~(1ULL << VIRTIO_F_VERSION_1);
 			break;
 		case 'D':
 			delayed = true;

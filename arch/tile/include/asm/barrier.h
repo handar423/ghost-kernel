@@ -24,6 +24,7 @@
 
 #define __sync()	__insn_mf()
 
+#if !CHIP_HAS_MF_WAITS_FOR_VICTIMS()
 #include <hv/syscall_public.h>
 /*
  * Issue an uncacheable load to each memory controller, then
@@ -42,6 +43,7 @@ static inline void __mb_incoherent(void)
 		       "r20", "r21", "r22", "r23", "r24",
 		       "r25", "r26", "r27", "r28", "r29");
 }
+#endif
 
 /* Fence to guarantee visibility of stores to incoherent memory. */
 static inline void
@@ -49,6 +51,7 @@ mb_incoherent(void)
 {
 	__insn_mf();
 
+#if !CHIP_HAS_MF_WAITS_FOR_VICTIMS()
 	{
 #if CHIP_HAS_TILE_WRITE_PENDING()
 		const unsigned long WRITE_TIMEOUT_CYCLES = 400;
@@ -60,6 +63,7 @@ mb_incoherent(void)
 #endif /* CHIP_HAS_TILE_WRITE_PENDING() */
 		(void) __mb_incoherent();
 	}
+#endif /* CHIP_HAS_MF_WAITS_FOR_VICTIMS() */
 }
 
 #define fast_wmb()	__sync()
@@ -71,28 +75,6 @@ mb_incoherent(void)
 #define rmb()		fast_rmb()
 #define mb()		fast_mb()
 #define iob()		fast_iob()
-
-#ifndef __tilegx__ /* 32 bit */
-/*
- * We need to barrier before modifying the word, since the _atomic_xxx()
- * routines just tns the lock and then read/modify/write of the word.
- * But after the word is updated, the routine issues an "mf" before returning,
- * and since it's a function call, we don't even need a compiler barrier.
- */
-#define __smp_mb__before_atomic()	__smp_mb()
-#define __smp_mb__after_atomic()	do { } while (0)
-#define smp_mb__after_atomic()	__smp_mb__after_atomic()
-#else /* 64 bit */
-#define __smp_mb__before_atomic()	__smp_mb()
-#define __smp_mb__after_atomic()	__smp_mb()
-#endif
-
-/*
- * The TILE architecture does not do speculative reads; this ensures
- * that a control dependency also orders against loads and already provides
- * a LOAD->{LOAD,STORE} order and can forgo the additional RMB.
- */
-#define smp_acquire__after_ctrl_dep()	barrier()
 
 #include <asm-generic/barrier.h>
 

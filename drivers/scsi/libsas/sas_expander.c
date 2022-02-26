@@ -41,32 +41,30 @@ static int sas_disable_routing(struct domain_device *dev,  u8 *sas_addr);
 
 /* ---------- SMP task management ---------- */
 
-static void smp_task_timedout(struct timer_list *t)
+static void smp_task_timedout(unsigned long _task)
 {
-	struct sas_task_slow *slow = from_timer(slow, t, timer);
-	struct sas_task *task = slow->task;
+	struct sas_task *task = (void *) _task;
 	unsigned long flags;
 
 	spin_lock_irqsave(&task->task_state_lock, flags);
-	if (!(task->task_state_flags & SAS_TASK_STATE_DONE))
+	if (!(task->task_state_flags & SAS_TASK_STATE_DONE)) {
 		task->task_state_flags |= SAS_TASK_STATE_ABORTED;
+		complete(&task->slow_task->completion);
+	}
 	spin_unlock_irqrestore(&task->task_state_lock, flags);
-
-	complete(&task->slow_task->completion);
 }
 
 static void smp_task_done(struct sas_task *task)
 {
-	if (!del_timer(&task->slow_task->timer))
-		return;
+	del_timer(&task->slow_task->timer);
 	complete(&task->slow_task->completion);
 }
 
 /* Give it some long enough timeout. In seconds. */
 #define SMP_TIMEOUT 10
 
-static int smp_execute_task_sg(struct domain_device *dev,
-		struct scatterlist *req, struct scatterlist *resp)
+static int smp_execute_task(struct domain_device *dev, void *req, int req_size,
+			    void *resp, int resp_size)
 {
 	int res, retry;
 	struct sas_task *task = NULL;
@@ -87,11 +85,12 @@ static int smp_execute_task_sg(struct domain_device *dev,
 		}
 		task->dev = dev;
 		task->task_proto = dev->tproto;
-		task->smp_task.smp_req = *req;
-		task->smp_task.smp_resp = *resp;
+		sg_init_one(&task->smp_task.smp_req, req, req_size);
+		sg_init_one(&task->smp_task.smp_resp, resp, resp_size);
 
 		task->task_done = smp_task_done;
 
+		task->slow_task->timer.data = (unsigned long) task;
 		task->slow_task->timer.function = smp_task_timedout;
 		task->slow_task->timer.expires = jiffies + SMP_TIMEOUT*HZ;
 		add_timer(&task->slow_task->timer);
@@ -149,17 +148,6 @@ static int smp_execute_task_sg(struct domain_device *dev,
 	BUG_ON(retry == 3 && task != NULL);
 	sas_free_task(task);
 	return res;
-}
-
-static int smp_execute_task(struct domain_device *dev, void *req, int req_size,
-			    void *resp, int resp_size)
-{
-	struct scatterlist req_sg;
-	struct scatterlist resp_sg;
-
-	sg_init_one(&req_sg, req, req_size);
-	sg_init_one(&resp_sg, resp, resp_size);
-	return smp_execute_task_sg(dev, &req_sg, &resp_sg);
 }
 
 /* ---------- Allocations ---------- */
@@ -695,6 +683,7 @@ int sas_smp_get_phy_events(struct sas_phy *phy)
 	phy->phy_reset_problem_count = scsi_to_u32(&resp[24]);
 
  out:
+	kfree(req);
 	kfree(resp);
 	return res;
 
@@ -986,6 +975,8 @@ static struct domain_device *sas_ex_discover_expander(
 		list_del(&child->dev_list_node);
 		spin_unlock_irq(&parent->port->dev_list_lock);
 		sas_put_device(child);
+		sas_port_delete(phy->port);
+		phy->port = NULL;
 		return NULL;
 	}
 	list_add_tail(&child->siblings, &parent->ex_dev.children);
@@ -1914,7 +1905,8 @@ static void sas_unregister_devs_sas_addr(struct domain_device *parent,
 		sas_port_delete_phy(phy->port, phy->phy);
 		sas_device_set_phy(found, phy->port);
 		if (phy->port->num_phys == 0)
-			sas_port_delete(phy->port);
+			list_add_tail(&phy->port->del_list,
+				&parent->port->sas_port_del_list);
 		phy->port = NULL;
 	}
 }
@@ -2122,7 +2114,7 @@ int sas_ex_revalidate_domain(struct domain_device *port_dev)
 	struct domain_device *dev = NULL;
 
 	res = sas_find_bcast_dev(port_dev, &dev);
-	while (res == 0 && dev) {
+	if (res == 0 && dev) {
 		struct expander_device *ex = &dev->ex_dev;
 		int i = 0, phy_id;
 
@@ -2134,57 +2126,61 @@ int sas_ex_revalidate_domain(struct domain_device *port_dev)
 			res = sas_rediscover(dev, phy_id);
 			i = phy_id + 1;
 		} while (i < ex->num_phys);
-
-		dev = NULL;
-		res = sas_find_bcast_dev(port_dev, &dev);
 	}
 	return res;
 }
 
-void sas_smp_handler(struct bsg_job *job, struct Scsi_Host *shost,
-		struct sas_rphy *rphy)
+int sas_smp_handler(struct Scsi_Host *shost, struct sas_rphy *rphy,
+		    struct request *req)
 {
 	struct domain_device *dev;
-	unsigned int rcvlen = 0;
-	int ret = -EINVAL;
+	int ret, type;
+	struct request *rsp = req->next_rq;
+
+	if (!rsp) {
+		printk("%s: space for a smp response is missing\n",
+		       __func__);
+		return -EINVAL;
+	}
 
 	/* no rphy means no smp target support (ie aic94xx host) */
 	if (!rphy)
-		return sas_smp_host_handler(job, shost);
+		return sas_smp_host_handler(shost, req, rsp);
 
-	switch (rphy->identify.device_type) {
-	case SAS_EDGE_EXPANDER_DEVICE:
-	case SAS_FANOUT_EXPANDER_DEVICE:
-		break;
-	default:
+	type = rphy->identify.device_type;
+
+	if (type != SAS_EDGE_EXPANDER_DEVICE &&
+	    type != SAS_FANOUT_EXPANDER_DEVICE) {
 		printk("%s: can we send a smp request to a device?\n",
 		       __func__);
-		goto out;
+		return -EINVAL;
 	}
 
 	dev = sas_find_dev_by_rphy(rphy);
 	if (!dev) {
 		printk("%s: fail to find a domain_device?\n", __func__);
-		goto out;
+		return -EINVAL;
 	}
 
 	/* do we need to support multiple segments? */
-	if (job->request_payload.sg_cnt > 1 ||
-	    job->reply_payload.sg_cnt > 1) {
-		printk("%s: multiple segments req %u, rsp %u\n",
-		       __func__, job->request_payload.payload_len,
-		       job->reply_payload.payload_len);
-		goto out;
+	if (bio_segments(req->bio) > 1 || bio_segments(rsp->bio) > 1) {
+		printk("%s: multiple segments req %u %u, rsp %u %u\n",
+		       __func__, bio_segments(req->bio), blk_rq_bytes(req),
+		       bio_segments(rsp->bio), blk_rq_bytes(rsp));
+		return -EINVAL;
 	}
 
-	ret = smp_execute_task_sg(dev, job->request_payload.sg_list,
-			job->reply_payload.sg_list);
-	if (ret >= 0) {
-		/* bsg_job_done() requires the length received  */
-		rcvlen = job->reply_payload.payload_len - ret;
+	ret = smp_execute_task(dev, bio_data(req->bio), blk_rq_bytes(req),
+			       bio_data(rsp->bio), blk_rq_bytes(rsp));
+	if (ret > 0) {
+		/* positive number is the untransferred residual */
+		rsp->resid_len = ret;
+		req->resid_len = 0;
 		ret = 0;
+	} else if (ret == 0) {
+		rsp->resid_len = 0;
+		req->resid_len = 0;
 	}
 
-out:
-	bsg_job_done(job, ret, rcvlen);
+	return ret;
 }

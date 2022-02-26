@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (C) 2009-2010 PetaLogix
  * Copyright (C) 2006 Benjamin Herrenschmidt, IBM Corporation
@@ -13,13 +12,29 @@
 #include <linux/dma-debug.h>
 #include <linux/export.h>
 #include <linux/bug.h>
-#include <asm/cacheflush.h>
+
+/*
+ * Generic direct DMA implementation
+ *
+ * This implementation supports a per-device offset that can be applied if
+ * the address at which memory is visible to devices is not 0. Platform code
+ * can set archdata.dma_data to an unsigned long holding the offset. By
+ * default the offset is PCI_DRAM_OFFSET.
+ */
+
+static unsigned long get_dma_direct_offset(struct device *dev)
+{
+	if (likely(dev))
+		return (unsigned long)dev->archdata.dma_data;
+
+	return PCI_DRAM_OFFSET; /* FIXME Not sure if is correct */
+}
 
 #define NOT_COHERENT_CACHE
 
 static void *dma_direct_alloc_coherent(struct device *dev, size_t size,
 				       dma_addr_t *dma_handle, gfp_t flag,
-				       unsigned long attrs)
+				       struct dma_attrs *attrs)
 {
 #ifdef NOT_COHERENT_CACHE
 	return consistent_alloc(flag, size, dma_handle);
@@ -36,7 +51,7 @@ static void *dma_direct_alloc_coherent(struct device *dev, size_t size,
 		return NULL;
 	ret = page_address(page);
 	memset(ret, 0, size);
-	*dma_handle = virt_to_phys(ret);
+	*dma_handle = virt_to_phys(ret) + get_dma_direct_offset(dev);
 
 	return ret;
 #endif
@@ -44,7 +59,7 @@ static void *dma_direct_alloc_coherent(struct device *dev, size_t size,
 
 static void dma_direct_free_coherent(struct device *dev, size_t size,
 				     void *vaddr, dma_addr_t dma_handle,
-				     unsigned long attrs)
+				     struct dma_attrs *attrs)
 {
 #ifdef NOT_COHERENT_CACHE
 	consistent_free(size, vaddr);
@@ -53,40 +68,27 @@ static void dma_direct_free_coherent(struct device *dev, size_t size,
 #endif
 }
 
-static inline void __dma_sync(unsigned long paddr,
-			      size_t size, enum dma_data_direction direction)
-{
-	switch (direction) {
-	case DMA_TO_DEVICE:
-	case DMA_BIDIRECTIONAL:
-		flush_dcache_range(paddr, paddr + size);
-		break;
-	case DMA_FROM_DEVICE:
-		invalidate_dcache_range(paddr, paddr + size);
-		break;
-	default:
-		BUG();
-	}
-}
-
 static int dma_direct_map_sg(struct device *dev, struct scatterlist *sgl,
 			     int nents, enum dma_data_direction direction,
-			     unsigned long attrs)
+			     struct dma_attrs *attrs)
 {
 	struct scatterlist *sg;
 	int i;
 
 	/* FIXME this part of code is untested */
 	for_each_sg(sgl, sg, nents, i) {
-		sg->dma_address = sg_phys(sg);
-
-		if (attrs & DMA_ATTR_SKIP_CPU_SYNC)
-			continue;
-
-		__dma_sync(sg_phys(sg), sg->length, direction);
+		sg->dma_address = sg_phys(sg) + get_dma_direct_offset(dev);
+		__dma_sync(page_to_phys(sg_page(sg)) + sg->offset,
+							sg->length, direction);
 	}
 
 	return nents;
+}
+
+static void dma_direct_unmap_sg(struct device *dev, struct scatterlist *sg,
+				int nents, enum dma_data_direction direction,
+				struct dma_attrs *attrs)
+{
 }
 
 static int dma_direct_dma_supported(struct device *dev, u64 mask)
@@ -99,26 +101,24 @@ static inline dma_addr_t dma_direct_map_page(struct device *dev,
 					     unsigned long offset,
 					     size_t size,
 					     enum dma_data_direction direction,
-					     unsigned long attrs)
+					     struct dma_attrs *attrs)
 {
-	if (!(attrs & DMA_ATTR_SKIP_CPU_SYNC))
-		__dma_sync(page_to_phys(page) + offset, size, direction);
-	return page_to_phys(page) + offset;
+	__dma_sync(page_to_phys(page) + offset, size, direction);
+	return page_to_phys(page) + offset + get_dma_direct_offset(dev);
 }
 
 static inline void dma_direct_unmap_page(struct device *dev,
 					 dma_addr_t dma_address,
 					 size_t size,
 					 enum dma_data_direction direction,
-					 unsigned long attrs)
+					 struct dma_attrs *attrs)
 {
 /* There is not necessary to do cache cleanup
  *
  * phys_to_virt is here because in __dma_sync_page is __virt_to_phys and
  * dma_address is physical address
  */
-	if (!(attrs & DMA_ATTR_SKIP_CPU_SYNC))
-		__dma_sync(dma_address, size, direction);
+	__dma_sync(dma_address, size, direction);
 }
 
 static inline void
@@ -177,38 +177,11 @@ dma_direct_sync_sg_for_device(struct device *dev,
 			__dma_sync(sg->dma_address, sg->length, direction);
 }
 
-static
-int dma_direct_mmap_coherent(struct device *dev, struct vm_area_struct *vma,
-			     void *cpu_addr, dma_addr_t handle, size_t size,
-			     unsigned long attrs)
-{
-#ifdef CONFIG_MMU
-	unsigned long user_count = vma_pages(vma);
-	unsigned long count = PAGE_ALIGN(size) >> PAGE_SHIFT;
-	unsigned long off = vma->vm_pgoff;
-	unsigned long pfn;
-
-	if (off >= count || user_count > (count - off))
-		return -ENXIO;
-
-#ifdef NOT_COHERENT_CACHE
-	vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
-	pfn = consistent_virt_to_pfn(cpu_addr);
-#else
-	pfn = virt_to_pfn(cpu_addr);
-#endif
-	return remap_pfn_range(vma, vma->vm_start, pfn + off,
-			       vma->vm_end - vma->vm_start, vma->vm_page_prot);
-#else
-	return -ENXIO;
-#endif
-}
-
-const struct dma_map_ops dma_direct_ops = {
+struct dma_map_ops dma_direct_ops = {
 	.alloc		= dma_direct_alloc_coherent,
 	.free		= dma_direct_free_coherent,
-	.mmap		= dma_direct_mmap_coherent,
 	.map_sg		= dma_direct_map_sg,
+	.unmap_sg	= dma_direct_unmap_sg,
 	.dma_supported	= dma_direct_dma_supported,
 	.map_page	= dma_direct_map_page,
 	.unmap_page	= dma_direct_unmap_page,

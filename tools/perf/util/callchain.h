@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __PERF_CALLCHAIN_H
 #define __PERF_CALLCHAIN_H
 
@@ -89,12 +88,13 @@ enum chain_value {
 	CCVAL_COUNT,
 };
 
+extern bool dwarf_callchain_users;
+
 struct callchain_param {
 	bool			enabled;
 	enum perf_call_graph_mode record_mode;
 	u32			dump_size;
 	enum chain_mode 	mode;
-	u16			max_stack;
 	u32			print_limit;
 	double			min_percent;
 	sort_chain_func_t	sort;

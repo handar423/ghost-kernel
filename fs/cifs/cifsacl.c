@@ -87,15 +87,16 @@ cifs_idmap_key_instantiate(struct key *key, struct key_preparsed_payload *prep)
 	 * dereference payload.data!
 	 */
 	if (prep->datalen <= sizeof(key->payload)) {
-		key->payload.data[0] = NULL;
-		memcpy(&key->payload, prep->data, prep->datalen);
-	} else {
-		payload = kmemdup(prep->data, prep->datalen, GFP_KERNEL);
-		if (!payload)
-			return -ENOMEM;
-		key->payload.data[0] = payload;
+		key->payload.value = 0;
+		memcpy(&key->payload.value, prep->data, prep->datalen);
+		key->datalen = prep->datalen;
+		return 0;
 	}
+	payload = kmemdup(prep->data, prep->datalen, GFP_KERNEL);
+	if (!payload)
+		return -ENOMEM;
 
+	key->payload.data = payload;
 	key->datalen = prep->datalen;
 	return 0;
 }
@@ -104,7 +105,7 @@ static inline void
 cifs_idmap_key_destroy(struct key *key)
 {
 	if (key->datalen > sizeof(key->payload))
-		kfree(key->payload.data[0]);
+		kfree(key->payload.data);
 }
 
 static struct key_type cifs_idmap_key_type = {
@@ -112,6 +113,7 @@ static struct key_type cifs_idmap_key_type = {
 	.instantiate = cifs_idmap_key_instantiate,
 	.destroy     = cifs_idmap_key_destroy,
 	.describe    = user_describe,
+	.match       = user_match,
 };
 
 static char *
@@ -317,8 +319,8 @@ id_to_sid(unsigned int cid, uint sidtype, struct cifs_sid *ssid)
 	 * it could be.
 	 */
 	ksid = sidkey->datalen <= sizeof(sidkey->payload) ?
-		(struct cifs_sid *)&sidkey->payload :
-		(struct cifs_sid *)sidkey->payload.data[0];
+		(struct cifs_sid *)&sidkey->payload.value :
+		(struct cifs_sid *)sidkey->payload.data;
 
 	ksid_size = CIFS_SID_BASE_SIZE + (ksid->num_subauth * sizeof(__le32));
 	if (ksid_size > sidkey->datalen) {
@@ -428,14 +430,14 @@ try_upcall_to_get_id:
 	if (sidtype == SIDOWNER) {
 		kuid_t uid;
 		uid_t id;
-		memcpy(&id, &sidkey->payload.data[0], sizeof(uid_t));
+		memcpy(&id, &sidkey->payload.value, sizeof(uid_t));
 		uid = make_kuid(&init_user_ns, id);
 		if (uid_valid(uid))
 			fuid = uid;
 	} else {
 		kgid_t gid;
 		gid_t id;
-		memcpy(&id, &sidkey->payload.data[0], sizeof(gid_t));
+		memcpy(&id, &sidkey->payload.value, sizeof(gid_t));
 		gid = make_kgid(&init_user_ns, id);
 		if (gid_valid(gid))
 			fgid = gid;
@@ -483,7 +485,7 @@ init_cifs_idmap(void)
 				GLOBAL_ROOT_UID, GLOBAL_ROOT_GID, cred,
 				(KEY_POS_ALL & ~KEY_POS_SETATTR) |
 				KEY_USR_VIEW | KEY_USR_READ,
-				KEY_ALLOC_NOT_IN_QUOTA, NULL, NULL);
+				KEY_ALLOC_NOT_IN_QUOTA, NULL);
 	if (IS_ERR(keyring)) {
 		ret = PTR_ERR(keyring);
 		goto failed_put_cred;

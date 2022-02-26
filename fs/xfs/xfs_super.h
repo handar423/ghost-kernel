@@ -30,7 +30,7 @@ extern void xfs_qm_exit(void);
 
 #ifdef CONFIG_XFS_POSIX_ACL
 # define XFS_ACL_STRING		"ACLs, "
-# define set_posix_acl_flag(sb)	((sb)->s_flags |= SB_POSIXACL)
+# define set_posix_acl_flag(sb)	((sb)->s_flags |= MS_POSIXACL)
 #else
 # define XFS_ACL_STRING
 # define set_posix_acl_flag(sb)	do { } while (0)
@@ -72,8 +72,6 @@ extern const struct xattr_handler *xfs_xattr_handlers[];
 extern const struct quotactl_ops xfs_quotactl_operations;
 
 extern void xfs_reinit_percpu_counters(struct xfs_mount *mp);
-
-extern struct workqueue_struct *xfs_discard_wq;
 
 #define XFS_M(sb)		((struct xfs_mount *)((sb)->s_fs_info))
 

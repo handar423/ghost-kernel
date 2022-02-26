@@ -402,7 +402,6 @@ static bool ftmac100_rx_packet(struct ftmac100 *priv, int *processed)
 	struct page *page;
 	dma_addr_t map;
 	int length;
-	bool ret;
 
 	rxdes = ftmac100_rx_locate_first_segment(priv);
 	if (!rxdes)
@@ -417,8 +416,8 @@ static bool ftmac100_rx_packet(struct ftmac100 *priv, int *processed)
 	 * It is impossible to get multi-segment packets
 	 * because we always provide big enough receive buffers.
 	 */
-	ret = ftmac100_rxdes_last_segment(rxdes);
-	BUG_ON(!ret);
+	if (unlikely(!ftmac100_rxdes_last_segment(rxdes)))
+		BUG();
 
 	/* start processing */
 	skb = netdev_alloc_skb_ip_align(netdev, 128);
@@ -733,10 +732,10 @@ static int ftmac100_alloc_buffers(struct ftmac100 *priv)
 {
 	int i;
 
-	priv->descs = dma_zalloc_coherent(priv->dev,
-					  sizeof(struct ftmac100_descs),
-					  &priv->descs_dma_addr,
-					  GFP_KERNEL);
+	priv->descs = dma_alloc_coherent(priv->dev,
+					 sizeof(struct ftmac100_descs),
+					 &priv->descs_dma_addr,
+					 GFP_KERNEL | __GFP_ZERO);
 	if (!priv->descs)
 		return -ENOMEM;
 
@@ -826,21 +825,16 @@ static void ftmac100_get_drvinfo(struct net_device *netdev,
 	strlcpy(info->bus_info, dev_name(&netdev->dev), sizeof(info->bus_info));
 }
 
-static int ftmac100_get_link_ksettings(struct net_device *netdev,
-				       struct ethtool_link_ksettings *cmd)
+static int ftmac100_get_settings(struct net_device *netdev, struct ethtool_cmd *cmd)
 {
 	struct ftmac100 *priv = netdev_priv(netdev);
-
-	mii_ethtool_get_link_ksettings(&priv->mii, cmd);
-
-	return 0;
+	return mii_ethtool_gset(&priv->mii, cmd);
 }
 
-static int ftmac100_set_link_ksettings(struct net_device *netdev,
-				       const struct ethtool_link_ksettings *cmd)
+static int ftmac100_set_settings(struct net_device *netdev, struct ethtool_cmd *cmd)
 {
 	struct ftmac100 *priv = netdev_priv(netdev);
-	return mii_ethtool_set_link_ksettings(&priv->mii, cmd);
+	return mii_ethtool_sset(&priv->mii, cmd);
 }
 
 static int ftmac100_nway_reset(struct net_device *netdev)
@@ -856,11 +850,11 @@ static u32 ftmac100_get_link(struct net_device *netdev)
 }
 
 static const struct ethtool_ops ftmac100_ethtool_ops = {
+	.set_settings		= ftmac100_set_settings,
+	.get_settings		= ftmac100_get_settings,
 	.get_drvinfo		= ftmac100_get_drvinfo,
 	.nway_reset		= ftmac100_nway_reset,
 	.get_link		= ftmac100_get_link,
-	.get_link_ksettings	= ftmac100_get_link_ksettings,
-	.set_link_ksettings	= ftmac100_set_link_ksettings,
 };
 
 /******************************************************************************
@@ -1091,7 +1085,7 @@ static int ftmac100_probe(struct platform_device *pdev)
 	}
 
 	SET_NETDEV_DEV(netdev, &pdev->dev);
-	netdev->ethtool_ops = &ftmac100_ethtool_ops;
+	SET_ETHTOOL_OPS(netdev, &ftmac100_ethtool_ops);
 	netdev->netdev_ops = &ftmac100_netdev_ops;
 
 	platform_set_drvdata(pdev, netdev);
@@ -1155,12 +1149,13 @@ err_ioremap:
 	release_resource(priv->res);
 err_req_mem:
 	netif_napi_del(&priv->napi);
+	platform_set_drvdata(pdev, NULL);
 	free_netdev(netdev);
 err_alloc_etherdev:
 	return err;
 }
 
-static int ftmac100_remove(struct platform_device *pdev)
+static int __exit ftmac100_remove(struct platform_device *pdev)
 {
 	struct net_device *netdev;
 	struct ftmac100 *priv;
@@ -1174,21 +1169,17 @@ static int ftmac100_remove(struct platform_device *pdev)
 	release_resource(priv->res);
 
 	netif_napi_del(&priv->napi);
+	platform_set_drvdata(pdev, NULL);
 	free_netdev(netdev);
 	return 0;
 }
 
-static const struct of_device_id ftmac100_of_ids[] = {
-	{ .compatible = "andestech,atmac100" },
-	{ }
-};
-
 static struct platform_driver ftmac100_driver = {
 	.probe		= ftmac100_probe,
-	.remove		= ftmac100_remove,
+	.remove		= __exit_p(ftmac100_remove),
 	.driver		= {
 		.name	= DRV_NAME,
-		.of_match_table = ftmac100_of_ids
+		.owner	= THIS_MODULE,
 	},
 };
 
@@ -1212,4 +1203,3 @@ module_exit(ftmac100_exit);
 MODULE_AUTHOR("Po-Yu Chuang <ratbert@faraday-tech.com>");
 MODULE_DESCRIPTION("FTMAC100 driver");
 MODULE_LICENSE("GPL");
-MODULE_DEVICE_TABLE(of, ftmac100_of_ids);

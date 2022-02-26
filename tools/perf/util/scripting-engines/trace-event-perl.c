@@ -61,10 +61,10 @@ void xs_init(pTHX)
 
 INTERP my_perl;
 
-#define TRACE_EVENT_TYPE_MAX				\
+#define FTRACE_MAX_EVENT				\
 	((1 << (sizeof(unsigned short) * 8)) - 1)
 
-static DECLARE_BITMAP(events_defined, TRACE_EVENT_TYPE_MAX);
+static DECLARE_BITMAP(events_defined, FTRACE_MAX_EVENT);
 
 extern struct scripting_context *scripting_context;
 
@@ -269,7 +269,8 @@ static SV *perl_process_callchain(struct perf_sample *sample,
 		goto exit;
 
 	if (thread__resolve_callchain(al->thread, &callchain_cursor, evsel,
-				      sample, NULL, NULL, scripting_max_stack) != 0) {
+				      sample, NULL, NULL,
+				      sysctl_perf_event_max_stack) != 0) {
 		pr_err("Failed to resolve callchain. Skipping\n");
 		goto exit;
 	}

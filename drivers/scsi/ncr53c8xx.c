@@ -1615,7 +1615,7 @@ struct ncb {
 	spinlock_t	smp_lock;	/* Lock for SMP threading       */
 
 	/*----------------------------------------------------------------
-	**	Chip and controller identification.
+	**	Chip and controller indentification.
 	**----------------------------------------------------------------
 	*/
 	int		unit;		/* Unit number			*/
@@ -6633,7 +6633,7 @@ static void ncr_sir_to_redo(struct ncb *np, int num, struct ccb *cp)
 		**	patch requested size into sense command
 		*/
 		cp->sensecmd[0]		= 0x03;
-		cp->sensecmd[1]		= (cmd->device->lun & 0x7) << 5;
+		cp->sensecmd[1]		= cmd->device->lun << 5;
 		cp->sensecmd[4]		= sizeof(cp->sense_buf);
 
 		/*
@@ -7997,7 +7997,10 @@ static int ncr53c8xx_slave_configure(struct scsi_device *device)
 	if (depth_to_use > MAX_TAGS)
 		depth_to_use = MAX_TAGS;
 
-	scsi_change_queue_depth(device, depth_to_use);
+	scsi_adjust_queue_depth(device,
+				(device->tagged_supported ?
+				 MSG_SIMPLE_TAG : 0),
+				depth_to_use);
 
 	/*
 	**	Since the queue depth is not tunable under Linux,
@@ -8093,9 +8096,9 @@ irqreturn_t ncr53c8xx_intr(int irq, void *dev_id)
      return IRQ_HANDLED;
 }
 
-static void ncr53c8xx_timeout(struct timer_list *t)
+static void ncr53c8xx_timeout(unsigned long npref)
 {
-	struct ncb *np = from_timer(np, t, timer);
+	struct ncb *np = (struct ncb *) npref;
 	unsigned long flags;
 	struct scsi_cmnd *done_list;
 
@@ -8357,7 +8360,9 @@ struct Scsi_Host * __init ncr_attach(struct scsi_host_template *tpnt,
 	if (!np->scripth0)
 		goto attach_error;
 
-	timer_setup(&np->timer, ncr53c8xx_timeout, 0);
+	init_timer(&np->timer);
+	np->timer.data     = (unsigned long) np;
+	np->timer.function = ncr53c8xx_timeout;
 
 	/* Try to map the controller chip to virtual and physical memory. */
 

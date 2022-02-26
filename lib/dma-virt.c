@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  *	lib/dma-virt.c
  *
@@ -11,7 +10,7 @@
 
 static void *dma_virt_alloc(struct device *dev, size_t size,
 			    dma_addr_t *dma_handle, gfp_t gfp,
-			    unsigned long attrs)
+			    struct dma_attrs* attrs)
 {
 	void *ret;
 
@@ -23,7 +22,7 @@ static void *dma_virt_alloc(struct device *dev, size_t size,
 
 static void dma_virt_free(struct device *dev, size_t size,
 			  void *cpu_addr, dma_addr_t dma_addr,
-			  unsigned long attrs)
+			  struct dma_attrs* attrs)
 {
 	free_pages((unsigned long)cpu_addr, get_order(size));
 }
@@ -31,14 +30,14 @@ static void dma_virt_free(struct device *dev, size_t size,
 static dma_addr_t dma_virt_map_page(struct device *dev, struct page *page,
 				    unsigned long offset, size_t size,
 				    enum dma_data_direction dir,
-				    unsigned long attrs)
+				    struct dma_attrs* attrs)
 {
 	return (uintptr_t)(page_address(page) + offset);
 }
 
 static int dma_virt_map_sg(struct device *dev, struct scatterlist *sgl,
 			   int nents, enum dma_data_direction dir,
-			   unsigned long attrs)
+			   struct dma_attrs* attrs)
 {
 	int i;
 	struct scatterlist *sg;
@@ -52,7 +51,7 @@ static int dma_virt_map_sg(struct device *dev, struct scatterlist *sgl,
 	return nents;
 }
 
-const struct dma_map_ops dma_virt_ops = {
+struct dma_map_ops dma_virt_ops = {
 	.alloc			= dma_virt_alloc,
 	.free			= dma_virt_free,
 	.map_page		= dma_virt_map_page,

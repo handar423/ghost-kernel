@@ -21,7 +21,6 @@
 #include <linux/seq_file.h>
 #include <linux/module.h>
 #include <linux/slab.h>
-#include <trace/events/block.h>
 #include "md.h"
 #include "md-linear.h"
 
@@ -53,6 +52,48 @@ static inline struct dev_info *which_dev(struct mddev *mddev, sector_t sector)
 	return conf->disks + lo;
 }
 
+/**
+ *	linear_mergeable_bvec -- tell bio layer if two requests can be merged
+ *	@q: request queue
+ *	@bvm: properties of new bio
+ *	@biovec: the request that could be merged to it.
+ *
+ *	Return amount of bytes we can take at this offset
+ */
+static int linear_mergeable_bvec(struct mddev *mddev,
+				 struct bvec_merge_data *bvm,
+				 struct bio_vec *biovec)
+{
+	struct dev_info *dev0;
+	unsigned long maxsectors, bio_sectors = bvm->bi_size >> 9;
+	sector_t sector = bvm->bi_sector + get_start_sect(bvm->bi_bdev);
+	int maxbytes = biovec->bv_len;
+	struct request_queue *subq;
+
+	dev0 = which_dev(mddev, sector);
+	maxsectors = dev0->end_sector - sector;
+	subq = bdev_get_queue(dev0->rdev->bdev);
+	if (subq->merge_bvec_fn) {
+		bvm->bi_bdev = dev0->rdev->bdev;
+		bvm->bi_sector -= dev0->end_sector - dev0->rdev->sectors;
+		maxbytes = min(maxbytes, subq->merge_bvec_fn(subq, bvm,
+							     biovec));
+	}
+
+	if (maxsectors < bio_sectors)
+		maxsectors = 0;
+	else
+		maxsectors -= bio_sectors;
+
+	if (maxsectors <= (PAGE_SIZE >> 9 ) && bio_sectors == 0)
+		return maxbytes;
+
+	if (maxsectors > (maxbytes >> 9))
+		return maxbytes;
+	else
+		return maxsectors << 9;
+}
+
 /*
  * In linear_congested() conf->raid_disks is used as a copy of
  * mddev->raid_disks to iterate conf->disks[], because conf->raid_disks
@@ -69,7 +110,7 @@ static int linear_congested(struct mddev *mddev, int bits)
 
 	for (i = 0; i < conf->raid_disks && !ret ; i++) {
 		struct request_queue *q = bdev_get_queue(conf->disks[i].rdev->bdev);
-		ret |= bdi_congested(q->backing_dev_info, bits);
+		ret |= bdi_congested(&q->backing_dev_info, bits);
 	}
 
 	rcu_read_unlock();
@@ -247,61 +288,75 @@ static void linear_free(struct mddev *mddev, void *priv)
 
 static bool linear_make_request(struct mddev *mddev, struct bio *bio)
 {
-	char b[BDEVNAME_SIZE];
 	struct dev_info *tmp_dev;
-	sector_t start_sector, end_sector, data_offset;
-	sector_t bio_sector = bio->bi_iter.bi_sector;
+	sector_t start_sector;
+	unsigned int max_sectors = blk_queue_get_max_sectors(mddev->queue,
+			bio->bi_rw);
+	const unsigned long do_discard = (bio->bi_rw
+					  & (REQ_DISCARD | REQ_SECURE));
+	const unsigned long do_same = (bio->bi_rw & REQ_WRITE_SAME);
 
-	if (unlikely(bio->bi_opf & REQ_PREFLUSH)) {
-		md_flush_request(mddev, bio);
+	if (unlikely(bio->bi_rw & REQ_FLUSH)
+	    && md_flush_request(mddev, bio))
+		return true;
+
+	if (!do_discard && !do_same && bio_sectors(bio) > max_sectors) {
+		struct bio_pair2 *bp = bio_split2(bio, max_sectors);
+		if (!bp) {
+			bio_io_error(bio);
+			return true;
+		}
+
+		generic_make_request(bp->bio1);
+		generic_make_request(bp->bio2);
+		bio_pair2_release(bp);
 		return true;
 	}
 
-	tmp_dev = which_dev(mddev, bio_sector);
+	tmp_dev = which_dev(mddev, bio->bi_sector);
 	start_sector = tmp_dev->end_sector - tmp_dev->rdev->sectors;
-	end_sector = tmp_dev->end_sector;
-	data_offset = tmp_dev->rdev->data_offset;
 
-	if (unlikely(bio_sector >= end_sector ||
-		     bio_sector < start_sector))
-		goto out_of_bounds;
+	if (unlikely(bio->bi_sector >= (tmp_dev->end_sector)
+		     || (bio->bi_sector < start_sector))) {
+		char b[BDEVNAME_SIZE];
 
-	if (unlikely(bio_end_sector(bio) > end_sector)) {
-		/* This bio crosses a device boundary, so we have to split it */
-		struct bio *split = bio_split(bio, end_sector - bio_sector,
-					      GFP_NOIO, mddev->bio_set);
-		bio_chain(split, bio);
-		generic_make_request(bio);
-		bio = split;
+		pr_err("md/linear:%s: make_request: Sector %llu out of bounds on dev %s: %llu sectors, offset %llu\n",
+		       mdname(mddev),
+		       (unsigned long long)bio->bi_sector,
+		       bdevname(tmp_dev->rdev->bdev, b),
+		       (unsigned long long)tmp_dev->rdev->sectors,
+		       (unsigned long long)start_sector);
+		bio_io_error(bio);
+		return true;
 	}
+	if (unlikely(bio_end_sector(bio) > tmp_dev->end_sector)) {
+		/* This bio crosses a device boundary, so we have to
+		 * split it.
+		 */
+		struct bio_pair *bp;
+		sector_t end_sector = tmp_dev->end_sector;
 
-	bio_set_dev(bio, tmp_dev->rdev->bdev);
-	bio->bi_iter.bi_sector = bio->bi_iter.bi_sector -
-		start_sector + data_offset;
+		bp = bio_split(bio, end_sector - bio->bi_sector);
 
-	if (unlikely((bio_op(bio) == REQ_OP_DISCARD) &&
-		     !blk_queue_discard(bio->bi_disk->queue))) {
+		linear_make_request(mddev, &bp->bio1);
+		linear_make_request(mddev, &bp->bio2);
+		bio_pair_release(bp);
+		return true;
+	}
+		    
+	bio->bi_bdev = tmp_dev->rdev->bdev;
+	bio->bi_sector = bio->bi_sector - start_sector
+		+ tmp_dev->rdev->data_offset;
+
+	if (unlikely((bio->bi_rw & REQ_DISCARD) &&
+		     !blk_queue_discard(bdev_get_queue(bio->bi_bdev)))) {
 		/* Just ignore it */
-		bio_endio(bio);
-	} else {
-		if (mddev->gendisk)
-			trace_block_bio_remap(bio->bi_disk->queue,
-					      bio, disk_devt(mddev->gendisk),
-					      bio_sector);
-		mddev_check_writesame(mddev, bio);
-		mddev_check_write_zeroes(mddev, bio);
-		generic_make_request(bio);
+		bio_endio(bio, 0);
+		return true;
 	}
-	return true;
 
-out_of_bounds:
-	pr_err("md/linear:%s: make_request: Sector %llu out of bounds on dev %s: %llu sectors, offset %llu\n",
-	       mdname(mddev),
-	       (unsigned long long)bio->bi_iter.bi_sector,
-	       bdevname(tmp_dev->rdev->bdev, b),
-	       (unsigned long long)tmp_dev->rdev->sectors,
-	       (unsigned long long)start_sector);
-	bio_io_error(bio);
+	mddev_check_writesame(mddev, bio);
+	generic_make_request(bio);
 	return true;
 }
 
@@ -327,6 +382,7 @@ static struct md_personality linear_personality =
 	.size		= linear_size,
 	.quiesce	= linear_quiesce,
 	.congested	= linear_congested,
+	.mergeable_bvec	= linear_mergeable_bvec,
 };
 
 static int __init linear_init (void)

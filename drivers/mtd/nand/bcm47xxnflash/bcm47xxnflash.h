@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __BCM47XXNFLASH_H
 #define __BCM47XXNFLASH_H
 
@@ -7,12 +6,13 @@
 #endif
 
 #include <linux/mtd/mtd.h>
-#include <linux/mtd/rawnand.h>
+#include <linux/mtd/nand.h>
 
 struct bcm47xxnflash {
 	struct bcma_drv_cc *cc;
 
 	struct nand_chip nand_chip;
+	struct mtd_info mtd;
 
 	unsigned curr_command;
 	int curr_page_addr;

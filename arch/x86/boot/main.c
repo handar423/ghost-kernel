@@ -147,8 +147,7 @@ void main(void)
 
 	/* Make sure we have all the proper CPU support */
 	if (validate_cpu()) {
-		puts("Unable to boot - please use a kernel appropriate "
-		     "for your CPU.\n");
+		puts("This processor is unsupported in CentOS 7.\n");
 		die();
 	}
 
@@ -160,6 +159,9 @@ void main(void)
 
 	/* Set keyboard repeat rate (why?) and query the lock flags */
 	keyboard_init();
+
+	/* Query MCA information */
+	query_mca();
 
 	/* Query Intel SpeedStep (IST) information */
 	query_ist();

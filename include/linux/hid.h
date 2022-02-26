@@ -34,7 +34,6 @@
 #include <linux/workqueue.h>
 #include <linux/input.h>
 #include <linux/semaphore.h>
-#include <linux/mutex.h>
 #include <linux/power_supply.h>
 #include <uapi/linux/hid.h>
 
@@ -160,7 +159,6 @@ struct hid_item {
 #define HID_UP_LED		0x00080000
 #define HID_UP_BUTTON		0x00090000
 #define HID_UP_ORDINAL		0x000a0000
-#define HID_UP_TELEPHONY	0x000b0000
 #define HID_UP_CONSUMER		0x000c0000
 #define HID_UP_DIGITIZER	0x000d0000
 #define HID_UP_PID		0x000f0000
@@ -169,11 +167,7 @@ struct hid_item {
 #define HID_UP_MSVENDOR		0xff000000
 #define HID_UP_CUSTOM		0x00ff0000
 #define HID_UP_LOGIVENDOR	0xffbc0000
-#define HID_UP_LOGIVENDOR2   0xff090000
-#define HID_UP_LOGIVENDOR3   0xff430000
-#define HID_UP_LNVENDOR		0xffa00000
 #define HID_UP_SENSOR		0x00200000
-#define HID_UP_ASUSVENDOR	0xff310000
 
 #define HID_USAGE		0x0000ffff
 
@@ -184,11 +178,6 @@ struct hid_item {
 #define HID_GD_KEYBOARD		0x00010006
 #define HID_GD_KEYPAD		0x00010007
 #define HID_GD_MULTIAXIS	0x00010008
-/*
- * Microsoft Win8 Wireless Radio Controls extensions CA, see:
- * http://www.usb.org/developers/hidpage/HUTRR40RadioHIDUsagesFinal.pdf
- */
-#define HID_GD_WIRELESS_RADIO_CTLS	0x0001000c
 #define HID_GD_X		0x00010030
 #define HID_GD_Y		0x00010031
 #define HID_GD_Z		0x00010032
@@ -217,10 +206,6 @@ struct hid_item {
 #define HID_GD_DOWN		0x00010091
 #define HID_GD_RIGHT		0x00010092
 #define HID_GD_LEFT		0x00010093
-/* Microsoft Win8 Wireless Radio Controls CA usage codes */
-#define HID_GD_RFKILL_BTN	0x000100c6
-#define HID_GD_RFKILL_LED	0x000100c7
-#define HID_GD_RFKILL_SWITCH	0x000100c8
 
 #define HID_DC_BATTERYSTRENGTH	0x00060020
 
@@ -254,33 +239,7 @@ struct hid_item {
 #define HID_DG_TABLETPICK	0x000d0046
 
 #define HID_CP_CONSUMERCONTROL	0x000c0001
-#define HID_CP_NUMERICKEYPAD	0x000c0002
-#define HID_CP_PROGRAMMABLEBUTTONS	0x000c0003
-#define HID_CP_MICROPHONE	0x000c0004
-#define HID_CP_HEADPHONE	0x000c0005
-#define HID_CP_GRAPHICEQUALIZER	0x000c0006
-#define HID_CP_FUNCTIONBUTTONS	0x000c0036
-#define HID_CP_SELECTION	0x000c0080
-#define HID_CP_MEDIASELECTION	0x000c0087
-#define HID_CP_SELECTDISC	0x000c00ba
-#define HID_CP_PLAYBACKSPEED	0x000c00f1
-#define HID_CP_PROXIMITY	0x000c0109
-#define HID_CP_SPEAKERSYSTEM	0x000c0160
-#define HID_CP_CHANNELLEFT	0x000c0161
-#define HID_CP_CHANNELRIGHT	0x000c0162
-#define HID_CP_CHANNELCENTER	0x000c0163
-#define HID_CP_CHANNELFRONT	0x000c0164
-#define HID_CP_CHANNELCENTERFRONT	0x000c0165
-#define HID_CP_CHANNELSIDE	0x000c0166
-#define HID_CP_CHANNELSURROUND	0x000c0167
-#define HID_CP_CHANNELLOWFREQUENCYENHANCEMENT	0x000c0168
-#define HID_CP_CHANNELTOP	0x000c0169
-#define HID_CP_CHANNELUNKNOWN	0x000c016a
-#define HID_CP_APPLICATIONLAUNCHBUTTONS	0x000c0180
-#define HID_CP_GENERICGUIAPPLICATIONCONTROLS	0x000c0200
 
-#define HID_DG_DEVICECONFIG	0x000d000e
-#define HID_DG_DEVICESETTINGS	0x000d0023
 #define HID_DG_CONFIDENCE	0x000d0047
 #define HID_DG_WIDTH		0x000d0048
 #define HID_DG_HEIGHT		0x000d0049
@@ -289,12 +248,10 @@ struct hid_item {
 #define HID_DG_DEVICEINDEX	0x000d0053
 #define HID_DG_CONTACTCOUNT	0x000d0054
 #define HID_DG_CONTACTMAX	0x000d0055
-#define HID_DG_SCANTIME		0x000d0056
 #define HID_DG_BUTTONTYPE	0x000d0059
 #define HID_DG_BARRELSWITCH2	0x000d005a
 #define HID_DG_TOOLSERIALNUMBER	0x000d005b
 
-#define HID_VD_ASUS_CUSTOM_MEDIA_KEYS	0xff310076
 /*
  * HID report types --- Ouch! HID spec says 1 2 3!
  */
@@ -362,14 +319,11 @@ struct hid_item {
  * Vendor specific HID device groups
  */
 #define HID_GROUP_RMI				0x0100
-#define HID_GROUP_WACOM				0x0101
-#define HID_GROUP_LOGITECH_DJ_DEVICE		0x0102
 
 /*
- * HID protocol status
+ * Vendor specific HID device groups
  */
-#define HID_REPORT_PROTOCOL	1
-#define HID_BOOT_PROTOCOL	0
+#define HID_GROUP_WACOM				0x0101
 
 /*
  * This is the global environment of the parser. This information is
@@ -504,7 +458,6 @@ struct hid_input {
 	struct list_head list;
 	struct hid_report *report;
 	struct input_dev *input;
-	bool registered;
 };
 
 enum hid_type {
@@ -535,13 +488,11 @@ struct hid_device {							/* device report descriptor */
 	struct hid_report_enum report_enum[HID_REPORT_TYPES];
 	struct work_struct led_work;					/* delayed LED worker */
 
+	struct semaphore driver_lock;					/* protects the current driver, except during input */
 	struct semaphore driver_input_lock;				/* protects the current driver */
 	struct device dev;						/* device */
 	struct hid_driver *driver;
-
 	struct hid_ll_driver *ll_driver;
-	struct mutex ll_open_lock;
-	unsigned int ll_open_count;
 
 #ifdef CONFIG_HID_BATTERY_STRENGTH
 	/*
@@ -550,23 +501,23 @@ struct hid_device {							/* device report descriptor */
 	 * battery is non-NULL.
 	 */
 	struct power_supply *battery;
-	__s32 battery_capacity;
 	__s32 battery_min;
 	__s32 battery_max;
 	__s32 battery_report_type;
 	__s32 battery_report_id;
-	bool battery_reported;
 #endif
 
 	unsigned int status;						/* see STAT flags above */
 	unsigned claimed;						/* Claimed by hidinput, hiddev? */
 	unsigned quirks;						/* Various quirks the device can pull on us */
-	bool io_started;						/* If IO has started */
+	bool io_started;						/* Protected by driver_lock. If IO has started */
 
 	struct list_head inputs;					/* The list of inputs */
 	void *hiddev;							/* The hiddev structure */
 	void *hidraw;
+	int minor;							/* Hiddev minor number */
 
+	int open;							/* is the device open by anyone? */
 	char name[128];							/* Device name */
 	char phys[64];							/* Device physical location */
 	char uniq[64];							/* Device unique identifier (serial #) */
@@ -609,9 +560,7 @@ static inline void hid_set_drvdata(struct hid_device *hdev, void *data)
 #define HID_GLOBAL_STACK_SIZE 4
 #define HID_COLLECTION_STACK_SIZE 4
 
-#define HID_SCAN_FLAG_MT_WIN_8			BIT(0)
-#define HID_SCAN_FLAG_VENDOR_SPECIFIC		BIT(1)
-#define HID_SCAN_FLAG_GD_POINTER		BIT(2)
+#define HID_SCAN_FLAG_MT_WIN_8			0x00000001
 
 struct hid_parser {
 	struct hid_global     global;
@@ -745,16 +694,12 @@ struct hid_driver {
 	struct device_driver driver;
 };
 
-#define to_hid_driver(pdrv) \
-	container_of(pdrv, struct hid_driver, driver)
-
 /**
  * hid_ll_driver - low level driver callbacks
  * @start: called on probe to start the device
  * @stop: called on remove
  * @open: called by input layer on open
  * @close: called by input layer on close
- * @power: request underlying hardware to enter requested power mode
  * @parse: this method is called only once to parse the device data,
  *	   shouldn't allocate anything to not leak memory
  * @request: send report request to device (e.g. feature report)
@@ -841,7 +786,7 @@ extern int hidinput_connect(struct hid_device *hid, unsigned int force);
 extern void hidinput_disconnect(struct hid_device *);
 
 int hid_set_field(struct hid_field *, unsigned, __s32);
-int hid_input_report(struct hid_device *, int type, u8 *, int, int);
+int hid_input_report(struct hid_device *, int type, u8 *, u32, int);
 int hidinput_find_field(struct hid_device *hid, unsigned int type, unsigned int code, struct hid_field **field);
 struct hid_field *hidinput_get_led_field(struct hid_device *hid);
 unsigned int hidinput_count_leds(struct hid_device *hid);
@@ -877,7 +822,7 @@ __u32 hid_field_extract(const struct hid_device *hid, __u8 *report,
  */
 static inline void hid_device_io_start(struct hid_device *hid) {
 	if (hid->io_started) {
-		dev_warn(&hid->dev, "io already started\n");
+		dev_warn(&hid->dev, "io already started");
 		return;
 	}
 	hid->io_started = true;
@@ -897,7 +842,7 @@ static inline void hid_device_io_start(struct hid_device *hid) {
  */
 static inline void hid_device_io_stop(struct hid_device *hid) {
 	if (!hid->io_started) {
-		dev_warn(&hid->dev, "io already stopped\n");
+		dev_warn(&hid->dev, "io already stopped");
 		return;
 	}
 	hid->io_started = false;
@@ -971,11 +916,69 @@ static inline int __must_check hid_parse(struct hid_device *hdev)
 	return hid_open_report(hdev);
 }
 
-int __must_check hid_hw_start(struct hid_device *hdev,
-			      unsigned int connect_mask);
-void hid_hw_stop(struct hid_device *hdev);
-int __must_check hid_hw_open(struct hid_device *hdev);
-void hid_hw_close(struct hid_device *hdev);
+/**
+ * hid_hw_start - start underlaying HW
+ *
+ * @hdev: hid device
+ * @connect_mask: which outputs to connect, see HID_CONNECT_*
+ *
+ * Call this in probe function *after* hid_parse. This will setup HW buffers
+ * and start the device (if not deffered to device open). hid_hw_stop must be
+ * called if this was successful.
+ */
+static inline int __must_check hid_hw_start(struct hid_device *hdev,
+		unsigned int connect_mask)
+{
+	int ret = hdev->ll_driver->start(hdev);
+	if (ret || !connect_mask)
+		return ret;
+	ret = hid_connect(hdev, connect_mask);
+	if (ret)
+		hdev->ll_driver->stop(hdev);
+	return ret;
+}
+
+/**
+ * hid_hw_stop - stop underlaying HW
+ *
+ * @hdev: hid device
+ *
+ * This is usually called from remove function or from probe when something
+ * failed and hid_hw_start was called already.
+ */
+static inline void hid_hw_stop(struct hid_device *hdev)
+{
+	hid_disconnect(hdev);
+	hdev->ll_driver->stop(hdev);
+}
+
+/**
+ * hid_hw_open - signal underlaying HW to start delivering events
+ *
+ * @hdev: hid device
+ *
+ * Tell underlying HW to start delivering events from the device.
+ * This function should be called sometime after successful call
+ * to hid_hiw_start().
+ */
+static inline int __must_check hid_hw_open(struct hid_device *hdev)
+{
+	return hdev->ll_driver->open(hdev);
+}
+
+/**
+ * hid_hw_close - signal underlaying HW to stop delivering events
+ *
+ * @hdev: hid device
+ *
+ * This function indicates that we are not interested in the events
+ * from this device anymore. Delivery of events may or may not stop,
+ * depending on the number of users still outstanding.
+ */
+static inline void hid_hw_close(struct hid_device *hdev)
+{
+	hdev->ll_driver->close(hdev);
+}
 
 /**
  * hid_hw_power - requests underlying HW to go into given power mode
@@ -1088,13 +1091,13 @@ static inline void hid_hw_wait(struct hid_device *hdev)
  *
  * @report: the report we want to know the length
  */
-static inline int hid_report_len(struct hid_report *report)
+static inline u32 hid_report_len(struct hid_report *report)
 {
 	/* equivalent to DIV_ROUND_UP(report->size, 8) + !!(report->id > 0) */
 	return ((report->size - 1) >> 3) + 1 + (report->id > 0);
 }
 
-int hid_report_raw_event(struct hid_device *hid, int type, u8 *data, int size,
+int hid_report_raw_event(struct hid_device *hid, int type, u8 *data, u32 size,
 		int interrupt);
 
 /* HID quirks API */

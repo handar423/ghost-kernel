@@ -25,19 +25,37 @@
 #include <asm-generic/qrwlock_types.h>
 
 /*
- * Writer states & reader shift and bias.
+ * Writer states & reader shift and bias
  */
-#define	_QW_WAITING	0x100		/* A writer is waiting	   */
-#define	_QW_LOCKED	0x0ff		/* A writer holds the lock */
-#define	_QW_WMASK	0x1ff		/* Writer mask		   */
-#define	_QR_SHIFT	9		/* Reader count shift	   */
+#define	_QW_WAITING	1		/* A writer is waiting	   */
+#define	_QW_LOCKED	0xff		/* A writer holds the lock */
+#define	_QW_WMASK	0xff		/* Writer mask		   */
+#define	_QR_SHIFT	8		/* Reader count shift	   */
 #define _QR_BIAS	(1U << _QR_SHIFT)
 
 /*
  * External function declarations
  */
-extern void queued_read_lock_slowpath(struct qrwlock *lock);
+extern void queued_read_lock_slowpath(struct qrwlock *lock, u32 cnts);
 extern void queued_write_lock_slowpath(struct qrwlock *lock);
+
+/**
+ * queued_read_can_lock- would read_trylock() succeed?
+ * @lock: Pointer to queue rwlock structure
+ */
+static inline int queued_read_can_lock(struct qrwlock *lock)
+{
+	return !(atomic_read(&lock->cnts) & _QW_WMASK);
+}
+
+/**
+ * queued_write_can_lock- would write_trylock() succeed?
+ * @lock: Pointer to queue rwlock structure
+ */
+static inline int queued_write_can_lock(struct qrwlock *lock)
+{
+	return !atomic_read(&lock->cnts);
+}
 
 /**
  * queued_read_trylock - try to acquire read lock of a queue rwlock
@@ -50,7 +68,7 @@ static inline int queued_read_trylock(struct qrwlock *lock)
 
 	cnts = atomic_read(&lock->cnts);
 	if (likely(!(cnts & _QW_WMASK))) {
-		cnts = (u32)atomic_add_return_acquire(_QR_BIAS, &lock->cnts);
+		cnts = (u32)atomic_add_return(_QR_BIAS, &lock->cnts);
 		if (likely(!(cnts & _QW_WMASK)))
 			return 1;
 		atomic_sub(_QR_BIAS, &lock->cnts);
@@ -71,8 +89,8 @@ static inline int queued_write_trylock(struct qrwlock *lock)
 	if (unlikely(cnts))
 		return 0;
 
-	return likely(atomic_cmpxchg_acquire(&lock->cnts,
-					     cnts, cnts | _QW_LOCKED) == cnts);
+	return likely(atomic_cmpxchg(&lock->cnts,
+				     cnts, cnts | _QW_LOCKED) == cnts);
 }
 /**
  * queued_read_lock - acquire read lock of a queue rwlock
@@ -82,12 +100,12 @@ static inline void queued_read_lock(struct qrwlock *lock)
 {
 	u32 cnts;
 
-	cnts = atomic_add_return_acquire(_QR_BIAS, &lock->cnts);
+	cnts = atomic_add_return(_QR_BIAS, &lock->cnts);
 	if (likely(!(cnts & _QW_WMASK)))
 		return;
 
 	/* The slowpath will decrement the reader count, if necessary. */
-	queued_read_lock_slowpath(lock);
+	queued_read_lock_slowpath(lock, cnts);
 }
 
 /**
@@ -97,7 +115,7 @@ static inline void queued_read_lock(struct qrwlock *lock)
 static inline void queued_write_lock(struct qrwlock *lock)
 {
 	/* Optimize for the unfair lock case where the fair flag is 0. */
-	if (atomic_cmpxchg_acquire(&lock->cnts, 0, _QW_LOCKED) == 0)
+	if (atomic_cmpxchg(&lock->cnts, 0, _QW_LOCKED) == 0)
 		return;
 
 	queued_write_lock_slowpath(lock);
@@ -112,27 +130,40 @@ static inline void queued_read_unlock(struct qrwlock *lock)
 	/*
 	 * Atomically decrement the reader count
 	 */
-	(void)atomic_sub_return_release(_QR_BIAS, &lock->cnts);
+	smp_mb__before_atomic();
+	atomic_sub(_QR_BIAS, &lock->cnts);
 }
 
+#ifndef queued_write_unlock
 /**
  * queued_write_unlock - release write lock of a queue rwlock
  * @lock : Pointer to queue rwlock structure
  */
 static inline void queued_write_unlock(struct qrwlock *lock)
 {
-	smp_store_release(&lock->wlocked, 0);
+	/*
+	 * If the writer field is atomic, it can be cleared directly.
+	 * Otherwise, an atomic subtraction will be used to clear it.
+	 */
+	smp_mb__before_atomic();
+	atomic_sub(_QW_LOCKED, &lock->cnts);
 }
+#endif
 
 /*
  * Remapping rwlock architecture specific functions to the corresponding
  * queue rwlock functions.
  */
-#define arch_read_lock(l)	queued_read_lock(l)
-#define arch_write_lock(l)	queued_write_lock(l)
-#define arch_read_trylock(l)	queued_read_trylock(l)
-#define arch_write_trylock(l)	queued_write_trylock(l)
-#define arch_read_unlock(l)	queued_read_unlock(l)
-#define arch_write_unlock(l)	queued_write_unlock(l)
+#define arch_qread_can_lock(l)	queued_read_can_lock(l)
+#define arch_qwrite_can_lock(l)	queued_write_can_lock(l)
+#define arch_qread_lock(l)	queued_read_lock(l)
+#define arch_qwrite_lock(l)	queued_write_lock(l)
+#define arch_qread_trylock(l)	queued_read_trylock(l)
+#define arch_qwrite_trylock(l)	queued_write_trylock(l)
+#define arch_qread_unlock(l)	queued_read_unlock(l)
+#define arch_qwrite_unlock(l)	queued_write_unlock(l)
+
+#define arch_qread_lock_flags(lock, flags)  arch_qread_lock(lock)
+#define arch_qwrite_lock_flags(lock, flags) arch_qwrite_lock(lock)
 
 #endif /* __ASM_GENERIC_QRWLOCK_H */

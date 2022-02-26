@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * linux/arch/arm/mach-footbridge/netwinder-hw.c
  *
@@ -621,7 +620,7 @@ __initcall(nw_hw_init);
  * the parameter page.
  */
 static void __init
-fixup_netwinder(struct tag *tags, char **cmdline)
+fixup_netwinder(struct tag *tags, char **cmdline, struct meminfo *mi)
 {
 #ifdef CONFIG_ISAPNP
 	extern int isapnp_disable;
@@ -635,9 +634,9 @@ fixup_netwinder(struct tag *tags, char **cmdline)
 #endif
 }
 
-static void netwinder_restart(enum reboot_mode mode, const char *cmd)
+static void netwinder_restart(char mode, const char *cmd)
 {
-	if (mode == REBOOT_SOFT) {
+	if (mode == 's') {
 		/* Jump into the ROM */
 		soft_restart(0x41000000);
 	} else {
@@ -693,14 +692,14 @@ static void netwinder_led_set(struct led_classdev *cdev,
 	unsigned long flags;
 	u32 reg;
 
-	raw_spin_lock_irqsave(&nw_gpio_lock, flags);
+	spin_lock_irqsave(&nw_gpio_lock, flags);
 	reg = nw_gpio_read();
 	if (b != LED_OFF)
 		reg &= ~led->mask;
 	else
 		reg |= led->mask;
 	nw_gpio_modify_op(led->mask, reg);
-	raw_spin_unlock_irqrestore(&nw_gpio_lock, flags);
+	spin_unlock_irqrestore(&nw_gpio_lock, flags);
 }
 
 static enum led_brightness netwinder_led_get(struct led_classdev *cdev)
@@ -710,9 +709,9 @@ static enum led_brightness netwinder_led_get(struct led_classdev *cdev)
 	unsigned long flags;
 	u32 reg;
 
-	raw_spin_lock_irqsave(&nw_gpio_lock, flags);
+	spin_lock_irqsave(&nw_gpio_lock, flags);
 	reg = nw_gpio_read();
-	raw_spin_unlock_irqrestore(&nw_gpio_lock, flags);
+	spin_unlock_irqrestore(&nw_gpio_lock, flags);
 
 	return (reg & led->mask) ? LED_OFF : LED_FULL;
 }

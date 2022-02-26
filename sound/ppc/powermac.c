@@ -137,6 +137,7 @@ __error:
 static int snd_pmac_remove(struct platform_device *devptr)
 {
 	snd_card_free(platform_get_drvdata(devptr));
+	platform_set_drvdata(devptr, NULL);
 	return 0;
 }
 
@@ -168,6 +169,7 @@ static struct platform_driver snd_pmac_driver = {
 	.remove		= snd_pmac_remove,
 	.driver		= {
 		.name	= SND_PMAC_DRIVER,
+		.owner	= THIS_MODULE,
 		.pm	= SND_PMAC_PM_OPS,
 	},
 };

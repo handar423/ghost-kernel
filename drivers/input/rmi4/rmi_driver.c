@@ -18,9 +18,9 @@
 #include <linux/delay.h>
 #include <linux/fs.h>
 #include <linux/irq.h>
+#include <linux/kconfig.h>
 #include <linux/pm.h>
 #include <linux/slab.h>
-#include <linux/of.h>
 #include <uapi/linux/input.h>
 #include <linux/rmi.h>
 #include "rmi_bus.h"
@@ -34,22 +34,12 @@
 #define RMI_DEVICE_RESET_CMD	0x01
 #define DEFAULT_RESET_DELAY_MS	100
 
-void rmi_free_function_list(struct rmi_device *rmi_dev)
+static void rmi_free_function_list(struct rmi_device *rmi_dev)
 {
 	struct rmi_function *fn, *tmp;
 	struct rmi_driver_data *data = dev_get_drvdata(&rmi_dev->dev);
 
 	rmi_dbg(RMI_DEBUG_CORE, &rmi_dev->dev, "Freeing function list\n");
-
-	devm_kfree(&rmi_dev->dev, data->irq_memory);
-	data->irq_memory = NULL;
-	data->irq_status = NULL;
-	data->fn_irq_bits = NULL;
-	data->current_irq_mask = NULL;
-	data->new_irq_mask = NULL;
-
-	data->f01_container = NULL;
-	data->f34_container = NULL;
 
 	/* Doing it in the reverse order so F01 will be removed last */
 	list_for_each_entry_safe_reverse(fn, tmp,
@@ -57,6 +47,8 @@ void rmi_free_function_list(struct rmi_device *rmi_dev)
 		list_del(&fn->node);
 		rmi_unregister_function(fn);
 	}
+
+	data->f01_container = NULL;
 }
 
 static int reset_one_function(struct rmi_function *fn)
@@ -190,53 +182,15 @@ static int rmi_process_interrupt_requests(struct rmi_device *rmi_dev)
 	return 0;
 }
 
-void rmi_set_attn_data(struct rmi_device *rmi_dev, unsigned long irq_status,
-		       void *data, size_t size)
-{
-	struct rmi_driver_data *drvdata = dev_get_drvdata(&rmi_dev->dev);
-	struct rmi4_attn_data attn_data;
-	void *fifo_data;
-
-	if (!drvdata->enabled)
-		return;
-
-	fifo_data = kmemdup(data, size, GFP_ATOMIC);
-	if (!fifo_data)
-		return;
-
-	attn_data.irq_status = irq_status;
-	attn_data.size = size;
-	attn_data.data = fifo_data;
-
-	kfifo_put(&drvdata->attn_fifo, attn_data);
-}
-EXPORT_SYMBOL_GPL(rmi_set_attn_data);
-
 static irqreturn_t rmi_irq_fn(int irq, void *dev_id)
 {
 	struct rmi_device *rmi_dev = dev_id;
-	struct rmi_driver_data *drvdata = dev_get_drvdata(&rmi_dev->dev);
-	struct rmi4_attn_data attn_data = {0};
-	int ret, count;
-
-	count = kfifo_get(&drvdata->attn_fifo, &attn_data);
-	if (count) {
-		*(drvdata->irq_status) = attn_data.irq_status;
-		drvdata->attn_data = attn_data;
-	}
+	int ret;
 
 	ret = rmi_process_interrupt_requests(rmi_dev);
 	if (ret)
 		rmi_dbg(RMI_DEBUG_CORE, &rmi_dev->dev,
 			"Failed to process interrupt request: %d\n", ret);
-
-	if (count) {
-		kfree(attn_data.data);
-		attn_data.data = NULL;
-	}
-
-	if (!kfifo_is_empty(&drvdata->attn_fifo))
-		return rmi_irq_fn(irq, dev_id);
 
 	return IRQ_HANDLED;
 }
@@ -348,7 +302,7 @@ static int rmi_resume_functions(struct rmi_device *rmi_dev)
 	return 0;
 }
 
-int rmi_enable_sensor(struct rmi_device *rmi_dev)
+static int enable_sensor(struct rmi_device *rmi_dev)
 {
 	int retval = 0;
 
@@ -558,13 +512,14 @@ static int rmi_scan_pdt_page(struct rmi_device *rmi_dev,
 	else
 		*empty_pages = 0;
 
-	return (data->bootloader_mode || *empty_pages >= 2) ?
+	return (data->f01_bootloader_mode || *empty_pages >= 2) ?
 					RMI_SCAN_DONE : RMI_SCAN_CONTINUE;
 }
 
-int rmi_scan_pdt(struct rmi_device *rmi_dev, void *ctx,
-		 int (*callback)(struct rmi_device *rmi_dev,
-		 void *ctx, const struct pdt_entry *entry))
+static int rmi_scan_pdt(struct rmi_device *rmi_dev, void *ctx,
+			int (*callback)(struct rmi_device *rmi_dev,
+					void *ctx,
+					const struct pdt_entry *entry))
 {
 	int page;
 	int empty_pages = 0;
@@ -763,55 +718,51 @@ bool rmi_register_desc_has_subpacket(const struct rmi_register_desc_item *item,
 				subpacket) == subpacket;
 }
 
+/* Indicates that flash programming is enabled (bootloader mode). */
+#define RMI_F01_STATUS_BOOTLOADER(status)	(!!((status) & 0x40))
+
+/*
+ * Given the PDT entry for F01, read the device status register to determine
+ * if we're stuck in bootloader mode or not.
+ *
+ */
 static int rmi_check_bootloader_mode(struct rmi_device *rmi_dev,
 				     const struct pdt_entry *pdt)
 {
-	struct rmi_driver_data *data = dev_get_drvdata(&rmi_dev->dev);
-	int ret;
-	u8 status;
+	int error;
+	u8 device_status;
 
-	if (pdt->function_number == 0x34 && pdt->function_version > 1) {
-		ret = rmi_read(rmi_dev, pdt->data_base_addr, &status);
-		if (ret) {
-			dev_err(&rmi_dev->dev,
-				"Failed to read F34 status: %d.\n", ret);
-			return ret;
-		}
-
-		if (status & BIT(7))
-			data->bootloader_mode = true;
-	} else if (pdt->function_number == 0x01) {
-		ret = rmi_read(rmi_dev, pdt->data_base_addr, &status);
-		if (ret) {
-			dev_err(&rmi_dev->dev,
-				"Failed to read F01 status: %d.\n", ret);
-			return ret;
-		}
-
-		if (status & BIT(6))
-			data->bootloader_mode = true;
+	error = rmi_read(rmi_dev, pdt->data_base_addr + pdt->page_start,
+			 &device_status);
+	if (error) {
+		dev_err(&rmi_dev->dev,
+			"Failed to read device status: %d.\n", error);
+		return error;
 	}
 
-	return 0;
+	return RMI_F01_STATUS_BOOTLOADER(device_status);
 }
 
 static int rmi_count_irqs(struct rmi_device *rmi_dev,
 			 void *ctx, const struct pdt_entry *pdt)
 {
+	struct rmi_driver_data *data = dev_get_drvdata(&rmi_dev->dev);
 	int *irq_count = ctx;
-	int ret;
 
 	*irq_count += pdt->interrupt_source_count;
-
-	ret = rmi_check_bootloader_mode(rmi_dev, pdt);
-	if (ret < 0)
-		return ret;
+	if (pdt->function_number == 0x01) {
+		data->f01_bootloader_mode =
+			rmi_check_bootloader_mode(rmi_dev, pdt);
+		if (data->f01_bootloader_mode)
+			dev_warn(&rmi_dev->dev,
+				"WARNING: RMI4 device is in bootloader mode!\n");
+	}
 
 	return RMI_SCAN_CONTINUE;
 }
 
-int rmi_initial_reset(struct rmi_device *rmi_dev, void *ctx,
-		      const struct pdt_entry *pdt)
+static int rmi_initial_reset(struct rmi_device *rmi_dev,
+			     void *ctx, const struct pdt_entry *pdt)
 {
 	int error;
 
@@ -887,8 +838,6 @@ static int rmi_create_function(struct rmi_device *rmi_dev,
 
 	if (pdt->function_number == 0x01)
 		data->f01_container = fn;
-	else if (pdt->function_number == 0x34)
-		data->f34_container = fn;
 
 	list_add_tail(&fn->node, &data->function_list);
 
@@ -938,9 +887,8 @@ void rmi_disable_irq(struct rmi_device *rmi_dev, bool enable_wake)
 {
 	struct rmi_device_platform_data *pdata = rmi_get_platform_data(rmi_dev);
 	struct rmi_driver_data *data = dev_get_drvdata(&rmi_dev->dev);
-	struct rmi4_attn_data attn_data = {0};
 	int irq = pdata->irq;
-	int retval, count;
+	int retval;
 
 	mutex_lock(&data->enabled_mutex);
 
@@ -955,13 +903,6 @@ void rmi_disable_irq(struct rmi_device *rmi_dev, bool enable_wake)
 			dev_warn(&rmi_dev->dev,
 				 "Failed to enable irq for wake: %d\n",
 				 retval);
-	}
-
-	/* make sure the fifo is clean */
-	while (!kfifo_is_empty(&data->attn_fifo)) {
-		count = kfifo_get(&data->attn_fifo, &attn_data);
-		if (count)
-			kfree(attn_data.data);
 	}
 
 out:
@@ -1003,39 +944,18 @@ static int rmi_driver_remove(struct device *dev)
 
 	rmi_disable_irq(rmi_dev, false);
 
-	rmi_f34_remove_sysfs(rmi_dev);
 	rmi_free_function_list(rmi_dev);
 
 	return 0;
 }
 
-#ifdef CONFIG_OF
-static int rmi_driver_of_probe(struct device *dev,
-				struct rmi_device_platform_data *pdata)
-{
-	int retval;
-
-	retval = rmi_of_property_read_u32(dev, &pdata->reset_delay_ms,
-					"syna,reset-delay-ms", 1);
-	if (retval)
-		return retval;
-
-	return 0;
-}
-#else
-static inline int rmi_driver_of_probe(struct device *dev,
-					struct rmi_device_platform_data *pdata)
-{
-	return -ENODEV;
-}
-#endif
-
-int rmi_probe_interrupts(struct rmi_driver_data *data)
+static int rmi_probe_interrupts(struct rmi_driver_data *data)
 {
 	struct rmi_device *rmi_dev = data->rmi_dev;
 	struct device *dev = &rmi_dev->dev;
 	int irq_count;
 	size_t size;
+	void *irq_memory;
 	int retval;
 
 	/*
@@ -1046,36 +966,30 @@ int rmi_probe_interrupts(struct rmi_driver_data *data)
 	 */
 	rmi_dbg(RMI_DEBUG_CORE, dev, "%s: Counting IRQs.\n", __func__);
 	irq_count = 0;
-	data->bootloader_mode = false;
-
 	retval = rmi_scan_pdt(rmi_dev, &irq_count, rmi_count_irqs);
 	if (retval < 0) {
 		dev_err(dev, "IRQ counting failed with code %d.\n", retval);
 		return retval;
 	}
-
-	if (data->bootloader_mode)
-		dev_warn(dev, "Device in bootloader mode.\n");
-
 	data->irq_count = irq_count;
 	data->num_of_irq_regs = (data->irq_count + 7) / 8;
 
 	size = BITS_TO_LONGS(data->irq_count) * sizeof(unsigned long);
-	data->irq_memory = devm_kzalloc(dev, size * 4, GFP_KERNEL);
-	if (!data->irq_memory) {
+	irq_memory = devm_kzalloc(dev, size * 4, GFP_KERNEL);
+	if (!irq_memory) {
 		dev_err(dev, "Failed to allocate memory for irq masks.\n");
 		return -ENOMEM;
 	}
 
-	data->irq_status	= data->irq_memory + size * 0;
-	data->fn_irq_bits	= data->irq_memory + size * 1;
-	data->current_irq_mask	= data->irq_memory + size * 2;
-	data->new_irq_mask	= data->irq_memory + size * 3;
+	data->irq_status	= irq_memory + size * 0;
+	data->fn_irq_bits	= irq_memory + size * 1;
+	data->current_irq_mask	= irq_memory + size * 2;
+	data->new_irq_mask	= irq_memory + size * 3;
 
 	return retval;
 }
 
-int rmi_init_functions(struct rmi_driver_data *data)
+static int rmi_init_functions(struct rmi_driver_data *data)
 {
 	struct rmi_device *rmi_dev = data->rmi_dev;
 	struct device *dev = &rmi_dev->dev;
@@ -1134,12 +1048,6 @@ static int rmi_driver_probe(struct device *dev)
 	rmi_dev->driver = rmi_driver;
 
 	pdata = rmi_get_platform_data(rmi_dev);
-
-	if (rmi_dev->xport->dev->of_node) {
-		retval = rmi_driver_of_probe(rmi_dev->xport->dev, pdata);
-		if (retval)
-			return retval;
-	}
 
 	data = devm_kzalloc(dev, sizeof(struct rmi_driver_data), GFP_KERNEL);
 	if (!data)
@@ -1217,10 +1125,6 @@ static int rmi_driver_probe(struct device *dev)
 	if (retval)
 		goto err;
 
-	retval = rmi_f34_create_sysfs(rmi_dev);
-	if (retval)
-		goto err;
-
 	if (data->input) {
 		rmi_driver_set_input_name(rmi_dev, data->input);
 		if (!rmi_dev->xport->input) {
@@ -1238,7 +1142,7 @@ static int rmi_driver_probe(struct device *dev)
 
 	if (data->f01_container->dev.driver) {
 		/* Driver already bound, so enable ATTN now. */
-		retval = rmi_enable_sensor(rmi_dev);
+		retval = enable_sensor(rmi_dev);
 		if (retval)
 			goto err_disable_irq;
 	}

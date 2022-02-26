@@ -158,6 +158,7 @@ static const struct file_operations exports_proc_operations = {
 	.read		= seq_read,
 	.llseek		= seq_lseek,
 	.release	= seq_release,
+	.owner		= THIS_MODULE,
 };
 
 static int exports_nfsd_open(struct inode *inode, struct file *file)
@@ -170,6 +171,7 @@ static const struct file_operations exports_nfsd_operations = {
 	.read		= seq_read,
 	.llseek		= seq_lseek,
 	.release	= seq_release,
+	.owner		= THIS_MODULE,
 };
 
 static int export_features_show(struct seq_file *m, void *v)
@@ -215,9 +217,10 @@ static const struct file_operations pool_stats_operations = {
 	.read		= seq_read,
 	.llseek		= seq_lseek,
 	.release	= nfsd_pool_stats_release,
+	.owner		= THIS_MODULE,
 };
 
-static const struct file_operations reply_cache_stats_operations = {
+static struct file_operations reply_cache_stats_operations = {
 	.open		= nfsd_reply_cache_stats_open,
 	.read		= seq_read,
 	.llseek		= seq_lseek,
@@ -1146,7 +1149,7 @@ static ssize_t write_v4_end_grace(struct file *file, char *buf, size_t size)
 
 static int nfsd_fill_super(struct super_block * sb, void * data, int silent)
 {
-	static const struct tree_descr nfsd_files[] = {
+	static struct tree_descr nfsd_files[] = {
 		[NFSD_List] = {"exports", &exports_nfsd_operations, S_IRUGO},
 		[NFSD_Export_features] = {"export_features",
 					&export_features_operations, S_IRUGO},
@@ -1224,7 +1227,7 @@ static int create_proc_exports_entry(void)
 }
 #endif
 
-unsigned int nfsd_net_id;
+int nfsd_net_id;
 
 static __net_init int nfsd_init_net(struct net *net)
 {

@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __NET_ACT_API_H
 #define __NET_ACT_API_H
 
@@ -10,10 +9,11 @@
 #include <net/pkt_sched.h>
 #include <net/net_namespace.h>
 #include <net/netns/generic.h>
+#include <linux/idr_ext.h>
 
 struct tcf_idrinfo {
 	spinlock_t	lock;
-	struct idr	action_idr;
+	struct idr_ext	action_idr;
 };
 
 struct tc_action_ops;
@@ -32,10 +32,12 @@ struct tc_action {
 	int				tcfa_action;
 	struct tcf_t			tcfa_tm;
 	struct gnet_stats_basic_packed	tcfa_bstats;
+	struct gnet_stats_basic_packed	tcfa_bstats_hw;
 	struct gnet_stats_queue		tcfa_qstats;
 	struct net_rate_estimator __rcu *tcfa_rate_est;
 	spinlock_t			tcfa_lock;
 	struct gnet_stats_basic_cpu __percpu *cpu_bstats;
+	struct gnet_stats_basic_cpu __percpu *cpu_bstats_hw;
 	struct gnet_stats_queue __percpu *cpu_qstats;
 	struct tc_cookie	*act_cookie;
 	struct tcf_chain	*goto_chain;
@@ -93,7 +95,7 @@ struct tc_action_ops {
 			int bind);
 	int     (*walk)(struct net *, struct sk_buff *,
 			struct netlink_callback *, int, const struct tc_action_ops *);
-	void	(*stats_update)(struct tc_action *, u64, u32, u64);
+	void	(*stats_update)(struct tc_action *, u64, u32, u64, bool);
 	struct net_device *(*get_dev)(const struct tc_action *a);
 };
 
@@ -113,7 +115,7 @@ int tc_action_net_init(struct tc_action_net *tn,
 		return -ENOMEM;
 	tn->ops = ops;
 	spin_lock_init(&tn->idrinfo->lock);
-	idr_init(&tn->idrinfo->action_idr);
+	idr_init_ext(&tn->idrinfo->action_idr);
 	return err;
 }
 
@@ -148,8 +150,7 @@ static inline int tcf_idr_release(struct tc_action *a, bool bind)
 }
 
 int tcf_register_action(struct tc_action_ops *a, struct pernet_operations *ops);
-int tcf_unregister_action(struct tc_action_ops *a,
-			  struct pernet_operations *ops);
+int tcf_unregister_action(struct tc_action_ops *a, struct pernet_operations *ops);
 int tcf_action_destroy(struct list_head *actions, int bind);
 int tcf_action_exec(struct sk_buff *skb, struct tc_action **actions,
 		    int nr_actions, struct tcf_result *res);
@@ -167,48 +168,17 @@ int tcf_action_copy_stats(struct sk_buff *, struct tc_action *, int);
 #endif /* CONFIG_NET_CLS_ACT */
 
 static inline void tcf_action_stats_update(struct tc_action *a, u64 bytes,
-					   u64 packets, u64 lastuse)
+					   u64 packets, u64 lastuse, bool hw)
 {
 #ifdef CONFIG_NET_CLS_ACT
 	if (!a->ops->stats_update)
 		return;
 
-	a->ops->stats_update(a, bytes, packets, lastuse);
+	a->ops->stats_update(a, bytes, packets, lastuse, hw);
 #endif
 }
 
 typedef int tc_setup_cb_t(enum tc_setup_type type,
 			  void *type_data, void *cb_priv);
-
-#ifdef CONFIG_NET_CLS_ACT
-int tc_setup_cb_egdev_register(const struct net_device *dev,
-			       tc_setup_cb_t *cb, void *cb_priv);
-void tc_setup_cb_egdev_unregister(const struct net_device *dev,
-				  tc_setup_cb_t *cb, void *cb_priv);
-int tc_setup_cb_egdev_call(const struct net_device *dev,
-			   enum tc_setup_type type, void *type_data,
-			   bool err_stop);
-#else
-static inline
-int tc_setup_cb_egdev_register(const struct net_device *dev,
-			       tc_setup_cb_t *cb, void *cb_priv)
-{
-	return 0;
-}
-
-static inline
-void tc_setup_cb_egdev_unregister(const struct net_device *dev,
-				  tc_setup_cb_t *cb, void *cb_priv)
-{
-}
-
-static inline
-int tc_setup_cb_egdev_call(const struct net_device *dev,
-			   enum tc_setup_type type, void *type_data,
-			   bool err_stop)
-{
-	return 0;
-}
-#endif
 
 #endif

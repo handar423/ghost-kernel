@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 # ifdef CONFIG_SUPERH32
 #  include <asm/unistd_32.h>
 # else
@@ -12,6 +11,7 @@
 # define __ARCH_WANT_SYS_GETHOSTNAME
 # define __ARCH_WANT_SYS_IPC
 # define __ARCH_WANT_SYS_PAUSE
+# define __ARCH_WANT_SYS_SGETMASK
 # define __ARCH_WANT_SYS_SIGNAL
 # define __ARCH_WANT_SYS_TIME
 # define __ARCH_WANT_SYS_UTIME

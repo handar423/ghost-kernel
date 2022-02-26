@@ -3429,7 +3429,7 @@ il3945_setup_deferred_work(struct il_priv *il)
 
 	il3945_hw_setup_deferred_work(il);
 
-	timer_setup(&il->watchdog, il_bg_watchdog, 0);
+	setup_timer(&il->watchdog, il_bg_watchdog, (unsigned long)il);
 
 	tasklet_init(&il->irq_tasklet,
 		     (void (*)(unsigned long))il3945_irq_tasklet,
@@ -3469,7 +3469,7 @@ static const struct attribute_group il3945_attribute_group = {
 	.attrs = il3945_sysfs_entries,
 };
 
-static struct ieee80211_ops il3945_mac_ops __ro_after_init = {
+static struct ieee80211_ops il3945_mac_ops = {
 	.tx = il3945_mac_tx,
 	.start = il3945_mac_start,
 	.stop = il3945_mac_stop,

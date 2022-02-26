@@ -40,7 +40,6 @@
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
 #include <linux/export.h>
-#include <linux/etherdevice.h>
 
 int sysctl_aarp_expiry_time = AARP_EXPIRY_TIME;
 int sysctl_aarp_tick_time = AARP_TICK_TIME;
@@ -68,7 +67,7 @@ struct aarp_entry {
 	unsigned long		expires_at;
 	struct atalk_addr	target_addr;
 	struct net_device	*dev;
-	char			hwaddr[ETH_ALEN];
+	char			hwaddr[6];
 	unsigned short		xmit_count;
 	struct aarp_entry	*next;
 };
@@ -135,13 +134,13 @@ static void __aarp_send_query(struct aarp_entry *a)
 	eah->pa_len	 = AARP_PA_ALEN;
 	eah->function	 = htons(AARP_REQUEST);
 
-	ether_addr_copy(eah->hw_src, dev->dev_addr);
+	memcpy(eah->hw_src, dev->dev_addr, ETH_ALEN);
 
 	eah->pa_src_zero = 0;
 	eah->pa_src_net	 = sat->s_net;
 	eah->pa_src_node = sat->s_node;
 
-	eth_zero_addr(eah->hw_dst);
+	memset(eah->hw_dst, '\0', ETH_ALEN);
 
 	eah->pa_dst_zero = 0;
 	eah->pa_dst_net	 = a->target_addr.s_net;
@@ -182,16 +181,16 @@ static void aarp_send_reply(struct net_device *dev, struct atalk_addr *us,
 	eah->pa_len	 = AARP_PA_ALEN;
 	eah->function	 = htons(AARP_REPLY);
 
-	ether_addr_copy(eah->hw_src, dev->dev_addr);
+	memcpy(eah->hw_src, dev->dev_addr, ETH_ALEN);
 
 	eah->pa_src_zero = 0;
 	eah->pa_src_net	 = us->s_net;
 	eah->pa_src_node = us->s_node;
 
 	if (!sha)
-		eth_zero_addr(eah->hw_dst);
+		memset(eah->hw_dst, '\0', ETH_ALEN);
 	else
-		ether_addr_copy(eah->hw_dst, sha);
+		memcpy(eah->hw_dst, sha, ETH_ALEN);
 
 	eah->pa_dst_zero = 0;
 	eah->pa_dst_net	 = them->s_net;
@@ -233,13 +232,13 @@ static void aarp_send_probe(struct net_device *dev, struct atalk_addr *us)
 	eah->pa_len	 = AARP_PA_ALEN;
 	eah->function	 = htons(AARP_PROBE);
 
-	ether_addr_copy(eah->hw_src, dev->dev_addr);
+	memcpy(eah->hw_src, dev->dev_addr, ETH_ALEN);
 
 	eah->pa_src_zero = 0;
 	eah->pa_src_net	 = us->s_net;
 	eah->pa_src_node = us->s_node;
 
-	eth_zero_addr(eah->hw_dst);
+	memset(eah->hw_dst, '\0', ETH_ALEN);
 
 	eah->pa_dst_zero = 0;
 	eah->pa_dst_net	 = us->s_net;
@@ -310,7 +309,7 @@ static void __aarp_expire_device(struct aarp_entry **n, struct net_device *dev)
 }
 
 /* Handle the timer event */
-static void aarp_expire_timeout(struct timer_list *unused)
+static void aarp_expire_timeout(unsigned long unused)
 {
 	int ct;
 
@@ -791,7 +790,7 @@ static int aarp_rcv(struct sk_buff *skb, struct net_device *dev,
 			break;
 
 		/* We can fill one in - this is good. */
-		ether_addr_copy(a->hwaddr, ea->hw_src);
+		memcpy(a->hwaddr, ea->hw_src, ETH_ALEN);
 		__aarp_resolved(&unresolved[hash], a, hash);
 		if (!unresolved_count)
 			mod_timer(&aarp_timer,
@@ -884,10 +883,10 @@ void __init aarp_proto_init(void)
 	aarp_dl = register_snap_client(aarp_snap_id, aarp_rcv);
 	if (!aarp_dl)
 		printk(KERN_CRIT "Unable to register AARP with SNAP.\n");
-	timer_setup(&aarp_timer, aarp_expire_timeout, 0);
+	setup_timer(&aarp_timer, aarp_expire_timeout, 0);
 	aarp_timer.expires  = jiffies + sysctl_aarp_expiry_time;
 	add_timer(&aarp_timer);
-	register_netdevice_notifier(&aarp_notifier);
+	register_netdevice_notifier_rh(&aarp_notifier);
 }
 
 /* Remove the AARP entries associated with a device. */
@@ -926,7 +925,7 @@ static struct aarp_entry *iter_next(struct aarp_iter_state *iter, loff_t *pos)
 	struct aarp_entry *entry;
 
  rescan:
-	while (ct < AARP_HASH_SIZE) {
+	while(ct < AARP_HASH_SIZE) {
 		for (entry = table[ct]; entry; entry = entry->next) {
 			if (!pos || ++off == *pos) {
 				iter->table = table;
@@ -995,7 +994,7 @@ static const char *dt2str(unsigned long ticks)
 {
 	static char buf[32];
 
-	sprintf(buf, "%ld.%02ld", ticks / HZ, ((ticks % HZ) * 100) / HZ);
+	sprintf(buf, "%ld.%02ld", ticks / HZ, ((ticks % HZ) * 100 ) / HZ);
 
 	return buf;
 }
@@ -1059,7 +1058,7 @@ const struct file_operations atalk_seq_arp_fops = {
 void aarp_cleanup_module(void)
 {
 	del_timer_sync(&aarp_timer);
-	unregister_netdevice_notifier(&aarp_notifier);
+	unregister_netdevice_notifier_rh(&aarp_notifier);
 	unregister_snap_client(aarp_dl);
 	aarp_purge();
 }

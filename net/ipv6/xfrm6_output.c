@@ -25,6 +25,7 @@ int xfrm6_find_1stfragopt(struct xfrm_state *x, struct sk_buff *skb,
 {
 	return ip6_find_1stfragopt(skb, prevhdr);
 }
+
 EXPORT_SYMBOL(xfrm6_find_1stfragopt);
 
 static int xfrm6_local_dontfrag(struct sk_buff *skb)
@@ -58,12 +59,10 @@ static void xfrm6_local_rxpmtu(struct sk_buff *skb, u32 mtu)
 void xfrm6_local_error(struct sk_buff *skb, u32 mtu)
 {
 	struct flowi6 fl6;
-	const struct ipv6hdr *hdr;
 	struct sock *sk = skb->sk;
 
-	hdr = skb->encapsulation ? inner_ipv6_hdr(skb) : ipv6_hdr(skb);
 	fl6.fl6_dport = inet_sk(sk)->inet_dport;
-	fl6.daddr = hdr->daddr;
+	fl6.daddr = ipv6_hdr(skb)->daddr;
 
 	ipv6_local_error(sk, EMSGSIZE, &fl6, mtu);
 }
@@ -73,18 +72,12 @@ static int xfrm6_tunnel_check_size(struct sk_buff *skb)
 	int mtu, ret = 0;
 	struct dst_entry *dst = skb_dst(skb);
 
-	if (skb->ignore_df)
-		goto out;
-
 	mtu = dst_mtu(dst);
 	if (mtu < IPV6_MIN_MTU)
 		mtu = IPV6_MIN_MTU;
 
-	if ((!skb_is_gso(skb) && skb->len > mtu) ||
-	    (skb_is_gso(skb) &&
-	     skb_gso_network_seglen(skb) > ip6_skb_dst_mtu(skb))) {
+	if (!skb->ignore_df && skb->len > mtu) {
 		skb->dev = dst->dev;
-		skb->protocol = htons(ETH_P_IPV6);
 
 		if (xfrm6_local_dontfrag(skb))
 			xfrm6_local_rxpmtu(skb, mtu);
@@ -94,7 +87,7 @@ static int xfrm6_tunnel_check_size(struct sk_buff *skb)
 			icmpv6_send(skb, ICMPV6_PKT_TOOBIG, 0, mtu);
 		ret = -EMSGSIZE;
 	}
-out:
+
 	return ret;
 }
 
@@ -120,7 +113,6 @@ int xfrm6_prepare_output(struct xfrm_state *x, struct sk_buff *skb)
 		return err;
 
 	skb->ignore_df = 1;
-	skb->protocol = htons(ETH_P_IPV6);
 
 	return x->outer_mode->output2(x, skb);
 }
@@ -129,6 +121,7 @@ EXPORT_SYMBOL(xfrm6_prepare_output);
 int xfrm6_output_finish(struct sock *sk, struct sk_buff *skb)
 {
 	memset(IP6CB(skb), 0, sizeof(*IP6CB(skb)));
+	skb->protocol = htons(ETH_P_IPV6);
 
 #ifdef CONFIG_NETFILTER
 	IP6CB(skb)->flags |= IP6SKB_XFRM_TRANSFORMED;
@@ -137,14 +130,7 @@ int xfrm6_output_finish(struct sock *sk, struct sk_buff *skb)
 	return xfrm_output(sk, skb);
 }
 
-static int __xfrm6_output_finish(struct net *net, struct sock *sk, struct sk_buff *skb)
-{
-	struct xfrm_state *x = skb_dst(skb)->xfrm;
-
-	return x->outer_mode->afinfo->output_finish(sk, skb);
-}
-
-static int __xfrm6_output(struct net *net, struct sock *sk, struct sk_buff *skb)
+static int __xfrm6_output(struct sock *sk, struct sk_buff *skb)
 {
 	struct dst_entry *dst = skb_dst(skb);
 	struct xfrm_state *x = dst->xfrm;
@@ -154,7 +140,7 @@ static int __xfrm6_output(struct net *net, struct sock *sk, struct sk_buff *skb)
 #ifdef CONFIG_NETFILTER
 	if (!x) {
 		IP6CB(skb)->flags |= IP6SKB_REROUTED;
-		return dst_output(net, sk, skb);
+		return dst_output_sk(sk, skb);
 	}
 #endif
 
@@ -170,24 +156,25 @@ static int __xfrm6_output(struct net *net, struct sock *sk, struct sk_buff *skb)
 
 	if (toobig && xfrm6_local_dontfrag(skb)) {
 		xfrm6_local_rxpmtu(skb, mtu);
+		kfree_skb(skb);
 		return -EMSGSIZE;
 	} else if (!skb->ignore_df && toobig && skb->sk) {
 		xfrm_local_error(skb, mtu);
+		kfree_skb(skb);
 		return -EMSGSIZE;
 	}
 
 	if (toobig || dst_allfrag(skb_dst(skb)))
-		return ip6_fragment(net, sk, skb,
-				    __xfrm6_output_finish);
+		return ip6_fragment(sk, skb,
+				    x->outer_mode->afinfo->output_finish);
 
 skip_frag:
 	return x->outer_mode->afinfo->output_finish(sk, skb);
 }
 
-int xfrm6_output(struct net *net, struct sock *sk, struct sk_buff *skb)
+int xfrm6_output(struct sock *sk, struct sk_buff *skb)
 {
-	return NF_HOOK_COND(NFPROTO_IPV6, NF_INET_POST_ROUTING,
-			    net, sk, skb,  NULL, skb_dst(skb)->dev,
-			    __xfrm6_output,
+	return NF_HOOK_COND(NFPROTO_IPV6, NF_INET_POST_ROUTING, sk, skb,
+			    NULL, skb_dst(skb)->dev, __xfrm6_output,
 			    !(IP6CB(skb)->flags & IP6SKB_REROUTED));
 }

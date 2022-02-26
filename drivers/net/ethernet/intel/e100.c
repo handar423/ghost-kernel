@@ -414,7 +414,7 @@ enum cb_status {
 
 /**
  * cb_command - Command Block flags
- * @cb_tx_nc:  0: controller does CRC (normal),  1: CRC from skb memory
+ * @cb_tx_nc:  0: controler does CRC (normal),  1: CRC from skb memory
  */
 enum cb_command {
 	cb_nop    = 0x0000,
@@ -874,7 +874,7 @@ static int e100_exec_cb(struct nic *nic, struct sk_buff *skb,
 {
 	struct cb *cb;
 	unsigned long flags;
-	int err;
+	int err = 0;
 
 	spin_lock_irqsave(&nic->cb_lock, flags);
 
@@ -899,7 +899,7 @@ static int e100_exec_cb(struct nic *nic, struct sk_buff *skb,
 	/* Order is important otherwise we'll be in a race with h/w:
 	 * set S-bit in current first, then clear S-bit in previous. */
 	cb->command |= cpu_to_le16(cb_s);
-	dma_wmb();
+	wmb();
 	cb->prev->command &= cpu_to_le16(~cb_s);
 
 	while (nic->cb_to_send != nic->cb_to_use) {
@@ -1175,12 +1175,15 @@ static int e100_configure(struct nic *nic, struct cb *cb, struct sk_buff *skb)
 		config->rx_discard_short_frames = 0x0;  /* 1=discard, 0=save */
 	}
 
-	netif_printk(nic, hw, KERN_DEBUG, nic->netdev, "[00-07]=%8ph\n",
-		     c + 0);
-	netif_printk(nic, hw, KERN_DEBUG, nic->netdev, "[08-15]=%8ph\n",
-		     c + 8);
-	netif_printk(nic, hw, KERN_DEBUG, nic->netdev, "[16-23]=%8ph\n",
-		     c + 16);
+	netif_printk(nic, hw, KERN_DEBUG, nic->netdev,
+		     "[00-07]=%02X:%02X:%02X:%02X:%02X:%02X:%02X:%02X\n",
+		     c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]);
+	netif_printk(nic, hw, KERN_DEBUG, nic->netdev,
+		     "[08-15]=%02X:%02X:%02X:%02X:%02X:%02X:%02X:%02X\n",
+		     c[8], c[9], c[10], c[11], c[12], c[13], c[14], c[15]);
+	netif_printk(nic, hw, KERN_DEBUG, nic->netdev,
+		     "[16-23]=%02X:%02X:%02X:%02X:%02X:%02X:%02X:%02X\n",
+		     c[16], c[17], c[18], c[19], c[20], c[21], c[22], c[23]);
 	return 0;
 }
 
@@ -1543,7 +1546,7 @@ static int e100_phy_init(struct nic *nic)
 		mdio_write(netdev, nic->mii.phy_id, MII_BMCR, bmcr);
 	} else if ((nic->mac >= mac_82550_D102) || ((nic->flags & ich) &&
 	   (mdio_read(netdev, nic->mii.phy_id, MII_TPISTATUS) & 0x8000) &&
-		(nic->eeprom[eeprom_cnfg_mdix] & eeprom_mdix_enabled))) {
+		!(nic->eeprom[eeprom_cnfg_mdix] & eeprom_mdix_enabled))) {
 		/* enable/disable MDI/MDI-X auto-switching. */
 		mdio_write(netdev, nic->mii.phy_id, MII_NCONFIG,
 				nic->mii.force_media ? 0 : NCONFIG_AUTO_SWITCH);
@@ -1710,9 +1713,9 @@ static void e100_adjust_adaptive_ifs(struct nic *nic, int speed, int duplex)
 	}
 }
 
-static void e100_watchdog(struct timer_list *t)
+static void e100_watchdog(unsigned long data)
 {
-	struct nic *nic = from_timer(nic, t, watchdog);
+	struct nic *nic = (struct nic *)data;
 	struct ethtool_cmd cmd = { .cmd = ETHTOOL_GSET };
 	u32 speed;
 
@@ -1770,20 +1773,17 @@ static int e100_xmit_prepare(struct nic *nic, struct cb *cb,
 	dma_addr = pci_map_single(nic->pdev,
 				  skb->data, skb->len, PCI_DMA_TODEVICE);
 	/* If we can't map the skb, have the upper layer try later */
-	if (pci_dma_mapping_error(nic->pdev, dma_addr)) {
-		dev_kfree_skb_any(skb);
-		skb = NULL;
+	if (pci_dma_mapping_error(nic->pdev, dma_addr))
 		return -ENOMEM;
-	}
 
 	/*
 	 * Use the last 4 bytes of the SKB payload packet as the CRC, used for
 	 * testing, ie sending frames with bad CRC.
 	 */
 	if (unlikely(skb->no_fcs))
-		cb->command |= cpu_to_le16(cb_tx_nc);
+		cb->command |= __constant_cpu_to_le16(cb_tx_nc);
 	else
-		cb->command &= ~cpu_to_le16(cb_tx_nc);
+		cb->command &= ~__constant_cpu_to_le16(cb_tx_nc);
 
 	/* interrupt every 16 packets regardless of delay */
 	if ((nic->cbs_avail & ~15) == nic->cbs_avail)
@@ -1846,7 +1846,7 @@ static int e100_tx_clean(struct nic *nic)
 	for (cb = nic->cb_to_clean;
 	    cb->status & cpu_to_le16(cb_complete);
 	    cb = nic->cb_to_clean = cb->next) {
-		dma_rmb(); /* read skb after status */
+		rmb(); /* read skb after status */
 		netif_printk(nic, tx_done, KERN_DEBUG, nic->netdev,
 			     "cb[%d]->status = 0x%04X\n",
 			     (int)(((void*)cb - (void*)nic->cbs)/sizeof(struct cb)),
@@ -1910,10 +1910,11 @@ static int e100_alloc_cbs(struct nic *nic)
 	nic->cb_to_use = nic->cb_to_send = nic->cb_to_clean = NULL;
 	nic->cbs_avail = 0;
 
-	nic->cbs = pci_pool_zalloc(nic->cbs_pool, GFP_KERNEL,
-				   &nic->cbs_dma_addr);
+	nic->cbs = pci_pool_alloc(nic->cbs_pool, GFP_KERNEL,
+				  &nic->cbs_dma_addr);
 	if (!nic->cbs)
 		return -ENOMEM;
+	memset(nic->cbs, 0, count * sizeof(struct cb));
 
 	for (cb = nic->cbs, i = 0; i < count; cb++, i++) {
 		cb->next = (i + 1 < count) ? cb + 1 : nic->cbs;
@@ -1995,7 +1996,7 @@ static int e100_rx_indicate(struct nic *nic, struct rx *rx,
 
 	netif_printk(nic, rx_status, KERN_DEBUG, nic->netdev,
 		     "status=0x%04X\n", rfd_status);
-	dma_rmb(); /* read size after status bit */
+	rmb(); /* read size after status bit */
 
 	/* If data isn't ready, nothing to indicate */
 	if (unlikely(!(rfd_status & cb_complete))) {
@@ -2252,7 +2253,7 @@ static int e100_poll(struct napi_struct *napi, int budget)
 
 	/* If budget not fully consumed, exit the polling mode */
 	if (work_done < budget) {
-		napi_complete_done(napi, work_done);
+		napi_complete(napi);
 		e100_enable_irq(nic);
 	}
 
@@ -2282,6 +2283,14 @@ static int e100_set_mac_address(struct net_device *netdev, void *p)
 	memcpy(netdev->dev_addr, addr->sa_data, netdev->addr_len);
 	e100_exec_cb(nic, NULL, e100_setup_iaaddr);
 
+	return 0;
+}
+
+static int e100_change_mtu(struct net_device *netdev, int new_mtu)
+{
+	if (new_mtu < ETH_ZLEN || new_mtu > ETH_DATA_LEN)
+		return -EINVAL;
+	netdev->mtu = new_mtu;
 	return 0;
 }
 
@@ -2425,24 +2434,19 @@ err_clean_rx:
 #define E100_82552_LED_ON       0x000F /* LEDTX and LED_RX both on */
 #define E100_82552_LED_OFF      0x000A /* LEDTX and LED_RX both off */
 
-static int e100_get_link_ksettings(struct net_device *netdev,
-				   struct ethtool_link_ksettings *cmd)
+static int e100_get_settings(struct net_device *netdev, struct ethtool_cmd *cmd)
 {
 	struct nic *nic = netdev_priv(netdev);
-
-	mii_ethtool_get_link_ksettings(&nic->mii, cmd);
-
-	return 0;
+	return mii_ethtool_gset(&nic->mii, cmd);
 }
 
-static int e100_set_link_ksettings(struct net_device *netdev,
-				   const struct ethtool_link_ksettings *cmd)
+static int e100_set_settings(struct net_device *netdev, struct ethtool_cmd *cmd)
 {
 	struct nic *nic = netdev_priv(netdev);
 	int err;
 
 	mdio_write(netdev, nic->mii.phy_id, MII_BMCR, BMCR_RESET);
-	err = mii_ethtool_set_link_ksettings(&nic->mii, cmd);
+	err = mii_ethtool_sset(&nic->mii, cmd);
 	e100_exec_cb(nic, NULL, e100_configure);
 
 	return err;
@@ -2745,6 +2749,8 @@ static void e100_get_strings(struct net_device *netdev, u32 stringset, u8 *data)
 }
 
 static const struct ethtool_ops e100_ethtool_ops = {
+	.get_settings		= e100_get_settings,
+	.set_settings		= e100_set_settings,
 	.get_drvinfo		= e100_get_drvinfo,
 	.get_regs_len		= e100_get_regs_len,
 	.get_regs		= e100_get_regs,
@@ -2765,8 +2771,6 @@ static const struct ethtool_ops e100_ethtool_ops = {
 	.get_ethtool_stats	= e100_get_ethtool_stats,
 	.get_sset_count		= e100_get_sset_count,
 	.get_ts_info		= ethtool_op_get_ts_info,
-	.get_link_ksettings	= e100_get_link_ksettings,
-	.set_link_ksettings	= e100_set_link_ksettings,
 };
 
 static int e100_do_ioctl(struct net_device *netdev, struct ifreq *ifr, int cmd)
@@ -2830,6 +2834,7 @@ static const struct net_device_ops e100_netdev_ops = {
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_set_rx_mode	= e100_set_multicast_list,
 	.ndo_set_mac_address	= e100_set_mac_address,
+	.ndo_change_mtu		= e100_change_mtu,
 	.ndo_do_ioctl		= e100_do_ioctl,
 	.ndo_tx_timeout		= e100_tx_timeout,
 #ifdef CONFIG_NET_POLL_CONTROLLER
@@ -2852,7 +2857,7 @@ static int e100_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	netdev->hw_features |= NETIF_F_RXALL;
 
 	netdev->netdev_ops = &e100_netdev_ops;
-	netdev->ethtool_ops = &e100_ethtool_ops;
+	SET_ETHTOOL_OPS(netdev, &e100_ethtool_ops);
 	netdev->watchdog_timeo = E100_WATCHDOG_PERIOD;
 	strncpy(netdev->name, pci_name(pdev), sizeof(netdev->name) - 1);
 
@@ -2920,7 +2925,9 @@ static int e100_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	pci_set_master(pdev);
 
-	timer_setup(&nic->watchdog, e100_watchdog, 0);
+	init_timer(&nic->watchdog);
+	nic->watchdog.function = e100_watchdog;
+	nic->watchdog.data = (unsigned long)nic;
 
 	INIT_WORK(&nic->tx_timeout_task, e100_tx_timeout_task);
 
@@ -2965,11 +2972,6 @@ static int e100_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 			   nic->params.cbs.max * sizeof(struct cb),
 			   sizeof(u32),
 			   0);
-	if (!nic->cbs_pool) {
-		netif_err(nic, probe, nic->netdev, "Cannot create DMA pool, aborting\n");
-		err = -ENOMEM;
-		goto err_out_pool;
-	}
 	netif_info(nic, probe, nic->netdev,
 		   "addr 0x%llx, irq %d, MAC addr %pM\n",
 		   (unsigned long long)pci_resource_start(pdev, use_io ? 1 : 0),
@@ -2977,8 +2979,6 @@ static int e100_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	return 0;
 
-err_out_pool:
-	unregister_netdev(netdev);
 err_out_free:
 	e100_free(nic);
 err_out_iounmap:
@@ -2988,6 +2988,7 @@ err_out_free_res:
 err_out_disable_pdev:
 	pci_disable_device(pdev);
 err_out_free_dev:
+	pci_set_drvdata(pdev, NULL);
 	free_netdev(netdev);
 	return err;
 }
@@ -3005,6 +3006,7 @@ static void e100_remove(struct pci_dev *pdev)
 		free_netdev(netdev);
 		pci_release_regions(pdev);
 		pci_disable_device(pdev);
+		pci_set_drvdata(pdev, NULL);
 	}
 }
 
@@ -3037,7 +3039,7 @@ static void __e100_shutdown(struct pci_dev *pdev, bool *enable_wake)
 		*enable_wake = false;
 	}
 
-	pci_clear_master(pdev);
+	pci_disable_device(pdev);
 }
 
 static int __e100_power_off(struct pci_dev *pdev, bool wake)
@@ -3067,7 +3069,7 @@ static int e100_resume(struct pci_dev *pdev)
 	pci_set_power_state(pdev, PCI_D0);
 	pci_restore_state(pdev);
 	/* ack any pending wake events, disable PME */
-	pci_enable_wake(pdev, PCI_D0, 0);
+	pci_enable_wake(pdev, 0, 0);
 
 	/* disable reverse auto-negotiation */
 	if (nic->phy == phy_82552_v) {
@@ -3158,7 +3160,7 @@ static void e100_io_resume(struct pci_dev *pdev)
 	struct nic *nic = netdev_priv(netdev);
 
 	/* ack any pending wake events, disable PME */
-	pci_enable_wake(pdev, PCI_D0, 0);
+	pci_enable_wake(pdev, 0, 0);
 
 	netif_device_attach(netdev);
 	if (netif_running(netdev)) {

@@ -61,6 +61,7 @@ struct ib_client_data {
 };
 
 struct workqueue_struct *ib_comp_wq;
+struct workqueue_struct *ib_comp_unbound_wq;
 struct workqueue_struct *ib_wq;
 EXPORT_SYMBOL_GPL(ib_wq);
 
@@ -103,11 +104,8 @@ static int ib_device_check_mandatory(struct ib_device *device)
 		IB_MANDATORY_FUNC(query_device),
 		IB_MANDATORY_FUNC(query_port),
 		IB_MANDATORY_FUNC(query_pkey),
-		IB_MANDATORY_FUNC(query_gid),
 		IB_MANDATORY_FUNC(alloc_pd),
 		IB_MANDATORY_FUNC(dealloc_pd),
-		IB_MANDATORY_FUNC(create_ah),
-		IB_MANDATORY_FUNC(destroy_ah),
 		IB_MANDATORY_FUNC(create_qp),
 		IB_MANDATORY_FUNC(modify_qp),
 		IB_MANDATORY_FUNC(destroy_qp),
@@ -125,8 +123,9 @@ static int ib_device_check_mandatory(struct ib_device *device)
 
 	for (i = 0; i < ARRAY_SIZE(mandatory_table); ++i) {
 		if (!*(void **) ((void *) device + mandatory_table[i].offset)) {
-			pr_warn("Device %s is missing mandatory function %s\n",
-				device->name, mandatory_table[i].name);
+			dev_warn(&device->dev,
+				 "Device is missing mandatory function %s\n",
+				 mandatory_table[i].name);
 			return -EINVAL;
 		}
 	}
@@ -146,7 +145,8 @@ static struct ib_device *__ib_device_get_by_index(u32 index)
 }
 
 /*
- * Caller is responsible to return refrerence count by calling put_device()
+ * Caller must perform ib_device_put() to return the device reference count
+ * when ib_device_get_by_index() returns valid device pointer.
  */
 struct ib_device *ib_device_get_by_index(u32 index)
 {
@@ -154,11 +154,19 @@ struct ib_device *ib_device_get_by_index(u32 index)
 
 	down_read(&lists_rwsem);
 	device = __ib_device_get_by_index(index);
-	if (device)
-		get_device(&device->dev);
-
+	if (device) {
+		/* Do not return a device if unregistration has started. */
+		if (!refcount_inc_not_zero(&device->refcount))
+			device = NULL;
+	}
 	up_read(&lists_rwsem);
 	return device;
+}
+
+void ib_device_put(struct ib_device *device)
+{
+	if (refcount_dec_and_test(&device->refcount))
+		complete(&device->unreg_completion);
 }
 
 static struct ib_device *__ib_device_get_by_name(const char *name)
@@ -166,16 +174,39 @@ static struct ib_device *__ib_device_get_by_name(const char *name)
 	struct ib_device *device;
 
 	list_for_each_entry(device, &device_list, core_list)
-		if (!strncmp(name, device->name, IB_DEVICE_NAME_MAX))
+		if (!strcmp(name, dev_name(&device->dev)))
 			return device;
 
 	return NULL;
 }
 
-static int alloc_name(char *name)
+int ib_device_rename(struct ib_device *ibdev, const char *name)
+{
+	int ret;
+
+	mutex_lock(&device_mutex);
+	if (!strcmp(name, dev_name(&ibdev->dev))) {
+		ret = 0;
+		goto out;
+	}
+
+	if (__ib_device_get_by_name(name)) {
+		ret = -EEXIST;
+		goto out;
+	}
+
+	ret = device_rename(&ibdev->dev, name);
+	if (ret)
+		goto out;
+	strlcpy(ibdev->name, name, IB_DEVICE_NAME_MAX);
+out:
+	mutex_unlock(&device_mutex);
+	return ret;
+}
+
+static int alloc_name(struct ib_device *ibdev, const char *name)
 {
 	unsigned long *inuse;
-	char buf[IB_DEVICE_NAME_MAX];
 	struct ib_device *device;
 	int i;
 
@@ -184,24 +215,21 @@ static int alloc_name(char *name)
 		return -ENOMEM;
 
 	list_for_each_entry(device, &device_list, core_list) {
-		if (!sscanf(device->name, name, &i))
+		char buf[IB_DEVICE_NAME_MAX];
+
+		if (sscanf(dev_name(&device->dev), name, &i) != 1)
 			continue;
 		if (i < 0 || i >= PAGE_SIZE * 8)
 			continue;
 		snprintf(buf, sizeof buf, name, i);
-		if (!strncmp(buf, device->name, IB_DEVICE_NAME_MAX))
+		if (!strcmp(buf, dev_name(&device->dev)))
 			set_bit(i, inuse);
 	}
 
 	i = find_first_zero_bit(inuse, PAGE_SIZE * 8);
 	free_page((unsigned long) inuse);
-	snprintf(buf, sizeof buf, name, i);
 
-	if (__ib_device_get_by_name(buf))
-		return -ENFILE;
-
-	strlcpy(name, buf, IB_DEVICE_NAME_MAX);
-	return 0;
+	return dev_set_name(&ibdev->dev, name, i);
 }
 
 static void ib_device_release(struct device *device)
@@ -209,24 +237,17 @@ static void ib_device_release(struct device *device)
 	struct ib_device *dev = container_of(device, struct ib_device, dev);
 
 	WARN_ON(dev->reg_state == IB_DEV_REGISTERED);
-	if (dev->reg_state == IB_DEV_UNREGISTERED) {
-		/*
-		 * In IB_DEV_UNINITIALIZED state, cache or port table
-		 * is not even created. Free cache and port table only when
-		 * device reaches UNREGISTERED state.
-		 */
-		ib_cache_release_one(dev);
-		kfree(dev->port_immutable);
-	}
+	ib_cache_release_one(dev);
+	ib_security_release_port_pkey_list(dev);
+	kfree(dev->port_pkey_list);
+	kfree(dev->port_immutable);
 	kfree(dev);
 }
 
 static int ib_device_uevent(struct device *device,
 			    struct kobj_uevent_env *env)
 {
-	struct ib_device *dev = container_of(device, struct ib_device, dev);
-
-	if (add_uevent_var(env, "NAME=%s", dev->name))
+	if (add_uevent_var(env, "NAME=%s", dev_name(device)))
 		return -ENOMEM;
 
 	/*
@@ -263,6 +284,8 @@ struct ib_device *ib_alloc_device(size_t size)
 	if (!device)
 		return NULL;
 
+	rdma_restrack_init(&device->res);
+
 	device->dev.class = &ib_class;
 	device_initialize(&device->dev);
 
@@ -270,9 +293,12 @@ struct ib_device *ib_alloc_device(size_t size)
 
 	INIT_LIST_HEAD(&device->event_handler_list);
 	spin_lock_init(&device->event_handler_lock);
-	spin_lock_init(&device->client_data_lock);
+	init_rwsem(&device->event_handler_rwsem);
+	rwlock_init(&device->client_data_lock);
 	INIT_LIST_HEAD(&device->client_data_list);
 	INIT_LIST_HEAD(&device->port_list);
+	refcount_set(&device->refcount, 1);
+	init_completion(&device->unreg_completion);
 
 	return device;
 }
@@ -286,18 +312,19 @@ EXPORT_SYMBOL(ib_alloc_device);
  */
 void ib_dealloc_device(struct ib_device *device)
 {
+	WARN_ON(!list_empty(&device->client_data_list));
 	WARN_ON(device->reg_state != IB_DEV_UNREGISTERED &&
 		device->reg_state != IB_DEV_UNINITIALIZED);
-	kobject_put(&device->dev.kobj);
+	rdma_restrack_clean(&device->res);
+	put_device(&device->dev);
 }
 EXPORT_SYMBOL(ib_dealloc_device);
 
 static int add_client_context(struct ib_device *device, struct ib_client *client)
 {
 	struct ib_client_data *context;
-	unsigned long flags;
 
-	context = kmalloc(sizeof *context, GFP_KERNEL);
+	context = kmalloc(sizeof(*context), GFP_KERNEL);
 	if (!context)
 		return -ENOMEM;
 
@@ -306,9 +333,9 @@ static int add_client_context(struct ib_device *device, struct ib_client *client
 	context->going_down = false;
 
 	down_write(&lists_rwsem);
-	spin_lock_irqsave(&device->client_data_lock, flags);
+	write_lock_irq(&device->client_data_lock);
 	list_add(&context->list, &device->client_data_list);
-	spin_unlock_irqrestore(&device->client_data_lock, flags);
+	write_unlock_irq(&device->client_data_lock);
 	up_write(&lists_rwsem);
 
 	return 0;
@@ -334,8 +361,8 @@ static int read_port_immutable(struct ib_device *device)
 	 * Therefore port_immutable is declared as a 1 based array with
 	 * potential empty slots at the beginning.
 	 */
-	device->port_immutable = kzalloc(sizeof(*device->port_immutable)
-					 * (end_port + 1),
+	device->port_immutable = kcalloc(end_port + 1,
+					 sizeof(*device->port_immutable),
 					 GFP_KERNEL);
 	if (!device->port_immutable)
 		return -ENOMEM;
@@ -416,6 +443,7 @@ static int ib_security_change(struct notifier_block *nb, unsigned long event,
 		return NOTIFY_DONE;
 
 	schedule_work(&ib_policy_change_work);
+	ib_mad_agent_security_change();
 
 	return NOTIFY_OK;
 }
@@ -444,6 +472,74 @@ static u32 __dev_new_index(void)
 	}
 }
 
+static void setup_dma_device(struct ib_device *device)
+{
+	struct device *parent = device->dev.parent;
+
+	WARN_ON_ONCE(device->dma_device);
+	if (device->dev.device_rh->dma_ops) {
+		/*
+		 * The caller provided custom DMA operations. Copy the
+		 * DMA-related fields that are used by e.g. dma_alloc_coherent()
+		 * into device->dev.
+		 */
+		device->dma_device = &device->dev;
+		if (!device->dev.dma_mask) {
+			if (parent)
+				device->dev.dma_mask = parent->dma_mask;
+			else
+				WARN_ON_ONCE(true);
+		}
+		if (!device->dev.coherent_dma_mask) {
+			if (parent)
+				device->dev.coherent_dma_mask =
+					parent->coherent_dma_mask;
+			else
+				WARN_ON_ONCE(true);
+		}
+	} else {
+		/*
+		 * The caller did not provide custom DMA operations. Use the
+		 * DMA mapping operations of the parent device.
+		 */
+		WARN_ON_ONCE(!parent);
+		device->dma_device = parent;
+	}
+}
+
+static int setup_device(struct ib_device *device)
+{
+	struct ib_udata uhw = {.outlen = 0, .inlen = 0};
+	int ret;
+
+	ret = ib_device_check_mandatory(device);
+	if (ret)
+		return ret;
+
+	ret = read_port_immutable(device);
+	if (ret) {
+		dev_warn(&device->dev,
+			 "Couldn't create per port immutable data\n");
+		return ret;
+	}
+
+	memset(&device->attrs, 0, sizeof(device->attrs));
+	ret = device->query_device(device, &device->attrs, &uhw);
+	if (ret) {
+		dev_warn(&device->dev,
+			 "Couldn't query the device attributes\n");
+		return ret;
+	}
+
+	ret = setup_port_pkey_list(device);
+	if (ret) {
+		dev_warn(&device->dev, "Couldn't create per port_pkey_list\n");
+		return ret;
+	}
+
+	return 0;
+}
+
 /**
  * ib_register_device - Register an IB device with IB core
  * @device:Device to register
@@ -453,87 +549,50 @@ static u32 __dev_new_index(void)
  * callback for each device that is added. @device must be allocated
  * with ib_alloc_device().
  */
-int ib_register_device(struct ib_device *device,
-		       int (*port_callback)(struct ib_device *,
-					    u8, struct kobject *))
+int ib_register_device(struct ib_device *device, const char *name,
+		       int (*port_callback)(struct ib_device *, u8,
+					    struct kobject *))
 {
 	int ret;
 	struct ib_client *client;
-	struct ib_udata uhw = {.outlen = 0, .inlen = 0};
-	struct device *parent = device->dev.parent;
 
-	WARN_ON_ONCE(!parent);
-	WARN_ON_ONCE(device->dma_device);
-	if (device->dev.dma_ops) {
-		/*
-		 * The caller provided custom DMA operations. Copy the
-		 * DMA-related fields that are used by e.g. dma_alloc_coherent()
-		 * into device->dev.
-		 */
-		device->dma_device = &device->dev;
-		if (!device->dev.dma_mask)
-			device->dev.dma_mask = parent->dma_mask;
-		if (!device->dev.coherent_dma_mask)
-			device->dev.coherent_dma_mask =
-				parent->coherent_dma_mask;
-	} else {
-		/*
-		 * The caller did not provide custom DMA operations. Use the
-		 * DMA mapping operations of the parent device.
-		 */
-		device->dma_device = parent;
-	}
+	setup_dma_device(device);
 
 	mutex_lock(&device_mutex);
 
-	if (strchr(device->name, '%')) {
-		ret = alloc_name(device->name);
+	if (strchr(name, '%')) {
+		ret = alloc_name(device, name);
+		if (ret)
+			goto out;
+	} else {
+		ret = dev_set_name(&device->dev, name);
 		if (ret)
 			goto out;
 	}
-
-	if (ib_device_check_mandatory(device)) {
-		ret = -EINVAL;
+	if (__ib_device_get_by_name(dev_name(&device->dev))) {
+		ret = -ENFILE;
 		goto out;
 	}
+	strlcpy(device->name, dev_name(&device->dev), IB_DEVICE_NAME_MAX);
 
-	ret = read_port_immutable(device);
-	if (ret) {
-		pr_warn("Couldn't create per port immutable data %s\n",
-			device->name);
+	ret = setup_device(device);
+	if (ret)
 		goto out;
-	}
-
-	ret = setup_port_pkey_list(device);
-	if (ret) {
-		pr_warn("Couldn't create per port_pkey_list\n");
-		goto out;
-	}
 
 	ret = ib_cache_setup_one(device);
 	if (ret) {
-		pr_warn("Couldn't set up InfiniBand P_Key/GID cache\n");
-		goto port_cleanup;
+		dev_warn(&device->dev,
+			 "Couldn't set up InfiniBand P_Key/GID cache\n");
+		goto out;
 	}
 
-	ret = ib_device_register_rdmacg(device);
-	if (ret) {
-		pr_warn("Couldn't register device with rdma cgroup\n");
-		goto cache_cleanup;
-	}
-
-	memset(&device->attrs, 0, sizeof(device->attrs));
-	ret = device->query_device(device, &device->attrs, &uhw);
-	if (ret) {
-		pr_warn("Couldn't query the device attributes\n");
-		goto cache_cleanup;
-	}
+	device->index = __dev_new_index();
 
 	ret = ib_device_register_sysfs(device, port_callback);
 	if (ret) {
-		pr_warn("Couldn't register device %s with driver model\n",
-			device->name);
-		goto cache_cleanup;
+		dev_warn(&device->dev,
+			 "Couldn't register device with driver model\n");
+		goto dev_cleanup;
 	}
 
 	device->reg_state = IB_DEV_REGISTERED;
@@ -542,18 +601,14 @@ int ib_register_device(struct ib_device *device,
 		if (!add_client_context(device, client) && client->add)
 			client->add(device);
 
-	device->index = __dev_new_index();
 	down_write(&lists_rwsem);
 	list_add_tail(&device->core_list, &device_list);
 	up_write(&lists_rwsem);
 	mutex_unlock(&device_mutex);
 	return 0;
 
-cache_cleanup:
+dev_cleanup:
 	ib_cache_cleanup_one(device);
-	ib_cache_release_one(device);
-port_cleanup:
-	kfree(device->port_immutable);
 out:
 	mutex_unlock(&device_mutex);
 	return ret;
@@ -571,38 +626,43 @@ void ib_unregister_device(struct ib_device *device)
 	struct ib_client_data *context, *tmp;
 	unsigned long flags;
 
+	/*
+	 * Wait for all netlink command callers to finish working on the
+	 * device.
+	 */
+	ib_device_put(device);
+	wait_for_completion(&device->unreg_completion);
+
 	mutex_lock(&device_mutex);
 
 	down_write(&lists_rwsem);
 	list_del(&device->core_list);
-	spin_lock_irqsave(&device->client_data_lock, flags);
-	list_for_each_entry_safe(context, tmp, &device->client_data_list, list)
+	write_lock_irq(&device->client_data_lock);
+	list_for_each_entry(context, &device->client_data_list, list)
 		context->going_down = true;
-	spin_unlock_irqrestore(&device->client_data_lock, flags);
+	write_unlock_irq(&device->client_data_lock);
 	downgrade_write(&lists_rwsem);
 
-	list_for_each_entry_safe(context, tmp, &device->client_data_list,
-				 list) {
+	list_for_each_entry(context, &device->client_data_list, list) {
 		if (context->client->remove)
 			context->client->remove(device, context->data);
 	}
 	up_read(&lists_rwsem);
 
-	ib_device_unregister_rdmacg(device);
 	ib_device_unregister_sysfs(device);
 
 	mutex_unlock(&device_mutex);
 
 	ib_cache_cleanup_one(device);
 
-	ib_security_destroy_port_pkey_list(device);
-	kfree(device->port_pkey_list);
-
 	down_write(&lists_rwsem);
-	spin_lock_irqsave(&device->client_data_lock, flags);
-	list_for_each_entry_safe(context, tmp, &device->client_data_list, list)
+	write_lock_irqsave(&device->client_data_lock, flags);
+	list_for_each_entry_safe(context, tmp, &device->client_data_list,
+				 list) {
+		list_del(&context->list);
 		kfree(context);
-	spin_unlock_irqrestore(&device->client_data_lock, flags);
+	}
+	write_unlock_irqrestore(&device->client_data_lock, flags);
 	up_write(&lists_rwsem);
 
 	device->reg_state = IB_DEV_UNREGISTERED;
@@ -652,9 +712,8 @@ EXPORT_SYMBOL(ib_register_client);
  */
 void ib_unregister_client(struct ib_client *client)
 {
-	struct ib_client_data *context, *tmp;
+	struct ib_client_data *context;
 	struct ib_device *device;
-	unsigned long flags;
 
 	mutex_lock(&device_mutex);
 
@@ -666,14 +725,14 @@ void ib_unregister_client(struct ib_client *client)
 		struct ib_client_data *found_context = NULL;
 
 		down_write(&lists_rwsem);
-		spin_lock_irqsave(&device->client_data_lock, flags);
-		list_for_each_entry_safe(context, tmp, &device->client_data_list, list)
+		write_lock_irq(&device->client_data_lock);
+		list_for_each_entry(context, &device->client_data_list, list)
 			if (context->client == client) {
 				context->going_down = true;
 				found_context = context;
 				break;
 			}
-		spin_unlock_irqrestore(&device->client_data_lock, flags);
+		write_unlock_irq(&device->client_data_lock);
 		up_write(&lists_rwsem);
 
 		if (client->remove)
@@ -681,17 +740,18 @@ void ib_unregister_client(struct ib_client *client)
 					       found_context->data : NULL);
 
 		if (!found_context) {
-			pr_warn("No client context found for %s/%s\n",
-				device->name, client->name);
+			dev_warn(&device->dev,
+				 "No client context found for %s\n",
+				 client->name);
 			continue;
 		}
 
 		down_write(&lists_rwsem);
-		spin_lock_irqsave(&device->client_data_lock, flags);
+		write_lock_irq(&device->client_data_lock);
 		list_del(&found_context->list);
-		kfree(found_context);
-		spin_unlock_irqrestore(&device->client_data_lock, flags);
+		write_unlock_irq(&device->client_data_lock);
 		up_write(&lists_rwsem);
+		kfree(found_context);
 	}
 
 	mutex_unlock(&device_mutex);
@@ -712,13 +772,13 @@ void *ib_get_client_data(struct ib_device *device, struct ib_client *client)
 	void *ret = NULL;
 	unsigned long flags;
 
-	spin_lock_irqsave(&device->client_data_lock, flags);
+	read_lock_irqsave(&device->client_data_lock, flags);
 	list_for_each_entry(context, &device->client_data_list, list)
 		if (context->client == client) {
 			ret = context->data;
 			break;
 		}
-	spin_unlock_irqrestore(&device->client_data_lock, flags);
+	read_unlock_irqrestore(&device->client_data_lock, flags);
 
 	return ret;
 }
@@ -739,18 +799,18 @@ void ib_set_client_data(struct ib_device *device, struct ib_client *client,
 	struct ib_client_data *context;
 	unsigned long flags;
 
-	spin_lock_irqsave(&device->client_data_lock, flags);
+	write_lock_irqsave(&device->client_data_lock, flags);
 	list_for_each_entry(context, &device->client_data_list, list)
 		if (context->client == client) {
 			context->data = data;
 			goto out;
 		}
 
-	pr_warn("No client context found for %s/%s\n",
-		device->name, client->name);
+	dev_warn(&device->dev, "No client context found for %s\n",
+		 client->name);
 
 out:
-	spin_unlock_irqrestore(&device->client_data_lock, flags);
+	write_unlock_irqrestore(&device->client_data_lock, flags);
 }
 EXPORT_SYMBOL(ib_set_client_data);
 
@@ -760,17 +820,15 @@ EXPORT_SYMBOL(ib_set_client_data);
  *
  * ib_register_event_handler() registers an event handler that will be
  * called back when asynchronous IB events occur (as defined in
- * chapter 11 of the InfiniBand Architecture Specification).  This
- * callback may occur in interrupt context.
+ * chapter 11 of the InfiniBand Architecture Specification). This
+ * callback occurs in workqueue context.
  */
 void ib_register_event_handler(struct ib_event_handler *event_handler)
 {
-	unsigned long flags;
-
-	spin_lock_irqsave(&event_handler->device->event_handler_lock, flags);
+	down_write(&event_handler->device->event_handler_rwsem);
 	list_add_tail(&event_handler->list,
 		      &event_handler->device->event_handler_list);
-	spin_unlock_irqrestore(&event_handler->device->event_handler_lock, flags);
+	up_write(&event_handler->device->event_handler_rwsem);
 }
 EXPORT_SYMBOL(ib_register_event_handler);
 
@@ -783,35 +841,23 @@ EXPORT_SYMBOL(ib_register_event_handler);
  */
 void ib_unregister_event_handler(struct ib_event_handler *event_handler)
 {
-	unsigned long flags;
-
-	spin_lock_irqsave(&event_handler->device->event_handler_lock, flags);
+	down_write(&event_handler->device->event_handler_rwsem);
 	list_del(&event_handler->list);
-	spin_unlock_irqrestore(&event_handler->device->event_handler_lock, flags);
+	up_write(&event_handler->device->event_handler_rwsem);
 }
 EXPORT_SYMBOL(ib_unregister_event_handler);
 
-/**
- * ib_dispatch_event - Dispatch an asynchronous event
- * @event:Event to dispatch
- *
- * Low-level drivers must call ib_dispatch_event() to dispatch the
- * event to all registered event handlers when an asynchronous event
- * occurs.
- */
-void ib_dispatch_event(struct ib_event *event)
+void ib_dispatch_event_clients(struct ib_event *event)
 {
-	unsigned long flags;
 	struct ib_event_handler *handler;
 
-	spin_lock_irqsave(&event->device->event_handler_lock, flags);
+	down_read(&event->device->event_handler_rwsem);
 
 	list_for_each_entry(handler, &event->device->event_handler_list, list)
 		handler->handler(handler, event);
 
-	spin_unlock_irqrestore(&event->device->event_handler_lock, flags);
+	up_read(&event->device->event_handler_rwsem);
 }
-EXPORT_SYMBOL(ib_dispatch_event);
 
 /**
  * ib_query_port - Query IB port attributes
@@ -840,7 +886,7 @@ int ib_query_port(struct ib_device *device,
 	if (rdma_port_get_link_layer(device, port_num) != IB_LINK_LAYER_INFINIBAND)
 		return 0;
 
-	err = ib_query_gid(device, port_num, 0, &gid, NULL);
+	err = device->query_gid(device, port_num, 0, &gid);
 	if (err)
 		return err;
 
@@ -848,31 +894,6 @@ int ib_query_port(struct ib_device *device,
 	return 0;
 }
 EXPORT_SYMBOL(ib_query_port);
-
-/**
- * ib_query_gid - Get GID table entry
- * @device:Device to query
- * @port_num:Port number to query
- * @index:GID table index to query
- * @gid:Returned GID
- * @attr: Returned GID attributes related to this GID index (only in RoCE).
- *   NULL means ignore.
- *
- * ib_query_gid() fetches the specified GID table entry.
- */
-int ib_query_gid(struct ib_device *device,
-		 u8 port_num, int index, union ib_gid *gid,
-		 struct ib_gid_attr *attr)
-{
-	if (rdma_cap_roce_gid_table(device, port_num))
-		return ib_get_cached_gid(device, port_num, index, gid, attr);
-
-	if (attr)
-		return -EINVAL;
-
-	return device->query_gid(device, port_num, index, gid);
-}
-EXPORT_SYMBOL(ib_query_gid);
 
 /**
  * ib_enum_roce_netdev - enumerate all RoCE ports
@@ -977,6 +998,9 @@ int ib_enum_all_devs(nldev_callback nldev_cb, struct sk_buff *skb,
 int ib_query_pkey(struct ib_device *device,
 		  u8 port_num, u16 index, u16 *pkey)
 {
+	if (!rdma_is_port_valid(device, port_num))
+		return -EINVAL;
+
 	return device->query_pkey(device, port_num, index, pkey);
 }
 EXPORT_SYMBOL(ib_query_pkey);
@@ -1033,36 +1057,25 @@ EXPORT_SYMBOL(ib_modify_port);
 
 /**
  * ib_find_gid - Returns the port number and GID table index where
- *   a specified GID value occurs.
+ *   a specified GID value occurs. Its searches only for IB link layer.
  * @device: The device to query.
  * @gid: The GID value to search for.
- * @gid_type: Type of GID.
- * @ndev: The ndev related to the GID to search for.
  * @port_num: The port number of the device where the GID value was found.
  * @index: The index into the GID table where the GID was found.  This
  *   parameter may be NULL.
  */
 int ib_find_gid(struct ib_device *device, union ib_gid *gid,
-		enum ib_gid_type gid_type, struct net_device *ndev,
 		u8 *port_num, u16 *index)
 {
 	union ib_gid tmp_gid;
 	int ret, port, i;
 
 	for (port = rdma_start_port(device); port <= rdma_end_port(device); ++port) {
-		if (rdma_cap_roce_gid_table(device, port)) {
-			if (!ib_find_cached_gid_by_port(device, gid, gid_type, port,
-							ndev, index)) {
-				*port_num = port;
-				return 0;
-			}
-		}
-
-		if (gid_type != IB_GID_TYPE_IB)
+		if (!rdma_protocol_ib(device, port))
 			continue;
 
 		for (i = 0; i < device->port_immutable[port].gid_tbl_len; ++i) {
-			ret = ib_query_gid(device, port, i, &tmp_gid, NULL);
+			ret = rdma_query_gid(device, port, i, &tmp_gid);
 			if (ret)
 				return ret;
 			if (!memcmp(&tmp_gid, gid, sizeof *gid)) {
@@ -1192,10 +1205,19 @@ static int __init ib_core_init(void)
 		goto err;
 	}
 
+	ib_comp_unbound_wq =
+		alloc_workqueue("ib-comp-unb-wq",
+				WQ_UNBOUND | WQ_HIGHPRI | WQ_MEM_RECLAIM |
+				WQ_SYSFS, WQ_UNBOUND_MAX_ACTIVE);
+	if (!ib_comp_unbound_wq) {
+		ret = -ENOMEM;
+		goto err_comp;
+	}
+
 	ret = class_register(&ib_class);
 	if (ret) {
 		pr_warn("Couldn't create InfiniBand device class\n");
-		goto err_comp;
+		goto err_comp_unbound;
 	}
 
 	ret = rdma_nl_init();
@@ -1230,7 +1252,7 @@ static int __init ib_core_init(void)
 
 	nldev_init();
 	rdma_nl_register(RDMA_NL_LS, ibnl_ls_cb_table);
-	ib_cache_setup();
+	roce_gid_mgmt_init();
 
 	return 0;
 
@@ -1244,6 +1266,8 @@ err_ibnl:
 	rdma_nl_exit();
 err_sysfs:
 	class_unregister(&ib_class);
+err_comp_unbound:
+	destroy_workqueue(ib_comp_unbound_wq);
 err_comp:
 	destroy_workqueue(ib_comp_wq);
 err:
@@ -1253,7 +1277,7 @@ err:
 
 static void __exit ib_core_cleanup(void)
 {
-	ib_cache_cleanup();
+	roce_gid_mgmt_cleanup();
 	nldev_exit();
 	rdma_nl_unregister(RDMA_NL_LS);
 	unregister_lsm_notifier(&ibdev_lsm_nb);
@@ -1262,6 +1286,7 @@ static void __exit ib_core_cleanup(void)
 	addr_cleanup();
 	rdma_nl_exit();
 	class_unregister(&ib_class);
+	destroy_workqueue(ib_comp_unbound_wq);
 	destroy_workqueue(ib_comp_wq);
 	/* Make sure that any pending umem accounting work is done. */
 	destroy_workqueue(ib_wq);

@@ -10,7 +10,7 @@
  *
  */
 
-#include <linux/sched/signal.h>
+#include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/rculist.h>
 #include <linux/vmalloc.h>
@@ -68,7 +68,7 @@ static long mm_iommu_adjust_locked_vm(struct mm_struct *mm,
 
 bool mm_iommu_preregistered(struct mm_struct *mm)
 {
-	return !list_empty(&mm->context.iommu_group_mem_list);
+	return !list_empty(&mm->iommu_group_mem_list);
 }
 EXPORT_SYMBOL_GPL(mm_iommu_preregistered);
 
@@ -112,7 +112,7 @@ static int mm_iommu_move_page_from_cma(struct page *page)
 	put_page(page); /* Drop the gup reference */
 
 	ret = migrate_pages(&cma_migrate_pages, new_iommu_non_cma_page,
-				NULL, 0, MIGRATE_SYNC, MR_CMA);
+			    0, MIGRATE_SYNC, MR_CMA);
 	if (ret) {
 		if (!list_empty(&cma_migrate_pages))
 			putback_movable_pages(&cma_migrate_pages);
@@ -130,7 +130,7 @@ long mm_iommu_get(struct mm_struct *mm, unsigned long ua, unsigned long entries,
 
 	mutex_lock(&mem_list_mutex);
 
-	list_for_each_entry_rcu(mem, &mm->context.iommu_group_mem_list,
+	list_for_each_entry_rcu(mem, &mm->iommu_group_mem_list,
 			next) {
 		if ((mem->ua == ua) && (mem->entries == entries)) {
 			++mem->used;
@@ -184,7 +184,7 @@ long mm_iommu_get(struct mm_struct *mm, unsigned long ua, unsigned long entries,
 		 * of the CMA zone if possible. NOTE: faulting in + migration
 		 * can be expensive. Batching can be considered later
 		 */
-		if (is_migrate_cma_page(page)) {
+		if (get_pageblock_migratetype(page) == MIGRATE_CMA) {
 			if (mm_iommu_move_page_from_cma(page))
 				goto populate;
 			if (1 != get_user_pages_fast(ua + (i << PAGE_SHIFT),
@@ -209,7 +209,7 @@ populate:
 	mem->entries = entries;
 	*pmem = mem;
 
-	list_add_rcu(&mem->next, &mm->context.iommu_group_mem_list);
+	list_add_rcu(&mem->next, &mm->iommu_group_mem_list);
 
 unlock_exit:
 	if (locked_entries && ret)
@@ -301,7 +301,7 @@ struct mm_iommu_table_group_mem_t *mm_iommu_lookup(struct mm_struct *mm,
 {
 	struct mm_iommu_table_group_mem_t *mem, *ret = NULL;
 
-	list_for_each_entry_rcu(mem, &mm->context.iommu_group_mem_list, next) {
+	list_for_each_entry_rcu(mem, &mm->iommu_group_mem_list, next) {
 		if ((mem->ua <= ua) &&
 				(ua + size <= mem->ua +
 				 (mem->entries << PAGE_SHIFT))) {
@@ -314,31 +314,12 @@ struct mm_iommu_table_group_mem_t *mm_iommu_lookup(struct mm_struct *mm,
 }
 EXPORT_SYMBOL_GPL(mm_iommu_lookup);
 
-struct mm_iommu_table_group_mem_t *mm_iommu_lookup_rm(struct mm_struct *mm,
-		unsigned long ua, unsigned long size)
-{
-	struct mm_iommu_table_group_mem_t *mem, *ret = NULL;
-
-	list_for_each_entry_lockless(mem, &mm->context.iommu_group_mem_list,
-			next) {
-		if ((mem->ua <= ua) &&
-				(ua + size <= mem->ua +
-				 (mem->entries << PAGE_SHIFT))) {
-			ret = mem;
-			break;
-		}
-	}
-
-	return ret;
-}
-EXPORT_SYMBOL_GPL(mm_iommu_lookup_rm);
-
 struct mm_iommu_table_group_mem_t *mm_iommu_find(struct mm_struct *mm,
 		unsigned long ua, unsigned long entries)
 {
 	struct mm_iommu_table_group_mem_t *mem, *ret = NULL;
 
-	list_for_each_entry_rcu(mem, &mm->context.iommu_group_mem_list, next) {
+	list_for_each_entry_rcu(mem, &mm->iommu_group_mem_list, next) {
 		if ((mem->ua == ua) && (mem->entries == entries)) {
 			ret = mem;
 			break;
@@ -364,26 +345,6 @@ long mm_iommu_ua_to_hpa(struct mm_iommu_table_group_mem_t *mem,
 }
 EXPORT_SYMBOL_GPL(mm_iommu_ua_to_hpa);
 
-long mm_iommu_ua_to_hpa_rm(struct mm_iommu_table_group_mem_t *mem,
-		unsigned long ua, unsigned long *hpa)
-{
-	const long entry = (ua - mem->ua) >> PAGE_SHIFT;
-	void *va = &mem->hpas[entry];
-	unsigned long *pa;
-
-	if (entry >= mem->entries)
-		return -EFAULT;
-
-	pa = (void *) vmalloc_to_phys(va);
-	if (!pa)
-		return -EFAULT;
-
-	*hpa = *pa | (ua & ~PAGE_MASK);
-
-	return 0;
-}
-EXPORT_SYMBOL_GPL(mm_iommu_ua_to_hpa_rm);
-
 long mm_iommu_mapped_inc(struct mm_iommu_table_group_mem_t *mem)
 {
 	if (atomic64_inc_not_zero(&mem->mapped))
@@ -402,5 +363,5 @@ EXPORT_SYMBOL_GPL(mm_iommu_mapped_dec);
 
 void mm_iommu_init(struct mm_struct *mm)
 {
-	INIT_LIST_HEAD_RCU(&mm->context.iommu_group_mem_list);
+	INIT_LIST_HEAD_RCU(&mm->iommu_group_mem_list);
 }

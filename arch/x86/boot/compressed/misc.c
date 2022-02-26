@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * misc.c
  *
@@ -72,14 +71,6 @@ static int lines, cols;
 #include "../../../../lib/decompress_unlzo.c"
 #endif
 
-#ifdef CONFIG_KERNEL_LZ4
-#include "../../../../lib/decompress_unlz4.c"
-#endif
-/*
- * NOTE: When adding a new decompressor, please update the analysis in
- * ../header.S.
- */
-
 static void scroll(void)
 {
 	int i;
@@ -117,7 +108,8 @@ void __putstr(const char *s)
 		}
 	}
 
-	if (lines == 0 || cols == 0)
+	if (boot_params->screen_info.orig_video_mode == 0 &&
+	    lines == 0 && cols == 0)
 		return;
 
 	x = boot_params->screen_info.orig_x;
@@ -167,16 +159,6 @@ void __puthex(unsigned long value)
 
 		__putstr(alpha);
 	}
-}
-
-static bool l5_supported(void)
-{
-	/* Check if leaf 7 is supported. */
-	if (native_cpuid_eax(0) < 7)
-		return 0;
-
-	/* Check if la57 is supported. */
-	return native_cpuid_ecx(7) & (1 << (X86_FEATURE_LA57 & 31));
 }
 
 #if CONFIG_X86_NEED_RELOCS
@@ -341,7 +323,7 @@ static void parse_elf(void *output)
  *             |-------uncompressed kernel image---------|
  *
  */
-asmlinkage __visible void *extract_kernel(void *rmode, memptr heap,
+asmlinkage void *extract_kernel(void *rmode, memptr heap,
 				  unsigned char *input_data,
 				  unsigned long input_len,
 				  unsigned char *output,
@@ -349,6 +331,7 @@ asmlinkage __visible void *extract_kernel(void *rmode, memptr heap,
 {
 	const unsigned long kernel_total_size = VO__end - VO__text;
 	unsigned long virt_addr = LOAD_PHYSICAL_ADDR;
+	unsigned long needed_size;
 
 	/* Retain x86 boot parameters pointer passed from startup_32/64. */
 	boot_params = rmode;
@@ -372,14 +355,24 @@ asmlinkage __visible void *extract_kernel(void *rmode, memptr heap,
 	console_init();
 	debug_putstr("early console in extract_kernel\n");
 
-	if (IS_ENABLED(CONFIG_X86_5LEVEL) && !l5_supported()) {
-		error("This linux kernel as configured requires 5-level paging\n"
-			"This CPU does not support the required 'cr4.la57' feature\n"
-			"Unable to boot - please use a kernel appropriate for your CPU\n");
-	}
-
 	free_mem_ptr     = heap;	/* Heap */
 	free_mem_end_ptr = heap + BOOT_HEAP_SIZE;
+
+	/*
+	 * The memory hole needed for the kernel is the larger of either
+	 * the entire decompressed kernel plus relocation table, or the
+	 * entire decompressed kernel plus .bss and .brk sections.
+	 *
+	 * On X86_64, the memory is mapped with PMD pages. Round the
+	 * size up so that the full extent of PMD pages mapped is
+	 * included in the check against the valid memory table
+	 * entries. This ensures the full mapped area is usable RAM
+	 * and doesn't include any reserved areas.
+	 */
+	needed_size = max(output_len, kernel_total_size);
+#ifdef CONFIG_X86_64
+	needed_size = ALIGN(needed_size, MIN_KERNEL_ALIGN);
+#endif
 
 	/* Report initial kernel position details. */
 	debug_putaddr(input_data);
@@ -387,15 +380,11 @@ asmlinkage __visible void *extract_kernel(void *rmode, memptr heap,
 	debug_putaddr(output);
 	debug_putaddr(output_len);
 	debug_putaddr(kernel_total_size);
+	debug_putaddr(needed_size);
 
-	/*
-	 * The memory hole needed for the kernel is the larger of either
-	 * the entire decompressed kernel plus relocation table, or the
-	 * entire decompressed kernel plus .bss and .brk sections.
-	 */
 	choose_random_location((unsigned long)input_data, input_len,
 				(unsigned long *)&output,
-				max(output_len, kernel_total_size),
+				needed_size,
 				&virt_addr);
 
 	/* Validate memory location choices. */
@@ -426,9 +415,4 @@ asmlinkage __visible void *extract_kernel(void *rmode, memptr heap,
 	handle_relocations(output, output_len, virt_addr);
 	debug_putstr("done.\nBooting the kernel.\n");
 	return output;
-}
-
-void fortify_panic(const char *name)
-{
-	error("detected buffer overflow");
 }

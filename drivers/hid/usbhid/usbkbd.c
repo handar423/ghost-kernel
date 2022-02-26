@@ -145,7 +145,7 @@ static void usb_kbd_irq(struct urb *urb)
 				input_report_key(kbd->dev, usb_kbd_keycode[kbd->new[i]], 1);
 			else
 				hid_info(urb->dev,
-					 "Unknown key (scancode %#x) pressed.\n",
+					 "Unknown key (scancode %#x) released.\n",
 					 kbd->new[i]);
 		}
 	}
@@ -392,7 +392,7 @@ static void usb_kbd_disconnect(struct usb_interface *intf)
 	}
 }
 
-static const struct usb_device_id usb_kbd_id_table[] = {
+static struct usb_device_id usb_kbd_id_table [] = {
 	{ USB_INTERFACE_INFO(USB_INTERFACE_CLASS_HID, USB_INTERFACE_SUBCLASS_BOOT,
 		USB_INTERFACE_PROTOCOL_KEYBOARD) },
 	{ }						/* Terminating entry */

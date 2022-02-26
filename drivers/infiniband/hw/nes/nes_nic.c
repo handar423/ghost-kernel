@@ -146,8 +146,6 @@ static int nes_netdev_open(struct net_device *netdev)
 	struct list_head *list_pos, *list_temp;
 	unsigned long flags;
 
-	assert(nesdev != NULL);
-
 	if (nesvnic->netdev_open == 1)
 		return 0;
 
@@ -461,7 +459,7 @@ static bool nes_nic_send(struct sk_buff *skb, struct net_device *netdev)
 /**
  * nes_netdev_start_xmit
  */
-static int nes_netdev_start_xmit(struct sk_buff *skb, struct net_device *netdev)
+static netdev_tx_t nes_netdev_start_xmit(struct sk_buff *skb, struct net_device *netdev)
 {
 	struct nes_vnic *nesvnic = netdev_priv(netdev);
 	struct nes_device *nesdev = nesvnic->nesdev;
@@ -573,8 +571,7 @@ tso_sq_no_longer_full:
 				/* setup the VLAN tag if present */
 				if (skb_vlan_tag_present(skb)) {
 					nes_debug(NES_DBG_NIC_TX, "%s: VLAN packet to send... VLAN = %08X\n",
-							netdev->name,
-						  skb_vlan_tag_get(skb));
+							netdev->name, skb_vlan_tag_get(skb) );
 					wqe_misc = NES_NIC_SQ_WQE_TAGVALUE_ENABLE;
 					wqe_fragment_length[0] = (__force __le16) skb_vlan_tag_get(skb);
 				} else
@@ -904,7 +901,7 @@ static void nes_netdev_set_multicast_list(struct net_device *netdev)
 		int i;
 		struct netdev_hw_addr *ha;
 
-		addrs = kmalloc(ETH_ALEN * mc_count, GFP_ATOMIC);
+		addrs = kmalloc_array(mc_count, ETH_ALEN, GFP_ATOMIC);
 		if (!addrs) {
 			set_allmulti(nesdev, nic_active_bit);
 			goto unlock;
@@ -1634,7 +1631,7 @@ static const struct net_device_ops nes_netdev_ops = {
 	.ndo_tx_timeout		= nes_netdev_tx_timeout,
 	.ndo_set_mac_address	= nes_netdev_set_mac_address,
 	.ndo_set_rx_mode	= nes_netdev_set_multicast_list,
-	.ndo_change_mtu		= nes_netdev_change_mtu,
+	.ndo_change_mtu_rh74	= nes_netdev_change_mtu,
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_fix_features	= nes_fix_features,
 	.ndo_set_features	= nes_set_features,
@@ -1665,7 +1662,7 @@ struct net_device *nes_netdev_init(struct nes_device *nesdev,
 
 	netdev->watchdog_timeo = NES_TX_TIMEOUT;
 	netdev->irq = nesdev->pcidev->irq;
-	netdev->max_mtu = NES_MAX_MTU;
+	netdev->extended->max_mtu = NES_MAX_MTU;
 	netdev->hard_header_len = ETH_HLEN;
 	netdev->addr_len = ETH_ALEN;
 	netdev->type = ARPHRD_ETHER;

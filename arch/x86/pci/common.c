@@ -24,6 +24,7 @@ unsigned int pci_probe = PCI_PROBE_BIOS | PCI_PROBE_CONF1 | PCI_PROBE_CONF2 |
 
 unsigned int pci_early_dump_regs;
 static int pci_bf_sort;
+static int smbios_type_b1_flag;
 int pci_routeirq;
 int noioapicquirk;
 #ifdef CONFIG_X86_REROUTE_FOR_BROKEN_BOOT_IRQS
@@ -74,8 +75,8 @@ struct pci_ops pci_root_ops = {
 };
 
 /*
- * This interrupt-safe spinlock protects all accesses to PCI configuration
- * space, except for the mmconfig (ECAM) based operations.
+ * This interrupt-safe spinlock protects all accesses to PCI
+ * configuration space.
  */
 DEFINE_RAW_SPINLOCK(pci_config_lock);
 
@@ -132,7 +133,7 @@ static void pcibios_fixup_device_resources(struct pci_dev *dev)
 	if (pci_probe & PCI_NOASSIGN_BARS) {
 		/*
 		* If the BIOS did not assign the BAR, zero out the
-		* resource so the kernel doesn't attempt to assign
+		* resource so the kernel doesn't attmept to assign
 		* it later on in pci_assign_unassigned_resources
 		*/
 		for (bar = 0; bar <= PCI_STD_RESOURCE_END; bar++) {
@@ -196,18 +197,34 @@ static int __init set_bf_sort(const struct dmi_system_id *d)
 static void __init read_dmi_type_b1(const struct dmi_header *dm,
 				    void *private_data)
 {
-	u8 *data = (u8 *)dm + 4;
+	u8 *d = (u8 *)dm + 4;
 
 	if (dm->type != 0xB1)
 		return;
-	if ((((*(u32 *)data) >> 9) & 0x03) == 0x01)
-		set_bf_sort((const struct dmi_system_id *)private_data);
+	switch (((*(u32 *)d) >> 9) & 0x03) {
+	case 0x00:
+		printk(KERN_INFO "dmi type 0xB1 record - unknown flag\n");
+		break;
+	case 0x01: /* set pci=bfsort */
+		smbios_type_b1_flag = 1;
+		break;
+	case 0x02: /* do not set pci=bfsort */
+		smbios_type_b1_flag = 2;
+		break;
+	default:
+		break;
+	}
 }
 
 static int __init find_sort_method(const struct dmi_system_id *d)
 {
-	dmi_walk(read_dmi_type_b1, (void *)d);
-	return 0;
+	dmi_walk(read_dmi_type_b1, NULL);
+
+	if (smbios_type_b1_flag == 1) {
+		set_bf_sort(d);
+		return 0;
+	}
+	return -1;
 }
 
 /*
@@ -567,6 +584,7 @@ char *__init pcibios_setup(char *str)
 		pci_probe |= PCI_PROBE_NOEARLY;
 		return NULL;
 	}
+#ifndef CONFIG_X86_VISWS
 	else if (!strcmp(str, "usepirqmask")) {
 		pci_probe |= PCI_USE_PIRQ_MASK;
 		return NULL;
@@ -576,7 +594,9 @@ char *__init pcibios_setup(char *str)
 	} else if (!strncmp(str, "lastbus=", 8)) {
 		pcibios_last_bus = simple_strtol(str+8, NULL, 0);
 		return NULL;
-	} else if (!strcmp(str, "rom")) {
+	}
+#endif
+	else if (!strcmp(str, "rom")) {
 		pci_probe |= PCI_ASSIGN_ROMS;
 		return NULL;
 	} else if (!strcmp(str, "norom")) {
@@ -594,11 +614,6 @@ char *__init pcibios_setup(char *str)
 	} else if (!strcmp(str, "nocrs")) {
 		pci_probe |= PCI_ROOT_NO_CRS;
 		return NULL;
-#ifdef CONFIG_PHYS_ADDR_T_64BIT
-	} else if (!strcmp(str, "big_root_window")) {
-		pci_probe |= PCI_BIG_ROOT_WINDOW;
-		return NULL;
-#endif
 	} else if (!strcmp(str, "earlydump")) {
 		pci_early_dump_regs = 1;
 		return NULL;
@@ -628,6 +643,12 @@ unsigned int pcibios_assign_all_busses(void)
 	return (pci_probe & PCI_ASSIGN_ALL_BUSSES) ? 1 : 0;
 }
 
+static void set_dev_domain_options(struct pci_dev *pdev)
+{
+	if (is_vmd(pdev->bus))
+		pdev->hotplug_user_indicators = 1;
+}
+
 #if defined(CONFIG_X86_DEV_DMA_OPS) && defined(CONFIG_PCI_DOMAINS)
 static LIST_HEAD(dma_domain_list);
 static DEFINE_SPINLOCK(dma_domain_list_lock);
@@ -655,7 +676,7 @@ static void set_dma_domain_ops(struct pci_dev *pdev)
 	spin_lock(&dma_domain_list_lock);
 	list_for_each_entry(domain, &dma_domain_list, node) {
 		if (pci_domain_nr(pdev->bus) == domain->domain_nr) {
-			pdev->dev.dma_ops = domain->dma_ops;
+			pdev->dev.device_rh->dma_ops = domain->dma_ops;
 			break;
 		}
 	}
@@ -664,12 +685,6 @@ static void set_dma_domain_ops(struct pci_dev *pdev)
 #else
 static void set_dma_domain_ops(struct pci_dev *pdev) {}
 #endif
-
-static void set_dev_domain_options(struct pci_dev *pdev)
-{
-	if (is_vmd(pdev->bus))
-		pdev->hotplug_user_indicators = 1;
-}
 
 int pcibios_add_device(struct pci_dev *dev)
 {
@@ -722,15 +737,6 @@ void pcibios_disable_device (struct pci_dev *dev)
 	if (!pci_dev_msi_enabled(dev) && pcibios_disable_irq)
 		pcibios_disable_irq(dev);
 }
-
-#ifdef CONFIG_ACPI_HOTPLUG_IOAPIC
-void pcibios_release_device(struct pci_dev *dev)
-{
-	if (atomic_dec_return(&dev->enable_cnt) >= 0)
-		pcibios_disable_device(dev);
-
-}
-#endif
 
 int pci_ext_cfg_avail(void)
 {

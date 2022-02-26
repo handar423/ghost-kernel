@@ -12,14 +12,13 @@
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/sched.h>
-#include <linux/sched/user.h>
 #include <linux/keyctl.h>
 #include <linux/fs.h>
 #include <linux/err.h>
 #include <linux/mutex.h>
 #include <linux/security.h>
 #include <linux/user_namespace.h>
-#include <linux/uaccess.h>
+#include <asm/uaccess.h>
 #include "internal.h"
 
 /* Session keyring create vs join semaphore */
@@ -30,7 +29,7 @@ static DEFINE_MUTEX(key_user_keyring_mutex);
 
 /* The root user's tracking struct */
 struct key_user root_key_user = {
-	.usage		= REFCOUNT_INIT(3),
+	.usage		= ATOMIC_INIT(3),
 	.cons_lock	= __MUTEX_INITIALIZER(root_key_user.cons_lock),
 	.lock		= __SPIN_LOCK_UNLOCKED(root_key_user.lock),
 	.nkeys		= ATOMIC_INIT(2),
@@ -79,7 +78,7 @@ int install_user_keyrings(void)
 						    cred, user_keyring_perm,
 						    KEY_ALLOC_UID_KEYRING |
 							KEY_ALLOC_IN_QUOTA,
-						    NULL, NULL);
+						    NULL);
 			if (IS_ERR(uid_keyring)) {
 				ret = PTR_ERR(uid_keyring);
 				goto error;
@@ -97,7 +96,7 @@ int install_user_keyrings(void)
 					      cred, user_keyring_perm,
 					      KEY_ALLOC_UID_KEYRING |
 						  KEY_ALLOC_IN_QUOTA,
-					      NULL, NULL);
+					      NULL);
 			if (IS_ERR(session_keyring)) {
 				ret = PTR_ERR(session_keyring);
 				goto error_release;
@@ -144,8 +143,7 @@ int install_thread_keyring_to_cred(struct cred *new)
 
 	keyring = keyring_alloc("_tid", new->uid, new->gid, new,
 				KEY_POS_ALL | KEY_USR_VIEW,
-				KEY_ALLOC_QUOTA_OVERRUN,
-				NULL, NULL);
+				KEY_ALLOC_QUOTA_OVERRUN, NULL);
 	if (IS_ERR(keyring))
 		return PTR_ERR(keyring);
 
@@ -191,8 +189,7 @@ int install_process_keyring_to_cred(struct cred *new)
 
 	keyring = keyring_alloc("_pid", new->uid, new->gid, new,
 				KEY_POS_ALL | KEY_USR_VIEW,
-				KEY_ALLOC_QUOTA_OVERRUN,
-				NULL, NULL);
+				KEY_ALLOC_QUOTA_OVERRUN, NULL);
 	if (IS_ERR(keyring))
 		return PTR_ERR(keyring);
 
@@ -245,7 +242,7 @@ int install_session_keyring_to_cred(struct cred *cred, struct key *keyring)
 
 		keyring = keyring_alloc("_ses", cred->uid, cred->gid, cred,
 					KEY_POS_ALL | KEY_USR_VIEW | KEY_USR_READ,
-					flags, NULL, NULL);
+					flags, NULL);
 		if (IS_ERR(keyring))
 			return PTR_ERR(keyring);
 	} else {
@@ -474,7 +471,7 @@ key_ref_t search_process_keyrings(struct keyring_search_context *ctx)
 		down_read(&cred->request_key_auth->sem);
 
 		if (key_validate(ctx->cred->request_key_auth) == 0) {
-			rka = ctx->cred->request_key_auth->payload.data[0];
+			rka = ctx->cred->request_key_auth->payload.data;
 
 			ctx->cred = rka->cred;
 			key_ref = search_process_keyrings(ctx);
@@ -506,10 +503,9 @@ found:
 /*
  * See if the key we're looking at is the target key.
  */
-bool lookup_user_key_possessed(const struct key *key,
-			       const struct key_match_data *match_data)
+int lookup_user_key_possessed(const struct key *key, const void *target)
 {
-	return key == match_data->raw_data;
+	return key == target;
 }
 
 /*
@@ -534,9 +530,9 @@ key_ref_t lookup_user_key(key_serial_t id, unsigned long lflags,
 			  key_perm_t perm)
 {
 	struct keyring_search_context ctx = {
-		.match_data.cmp		= lookup_user_key_possessed,
-		.match_data.lookup_type	= KEYRING_SEARCH_LOOKUP_DIRECT,
-		.flags			= KEYRING_SEARCH_NO_STATE_CHECK,
+		.match	= lookup_user_key_possessed,
+		.flags	= (KEYRING_SEARCH_NO_STATE_CHECK |
+			   KEYRING_SEARCH_LOOKUP_DIRECT),
 	};
 	struct request_key_auth *rka;
 	struct key *key;
@@ -664,7 +660,7 @@ try_again:
 			key_ref = ERR_PTR(-EKEYREVOKED);
 			key = NULL;
 		} else {
-			rka = ctx.cred->request_key_auth->payload.data[0];
+			rka = ctx.cred->request_key_auth->payload.data;
 			key = rka->dest_keyring;
 			__key_get(key);
 		}
@@ -691,7 +687,7 @@ try_again:
 		ctx.index_key.type		= key->type;
 		ctx.index_key.description	= key->description;
 		ctx.index_key.desc_len		= strlen(key->description);
-		ctx.match_data.raw_data		= key;
+		ctx.match_data			= key;
 		kdebug("check possessed");
 		skey_ref = search_process_keyrings(&ctx);
 		kdebug("possessed=%p", skey_ref);
@@ -738,7 +734,7 @@ try_again:
 	if (ret < 0)
 		goto invalid_key;
 
-	key->last_used_at = ktime_get_real_seconds();
+	key->last_used_at = current_kernel_time().tv_sec;
 
 error:
 	put_cred(ctx.cred);
@@ -755,6 +751,7 @@ reget_creds:
 	put_cred(ctx.cred);
 	goto try_again;
 }
+EXPORT_SYMBOL(lookup_user_key);
 
 /*
  * Join the named keyring as the session keyring if possible else attempt to
@@ -802,7 +799,7 @@ long join_session_keyring(const char *name)
 		keyring = keyring_alloc(
 			name, old->uid, old->gid, old,
 			KEY_POS_ALL | KEY_USR_VIEW | KEY_USR_READ | KEY_USR_LINK,
-			KEY_ALLOC_IN_QUOTA, NULL, NULL);
+			KEY_ALLOC_IN_QUOTA, NULL);
 		if (IS_ERR(keyring)) {
 			ret = PTR_ERR(keyring);
 			goto error2;

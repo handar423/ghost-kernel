@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * Implementation of s390 diagnose codes
  *
@@ -6,8 +5,7 @@
  * Author(s): Michael Holzheu <holzheu@de.ibm.com>
  */
 
-#include <linux/export.h>
-#include <linux/init.h>
+#include <linux/module.h>
 #include <linux/cpu.h>
 #include <linux/seq_file.h>
 #include <linux/debugfs.h>
@@ -39,7 +37,6 @@ static const struct diag_desc diag_map[NR_DIAG_STAT] = {
 	[DIAG_STAT_X224] = { .code = 0x224, .name = "EBCDIC-Name Table" },
 	[DIAG_STAT_X250] = { .code = 0x250, .name = "Block I/O" },
 	[DIAG_STAT_X258] = { .code = 0x258, .name = "Page-Reference Services" },
-	[DIAG_STAT_X26C] = { .code = 0x26c, .name = "Certain System Information" },
 	[DIAG_STAT_X288] = { .code = 0x288, .name = "Time Bomb" },
 	[DIAG_STAT_X2C4] = { .code = 0x2c4, .name = "FTP Services" },
 	[DIAG_STAT_X2FC] = { .code = 0x2fc, .name = "Guest Performance Data" },
@@ -121,17 +118,17 @@ static int __init show_diag_stat_init(void)
 
 device_initcall(show_diag_stat_init);
 
-void diag_stat_inc(enum diag_stat_enum nr)
+void notrace diag_stat_inc(enum diag_stat_enum nr)
 {
 	this_cpu_inc(diag_stat.counter[nr]);
-	trace_s390_diagnose(diag_map[nr].code);
+	trace_diagnose(diag_map[nr].code);
 }
 EXPORT_SYMBOL(diag_stat_inc);
 
 void diag_stat_inc_norecursion(enum diag_stat_enum nr)
 {
 	this_cpu_inc(diag_stat.counter[nr]);
-	trace_s390_diagnose_norecursion(diag_map[nr].code);
+	trace_diagnose_norecursion(diag_map[nr].code);
 }
 EXPORT_SYMBOL(diag_stat_inc_norecursion);
 
@@ -146,9 +143,13 @@ static inline int __diag14(unsigned long rx, unsigned long ry1,
 	int rc = 0;
 
 	asm volatile(
+#ifdef CONFIG_64BIT
 		"   sam31\n"
 		"   diag    %2,2,0x14\n"
 		"   sam64\n"
+#else
+		"   diag    %2,2,0x14\n"
+#endif
 		"   ipm     %0\n"
 		"   srl     %0,28\n"
 		: "=d" (rc), "+d" (_ry2)
@@ -165,27 +166,25 @@ int diag14(unsigned long rx, unsigned long ry1, unsigned long subcode)
 }
 EXPORT_SYMBOL(diag14);
 
-static inline int __diag204(unsigned long *subcode, unsigned long size, void *addr)
+static inline int __diag204(unsigned long subcode, unsigned long size, void *addr)
 {
-	register unsigned long _subcode asm("0") = *subcode;
+	register unsigned long _subcode asm("0") = subcode;
 	register unsigned long _size asm("1") = size;
 
 	asm volatile(
 		"	diag	%2,%0,0x204\n"
-		"0:	nopr	%%r7\n"
+		"0:\n"
 		EX_TABLE(0b,0b)
 		: "+d" (_subcode), "+d" (_size) : "d" (addr) : "memory");
-	*subcode = _subcode;
+	if (_subcode)
+		return -1;
 	return _size;
 }
 
 int diag204(unsigned long subcode, unsigned long size, void *addr)
 {
 	diag_stat_inc(DIAG_STAT_X204);
-	size = __diag204(&subcode, size, addr);
-	if (subcode)
-		return -1;
-	return size;
+	return __diag204(subcode, size, addr);
 }
 EXPORT_SYMBOL(diag204);
 
@@ -207,6 +206,7 @@ int diag210(struct diag210 *addr)
 	diag210_tmp = *addr;
 
 	diag_stat_inc(DIAG_STAT_X210);
+#ifdef CONFIG_64BIT
 	asm volatile(
 		"	lhi	%0,-1\n"
 		"	sam31\n"
@@ -216,6 +216,16 @@ int diag210(struct diag210 *addr)
 		"1:	sam64\n"
 		EX_TABLE(0b, 1b)
 		: "=&d" (ccode) : "a" (&diag210_tmp) : "cc", "memory");
+#else
+	asm volatile(
+		"	lhi	%0,-1\n"
+		"	diag	%1,0,0x210\n"
+		"0:	ipm	%0\n"
+		"	srl	%0,28\n"
+		"1:\n"
+		EX_TABLE(0b, 1b)
+		: "=&d" (ccode) : "a" (&diag210_tmp) : "cc", "memory");
+#endif
 
 	*addr = diag210_tmp;
 	spin_unlock_irqrestore(&diag210_lock, flags);
@@ -223,21 +233,6 @@ int diag210(struct diag210 *addr)
 	return ccode;
 }
 EXPORT_SYMBOL(diag210);
-
-int diag224(void *ptr)
-{
-	int rc = -EOPNOTSUPP;
-
-	diag_stat_inc(DIAG_STAT_X224);
-	asm volatile(
-		"	diag	%1,%2,0x224\n"
-		"0:	lhi	%0,0x0\n"
-		"1:\n"
-		EX_TABLE(0b,1b)
-		: "+d" (rc) :"d" (0), "d" (ptr) : "memory");
-	return rc;
-}
-EXPORT_SYMBOL(diag224);
 
 /*
  * Diagnose 26C: Access Certain System Information
@@ -262,7 +257,20 @@ static inline int __diag26c(void *req, void *resp, enum diag26c_sc subcode)
 
 int diag26c(void *req, void *resp, enum diag26c_sc subcode)
 {
-	diag_stat_inc(DIAG_STAT_X26C);
 	return __diag26c(req, resp, subcode);
 }
 EXPORT_SYMBOL(diag26c);
+int diag224(void *ptr)
+{
+	int rc = -EOPNOTSUPP;
+
+	diag_stat_inc(DIAG_STAT_X224);
+	asm volatile(
+		"	diag	%1,%2,0x224\n"
+		"0:	lhi	%0,0x0\n"
+		"1:\n"
+		EX_TABLE(0b,1b)
+		: "+d" (rc) :"d" (0), "d" (ptr) : "memory");
+	return rc;
+}
+EXPORT_SYMBOL(diag224);

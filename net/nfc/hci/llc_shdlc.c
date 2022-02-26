@@ -13,7 +13,9 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; if not, see <http://www.gnu.org/licenses/>.
+ * along with this program; if not, write to the
+ * Free Software Foundation, Inc.,
+ * 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  */
 
 #define pr_fmt(fmt) "shdlc: %s: " fmt, __func__
@@ -160,7 +162,7 @@ static int llc_shdlc_send_s_frame(struct llc_shdlc *shdlc,
 	if (skb == NULL)
 		return -ENOMEM;
 
-	*(u8 *)skb_push(skb, 1) = SHDLC_CONTROL_HEAD_S | (sframe_type << 3) | nr;
+	*skb_push(skb, 1) = SHDLC_CONTROL_HEAD_S | (sframe_type << 3) | nr;
 
 	r = shdlc->xmit_to_drv(shdlc->hdev, skb);
 
@@ -178,7 +180,7 @@ static int llc_shdlc_send_u_frame(struct llc_shdlc *shdlc,
 
 	pr_debug("uframe_modifier=%d\n", uframe_modifier);
 
-	*(u8 *)skb_push(skb, 1) = SHDLC_CONTROL_HEAD_U | uframe_modifier;
+	*skb_push(skb, 1) = SHDLC_CONTROL_HEAD_U | uframe_modifier;
 
 	r = shdlc->xmit_to_drv(shdlc->hdev, skb);
 
@@ -298,7 +300,7 @@ static void llc_shdlc_rcv_rej(struct llc_shdlc *shdlc, int y_nr)
 {
 	struct sk_buff *skb;
 
-	pr_debug("remote asks retransmission from frame %d\n", y_nr);
+	pr_debug("remote asks retransmition from frame %d\n", y_nr);
 
 	if (llc_shdlc_x_lteq_y_lt_z(shdlc->dnr, y_nr, shdlc->ns)) {
 		if (shdlc->t2_active) {
@@ -382,8 +384,8 @@ static int llc_shdlc_connect_initiate(struct llc_shdlc *shdlc)
 	if (skb == NULL)
 		return -ENOMEM;
 
-	skb_put_u8(skb, SHDLC_MAX_WINDOW);
-	skb_put_u8(skb, SHDLC_SREJ_SUPPORT ? 1 : 0);
+	*skb_put(skb, 1) = SHDLC_MAX_WINDOW;
+	*skb_put(skb, 1) = SHDLC_SREJ_SUPPORT ? 1 : 0;
 
 	return llc_shdlc_send_u_frame(shdlc, skb, U_FRAME_RSET);
 }
@@ -551,8 +553,8 @@ static void llc_shdlc_handle_send_queue(struct llc_shdlc *shdlc)
 
 		skb = skb_dequeue(&shdlc->send_q);
 
-		*(u8 *)skb_push(skb, 1) = SHDLC_CONTROL_HEAD_I | (shdlc->ns << 3) |
-					shdlc->nr;
+		*skb_push(skb, 1) = SHDLC_CONTROL_HEAD_I | (shdlc->ns << 3) |
+				    shdlc->nr;
 
 		pr_debug("Sending I-Frame %d, waiting to rcv %d\n", shdlc->ns,
 			 shdlc->nr);
@@ -580,27 +582,27 @@ static void llc_shdlc_handle_send_queue(struct llc_shdlc *shdlc)
 	}
 }
 
-static void llc_shdlc_connect_timeout(struct timer_list *t)
+static void llc_shdlc_connect_timeout(unsigned long data)
 {
-	struct llc_shdlc *shdlc = from_timer(shdlc, t, connect_timer);
+	struct llc_shdlc *shdlc = (struct llc_shdlc *)data;
 
 	pr_debug("\n");
 
 	schedule_work(&shdlc->sm_work);
 }
 
-static void llc_shdlc_t1_timeout(struct timer_list *t)
+static void llc_shdlc_t1_timeout(unsigned long data)
 {
-	struct llc_shdlc *shdlc = from_timer(shdlc, t, t1_timer);
+	struct llc_shdlc *shdlc = (struct llc_shdlc *)data;
 
 	pr_debug("SoftIRQ: need to send ack\n");
 
 	schedule_work(&shdlc->sm_work);
 }
 
-static void llc_shdlc_t2_timeout(struct timer_list *t)
+static void llc_shdlc_t2_timeout(unsigned long data)
 {
-	struct llc_shdlc *shdlc = from_timer(shdlc, t, t2_timer);
+	struct llc_shdlc *shdlc = (struct llc_shdlc *)data;
 
 	pr_debug("SoftIRQ: need to retransmit\n");
 
@@ -763,9 +765,17 @@ static void *llc_shdlc_init(struct nfc_hci_dev *hdev, xmit_to_drv_t xmit_to_drv,
 	mutex_init(&shdlc->state_mutex);
 	shdlc->state = SHDLC_DISCONNECTED;
 
-	timer_setup(&shdlc->connect_timer, llc_shdlc_connect_timeout, 0);
-	timer_setup(&shdlc->t1_timer, llc_shdlc_t1_timeout, 0);
-	timer_setup(&shdlc->t2_timer, llc_shdlc_t2_timeout, 0);
+	init_timer(&shdlc->connect_timer);
+	shdlc->connect_timer.data = (unsigned long)shdlc;
+	shdlc->connect_timer.function = llc_shdlc_connect_timeout;
+
+	init_timer(&shdlc->t1_timer);
+	shdlc->t1_timer.data = (unsigned long)shdlc;
+	shdlc->t1_timer.function = llc_shdlc_t1_timeout;
+
+	init_timer(&shdlc->t2_timer);
+	shdlc->t2_timer.data = (unsigned long)shdlc;
+	shdlc->t2_timer.function = llc_shdlc_t2_timeout;
 
 	shdlc->w = SHDLC_MAX_WINDOW;
 	shdlc->srej_support = SHDLC_SREJ_SUPPORT;

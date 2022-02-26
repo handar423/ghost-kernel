@@ -22,6 +22,7 @@
 
 #include <linux/kernel.h>
 #include <linux/slab.h>
+#include <linux/sched.h>
 
 /**
  * struct sbitmap_word - Word in a &struct sbitmap.
@@ -171,6 +172,8 @@ void sbitmap_resize(struct sbitmap *sb, unsigned int depth);
  *               starting from the last allocated bit. This is less efficient
  *               than the default behavior (false).
  *
+ * This operation provides acquire barrier semantics if it succeeds.
+ *
  * Return: Non-negative allocated bit number if successful, -1 otherwise.
  */
 int sbitmap_get(struct sbitmap *sb, unsigned int alloc_hint, bool round_robin);
@@ -298,6 +301,12 @@ static inline void sbitmap_set_bit(struct sbitmap *sb, unsigned int bitnr)
 static inline void sbitmap_clear_bit(struct sbitmap *sb, unsigned int bitnr)
 {
 	clear_bit(SB_NR_TO_BIT(sb, bitnr), __sbitmap_word(sb, bitnr));
+}
+
+static inline void sbitmap_clear_bit_unlock(struct sbitmap *sb,
+					    unsigned int bitnr)
+{
+	clear_bit_unlock(SB_NR_TO_BIT(sb, bitnr), __sbitmap_word(sb, bitnr));
 }
 
 static inline int sbitmap_test_bit(struct sbitmap *sb, unsigned int bitnr)
@@ -474,6 +483,13 @@ static inline struct sbq_wait_state *sbq_wait_ptr(struct sbitmap_queue *sbq,
  * @sbq: Bitmap queue to wake up.
  */
 void sbitmap_queue_wake_all(struct sbitmap_queue *sbq);
+
+/**
+ * sbitmap_queue_wake_up() - Wake up some of waiters in one waitqueue
+ * on a &struct sbitmap_queue.
+ * @sbq: Bitmap queue to wake up.
+ */
+void sbitmap_queue_wake_up(struct sbitmap_queue *sbq);
 
 /**
  * sbitmap_queue_show() - Dump &struct sbitmap_queue information to a &struct

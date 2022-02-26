@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 #include <linux/fs.h>
 #include <linux/init.h>
 #include <linux/proc_fs.h>
@@ -27,4 +26,4 @@ static int __init proc_cmdline_init(void)
 	proc_create("cmdline", 0, NULL, &cmdline_proc_fops);
 	return 0;
 }
-fs_initcall(proc_cmdline_init);
+module_init(proc_cmdline_init);

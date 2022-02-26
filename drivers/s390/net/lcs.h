@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 /*lcs.h*/
 
 #include <linux/interrupt.h>
@@ -17,9 +16,15 @@ do { \
 	debug_event(lcs_dbf_##name,level,(void*)(addr),len); \
 } while (0)
 
+/* Allow to sort out low debug levels early to avoid wasted sprints */
+static inline int lcs_dbf_passes(debug_info_t *dbf_grp, int level)
+{
+	return (level <= dbf_grp->level);
+}
+
 #define LCS_DBF_TEXT_(level,name,text...) \
 	do { \
-		if (debug_level_enabled(lcs_dbf_##name, level)) { \
+		if (lcs_dbf_passes(lcs_dbf_##name, level)) { \
 			sprintf(debug_buffer, text); \
 			debug_text_event(lcs_dbf_##name, level, debug_buffer); \
 		} \
@@ -276,7 +281,6 @@ struct lcs_reply {
 	void (*callback)(struct lcs_card *, struct lcs_cmd *);
 	wait_queue_head_t wait_q;
 	struct lcs_card *card;
-	struct timer_list timer;
 	int received;
 	int rc;
 };

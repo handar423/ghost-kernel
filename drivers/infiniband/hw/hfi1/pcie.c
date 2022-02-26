@@ -1,5 +1,5 @@
 /*
- * Copyright(c) 2015 - 2017 Intel Corporation.
+ * Copyright(c) 2015 - 2018 Intel Corporation.
  *
  * This file is provided under a dual BSD/GPLv2 license.  When using or
  * redistributing this file, you may do so under either license.
@@ -66,19 +66,12 @@
  */
 
 /*
- * Code to adjust PCIe capabilities.
- */
-static void tune_pcie_caps(struct hfi1_devdata *);
-
-/*
  * Do all the common PCIe setup and initialization.
- * devdata is not yet allocated, and is not allocated until after this
- * routine returns success.  Therefore dd_dev_err() can't be used for error
- * printing.
  */
-int hfi1_pcie_init(struct pci_dev *pdev, const struct pci_device_id *ent)
+int hfi1_pcie_init(struct hfi1_devdata *dd)
 {
 	int ret;
+	struct pci_dev *pdev = dd->pcidev;
 
 	ret = pci_enable_device(pdev);
 	if (ret) {
@@ -94,15 +87,13 @@ int hfi1_pcie_init(struct pci_dev *pdev, const struct pci_device_id *ent)
 		 * about that, it appears.  If the original BAR was retained
 		 * in the kernel data structures, this may be OK.
 		 */
-		hfi1_early_err(&pdev->dev, "pci enable failed: error %d\n",
-			       -ret);
-		goto done;
+		dd_dev_err(dd, "pci enable failed: error %d\n", -ret);
+		return ret;
 	}
 
 	ret = pci_request_regions(pdev, DRIVER_NAME);
 	if (ret) {
-		hfi1_early_err(&pdev->dev,
-			       "pci_request_regions fails: err %d\n", -ret);
+		dd_dev_err(dd, "pci_request_regions fails: err %d\n", -ret);
 		goto bail;
 	}
 
@@ -115,8 +106,7 @@ int hfi1_pcie_init(struct pci_dev *pdev, const struct pci_device_id *ent)
 		 */
 		ret = pci_set_dma_mask(pdev, DMA_BIT_MASK(32));
 		if (ret) {
-			hfi1_early_err(&pdev->dev,
-				       "Unable to set DMA mask: %d\n", ret);
+			dd_dev_err(dd, "Unable to set DMA mask: %d\n", ret);
 			goto bail;
 		}
 		ret = pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(32));
@@ -124,18 +114,16 @@ int hfi1_pcie_init(struct pci_dev *pdev, const struct pci_device_id *ent)
 		ret = pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(64));
 	}
 	if (ret) {
-		hfi1_early_err(&pdev->dev,
-			       "Unable to set DMA consistent mask: %d\n", ret);
+		dd_dev_err(dd, "Unable to set DMA consistent mask: %d\n", ret);
 		goto bail;
 	}
 
 	pci_set_master(pdev);
 	(void)pci_enable_pcie_error_reporting(pdev);
-	goto done;
+	return 0;
 
 bail:
 	hfi1_pcie_cleanup(pdev);
-done:
 	return ret;
 }
 
@@ -162,9 +150,7 @@ int hfi1_pcie_ddinit(struct hfi1_devdata *dd, struct pci_dev *pdev)
 	unsigned long len;
 	resource_size_t addr;
 	int ret = 0;
-
-	dd->pcidev = pdev;
-	pci_set_drvdata(pdev, dd);
+	u32 rcv_array_count;
 
 	addr = pci_resource_start(pdev, 0);
 	len = pci_resource_len(pdev, 0);
@@ -186,9 +172,17 @@ int hfi1_pcie_ddinit(struct hfi1_devdata *dd, struct pci_dev *pdev)
 		return -ENOMEM;
 	}
 	dd_dev_info(dd, "UC base1: %p for %x\n", dd->kregbase1, RCV_ARRAY);
-	dd->chip_rcv_array_count = readq(dd->kregbase1 + RCV_ARRAY_CNT);
-	dd_dev_info(dd, "RcvArray count: %u\n", dd->chip_rcv_array_count);
-	dd->base2_start  = RCV_ARRAY + dd->chip_rcv_array_count * 8;
+
+	/* verify that reads actually work, save revision for reset check */
+	dd->revision = readq(dd->kregbase1 + CCE_REVISION);
+	if (dd->revision == ~(u64)0) {
+		dd_dev_err(dd, "Cannot read chip CSRs\n");
+		goto nomem;
+	}
+
+	rcv_array_count = readq(dd->kregbase1 + RCV_ARRAY_CNT);
+	dd_dev_info(dd, "RcvArray count: %u\n", rcv_array_count);
+	dd->base2_start  = RCV_ARRAY + rcv_array_count * 8;
 
 	dd->kregbase2 = ioremap_nocache(
 		addr + dd->base2_start,
@@ -205,7 +199,7 @@ int hfi1_pcie_ddinit(struct hfi1_devdata *dd, struct pci_dev *pdev)
 		dd_dev_err(dd, "WC mapping of send buffers failed\n");
 		goto nomem;
 	}
-	dd_dev_info(dd, "WC piobase: %p\n for %x", dd->piobase, TXE_PIO_SIZE);
+	dd_dev_info(dd, "WC piobase: %p for %x\n", dd->piobase, TXE_PIO_SIZE);
 
 	dd->physaddr = addr;        /* used for io_remap, etc. */
 
@@ -214,13 +208,13 @@ int hfi1_pcie_ddinit(struct hfi1_devdata *dd, struct pci_dev *pdev)
 	 * to write an entire cacheline worth of entries in one shot.
 	 */
 	dd->rcvarray_wc = ioremap_wc(addr + RCV_ARRAY,
-				     dd->chip_rcv_array_count * 8);
+				     rcv_array_count * 8);
 	if (!dd->rcvarray_wc) {
 		dd_dev_err(dd, "WC mapping of receive array failed\n");
 		goto nomem;
 	}
 	dd_dev_info(dd, "WC RcvArray: %p for %x\n",
-		    dd->rcvarray_wc, dd->chip_rcv_array_count * 8);
+		    dd->rcvarray_wc, rcv_array_count * 8);
 
 	dd->flags |= HFI1_PRESENT;	/* chip.c CSR routines now work */
 	return 0;
@@ -343,32 +337,6 @@ int pcie_speeds(struct hfi1_devdata *dd)
 	return 0;
 }
 
-/*
- * Returns:
- *	- actual number of interrupts allocated or
- *	- 0 if fell back to INTx.
- *      - error
- */
-int request_msix(struct hfi1_devdata *dd, u32 msireq)
-{
-	int nvec;
-
-	nvec = pci_alloc_irq_vectors(dd->pcidev, 1, msireq,
-				     PCI_IRQ_MSIX | PCI_IRQ_LEGACY);
-	if (nvec < 0) {
-		dd_dev_err(dd, "pci_alloc_irq_vectors() failed: %d\n", nvec);
-		return nvec;
-	}
-
-	tune_pcie_caps(dd);
-
-	/* check for legacy IRQ */
-	if (nvec == 1 && !dd->pcidev->msix_enabled)
-		return 0;
-
-	return nvec;
-}
-
 /* restore command and BARs after a reset has wiped them out */
 int restore_pci_variables(struct hfi1_devdata *dd)
 {
@@ -484,14 +452,19 @@ error:
  * Check and optionally adjust them to maximize our throughput.
  */
 static int hfi1_pcie_caps;
-module_param_named(pcie_caps, hfi1_pcie_caps, int, S_IRUGO);
+module_param_named(pcie_caps, hfi1_pcie_caps, int, 0444);
 MODULE_PARM_DESC(pcie_caps, "Max PCIe tuning: Payload (0..3), ReadReq (4..7)");
 
 uint aspm_mode = ASPM_MODE_DISABLED;
-module_param_named(aspm, aspm_mode, uint, S_IRUGO);
+module_param_named(aspm, aspm_mode, uint, 0444);
 MODULE_PARM_DESC(aspm, "PCIe ASPM: 0: disable, 1: enable, 2: dynamic");
 
-static void tune_pcie_caps(struct hfi1_devdata *dd)
+/**
+ * tune_pcie_caps() - Code to adjust PCIe capabilities.
+ * @dd: Valid device data structure
+ *
+ */
+void tune_pcie_caps(struct hfi1_devdata *dd)
 {
 	struct pci_dev *parent;
 	u16 rc_mpss, rc_mps, ep_mpss, ep_mps;
@@ -1034,6 +1007,7 @@ int do_pcie_gen3_transition(struct hfi1_devdata *dd)
 	int do_retry, retry_count = 0;
 	int intnum = 0;
 	uint default_pset;
+	uint pset = pcie_pset;
 	u16 target_vector, target_speed;
 	u16 lnkctl2, vendor;
 	u8 div;
@@ -1041,6 +1015,7 @@ int do_pcie_gen3_transition(struct hfi1_devdata *dd)
 	const u8 (*ctle_tunings)[4];
 	uint static_ctle_mode;
 	int return_error = 0;
+	u32 target_width;
 
 	/* PCIe Gen3 is for the ASIC only */
 	if (dd->icode != ICODE_RTL_SILICON)
@@ -1079,6 +1054,9 @@ int do_pcie_gen3_transition(struct hfi1_devdata *dd)
 			    __func__);
 		return 0;
 	}
+
+	/* Previous Gen1/Gen2 bus width */
+	target_width = dd->lbus_width;
 
 	/*
 	 * Do the Gen3 transition.  Steps are those of the PCIe Gen3
@@ -1201,16 +1179,16 @@ retry:
 	 *
 	 * Set Gen3EqPsetReqVec, leave other fields 0.
 	 */
-	if (pcie_pset == UNSET_PSET)
-		pcie_pset = default_pset;
-	if (pcie_pset > 10) {	/* valid range is 0-10, inclusive */
+	if (pset == UNSET_PSET)
+		pset = default_pset;
+	if (pset > 10) {	/* valid range is 0-10, inclusive */
 		dd_dev_err(dd, "%s: Invalid Eq Pset %u, setting to %d\n",
-			   __func__, pcie_pset, default_pset);
-		pcie_pset = default_pset;
+			   __func__, pset, default_pset);
+		pset = default_pset;
 	}
-	dd_dev_info(dd, "%s: using EQ Pset %u\n", __func__, pcie_pset);
+	dd_dev_info(dd, "%s: using EQ Pset %u\n", __func__, pset);
 	pci_write_config_dword(dd->pcidev, PCIE_CFG_REG_PL106,
-			       ((1 << pcie_pset) <<
+			       ((1 << pset) <<
 			PCIE_CFG_REG_PL106_GEN3_EQ_PSET_REQ_VEC_SHIFT) |
 			PCIE_CFG_REG_PL106_GEN3_EQ_EVAL2MS_DISABLE_SMASK |
 			PCIE_CFG_REG_PL106_GEN3_EQ_PHASE23_EXIT_MODE_SMASK);
@@ -1240,10 +1218,10 @@ retry:
 		/* apply static CTLE tunings */
 		u8 pcie_dc, pcie_lf, pcie_hf, pcie_bw;
 
-		pcie_dc = ctle_tunings[pcie_pset][0];
-		pcie_lf = ctle_tunings[pcie_pset][1];
-		pcie_hf = ctle_tunings[pcie_pset][2];
-		pcie_bw = ctle_tunings[pcie_pset][3];
+		pcie_dc = ctle_tunings[pset][0];
+		pcie_lf = ctle_tunings[pset][1];
+		pcie_hf = ctle_tunings[pset][2];
+		pcie_bw = ctle_tunings[pset][3];
 		write_gasket_interrupt(dd, intnum++, 0x0026, 0x0200 | pcie_dc);
 		write_gasket_interrupt(dd, intnum++, 0x0026, 0x0100 | pcie_lf);
 		write_gasket_interrupt(dd, intnum++, 0x0026, 0x0000 | pcie_hf);
@@ -1448,11 +1426,12 @@ retry:
 	dd_dev_info(dd, "%s: new speed and width: %s\n", __func__,
 		    dd->lbus_info);
 
-	if (dd->lbus_speed != target_speed) { /* not target */
+	if (dd->lbus_speed != target_speed ||
+	    dd->lbus_width < target_width) { /* not target */
 		/* maybe retry */
 		do_retry = retry_count < pcie_retry;
-		dd_dev_err(dd, "PCIe link speed did not switch to Gen%d%s\n",
-			   pcie_target, do_retry ? ", retrying" : "");
+		dd_dev_err(dd, "PCIe link speed or width did not match target%s\n",
+			   do_retry ? ", retrying" : "");
 		retry_count++;
 		if (do_retry) {
 			msleep(100); /* allow time to settle */

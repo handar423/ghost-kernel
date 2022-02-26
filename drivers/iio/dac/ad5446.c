@@ -139,19 +139,14 @@ static const struct iio_chan_spec_ext_info ad5446_ext_info_powerdown[] = {
 	{ },
 };
 
-#define _AD5446_CHANNEL(bits, storage, _shift, ext) { \
+#define _AD5446_CHANNEL(bits, storage, shift, ext) { \
 	.type = IIO_VOLTAGE, \
 	.indexed = 1, \
 	.output = 1, \
 	.channel = 0, \
 	.info_mask_separate = BIT(IIO_CHAN_INFO_RAW), \
 	.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE), \
-	.scan_type = { \
-		.sign = 'u', \
-		.realbits = (bits), \
-		.storagebits = (storage), \
-		.shift = (_shift), \
-		}, \
+	.scan_type = IIO_ST('u', (bits), (storage), (shift)), \
 	.ext_info = (ext), \
 }
 
@@ -168,15 +163,18 @@ static int ad5446_read_raw(struct iio_dev *indio_dev,
 			   long m)
 {
 	struct ad5446_state *st = iio_priv(indio_dev);
+	unsigned long scale_uv;
 
 	switch (m) {
 	case IIO_CHAN_INFO_RAW:
 		*val = st->cached_val;
 		return IIO_VAL_INT;
 	case IIO_CHAN_INFO_SCALE:
-		*val = st->vref_mv;
-		*val2 = chan->scan_type.realbits;
-		return IIO_VAL_FRACTIONAL_LOG2;
+		scale_uv = (st->vref_mv * 1000) >> chan->scan_type.realbits;
+		*val =  scale_uv / 1000;
+		*val2 = (scale_uv % 1000) * 1000;
+		return IIO_VAL_INT_PLUS_MICRO;
+
 	}
 	return -EINVAL;
 }
@@ -212,6 +210,7 @@ static int ad5446_write_raw(struct iio_dev *indio_dev,
 static const struct iio_info ad5446_info = {
 	.read_raw = ad5446_read_raw,
 	.write_raw = ad5446_write_raw,
+	.driver_module = THIS_MODULE,
 };
 
 static int ad5446_probe(struct device *dev, const char *name,
@@ -222,11 +221,11 @@ static int ad5446_probe(struct device *dev, const char *name,
 	struct regulator *reg;
 	int ret, voltage_uv = 0;
 
-	reg = devm_regulator_get(dev, "vcc");
+	reg = regulator_get(dev, "vcc");
 	if (!IS_ERR(reg)) {
 		ret = regulator_enable(reg);
 		if (ret)
-			return ret;
+			goto error_put_reg;
 
 		ret = regulator_get_voltage(reg);
 		if (ret < 0)
@@ -235,7 +234,7 @@ static int ad5446_probe(struct device *dev, const char *name,
 		voltage_uv = ret;
 	}
 
-	indio_dev = devm_iio_device_alloc(dev, sizeof(*st));
+	indio_dev = iio_device_alloc(sizeof(*st));
 	if (indio_dev == NULL) {
 		ret = -ENOMEM;
 		goto error_disable_reg;
@@ -266,13 +265,19 @@ static int ad5446_probe(struct device *dev, const char *name,
 
 	ret = iio_device_register(indio_dev);
 	if (ret)
-		goto error_disable_reg;
+		goto error_free_device;
 
 	return 0;
 
+error_free_device:
+	iio_device_free(indio_dev);
 error_disable_reg:
 	if (!IS_ERR(reg))
 		regulator_disable(reg);
+error_put_reg:
+	if (!IS_ERR(reg))
+		regulator_put(reg);
+
 	return ret;
 }
 
@@ -282,8 +287,11 @@ static int ad5446_remove(struct device *dev)
 	struct ad5446_state *st = iio_priv(indio_dev);
 
 	iio_device_unregister(indio_dev);
-	if (!IS_ERR(st->reg))
+	if (!IS_ERR(st->reg)) {
 		regulator_disable(st->reg);
+		regulator_put(st->reg);
+	}
+	iio_device_free(indio_dev);
 
 	return 0;
 }
@@ -331,7 +339,6 @@ enum ad5446_supported_spi_device_ids {
 	ID_AD5601,
 	ID_AD5611,
 	ID_AD5621,
-	ID_AD5641,
 	ID_AD5620_2500,
 	ID_AD5620_1250,
 	ID_AD5640_2500,
@@ -394,10 +401,6 @@ static const struct ad5446_chip_info ad5446_spi_chip_info[] = {
 		.channel = AD5446_CHANNEL_POWERDOWN(12, 16, 2),
 		.write = ad5446_write,
 	},
-	[ID_AD5641] = {
-		.channel = AD5446_CHANNEL_POWERDOWN(14, 16, 0),
-		.write = ad5446_write,
-	},
 	[ID_AD5620_2500] = {
 		.channel = AD5446_CHANNEL_POWERDOWN(12, 16, 2),
 		.int_vref_mv = 2500,
@@ -452,7 +455,6 @@ static const struct spi_device_id ad5446_spi_ids[] = {
 	{"ad5601", ID_AD5601},
 	{"ad5611", ID_AD5611},
 	{"ad5621", ID_AD5621},
-	{"ad5641", ID_AD5641},
 	{"ad5620-2500", ID_AD5620_2500}, /* AD5620/40/60: */
 	{"ad5620-1250", ID_AD5620_1250}, /* part numbers may look differently */
 	{"ad5640-2500", ID_AD5640_2500},
@@ -460,21 +462,9 @@ static const struct spi_device_id ad5446_spi_ids[] = {
 	{"ad5660-2500", ID_AD5660_2500},
 	{"ad5660-1250", ID_AD5660_1250},
 	{"ad5662", ID_AD5662},
-	{"dac081s101", ID_AD5300}, /* compatible Texas Instruments chips */
-	{"dac101s101", ID_AD5310},
-	{"dac121s101", ID_AD5320},
-	{"dac7512", ID_AD5320},
 	{}
 };
 MODULE_DEVICE_TABLE(spi, ad5446_spi_ids);
-
-#ifdef CONFIG_OF
-static const struct of_device_id ad5446_of_ids[] = {
-	{ .compatible = "ti,dac7512" },
-	{ }
-};
-MODULE_DEVICE_TABLE(of, ad5446_of_ids);
-#endif
 
 static int ad5446_spi_probe(struct spi_device *spi)
 {
@@ -492,7 +482,7 @@ static int ad5446_spi_remove(struct spi_device *spi)
 static struct spi_driver ad5446_spi_driver = {
 	.driver = {
 		.name	= "ad5446",
-		.of_match_table = of_match_ptr(ad5446_of_ids),
+		.owner	= THIS_MODULE,
 	},
 	.probe		= ad5446_spi_probe,
 	.remove		= ad5446_spi_remove,
@@ -580,6 +570,7 @@ MODULE_DEVICE_TABLE(i2c, ad5446_i2c_ids);
 static struct i2c_driver ad5446_i2c_driver = {
 	.driver = {
 		   .name = "ad5446",
+		   .owner = THIS_MODULE,
 	},
 	.probe = ad5446_i2c_probe,
 	.remove = ad5446_i2c_remove,

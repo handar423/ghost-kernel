@@ -27,7 +27,7 @@
  *         mapping->i_mmap_rwsem
  *           anon_vma->rwsem
  *             mm->page_table_lock or pte_lock
- *               zone_lru_lock (in mark_page_accessed, isolate_lru_page)
+ *               zone->lru_lock (in mark_page_accessed, isolate_lru_page)
  *               swap_lock (in swap_duplicate, swap_info_get)
  *                 mmlist_lock (in mmput, drain_mmlist and others)
  *                 mapping->private_lock (in __set_page_dirty_buffers)
@@ -46,8 +46,6 @@
  */
 
 #include <linux/mm.h>
-#include <linux/sched/mm.h>
-#include <linux/sched/task.h>
 #include <linux/pagemap.h>
 #include <linux/swap.h>
 #include <linux/swapops.h>
@@ -62,12 +60,14 @@
 #include <linux/migrate.h>
 #include <linux/hugetlb.h>
 #include <linux/backing-dev.h>
-#include <linux/page_idle.h>
 #include <linux/memremap.h>
+#include <linux/page_idle.h>
 
 #include <asm/tlbflush.h>
 
+/*
 #include <trace/events/tlb.h>
+*/
 
 #include "internal.h"
 
@@ -144,15 +144,14 @@ static void anon_vma_chain_link(struct vm_area_struct *vma,
 }
 
 /**
- * __anon_vma_prepare - attach an anon_vma to a memory region
+ * anon_vma_prepare - attach an anon_vma to a memory region
  * @vma: the memory region in question
  *
  * This makes sure the memory mapping described by 'vma' has
  * an 'anon_vma' attached to it, so that we can associate the
  * anonymous pages mapped into it with that anon_vma.
  *
- * The common case will be that we already have one, which
- * is handled inline by anon_vma_prepare(). But if
+ * The common case will be that we already have one, but if
  * not we either need to find an adjacent mapping that we
  * can re-use the anon_vma from (very common when the only
  * reason for splitting a vma has been mprotect()), or we
@@ -171,46 +170,48 @@ static void anon_vma_chain_link(struct vm_area_struct *vma,
  *
  * This must be called with the mmap_sem held for reading.
  */
-int __anon_vma_prepare(struct vm_area_struct *vma)
+int anon_vma_prepare(struct vm_area_struct *vma)
 {
-	struct mm_struct *mm = vma->vm_mm;
-	struct anon_vma *anon_vma, *allocated;
+	struct anon_vma *anon_vma = vma->anon_vma;
 	struct anon_vma_chain *avc;
 
 	might_sleep();
+	if (unlikely(!anon_vma)) {
+		struct mm_struct *mm = vma->vm_mm;
+		struct anon_vma *allocated;
 
-	avc = anon_vma_chain_alloc(GFP_KERNEL);
-	if (!avc)
-		goto out_enomem;
+		avc = anon_vma_chain_alloc(GFP_KERNEL);
+		if (!avc)
+			goto out_enomem;
 
-	anon_vma = find_mergeable_anon_vma(vma);
-	allocated = NULL;
-	if (!anon_vma) {
-		anon_vma = anon_vma_alloc();
-		if (unlikely(!anon_vma))
-			goto out_enomem_free_avc;
-		allocated = anon_vma;
-	}
-
-	anon_vma_lock_write(anon_vma);
-	/* page_table_lock to protect against threads */
-	spin_lock(&mm->page_table_lock);
-	if (likely(!vma->anon_vma)) {
-		vma->anon_vma = anon_vma;
-		anon_vma_chain_link(vma, avc, anon_vma);
-		/* vma reference or self-parent link for new root */
-		anon_vma->degree++;
+		anon_vma = find_mergeable_anon_vma(vma);
 		allocated = NULL;
-		avc = NULL;
+		if (!anon_vma) {
+			anon_vma = anon_vma_alloc();
+			if (unlikely(!anon_vma))
+				goto out_enomem_free_avc;
+			allocated = anon_vma;
+		}
+
+		anon_vma_lock_write(anon_vma);
+		/* page_table_lock to protect against threads */
+		spin_lock(&mm->page_table_lock);
+		if (likely(!vma->anon_vma)) {
+			vma->anon_vma = anon_vma;
+			anon_vma_chain_link(vma, avc, anon_vma);
+			/* vma reference or self-parent link for new root */
+			anon_vma->degree++;
+			allocated = NULL;
+			avc = NULL;
+		}
+		spin_unlock(&mm->page_table_lock);
+		anon_vma_unlock_write(anon_vma);
+
+		if (unlikely(allocated))
+			put_anon_vma(allocated);
+		if (unlikely(avc))
+			anon_vma_chain_free(avc);
 	}
-	spin_unlock(&mm->page_table_lock);
-	anon_vma_unlock_write(anon_vma);
-
-	if (unlikely(allocated))
-		put_anon_vma(allocated);
-	if (unlikely(avc))
-		anon_vma_chain_free(avc);
-
 	return 0;
 
  out_enomem_free_avc:
@@ -391,7 +392,7 @@ void unlink_anon_vmas(struct vm_area_struct *vma)
 		 * Leave empty anon_vmas on the list - we'll need
 		 * to free them outside the lock.
 		 */
-		if (RB_EMPTY_ROOT(&anon_vma->rb_root.rb_root)) {
+		if (RB_EMPTY_ROOT(&anon_vma->rb_root)) {
 			anon_vma->parent->degree--;
 			continue;
 		}
@@ -411,7 +412,7 @@ void unlink_anon_vmas(struct vm_area_struct *vma)
 	list_for_each_entry_safe(avc, next, &vma->anon_vma_chain, same_vma) {
 		struct anon_vma *anon_vma = avc->anon_vma;
 
-		VM_WARN_ON(anon_vma->degree);
+		BUG_ON(anon_vma->degree);
 		put_anon_vma(anon_vma);
 
 		list_del(&avc->same_vma);
@@ -425,16 +426,14 @@ static void anon_vma_ctor(void *data)
 
 	init_rwsem(&anon_vma->rwsem);
 	atomic_set(&anon_vma->refcount, 0);
-	anon_vma->rb_root = RB_ROOT_CACHED;
+	anon_vma->rb_root = RB_ROOT;
 }
 
 void __init anon_vma_init(void)
 {
 	anon_vma_cachep = kmem_cache_create("anon_vma", sizeof(struct anon_vma),
-			0, SLAB_TYPESAFE_BY_RCU|SLAB_PANIC|SLAB_ACCOUNT,
-			anon_vma_ctor);
-	anon_vma_chain_cachep = KMEM_CACHE(anon_vma_chain,
-			SLAB_PANIC|SLAB_ACCOUNT);
+			0, SLAB_DESTROY_BY_RCU|SLAB_PANIC, anon_vma_ctor);
+	anon_vma_chain_cachep = KMEM_CACHE(anon_vma_chain, SLAB_PANIC);
 }
 
 /*
@@ -466,7 +465,7 @@ struct anon_vma *page_get_anon_vma(struct page *page)
 	unsigned long anon_mapping;
 
 	rcu_read_lock();
-	anon_mapping = (unsigned long)READ_ONCE(page->mapping);
+	anon_mapping = (unsigned long) ACCESS_ONCE(page->mapping);
 	if ((anon_mapping & PAGE_MAPPING_FLAGS) != PAGE_MAPPING_ANON)
 		goto out;
 	if (!page_mapped(page))
@@ -482,7 +481,7 @@ struct anon_vma *page_get_anon_vma(struct page *page)
 	 * If this page is still mapped, then its anon_vma cannot have been
 	 * freed.  But if it has been unmapped, we have no security against the
 	 * anon_vma structure being freed and reused (for another anon_vma:
-	 * SLAB_TYPESAFE_BY_RCU guarantees that - so the atomic_inc_not_zero()
+	 * SLAB_DESTROY_BY_RCU guarantees that - so the atomic_inc_not_zero()
 	 * above cannot corrupt).
 	 */
 	if (!page_mapped(page)) {
@@ -510,14 +509,14 @@ struct anon_vma *page_lock_anon_vma_read(struct page *page)
 	unsigned long anon_mapping;
 
 	rcu_read_lock();
-	anon_mapping = (unsigned long)READ_ONCE(page->mapping);
+	anon_mapping = (unsigned long) ACCESS_ONCE(page->mapping);
 	if ((anon_mapping & PAGE_MAPPING_FLAGS) != PAGE_MAPPING_ANON)
 		goto out;
 	if (!page_mapped(page))
 		goto out;
 
 	anon_vma = (struct anon_vma *) (anon_mapping - PAGE_MAPPING_ANON);
-	root_anon_vma = READ_ONCE(anon_vma->root);
+	root_anon_vma = ACCESS_ONCE(anon_vma->root);
 	if (down_read_trylock(&root_anon_vma->rwsem)) {
 		/*
 		 * If the page is still mapped, then this anon_vma is still
@@ -570,7 +569,43 @@ void page_unlock_anon_vma_read(struct anon_vma *anon_vma)
 	anon_vma_unlock_read(anon_vma);
 }
 
+/*
+ * At what user virtual address is page expected in @vma?
+ */
+static inline unsigned long
+__vma_address(struct page *page, struct vm_area_struct *vma)
+{
+	pgoff_t pgoff = page_to_pgoff(page);
+	return vma->vm_start + ((pgoff - vma->vm_pgoff) << PAGE_SHIFT);
+}
+
+inline unsigned long
+vma_address(struct page *page, struct vm_area_struct *vma)
+{
+	unsigned long address = __vma_address(page, vma);
+
+	/* page should be within @vma mapping range */
+	VM_BUG_ON(address < vma->vm_start || address >= vma->vm_end);
+
+	return address;
+}
+
 #ifdef CONFIG_ARCH_WANT_BATCHED_UNMAP_TLB_FLUSH
+static void percpu_flush_tlb_batch_pages(void *data)
+{
+	/*
+	 * All TLB entries are flushed on the assumption that it is
+	 * cheaper to flush all TLBs and let them be refilled than
+	 * flushing individual PFNs. Note that we do not track mm's
+	 * to flush as that might simply be multiple full TLB flushes
+	 * for no gain.
+	 */
+  /*
+	count_vm_tlb_event(NR_TLB_REMOTE_FLUSH_RECEIVED);
+  */
+	flush_tlb_local();
+}
+
 /*
  * Flush TLB entries for recently unmapped pages from remote CPUs. It is
  * important if a PTE was dirty when it was unmapped that it's flushed
@@ -580,13 +615,28 @@ void page_unlock_anon_vma_read(struct anon_vma *anon_vma)
 void try_to_unmap_flush(void)
 {
 	struct tlbflush_unmap_batch *tlb_ubc = &current->tlb_ubc;
+	int cpu;
 
 	if (!tlb_ubc->flush_required)
 		return;
 
-	arch_tlbbatch_flush(&tlb_ubc->arch);
+	cpu = get_cpu();
+
+	/*
+	trace_tlb_flush(TLB_REMOTE_SHOOTDOWN, -1UL);
+	*/
+
+	if (cpumask_test_cpu(cpu, &tlb_ubc->cpumask))
+		percpu_flush_tlb_batch_pages(&tlb_ubc->cpumask);
+
+	if (cpumask_any_but(&tlb_ubc->cpumask, cpu) < nr_cpu_ids) {
+		smp_call_function_many(&tlb_ubc->cpumask,
+			percpu_flush_tlb_batch_pages, (void *)tlb_ubc, true);
+	}
+	cpumask_clear(&tlb_ubc->cpumask);
 	tlb_ubc->flush_required = false;
 	tlb_ubc->writable = false;
+	put_cpu();
 }
 
 /* Flush iff there are potentially writable TLB entries that can race with IO */
@@ -598,11 +648,12 @@ void try_to_unmap_flush_dirty(void)
 		try_to_unmap_flush();
 }
 
-static void set_tlb_ubc_flush_pending(struct mm_struct *mm, bool writable)
+static void set_tlb_ubc_flush_pending(struct mm_struct *mm,
+		struct page *page, bool writable)
 {
 	struct tlbflush_unmap_batch *tlb_ubc = &current->tlb_ubc;
 
-	arch_tlbbatch_add_mm(&tlb_ubc->arch, mm);
+	cpumask_or(&tlb_ubc->cpumask, &tlb_ubc->cpumask, mm_cpumask(mm));
 	tlb_ubc->flush_required = true;
 
 	/*
@@ -669,7 +720,8 @@ void flush_tlb_batched_pending(struct mm_struct *mm)
 	}
 }
 #else
-static void set_tlb_ubc_flush_pending(struct mm_struct *mm, bool writable)
+static void set_tlb_ubc_flush_pending(struct mm_struct *mm,
+		struct page *page, bool writable)
 {
 }
 
@@ -695,8 +747,9 @@ unsigned long page_address_in_vma(struct page *page, struct vm_area_struct *vma)
 		if (!vma->anon_vma || !page__anon_vma ||
 		    vma->anon_vma->root != page__anon_vma->root)
 			return -EFAULT;
-	} else if (page->mapping) {
-		if (!vma->vm_file || vma->vm_file->f_mapping != page->mapping)
+	} else if (page->mapping && !(vma->vm_flags & VM_NONLINEAR)) {
+		if (!vma->vm_file ||
+		    vma->vm_file->f_mapping != page->mapping)
 			return -EFAULT;
 	} else
 		return -EFAULT;
@@ -709,7 +762,6 @@ unsigned long page_address_in_vma(struct page *page, struct vm_area_struct *vma)
 pmd_t *mm_find_pmd(struct mm_struct *mm, unsigned long address)
 {
 	pgd_t *pgd;
-	p4d_t *p4d;
 	pud_t *pud;
 	pmd_t *pmd = NULL;
 	pmd_t pmde;
@@ -718,26 +770,95 @@ pmd_t *mm_find_pmd(struct mm_struct *mm, unsigned long address)
 	if (!pgd_present(*pgd))
 		goto out;
 
-	p4d = p4d_offset(pgd, address);
-	if (!p4d_present(*p4d))
-		goto out;
-
-	pud = pud_offset(p4d, address);
+	pud = pud_offset(pgd, address);
 	if (!pud_present(*pud))
 		goto out;
 
 	pmd = pmd_offset(pud, address);
 	/*
-	 * Some THP functions use the sequence pmdp_huge_clear_flush(), set_pmd_at()
+	 * Some THP functions use the sequence pmdp_clear_flush(), set_pmd_at()
 	 * without holding anon_vma lock for write.  So when looking for a
 	 * genuine pmde (in which to find pte), test present and !THP together.
 	 */
-	pmde = *pmd;
-	barrier();
+	pmde = ACCESS_ONCE(*pmd);
 	if (!pmd_present(pmde) || pmd_trans_huge(pmde))
 		pmd = NULL;
 out:
 	return pmd;
+}
+
+/*
+ * Check that @page is mapped at @address into @mm.
+ *
+ * If @sync is false, page_check_address may perform a racy check to avoid
+ * the page table lock when the pte is not present (helpful when reclaiming
+ * highly shared pages).
+ *
+ * On success returns with pte mapped and locked.
+ */
+pte_t *__page_check_address(struct page *page, struct mm_struct *mm,
+			  unsigned long address, spinlock_t **ptlp, int sync)
+{
+	pmd_t *pmd;
+	pte_t *pte;
+	spinlock_t *ptl;
+
+	if (unlikely(PageHuge(page))) {
+		/* when pud is not present, pte will be NULL */
+		pte = huge_pte_offset(mm, address);
+		if (!pte)
+			return NULL;
+
+		ptl = huge_pte_lockptr(page_hstate(page), mm, pte);
+		goto check;
+	}
+
+	pmd = mm_find_pmd(mm, address);
+	if (!pmd)
+		return NULL;
+
+	pte = pte_offset_map(pmd, address);
+	/* Make a quick check before getting the lock */
+	if (!sync && !pte_present(*pte)) {
+		pte_unmap(pte);
+		return NULL;
+	}
+
+	ptl = pte_lockptr(mm, pmd);
+check:
+	spin_lock(ptl);
+	if (pte_present(*pte) && page_to_pfn(page) == pte_pfn(*pte)) {
+		*ptlp = ptl;
+		return pte;
+	}
+	pte_unmap_unlock(pte, ptl);
+	return NULL;
+}
+
+/**
+ * page_mapped_in_vma - check whether a page is really mapped in a VMA
+ * @page: the page to test
+ * @vma: the VMA to test
+ *
+ * Returns 1 if the page is mapped into the page tables of the VMA, 0
+ * if the page is not mapped into the page tables of this VMA.  Only
+ * valid for normal file or anonymous VMAs.
+ */
+int page_mapped_in_vma(struct page *page, struct vm_area_struct *vma)
+{
+	unsigned long address;
+	pte_t *pte;
+	spinlock_t *ptl;
+
+	address = __vma_address(page, vma);
+	if (unlikely(address < vma->vm_start || address >= vma->vm_end))
+		return 0;
+	pte = page_check_address(page, vma->vm_mm, address, &ptl, 1);
+	if (!pte)			/* the page is not in this mm */
+		return 0;
+	pte_unmap_unlock(pte, ptl);
+
+	return 1;
 }
 
 struct page_referenced_arg {
@@ -749,50 +870,65 @@ struct page_referenced_arg {
 /*
  * arg: page_referenced_arg will be passed
  */
-static bool page_referenced_one(struct page *page, struct vm_area_struct *vma,
+int page_referenced_one(struct page *page, struct vm_area_struct *vma,
 			unsigned long address, void *arg)
 {
-	struct page_referenced_arg *pra = arg;
-	struct page_vma_mapped_walk pvmw = {
-		.page = page,
-		.vma = vma,
-		.address = address,
-	};
+	struct mm_struct *mm = vma->vm_mm;
+	spinlock_t *ptl;
 	int referenced = 0;
+	struct page_referenced_arg *pra = arg;
 
-	while (page_vma_mapped_walk(&pvmw)) {
-		address = pvmw.address;
+	if (unlikely(PageTransHuge(page))) {
+		pmd_t *pmd;
+
+		/*
+		 * rmap might return false positives; we must filter
+		 * these out using page_check_address_pmd().
+		 */
+		pmd = page_check_address_pmd(page, mm, address,
+					     PAGE_CHECK_ADDRESS_PMD_FLAG, &ptl);
+		if (!pmd)
+			return SWAP_AGAIN;
 
 		if (vma->vm_flags & VM_LOCKED) {
-			page_vma_mapped_walk_done(&pvmw);
+			spin_unlock(ptl);
 			pra->vm_flags |= VM_LOCKED;
-			return false; /* To break the loop */
+			return SWAP_FAIL; /* To break the loop */
 		}
 
-		if (pvmw.pte) {
-			if (ptep_clear_flush_young_notify(vma, address,
-						pvmw.pte)) {
-				/*
-				 * Don't treat a reference through
-				 * a sequentially read mapping as such.
-				 * If the page has been used in another mapping,
-				 * we will catch it; if this other mapping is
-				 * already gone, the unmap path will have set
-				 * PG_referenced or activated the page.
-				 */
-				if (likely(!(vma->vm_flags & VM_SEQ_READ)))
-					referenced++;
-			}
-		} else if (IS_ENABLED(CONFIG_TRANSPARENT_HUGEPAGE)) {
-			if (pmdp_clear_flush_young_notify(vma, address,
-						pvmw.pmd))
+		/* go ahead even if the pmd is pmd_trans_splitting() */
+		if (pmdp_clear_flush_young_notify(vma, address, pmd))
+			referenced++;
+		spin_unlock(ptl);
+	} else {
+		pte_t *pte;
+
+		/*
+		 * rmap might return false positives; we must filter
+		 * these out using page_check_address().
+		 */
+		pte = page_check_address(page, mm, address, &ptl, 0);
+		if (!pte)
+			return SWAP_AGAIN;
+
+		if (vma->vm_flags & VM_LOCKED) {
+			pte_unmap_unlock(pte, ptl);
+			pra->vm_flags |= VM_LOCKED;
+			return SWAP_FAIL; /* To break the loop */
+		}
+
+		if (ptep_clear_flush_young_notify(vma, address, pte)) {
+			/*
+			 * Don't treat a reference through a sequentially read
+			 * mapping as such.  If the page has been used in
+			 * another mapping, we will catch it; if this other
+			 * mapping is already gone, the unmap path will have
+			 * set PG_referenced or activated the page.
+			 */
+			if (likely(!VM_SequentialReadHint(vma)))
 				referenced++;
-		} else {
-			/* unexpected pmd-mapped page? */
-			WARN_ON_ONCE(1);
 		}
-
-		pra->mapcount--;
+		pte_unmap_unlock(pte, ptl);
 	}
 
 	if (referenced)
@@ -805,10 +941,11 @@ static bool page_referenced_one(struct page *page, struct vm_area_struct *vma,
 		pra->vm_flags |= vma->vm_flags;
 	}
 
+	pra->mapcount--;
 	if (!pra->mapcount)
-		return false; /* To break the loop */
+		return SWAP_SUCCESS; /* To break the loop */
 
-	return true;
+	return SWAP_AGAIN;
 }
 
 static bool invalid_page_referenced_vma(struct vm_area_struct *vma, void *arg)
@@ -837,9 +974,10 @@ int page_referenced(struct page *page,
 		    struct mem_cgroup *memcg,
 		    unsigned long *vm_flags)
 {
+	int ret;
 	int we_locked = 0;
 	struct page_referenced_arg pra = {
-		.mapcount = total_mapcount(page),
+		.mapcount = page_mapcount(page),
 		.memcg = memcg,
 	};
 	struct rmap_walk_control rwc = {
@@ -870,7 +1008,7 @@ int page_referenced(struct page *page,
 		rwc.invalid_vma = invalid_page_referenced_vma;
 	}
 
-	rmap_walk(page, &rwc);
+	ret = rmap_walk(page, &rwc);
 	*vm_flags = pra.vm_flags;
 
 	if (we_locked)
@@ -879,86 +1017,46 @@ int page_referenced(struct page *page,
 	return pra.referenced;
 }
 
-static bool page_mkclean_one(struct page *page, struct vm_area_struct *vma,
+static int page_mkclean_one(struct page *page, struct vm_area_struct *vma,
 			    unsigned long address, void *arg)
 {
-	struct page_vma_mapped_walk pvmw = {
-		.page = page,
-		.vma = vma,
-		.address = address,
-		.flags = PVMW_SYNC,
-	};
-	unsigned long start = address, end;
+	struct mm_struct *mm = vma->vm_mm;
+	pte_t *pte;
+	spinlock_t *ptl;
+	int ret = 0;
 	int *cleaned = arg;
 
-	/*
-	 * We have to assume the worse case ie pmd for invalidation. Note that
-	 * the page can not be free from this function.
-	 */
-	end = min(vma->vm_end, start + (PAGE_SIZE << compound_order(page)));
-	mmu_notifier_invalidate_range_start(vma->vm_mm, start, end);
+	pte = page_check_address(page, mm, address, &ptl, 1);
+	if (!pte)
+		goto out;
 
-	while (page_vma_mapped_walk(&pvmw)) {
-		unsigned long cstart;
-		int ret = 0;
+	if (pte_dirty(*pte) || pte_write(*pte)) {
+		pte_t entry;
 
-		cstart = address = pvmw.address;
-		if (pvmw.pte) {
-			pte_t entry;
-			pte_t *pte = pvmw.pte;
-
-			if (!pte_dirty(*pte) && !pte_write(*pte))
-				continue;
-
-			flush_cache_page(vma, address, pte_pfn(*pte));
-			entry = ptep_clear_flush(vma, address, pte);
-			entry = pte_wrprotect(entry);
-			entry = pte_mkclean(entry);
-			set_pte_at(vma->vm_mm, address, pte, entry);
-			ret = 1;
-		} else {
-#ifdef CONFIG_TRANSPARENT_HUGE_PAGECACHE
-			pmd_t *pmd = pvmw.pmd;
-			pmd_t entry;
-
-			if (!pmd_dirty(*pmd) && !pmd_write(*pmd))
-				continue;
-
-			flush_cache_page(vma, address, page_to_pfn(page));
-			entry = pmdp_huge_clear_flush(vma, address, pmd);
-			entry = pmd_wrprotect(entry);
-			entry = pmd_mkclean(entry);
-			set_pmd_at(vma->vm_mm, address, pmd, entry);
-			cstart &= PMD_MASK;
-			ret = 1;
-#else
-			/* unexpected pmd-mapped page? */
-			WARN_ON_ONCE(1);
-#endif
-		}
-
-		/*
-		 * No need to call mmu_notifier_invalidate_range() as we are
-		 * downgrading page table protection not changing it to point
-		 * to a new page.
-		 *
-		 * See Documentation/vm/mmu_notifier.txt
-		 */
-		if (ret)
-			(*cleaned)++;
+		flush_cache_page(vma, address, pte_pfn(*pte));
+		entry = ptep_clear_flush(vma, address, pte);
+		entry = pte_wrprotect(entry);
+		entry = pte_mkclean(entry);
+		set_pte_at(mm, address, pte, entry);
+		ret = 1;
 	}
 
-	mmu_notifier_invalidate_range_end(vma->vm_mm, start, end);
+	pte_unmap_unlock(pte, ptl);
 
-	return true;
+	if (ret) {
+		mmu_notifier_invalidate_page(mm, address);
+		(*cleaned)++;
+	}
+out:
+	return SWAP_AGAIN;
 }
 
 static bool invalid_mkclean_vma(struct vm_area_struct *vma, void *arg)
 {
 	if (vma->vm_flags & VM_SHARED)
-		return false;
+		return 0;
 
-	return true;
+	return 1;
 }
 
 int page_mkclean(struct page *page)
@@ -990,20 +1088,21 @@ EXPORT_SYMBOL_GPL(page_mkclean);
  * page_move_anon_rmap - move a page to our anon_vma
  * @page:	the page to move to our anon_vma
  * @vma:	the vma the page belongs to
+ * @address:	the user virtual address mapped
  *
  * When a page belongs exclusively to one process after a COW event,
  * that page can be moved into the anon_vma that belongs to just that
  * process, so the rmap code will not search the parent or sibling
  * processes.
  */
-void page_move_anon_rmap(struct page *page, struct vm_area_struct *vma)
+void page_move_anon_rmap(struct page *page,
+	struct vm_area_struct *vma, unsigned long address)
 {
 	struct anon_vma *anon_vma = vma->anon_vma;
 
-	page = compound_head(page);
-
-	VM_BUG_ON_PAGE(!PageLocked(page), page);
-	VM_BUG_ON_VMA(!anon_vma, vma);
+	VM_BUG_ON(!PageLocked(page));
+	VM_BUG_ON(!anon_vma);
+	VM_BUG_ON(page->index != linear_page_index(vma, address));
 
 	anon_vma = (void *) anon_vma + PAGE_MAPPING_ANON;
 	/*
@@ -1067,7 +1166,7 @@ static void __page_check_anon_rmap(struct page *page,
 	 * over the call to page_add_new_anon_rmap.
 	 */
 	BUG_ON(page_anon_vma(page)->root != vma->anon_vma->root);
-	BUG_ON(page_to_pgoff(page) != linear_page_index(vma, address));
+	BUG_ON(page->index != linear_page_index(vma, address));
 #endif
 }
 
@@ -1076,7 +1175,6 @@ static void __page_check_anon_rmap(struct page *page,
  * @page:	the page to add the mapping to
  * @vma:	the vm area in which the mapping is added
  * @address:	the user virtual address mapped
- * @compound:	charge the page as compound or small page
  *
  * The caller needs to hold the pte lock, and the page must be locked in
  * the anon_vma case: to serialize mapping,index checking after setting,
@@ -1084,9 +1182,9 @@ static void __page_check_anon_rmap(struct page *page,
  * (but PageKsm is never downgraded to PageAnon).
  */
 void page_add_anon_rmap(struct page *page,
-	struct vm_area_struct *vma, unsigned long address, bool compound)
+	struct vm_area_struct *vma, unsigned long address)
 {
-	do_page_add_anon_rmap(page, vma, address, compound ? RMAP_COMPOUND : 0);
+	do_page_add_anon_rmap(page, vma, address, 0);
 }
 
 /*
@@ -1095,42 +1193,23 @@ void page_add_anon_rmap(struct page *page,
  * Everybody else should continue to use page_add_anon_rmap above.
  */
 void do_page_add_anon_rmap(struct page *page,
-	struct vm_area_struct *vma, unsigned long address, int flags)
+	struct vm_area_struct *vma, unsigned long address, int exclusive)
 {
-	bool compound = flags & RMAP_COMPOUND;
-	bool first;
-
-	if (compound) {
-		atomic_t *mapcount;
-		VM_BUG_ON_PAGE(!PageLocked(page), page);
-		VM_BUG_ON_PAGE(!PageTransHuge(page), page);
-		mapcount = compound_mapcount_ptr(page);
-		first = atomic_inc_and_test(mapcount);
-	} else {
-		first = atomic_inc_and_test(&page->_mapcount);
-	}
-
+	int first = atomic_inc_and_test(&page->_mapcount);
 	if (first) {
-		int nr = compound ? hpage_nr_pages(page) : 1;
-		/*
-		 * We use the irq-unsafe __{inc|mod}_zone_page_stat because
-		 * these counters are not modified in interrupt context, and
-		 * pte lock(a spinlock) is held, which implies preemption
-		 * disabled.
-		 */
-		if (compound)
-			__inc_node_page_state(page, NR_ANON_THPS);
-		__mod_node_page_state(page_pgdat(page), NR_ANON_MAPPED, nr);
+		if (!PageTransHuge(page))
+			__inc_zone_page_state(page, NR_ANON_PAGES);
+		else
+			__inc_zone_page_state(page,
+					      NR_ANON_TRANSPARENT_HUGEPAGES);
 	}
 	if (unlikely(PageKsm(page)))
 		return;
 
-	VM_BUG_ON_PAGE(!PageLocked(page), page);
-
+	VM_BUG_ON(!PageLocked(page));
 	/* address might be in next vma when migration races vma_adjust */
 	if (first)
-		__page_set_anon_rmap(page, vma, address,
-				flags & RMAP_EXCLUSIVE);
+		__page_set_anon_rmap(page, vma, address, exclusive);
 	else
 		__page_check_anon_rmap(page, vma, address);
 }
@@ -1140,32 +1219,28 @@ void do_page_add_anon_rmap(struct page *page,
  * @page:	the page to add the mapping to
  * @vma:	the vm area in which the mapping is added
  * @address:	the user virtual address mapped
- * @compound:	charge the page as compound or small page
  *
  * Same as page_add_anon_rmap but must only be called on *new* pages.
  * This means the inc-and-test can be bypassed.
  * Page does not have to be locked.
  */
 void page_add_new_anon_rmap(struct page *page,
-	struct vm_area_struct *vma, unsigned long address, bool compound)
+	struct vm_area_struct *vma, unsigned long address)
 {
-	int nr = compound ? hpage_nr_pages(page) : 1;
-
-	VM_BUG_ON_VMA(address < vma->vm_start || address >= vma->vm_end, vma);
-	__SetPageSwapBacked(page);
-	if (compound) {
-		VM_BUG_ON_PAGE(!PageTransHuge(page), page);
-		/* increment count (starts at -1) */
-		atomic_set(compound_mapcount_ptr(page), 0);
-		__inc_node_page_state(page, NR_ANON_THPS);
-	} else {
-		/* Anon THP always mapped first with PMD */
-		VM_BUG_ON_PAGE(PageTransCompound(page), page);
-		/* increment count (starts at -1) */
-		atomic_set(&page->_mapcount, 0);
-	}
-	__mod_node_page_state(page_pgdat(page), NR_ANON_MAPPED, nr);
+	VM_BUG_ON(address < vma->vm_start || address >= vma->vm_end);
+	SetPageSwapBacked(page);
+	atomic_set(&page->_mapcount, 0); /* increment count (starts at -1) */
+	if (!PageTransHuge(page))
+		__inc_zone_page_state(page, NR_ANON_PAGES);
+	else
+		__inc_zone_page_state(page, NR_ANON_TRANSPARENT_HUGEPAGES);
 	__page_set_anon_rmap(page, vma, address, 1);
+	if (!mlocked_vma_newpage(vma, page)) {
+		SetPageActive(page);
+		if (!is_zone_device_page(page))
+			lru_cache_add(page);
+	} else if (!is_zone_device_page(page))
+		add_page_to_unevictable_list(page);
 }
 
 /**
@@ -1174,387 +1249,223 @@ void page_add_new_anon_rmap(struct page *page,
  *
  * The caller needs to hold the pte lock.
  */
-void page_add_file_rmap(struct page *page, bool compound)
+void page_add_file_rmap(struct page *page)
 {
-	int i, nr = 1;
+	bool locked;
+	unsigned long flags;
 
-	VM_BUG_ON_PAGE(compound && !PageTransHuge(page), page);
-	lock_page_memcg(page);
-	if (compound && PageTransHuge(page)) {
-		for (i = 0, nr = 0; i < HPAGE_PMD_NR; i++) {
-			if (atomic_inc_and_test(&page[i]._mapcount))
-				nr++;
-		}
-		if (!atomic_inc_and_test(compound_mapcount_ptr(page)))
-			goto out;
-		VM_BUG_ON_PAGE(!PageSwapBacked(page), page);
-		__inc_node_page_state(page, NR_SHMEM_PMDMAPPED);
-	} else {
-		if (PageTransCompound(page) && page_mapping(page)) {
-			VM_WARN_ON_ONCE(!PageLocked(page));
-
-			SetPageDoubleMap(compound_head(page));
-			if (PageMlocked(page))
-				clear_page_mlock(compound_head(page));
-		}
-		if (!atomic_inc_and_test(&page->_mapcount))
-			goto out;
+	mem_cgroup_begin_update_page_stat(page, &locked, &flags);
+	if (atomic_inc_and_test(&page->_mapcount)) {
+		__inc_zone_page_state(page, NR_FILE_MAPPED);
+		mem_cgroup_inc_page_stat(page, MEMCG_NR_FILE_MAPPED);
 	}
-	__mod_lruvec_page_state(page, NR_FILE_MAPPED, nr);
-out:
-	unlock_page_memcg(page);
-}
-
-static void page_remove_file_rmap(struct page *page, bool compound)
-{
-	int i, nr = 1;
-
-	VM_BUG_ON_PAGE(compound && !PageHead(page), page);
-	lock_page_memcg(page);
-
-	/* Hugepages are not counted in NR_FILE_MAPPED for now. */
-	if (unlikely(PageHuge(page))) {
-		/* hugetlb pages are always mapped with pmds */
-		atomic_dec(compound_mapcount_ptr(page));
-		goto out;
-	}
-
-	/* page still mapped by someone else? */
-	if (compound && PageTransHuge(page)) {
-		for (i = 0, nr = 0; i < HPAGE_PMD_NR; i++) {
-			if (atomic_add_negative(-1, &page[i]._mapcount))
-				nr++;
-		}
-		if (!atomic_add_negative(-1, compound_mapcount_ptr(page)))
-			goto out;
-		VM_BUG_ON_PAGE(!PageSwapBacked(page), page);
-		__dec_node_page_state(page, NR_SHMEM_PMDMAPPED);
-	} else {
-		if (!atomic_add_negative(-1, &page->_mapcount))
-			goto out;
-	}
-
-	/*
-	 * We use the irq-unsafe __{inc|mod}_lruvec_page_state because
-	 * these counters are not modified in interrupt context, and
-	 * pte lock(a spinlock) is held, which implies preemption disabled.
-	 */
-	__mod_lruvec_page_state(page, NR_FILE_MAPPED, -nr);
-
-	if (unlikely(PageMlocked(page)))
-		clear_page_mlock(page);
-out:
-	unlock_page_memcg(page);
-}
-
-static void page_remove_anon_compound_rmap(struct page *page)
-{
-	int i, nr;
-
-	if (!atomic_add_negative(-1, compound_mapcount_ptr(page)))
-		return;
-
-	/* Hugepages are not counted in NR_ANON_PAGES for now. */
-	if (unlikely(PageHuge(page)))
-		return;
-
-	if (!IS_ENABLED(CONFIG_TRANSPARENT_HUGEPAGE))
-		return;
-
-	__dec_node_page_state(page, NR_ANON_THPS);
-
-	if (TestClearPageDoubleMap(page)) {
-		/*
-		 * Subpages can be mapped with PTEs too. Check how many of
-		 * themi are still mapped.
-		 */
-		for (i = 0, nr = 0; i < HPAGE_PMD_NR; i++) {
-			if (atomic_add_negative(-1, &page[i]._mapcount))
-				nr++;
-		}
-	} else {
-		nr = HPAGE_PMD_NR;
-	}
-
-	if (unlikely(PageMlocked(page)))
-		clear_page_mlock(page);
-
-	if (nr) {
-		__mod_node_page_state(page_pgdat(page), NR_ANON_MAPPED, -nr);
-		deferred_split_huge_page(page);
-	}
+	mem_cgroup_end_update_page_stat(page, &locked, &flags);
 }
 
 /**
  * page_remove_rmap - take down pte mapping from a page
- * @page:	page to remove mapping from
- * @compound:	uncharge the page as compound or small page
+ * @page: page to remove mapping from
  *
  * The caller needs to hold the pte lock.
  */
-void page_remove_rmap(struct page *page, bool compound)
+void page_remove_rmap(struct page *page)
 {
-	if (!PageAnon(page))
-		return page_remove_file_rmap(page, compound);
+	bool anon = PageAnon(page);
+	bool locked;
+	unsigned long flags;
 
-	if (compound)
-		return page_remove_anon_compound_rmap(page);
+	/*
+	 * The anon case has no mem_cgroup page_stat to update; but may
+	 * uncharge_page() below, where the lock ordering can deadlock if
+	 * we hold the lock against page_stat move: so avoid it on anon.
+	 */
+	if (!anon)
+		mem_cgroup_begin_update_page_stat(page, &locked, &flags);
 
 	/* page still mapped by someone else? */
 	if (!atomic_add_negative(-1, &page->_mapcount))
-		return;
+		goto out;
 
 	/*
-	 * We use the irq-unsafe __{inc|mod}_zone_page_stat because
-	 * these counters are not modified in interrupt context, and
-	 * pte lock(a spinlock) is held, which implies preemption disabled.
+	 * Hugepages are not counted in NR_ANON_PAGES nor NR_FILE_MAPPED
+	 * and not charged by memcg for now.
 	 */
-	__dec_node_page_state(page, NR_ANON_MAPPED);
-
+	if (unlikely(PageHuge(page)))
+		goto out;
+	if (anon) {
+		mem_cgroup_uncharge_page(page);
+		if (!PageTransHuge(page))
+			__dec_zone_page_state(page, NR_ANON_PAGES);
+		else
+			__dec_zone_page_state(page,
+					      NR_ANON_TRANSPARENT_HUGEPAGES);
+	} else {
+		__dec_zone_page_state(page, NR_FILE_MAPPED);
+		mem_cgroup_dec_page_stat(page, MEMCG_NR_FILE_MAPPED);
+		mem_cgroup_end_update_page_stat(page, &locked, &flags);
+	}
 	if (unlikely(PageMlocked(page)))
 		clear_page_mlock(page);
-
-	if (PageTransCompound(page))
-		deferred_split_huge_page(compound_head(page));
-
 	/*
 	 * It would be tidy to reset the PageAnon mapping here,
 	 * but that might overwrite a racing page_add_anon_rmap
 	 * which increments mapcount after us but sets mapping
-	 * before us: so leave the reset to free_unref_page,
+	 * before us: so leave the reset to free_hot_cold_page,
 	 * and remember that it's only reliable while mapped.
 	 * Leaving it set also helps swapoff to reinstate ptes
 	 * faster for those pages still in swapcache.
 	 */
+	return;
+out:
+	if (!anon)
+		mem_cgroup_end_update_page_stat(page, &locked, &flags);
 }
+
+struct rmap_private {
+	enum ttu_flags flags;
+	int lazyfreed;
+};
 
 /*
  * @arg: enum ttu_flags will be passed to this argument
  */
-static bool try_to_unmap_one(struct page *page, struct vm_area_struct *vma,
+int try_to_unmap_one(struct page *page, struct vm_area_struct *vma,
 		     unsigned long address, void *arg)
 {
 	struct mm_struct *mm = vma->vm_mm;
-	struct page_vma_mapped_walk pvmw = {
-		.page = page,
-		.vma = vma,
-		.address = address,
-	};
+	pte_t *pte;
 	pte_t pteval;
-	struct page *subpage;
-	bool ret = true;
-	unsigned long start = address, end;
-	enum ttu_flags flags = (enum ttu_flags)arg;
+	spinlock_t *ptl;
+	int ret = SWAP_AGAIN;
+	struct rmap_private *rp = arg;
+	enum ttu_flags flags = rp->flags;
+
+	if ((flags & TTU_MIGRATION) && is_zone_device_page(page)) {
+		swp_entry_t entry;
+		pte_t swp_pte;
+		pmd_t *pmdp;
+
+		if (!is_hmm_page(page))
+			goto out;
+
+		pmdp = mm_find_pmd(mm, address);
+		if (!pmdp)
+			goto out;
+
+		pte = pte_offset_map_lock(mm, pmdp, address, &ptl);
+		if (!pte)
+			goto out;
+
+		pteval = ptep_get_and_clear(mm, address, pte);
+		if (pte_present(pteval) || pte_none(pteval) || pte_file(pteval)) {
+			set_pte_at(mm, address, pte, pteval);
+			goto out_unmap;
+		}
+
+		entry = pte_to_swp_entry(pteval);
+		if (!is_hmm_entry(entry)) {
+			set_pte_at(mm, address, pte, pteval);
+			goto out_unmap;
+		}
+
+		if (hmm_entry_to_page(entry) != page) {
+			set_pte_at(mm, address, pte, pteval);
+			goto out_unmap;
+		}
+
+		/*
+		 * Store the pfn of the page in a special migration
+		 * pte. do_swap_page() will wait until the migration
+		 * pte is removed and then restart fault handling.
+		 */
+		entry = make_migration_entry(page, 0);
+		swp_pte = swp_entry_to_pte(entry);
+		if (pte_soft_dirty(*pte))
+			swp_pte = pte_swp_mksoft_dirty(swp_pte);
+		set_pte_at(mm, address, pte, swp_pte);
+		goto out_unmap;
+	}
 
 	/* munlock has nothing to gain from examining un-locked vmas */
 	if ((flags & TTU_MUNLOCK) && !(vma->vm_flags & VM_LOCKED))
-		return true;
+		goto out;
 
-	if (IS_ENABLED(CONFIG_MIGRATION) && (flags & TTU_MIGRATION) &&
-	    is_zone_device_page(page) && !is_device_private_page(page))
-		return true;
-
-	if (flags & TTU_SPLIT_HUGE_PMD) {
-		split_huge_pmd_address(vma, address,
-				flags & TTU_SPLIT_FREEZE, page);
-	}
+	pte = page_check_address(page, mm, address, &ptl, 0);
+	if (!pte)
+		goto out;
 
 	/*
-	 * We have to assume the worse case ie pmd for invalidation. Note that
-	 * the page can not be free in this function as call of try_to_unmap()
-	 * must hold a reference on the page.
+	 * If the page is mlock()d, we cannot swap it out.
+	 * If it's recently referenced (perhaps page_referenced
+	 * skipped over this mm) then we should reactivate it.
 	 */
-	end = min(vma->vm_end, start + (PAGE_SIZE << compound_order(page)));
-	mmu_notifier_invalidate_range_start(vma->vm_mm, start, end);
-
-	while (page_vma_mapped_walk(&pvmw)) {
-#ifdef CONFIG_ARCH_ENABLE_THP_MIGRATION
-		/* PMD-mapped THP migration entry */
-		if (!pvmw.pte && (flags & TTU_MIGRATION)) {
-			VM_BUG_ON_PAGE(PageHuge(page) || !PageTransCompound(page), page);
-
-			if (!PageAnon(page))
-				continue;
-
-			set_pmd_migration_entry(&pvmw, page);
-			continue;
+	if (!(flags & TTU_IGNORE_MLOCK)) {
+		if (vma->vm_flags & VM_LOCKED) {
+			/* Holding pte lock, we do *not* need mmap_sem here */
+			mlock_vma_page(page);
+			ret = SWAP_MLOCK;
+			goto out_unmap;
 		}
-#endif
+		if (flags & TTU_MUNLOCK)
+			goto out_unmap;
+	}
+	if (!(flags & TTU_IGNORE_ACCESS)) {
+		if (ptep_clear_flush_young_notify(vma, address, pte)) {
+			ret = SWAP_FAIL;
+			goto out_unmap;
+		}
+  	}
 
+	/* Nuke the page table entry. */
+	flush_cache_page(vma, address, page_to_pfn(page));
+	if (should_defer_flush(mm, flags)) {
 		/*
-		 * If the page is mlock()d, we cannot swap it out.
-		 * If it's recently referenced (perhaps page_referenced
-		 * skipped over this mm) then we should reactivate it.
+		 * We clear the PTE but do not flush so potentially a remote
+		 * CPU could still be writing to the page. If the entry was
+		 * previously clean then the architecture must guarantee that
+		 * a clear->dirty transition on a cached TLB entry is written
+		 * through and traps if the PTE is unmapped.
 		 */
-		if (!(flags & TTU_IGNORE_MLOCK)) {
-			if (vma->vm_flags & VM_LOCKED) {
-				/* PTE-mapped THP are never mlocked */
-				if (!PageTransCompound(page)) {
-					/*
-					 * Holding pte lock, we do *not* need
-					 * mmap_sem here
-					 */
-					mlock_vma_page(page);
-				}
-				ret = false;
-				page_vma_mapped_walk_done(&pvmw);
-				break;
-			}
-			if (flags & TTU_MUNLOCK)
-				continue;
-		}
+		pteval = ptep_get_and_clear(mm, address, pte);
 
-		/* Unexpected PMD-mapped THP? */
-		VM_BUG_ON_PAGE(!pvmw.pte, page);
+		set_tlb_ubc_flush_pending(mm, page, pte_dirty(pteval));
+	} else {
+		pteval = ptep_clear_flush(vma, address, pte);
+	}
 
-		subpage = page - page_to_pfn(page) + pte_pfn(*pvmw.pte);
-		address = pvmw.address;
+	/* Move the dirty bit to the physical page now the pte is gone. */
+	if (pte_dirty(pteval))
+		set_page_dirty(page);
 
+	/* Update high watermark before we lower rss */
+	update_hiwater_rss(mm);
 
-		if (IS_ENABLED(CONFIG_MIGRATION) &&
-		    (flags & TTU_MIGRATION) &&
-		    is_zone_device_page(page)) {
-			swp_entry_t entry;
-			pte_t swp_pte;
-
-			pteval = ptep_get_and_clear(mm, pvmw.address, pvmw.pte);
-
-			/*
-			 * Store the pfn of the page in a special migration
-			 * pte. do_swap_page() will wait until the migration
-			 * pte is removed and then restart fault handling.
-			 */
-			entry = make_migration_entry(page, 0);
-			swp_pte = swp_entry_to_pte(entry);
-			if (pte_soft_dirty(pteval))
-				swp_pte = pte_swp_mksoft_dirty(swp_pte);
-			set_pte_at(mm, pvmw.address, pvmw.pte, swp_pte);
-			/*
-			 * No need to invalidate here it will synchronize on
-			 * against the special swap migration pte.
-			 */
-			goto discard;
-		}
-
-		if (!(flags & TTU_IGNORE_ACCESS)) {
-			if (ptep_clear_flush_young_notify(vma, address,
-						pvmw.pte)) {
-				ret = false;
-				page_vma_mapped_walk_done(&pvmw);
-				break;
-			}
-		}
-
-		/* Nuke the page table entry. */
-		flush_cache_page(vma, address, pte_pfn(*pvmw.pte));
-		if (should_defer_flush(mm, flags)) {
-			/*
-			 * We clear the PTE but do not flush so potentially
-			 * a remote CPU could still be writing to the page.
-			 * If the entry was previously clean then the
-			 * architecture must guarantee that a clear->dirty
-			 * transition on a cached TLB entry is written through
-			 * and traps if the PTE is unmapped.
-			 */
-			pteval = ptep_get_and_clear(mm, address, pvmw.pte);
-
-			set_tlb_ubc_flush_pending(mm, pte_dirty(pteval));
-		} else {
-			pteval = ptep_clear_flush(vma, address, pvmw.pte);
-		}
-
-		/* Move the dirty bit to the page. Now the pte is gone. */
-		if (pte_dirty(pteval))
-			set_page_dirty(page);
-
-		/* Update high watermark before we lower rss */
-		update_hiwater_rss(mm);
-
-		if (PageHWPoison(page) && !(flags & TTU_IGNORE_HWPOISON)) {
-			pteval = swp_entry_to_pte(make_hwpoison_entry(subpage));
-			if (PageHuge(page)) {
-				int nr = 1 << compound_order(page);
-				hugetlb_count_sub(nr, mm);
-				set_huge_swap_pte_at(mm, address,
-						     pvmw.pte, pteval,
-						     vma_mmu_pagesize(vma));
-			} else {
-				dec_mm_counter(mm, mm_counter(page));
-				set_pte_at(mm, address, pvmw.pte, pteval);
-			}
-
-		} else if (pte_unused(pteval)) {
-			/*
-			 * The guest indicated that the page content is of no
-			 * interest anymore. Simply discard the pte, vmscan
-			 * will take care of the rest.
-			 */
+	if (PageHWPoison(page) && !(flags & TTU_IGNORE_HWPOISON)) {
+		if (!PageHuge(page))
 			dec_mm_counter(mm, mm_counter(page));
-			/* We have to invalidate as we cleared the pte */
-			mmu_notifier_invalidate_range(mm, address,
-						      address + PAGE_SIZE);
-		} else if (IS_ENABLED(CONFIG_MIGRATION) &&
-				(flags & (TTU_MIGRATION|TTU_SPLIT_FREEZE))) {
-			swp_entry_t entry;
-			pte_t swp_pte;
-			/*
-			 * Store the pfn of the page in a special migration
-			 * pte. do_swap_page() will wait until the migration
-			 * pte is removed and then restart fault handling.
-			 */
-			entry = make_migration_entry(subpage,
-					pte_write(pteval));
-			swp_pte = swp_entry_to_pte(entry);
-			if (pte_soft_dirty(pteval))
-				swp_pte = pte_swp_mksoft_dirty(swp_pte);
-			set_pte_at(mm, address, pvmw.pte, swp_pte);
-			/*
-			 * No need to invalidate here it will synchronize on
-			 * against the special swap migration pte.
-			 */
-		} else if (PageAnon(page)) {
-			swp_entry_t entry = { .val = page_private(subpage) };
-			pte_t swp_pte;
+		set_pte_at(mm, address, pte,
+			   swp_entry_to_pte(make_hwpoison_entry(page)));
+	} else if (PageAnon(page)) {
+		swp_entry_t entry = { .val = page_private(page) };
+		pte_t swp_pte;
+
+		if (PageSwapCache(page)) {
 			/*
 			 * Store the swap location in the pte.
 			 * See handle_pte_fault() ...
 			 */
-			if (unlikely(PageSwapBacked(page) != PageSwapCache(page))) {
-				WARN_ON_ONCE(1);
-				ret = false;
-				/* We have to invalidate as we cleared the pte */
-				mmu_notifier_invalidate_range(mm, address,
-							address + PAGE_SIZE);
-				page_vma_mapped_walk_done(&pvmw);
-				break;
-			}
 
-			/* MADV_FREE page check */
-			if (!PageSwapBacked(page)) {
-				if (!PageDirty(page)) {
-					/* Invalidate as we cleared the pte */
-					mmu_notifier_invalidate_range(mm,
-						address, address + PAGE_SIZE);
-					dec_mm_counter(mm, MM_ANONPAGES);
-					goto discard;
-				}
-
-				/*
-				 * If the page was redirtied, it cannot be
-				 * discarded. Remap the page to page table.
-				 */
-				set_pte_at(mm, address, pvmw.pte, pteval);
-				SetPageSwapBacked(page);
-				ret = false;
-				page_vma_mapped_walk_done(&pvmw);
-				break;
+			if (!PageDirty(page) && (flags & TTU_LZFREE)) {
+				/* It's a freeable page by MADV_FREE */
+				dec_mm_counter(mm, MM_ANONPAGES);
+				rp->lazyfreed++;
+				goto discard;
 			}
 
 			if (swap_duplicate(entry) < 0) {
-				set_pte_at(mm, address, pvmw.pte, pteval);
-				ret = false;
-				page_vma_mapped_walk_done(&pvmw);
-				break;
+				set_pte_at(mm, address, pte, pteval);
+				ret = SWAP_FAIL;
+				goto out_unmap;
 			}
 			if (list_empty(&mm->mmlist)) {
 				spin_lock(&mmlist_lock);
@@ -1564,46 +1475,237 @@ static bool try_to_unmap_one(struct page *page, struct vm_area_struct *vma,
 			}
 			dec_mm_counter(mm, MM_ANONPAGES);
 			inc_mm_counter(mm, MM_SWAPENTS);
-			swp_pte = swp_entry_to_pte(entry);
-			if (pte_soft_dirty(pteval))
-				swp_pte = pte_swp_mksoft_dirty(swp_pte);
-			set_pte_at(mm, address, pvmw.pte, swp_pte);
-			/* Invalidate as we cleared the pte */
-			mmu_notifier_invalidate_range(mm, address,
-						      address + PAGE_SIZE);
-		} else {
+		} else if (IS_ENABLED(CONFIG_MIGRATION)) {
 			/*
-			 * We should not need to notify here as we reach this
-			 * case only from freeze_page() itself only call from
-			 * split_huge_page_to_list() so everything below must
-			 * be true:
-			 *   - page is not anonymous
-			 *   - page is locked
-			 *
-			 * So as it is a locked file back page thus it can not
-			 * be remove from the page cache and replace by a new
-			 * page before mmu_notifier_invalidate_range_end so no
-			 * concurrent thread might update its page table to
-			 * point at new page while a device still is using this
-			 * page.
-			 *
-			 * See Documentation/vm/mmu_notifier.txt
+			 * Store the pfn of the page in a special migration
+			 * pte. do_swap_page() will wait until the migration
+			 * pte is removed and then restart fault handling.
 			 */
-			dec_mm_counter(mm, mm_counter_file(page));
+			BUG_ON(!(flags & TTU_MIGRATION));
+			entry = make_migration_entry(page, pte_write(pteval));
 		}
+		swp_pte = swp_entry_to_pte(entry);
+		if (pte_soft_dirty(pteval))
+			swp_pte = pte_swp_mksoft_dirty(swp_pte);
+		set_pte_at(mm, address, pte, swp_pte);
+		BUG_ON(pte_file(*pte));
+	} else if (IS_ENABLED(CONFIG_MIGRATION) &&
+		   (flags & TTU_MIGRATION)) {
+		/* Establish migration entry for a file page */
+		swp_entry_t entry;
+		entry = make_migration_entry(page, pte_write(pteval));
+		set_pte_at(mm, address, pte, swp_entry_to_pte(entry));
+	} else
+		dec_mm_counter(mm, mm_counter_file(page));
+
 discard:
-		/*
-		 * No need to call mmu_notifier_invalidate_range() it has be
-		 * done above for all cases requiring it to happen under page
-		 * table lock before mmu_notifier_invalidate_range_end()
-		 *
-		 * See Documentation/vm/mmu_notifier.txt
-		 */
-		page_remove_rmap(subpage, PageHuge(page));
-		put_page(page);
+	page_remove_rmap(page);
+	page_cache_release(page);
+
+out_unmap:
+	pte_unmap_unlock(pte, ptl);
+	if (ret != SWAP_FAIL && ret != SWAP_MLOCK && !(flags & TTU_MUNLOCK))
+		mmu_notifier_invalidate_page(mm, address);
+out:
+	return ret;
+}
+
+/*
+ * objrmap doesn't work for nonlinear VMAs because the assumption that
+ * offset-into-file correlates with offset-into-virtual-addresses does not hold.
+ * Consequently, given a particular page and its ->index, we cannot locate the
+ * ptes which are mapping that page without an exhaustive linear search.
+ *
+ * So what this code does is a mini "virtual scan" of each nonlinear VMA which
+ * maps the file to which the target page belongs.  The ->vm_private_data field
+ * holds the current cursor into that scan.  Successive searches will circulate
+ * around the vma's virtual address space.
+ *
+ * So as more replacement pressure is applied to the pages in a nonlinear VMA,
+ * more scanning pressure is placed against them as well.   Eventually pages
+ * will become fully unmapped and are eligible for eviction.
+ *
+ * For very sparsely populated VMAs this is a little inefficient - chances are
+ * there there won't be many ptes located within the scan cluster.  In this case
+ * maybe we could scan further - to the end of the pte page, perhaps.
+ *
+ * Mlocked pages:  check VM_LOCKED under mmap_sem held for read, if we can
+ * acquire it without blocking.  If vma locked, mlock the pages in the cluster,
+ * rather than unmapping them.  If we encounter the "check_page" that vmscan is
+ * trying to unmap, return SWAP_MLOCK, else default SWAP_AGAIN.
+ */
+#define CLUSTER_SIZE	min(32*PAGE_SIZE, PMD_SIZE)
+#define CLUSTER_MASK	(~(CLUSTER_SIZE - 1))
+
+static int try_to_unmap_cluster(unsigned long cursor, unsigned int *mapcount,
+		struct vm_area_struct *vma, struct page *check_page)
+{
+	struct mm_struct *mm = vma->vm_mm;
+	pmd_t *pmd;
+	pte_t *pte;
+	pte_t pteval;
+	spinlock_t *ptl;
+	struct page *page;
+	unsigned long address;
+	unsigned long mmun_start;	/* For mmu_notifiers */
+	unsigned long mmun_end;		/* For mmu_notifiers */
+	unsigned long end;
+	int ret = SWAP_AGAIN;
+	int locked_vma = 0;
+
+	address = (vma->vm_start + cursor) & CLUSTER_MASK;
+	end = address + CLUSTER_SIZE;
+	if (address < vma->vm_start)
+		address = vma->vm_start;
+	if (end > vma->vm_end)
+		end = vma->vm_end;
+
+	pmd = mm_find_pmd(mm, address);
+	if (!pmd)
+		return ret;
+
+	mmun_start = address;
+	mmun_end   = end;
+	mmu_notifier_invalidate_range_start(mm, mmun_start, mmun_end);
+
+	/*
+	 * If we can acquire the mmap_sem for read, and vma is VM_LOCKED,
+	 * keep the sem while scanning the cluster for mlocking pages.
+	 */
+	if (down_read_trylock(&vma->vm_mm->mmap_sem)) {
+		locked_vma = (vma->vm_flags & VM_LOCKED);
+		if (!locked_vma)
+			up_read(&vma->vm_mm->mmap_sem); /* don't need it */
 	}
 
-	mmu_notifier_invalidate_range_end(vma->vm_mm, start, end);
+	pte = pte_offset_map_lock(mm, pmd, address, &ptl);
+
+	/* Update high watermark before we lower rss */
+	update_hiwater_rss(mm);
+
+	for (; address < end; pte++, address += PAGE_SIZE) {
+		if (!pte_present(*pte))
+			continue;
+		page = vm_normal_page(vma, address, *pte);
+		BUG_ON(!page || PageAnon(page));
+
+		if (locked_vma) {
+			if (page == check_page) {
+				/* we know we have check_page locked */
+				mlock_vma_page(page);
+				ret = SWAP_MLOCK;
+			} else if (trylock_page(page)) {
+				/*
+				 * If we can lock the page, perform mlock.
+				 * Otherwise leave the page alone, it will be
+				 * eventually encountered again later.
+				 */
+				mlock_vma_page(page);
+				unlock_page(page);
+			}
+			continue;	/* don't unmap */
+		}
+
+		if (ptep_clear_flush_young_notify(vma, address, pte))
+			continue;
+
+		/* Nuke the page table entry. */
+		flush_cache_page(vma, address, pte_pfn(*pte));
+		pteval = ptep_clear_flush_notify(vma, address, pte);
+
+		/* If nonlinear, store the file page offset in the pte. */
+		if (page->index != linear_page_index(vma, address)) {
+			pte_t ptfile = pgoff_to_pte(page->index);
+			if (pte_soft_dirty(pteval))
+				ptfile = pte_file_mksoft_dirty(ptfile);
+			set_pte_at(mm, address, pte, ptfile);
+		}
+
+		/* Move the dirty bit to the physical page now the pte is gone. */
+		if (pte_dirty(pteval))
+			set_page_dirty(page);
+
+		page_remove_rmap(page);
+		page_cache_release(page);
+		dec_mm_counter(mm, mm_counter_file(page));
+		(*mapcount)--;
+	}
+	pte_unmap_unlock(pte - 1, ptl);
+	mmu_notifier_invalidate_range_end(mm, mmun_start, mmun_end);
+	if (locked_vma)
+		up_read(&vma->vm_mm->mmap_sem);
+	return ret;
+}
+
+static int try_to_unmap_nonlinear(struct page *page,
+		struct address_space *mapping, struct vm_area_struct *vma)
+{
+	int ret = SWAP_AGAIN;
+	unsigned long cursor;
+	unsigned long max_nl_cursor = 0;
+	unsigned long max_nl_size = 0;
+	unsigned int mapcount;
+
+	list_for_each_entry(vma,
+		&mapping->i_mmap_nonlinear, shared.nonlinear) {
+
+		cursor = (unsigned long) vma->vm_private_data;
+		if (cursor > max_nl_cursor)
+			max_nl_cursor = cursor;
+		cursor = vma->vm_end - vma->vm_start;
+		if (cursor > max_nl_size)
+			max_nl_size = cursor;
+	}
+
+	if (max_nl_size == 0) {	/* all nonlinears locked or reserved ? */
+		return SWAP_FAIL;
+	}
+
+	/*
+	 * We don't try to search for this page in the nonlinear vmas,
+	 * and page_referenced wouldn't have found it anyway.  Instead
+	 * just walk the nonlinear vmas trying to age and unmap some.
+	 * The mapcount of the page we came in with is irrelevant,
+	 * but even so use it as a guide to how hard we should try?
+	 */
+	mapcount = page_mapcount(page);
+	if (!mapcount)
+		return ret;
+
+	cond_resched();
+
+	max_nl_size = (max_nl_size + CLUSTER_SIZE - 1) & CLUSTER_MASK;
+	if (max_nl_cursor == 0)
+		max_nl_cursor = CLUSTER_SIZE;
+
+	do {
+		list_for_each_entry(vma,
+			&mapping->i_mmap_nonlinear, shared.nonlinear) {
+
+			cursor = (unsigned long) vma->vm_private_data;
+			while (cursor < max_nl_cursor &&
+				cursor < vma->vm_end - vma->vm_start) {
+				if (try_to_unmap_cluster(cursor, &mapcount,
+						vma, page) == SWAP_MLOCK)
+					ret = SWAP_MLOCK;
+				cursor += CLUSTER_SIZE;
+				vma->vm_private_data = (void *) cursor;
+				if ((int)mapcount <= 0)
+					return ret;
+			}
+			vma->vm_private_data = (void *) max_nl_cursor;
+		}
+		cond_resched();
+		max_nl_cursor += CLUSTER_SIZE;
+	} while (max_nl_cursor <= max_nl_size);
+
+	/*
+	 * Don't loop forever (perhaps all the remaining pages are
+	 * in locked vmas).  Reset cursor on all unreserved nonlinear
+	 * vmas, now forgetting on which ones it had fallen behind.
+	 */
+	list_for_each_entry(vma, &mapping->i_mmap_nonlinear, shared.nonlinear)
+		vma->vm_private_data = NULL;
 
 	return ret;
 }
@@ -1627,10 +1729,10 @@ static bool invalid_migration_vma(struct vm_area_struct *vma, void *arg)
 	return is_vma_temporary_stack(vma);
 }
 
-static int page_mapcount_is_zero(struct page *page)
+static int page_not_mapped(struct page *page)
 {
-	return !total_mapcount(page);
-}
+	return !page_mapped(page);
+};
 
 /**
  * try_to_unmap - try to remove all page table mappings to a page
@@ -1639,17 +1741,30 @@ static int page_mapcount_is_zero(struct page *page)
  *
  * Tries to remove all the page table entries which are mapping this
  * page, used in the pageout path.  Caller must hold the page lock.
+ * Return values are:
  *
- * If unmap is successful, return true. Otherwise, false.
+ * SWAP_SUCCESS	- we succeeded in removing all mappings
+ * SWAP_AGAIN	- we missed a mapping, try again later
+ * SWAP_FAIL	- the page is unswappable
+ * SWAP_MLOCK	- page is mlocked.
  */
-bool try_to_unmap(struct page *page, enum ttu_flags flags)
+int try_to_unmap(struct page *page, enum ttu_flags flags)
 {
+	int ret;
+	struct rmap_private rp = {
+		.flags = flags,
+		.lazyfreed = 0,
+	};
+
 	struct rmap_walk_control rwc = {
 		.rmap_one = try_to_unmap_one,
-		.arg = (void *)flags,
-		.done = page_mapcount_is_zero,
+		.arg = &rp,
+		.done = page_not_mapped,
+		.file_nonlinear = try_to_unmap_nonlinear,
 		.anon_lock = page_lock_anon_vma_read,
 	};
+
+	VM_BUG_ON(!PageHuge(page) && PageTransHuge(page));
 
 	/*
 	 * During exec, a temporary VMA is setup and later moved.
@@ -1659,22 +1774,18 @@ bool try_to_unmap(struct page *page, enum ttu_flags flags)
 	 * locking requirements of exec(), migration skips
 	 * temporary VMAs until after exec() completes.
 	 */
-	if ((flags & (TTU_MIGRATION|TTU_SPLIT_FREEZE))
-	    && !PageKsm(page) && PageAnon(page))
+	if (flags & TTU_MIGRATION && !PageKsm(page) && PageAnon(page))
 		rwc.invalid_vma = invalid_migration_vma;
 
-	if (flags & TTU_RMAP_LOCKED)
-		rmap_walk_locked(page, &rwc);
-	else
-		rmap_walk(page, &rwc);
+	ret = rmap_walk(page, &rwc);
 
-	return !page_mapcount(page) ? true : false;
+	if (ret != SWAP_MLOCK && !page_mapped(page)) {
+		ret = SWAP_SUCCESS;
+		if (rp.lazyfreed && !PageDirty(page))
+			ret = SWAP_LZFREE;
+	}
+	return ret;
 }
-
-static int page_not_mapped(struct page *page)
-{
-	return !page_mapped(page);
-};
 
 /**
  * try_to_munlock - try to munlock a page
@@ -1683,22 +1794,40 @@ static int page_not_mapped(struct page *page)
  * Called from munlock code.  Checks all of the VMAs mapping the page
  * to make sure nobody else has this page mlocked. The page will be
  * returned with PG_mlocked cleared if no other vmas have it mlocked.
+ *
+ * Return values are:
+ *
+ * SWAP_AGAIN	- no vma is holding page mlocked, or,
+ * SWAP_AGAIN	- page mapped in mlocked vma -- couldn't acquire mmap sem
+ * SWAP_FAIL	- page cannot be located at present
+ * SWAP_MLOCK	- page is now mlocked.
  */
-
-void try_to_munlock(struct page *page)
+int try_to_munlock(struct page *page)
 {
+	int ret;
+	struct rmap_private rp = {
+		.flags = TTU_MUNLOCK,
+		.lazyfreed = 0,
+	};
+
 	struct rmap_walk_control rwc = {
 		.rmap_one = try_to_unmap_one,
-		.arg = (void *)TTU_MUNLOCK,
+		.arg = &rp,
 		.done = page_not_mapped,
+		/*
+		 * We don't bother to try to find the munlocked page in
+		 * nonlinears. It's costly. Instead, later, page reclaim logic
+		 * may call try_to_unmap() and recover PG_mlocked lazily.
+		 */
+		.file_nonlinear = NULL,
 		.anon_lock = page_lock_anon_vma_read,
 
 	};
 
-	VM_BUG_ON_PAGE(!PageLocked(page) || PageLRU(page), page);
-	VM_BUG_ON_PAGE(PageCompound(page) && PageDoubleMap(page), page);
+	VM_BUG_ON(!PageLocked(page) || PageLRU(page));
 
-	rmap_walk(page, &rwc);
+	ret = rmap_walk(page, &rwc);
+	return ret;
 }
 
 void __put_anon_vma(struct anon_vma *anon_vma)
@@ -1746,43 +1875,35 @@ static struct anon_vma *rmap_walk_anon_lock(struct page *page,
  * vm_flags for that VMA.  That should be OK, because that vma shouldn't be
  * LOCKED.
  */
-static void rmap_walk_anon(struct page *page, struct rmap_walk_control *rwc,
-		bool locked)
+static int rmap_walk_anon(struct page *page, struct rmap_walk_control *rwc)
 {
 	struct anon_vma *anon_vma;
-	pgoff_t pgoff_start, pgoff_end;
+	pgoff_t pgoff;
 	struct anon_vma_chain *avc;
+	int ret = SWAP_AGAIN;
 
-	if (locked) {
-		anon_vma = page_anon_vma(page);
-		/* anon_vma disappear under us? */
-		VM_BUG_ON_PAGE(!anon_vma, page);
-	} else {
-		anon_vma = rmap_walk_anon_lock(page, rwc);
-	}
+	anon_vma = rmap_walk_anon_lock(page, rwc);
 	if (!anon_vma)
-		return;
+		return ret;
 
-	pgoff_start = page_to_pgoff(page);
-	pgoff_end = pgoff_start + hpage_nr_pages(page) - 1;
-	anon_vma_interval_tree_foreach(avc, &anon_vma->rb_root,
-			pgoff_start, pgoff_end) {
+	pgoff = page_to_pgoff(page);
+	anon_vma_interval_tree_foreach(avc, &anon_vma->rb_root, pgoff, pgoff) {
 		struct vm_area_struct *vma = avc->vma;
 		unsigned long address = vma_address(page, vma);
-
-		cond_resched();
 
 		if (rwc->invalid_vma && rwc->invalid_vma(vma, rwc->arg))
 			continue;
 
-		if (!rwc->rmap_one(page, vma, address, rwc->arg))
+		ret = rwc->rmap_one(page, vma, address, rwc->arg);
+		if (ret != SWAP_AGAIN)
 			break;
 		if (rwc->done && rwc->done(page))
 			break;
-	}
 
-	if (!locked)
-		anon_vma_unlock_read(anon_vma);
+		cond_resched();
+	}
+	anon_vma_unlock_read(anon_vma);
+	return ret;
 }
 
 /*
@@ -1798,67 +1919,61 @@ static void rmap_walk_anon(struct page *page, struct rmap_walk_control *rwc,
  * vm_flags for that VMA.  That should be OK, because that vma shouldn't be
  * LOCKED.
  */
-static void rmap_walk_file(struct page *page, struct rmap_walk_control *rwc,
-		bool locked)
+static int rmap_walk_file(struct page *page, struct rmap_walk_control *rwc)
 {
-	struct address_space *mapping = page_mapping(page);
-	pgoff_t pgoff_start, pgoff_end;
+	struct address_space *mapping = page->mapping;
+	pgoff_t pgoff;
 	struct vm_area_struct *vma;
+	int ret = SWAP_AGAIN;
 
 	/*
 	 * The page lock not only makes sure that page->mapping cannot
 	 * suddenly be NULLified by truncation, it makes sure that the
 	 * structure at mapping cannot be freed and reused yet,
-	 * so we can safely take mapping->i_mmap_rwsem.
+	 * so we can safely take mapping->i_mmap_mutex.
 	 */
-	VM_BUG_ON_PAGE(!PageLocked(page), page);
+	VM_BUG_ON(!PageLocked(page));
 
 	if (!mapping)
-		return;
-
-	pgoff_start = page_to_pgoff(page);
-	pgoff_end = pgoff_start + hpage_nr_pages(page) - 1;
-	if (!locked)
-		i_mmap_lock_read(mapping);
-	vma_interval_tree_foreach(vma, &mapping->i_mmap,
-			pgoff_start, pgoff_end) {
+		return ret;
+	pgoff = page_to_pgoff(page);
+	mutex_lock(&mapping->i_mmap_mutex);
+	vma_interval_tree_foreach(vma, &mapping->i_mmap, pgoff, pgoff) {
 		unsigned long address = vma_address(page, vma);
-
-		cond_resched();
 
 		if (rwc->invalid_vma && rwc->invalid_vma(vma, rwc->arg))
 			continue;
 
-		if (!rwc->rmap_one(page, vma, address, rwc->arg))
+		ret = rwc->rmap_one(page, vma, address, rwc->arg);
+		if (ret != SWAP_AGAIN)
 			goto done;
 		if (rwc->done && rwc->done(page))
 			goto done;
+
+		cond_resched();
 	}
 
+	if (!rwc->file_nonlinear)
+		goto done;
+
+	if (list_empty(&mapping->i_mmap_nonlinear))
+		goto done;
+
+	ret = rwc->file_nonlinear(page, mapping, vma);
+
 done:
-	if (!locked)
-		i_mmap_unlock_read(mapping);
+	mutex_unlock(&mapping->i_mmap_mutex);
+	return ret;
 }
 
-void rmap_walk(struct page *page, struct rmap_walk_control *rwc)
+int rmap_walk(struct page *page, struct rmap_walk_control *rwc)
 {
 	if (unlikely(PageKsm(page)))
-		rmap_walk_ksm(page, rwc);
+		return rmap_walk_ksm(page, rwc);
 	else if (PageAnon(page))
-		rmap_walk_anon(page, rwc, false);
+		return rmap_walk_anon(page, rwc);
 	else
-		rmap_walk_file(page, rwc, false);
-}
-
-/* Like rmap_walk, but caller holds relevant rmap lock */
-void rmap_walk_locked(struct page *page, struct rmap_walk_control *rwc)
-{
-	/* no ksm support for now */
-	VM_BUG_ON_PAGE(PageKsm(page), page);
-	if (PageAnon(page))
-		rmap_walk_anon(page, rwc, true);
-	else
-		rmap_walk_file(page, rwc, true);
+		return rmap_walk_file(page, rwc);
 }
 
 #ifdef CONFIG_HUGETLB_PAGE
@@ -1893,7 +2008,7 @@ void hugepage_add_anon_rmap(struct page *page,
 	BUG_ON(!PageLocked(page));
 	BUG_ON(!anon_vma);
 	/* address might be in next vma when migration races vma_adjust */
-	first = atomic_inc_and_test(compound_mapcount_ptr(page));
+	first = atomic_inc_and_test(&page->_mapcount);
 	if (first)
 		__hugepage_set_anon_rmap(page, vma, address, 0);
 }
@@ -1902,7 +2017,7 @@ void hugepage_add_new_anon_rmap(struct page *page,
 			struct vm_area_struct *vma, unsigned long address)
 {
 	BUG_ON(address < vma->vm_start || address >= vma->vm_end);
-	atomic_set(compound_mapcount_ptr(page), 0);
+	atomic_set(&page->_mapcount, 0);
 	__hugepage_set_anon_rmap(page, vma, address, 1);
 }
 #endif /* CONFIG_HUGETLB_PAGE */

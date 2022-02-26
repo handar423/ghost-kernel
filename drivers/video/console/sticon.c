@@ -46,7 +46,7 @@
 
 #include <asm/io.h>
 
-#include "../fbdev/sticore.h"
+#include "../sticore.h"
 
 /* switching to graphics mode */
 #define BLANK 0
@@ -344,7 +344,6 @@ static const struct consw sti_con = {
 
 static int __init sticonsole_init(void)
 {
-    int err;
     /* already initialized ? */
     if (sticon_sti)
 	 return 0;
@@ -355,10 +354,7 @@ static int __init sticonsole_init(void)
 
     if (conswitchp == &dummy_con) {
 	printk(KERN_INFO "sticon: Initializing STI text console.\n");
-	console_lock();
-	err = do_take_over_console(&sti_con, 0, MAX_NR_CONSOLES - 1, 1);
-	console_unlock();
-	return err;
+	return take_over_console(&sti_con, 0, MAX_NR_CONSOLES - 1, 1);
     }
     return 0;
 }

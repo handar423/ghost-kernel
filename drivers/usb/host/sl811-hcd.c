@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * SL811HS HCD (Host Controller Driver) for USB.
  *
@@ -23,7 +22,7 @@
  * and usb-storage.
  *
  * TODO:
- * - usb suspend/resume triggered by sl811
+ * - usb suspend/resume triggered by sl811 (with PM_RUNTIME)
  * - various issues noted in the code
  * - performance work; use both register banks; ...
  * - use urb->iso_frame_desc[] with ISO transfers
@@ -675,7 +674,7 @@ retry:
 			sl811->next_periodic = sl811->periodic[index];
 	}
 
-	/* hub_wq manages debouncing and wakeup */
+	/* khubd manages debouncing and wakeup */
 	if (irqstat & SL11H_INTMASK_INSRMV) {
 		sl811->stat_insrmv++;
 
@@ -715,7 +714,7 @@ retry:
 #endif
 
 		/* port status seems weird until after reset, so
-		 * force the reset and make hub_wq clean up later.
+		 * force the reset and make khubd clean up later.
 		 */
 		if (irqstat & SL11H_INTMASK_RD)
 			sl811->port1 &= ~USB_PORT_STAT_CONNECTION;
@@ -1080,7 +1079,7 @@ sl811h_hub_status_data(struct usb_hcd *hcd, char *buf)
 	if (!(sl811->port1 & (0xffff << 16)))
 		return 0;
 
-	/* tell hub_wq port 1 changed */
+	/* tell khubd port 1 changed */
 	*buf = (1 << 1);
 	return 1;
 }
@@ -1092,7 +1091,7 @@ sl811h_hub_descriptor (
 ) {
 	u16		temp = 0;
 
-	desc->bDescriptorType = USB_DT_HUB;
+	desc->bDescriptorType = 0x29;
 	desc->bHubContrCurrent = 0;
 
 	desc->bNbrPorts = 1;
@@ -1104,12 +1103,12 @@ sl811h_hub_descriptor (
 		desc->bPwrOn2PwrGood = sl811->board->potpg;
 		if (!desc->bPwrOn2PwrGood)
 			desc->bPwrOn2PwrGood = 10;
-		temp = HUB_CHAR_INDV_PORT_LPSM;
+		temp = 0x0001;
 	} else
-		temp = HUB_CHAR_NO_LPSM;
+		temp = 0x0002;
 
 	/* no overcurrent errors detection/handling */
-	temp |= HUB_CHAR_NO_OCPM;
+	temp |= 0x0010;
 
 	desc->wHubCharacteristics = cpu_to_le16(temp);
 
@@ -1119,9 +1118,9 @@ sl811h_hub_descriptor (
 }
 
 static void
-sl811h_timer(struct timer_list *t)
+sl811h_timer(unsigned long _sl811)
 {
-	struct sl811 	*sl811 = from_timer(sl811, t, timer);
+	struct sl811 	*sl811 = (void *) _sl811;
 	unsigned long	flags;
 	u8		irqstat;
 	u8		signaling = sl811->ctrl1 & SL11H_CTL1MASK_FORCE;
@@ -1197,7 +1196,7 @@ sl811h_timer(struct timer_list *t)
 		sl811_write(sl811, SL811_EP_A(SL11H_HOSTCTLREG),
 				SL11H_HCTLMASK_ARM);
 
-		/* hub_wq provides debounce delay */
+		/* khubd provides debounce delay */
 	} else {
 		sl811->ctrl1 = 0;
 	}
@@ -1260,7 +1259,7 @@ sl811h_hub_control(
 			sl811_write(sl811, SL11H_CTLREG1, sl811->ctrl1);
 
 			mod_timer(&sl811->timer, jiffies
-					+ msecs_to_jiffies(USB_RESUME_TIMEOUT));
+					+ msecs_to_jiffies(20));
 			break;
 		case USB_PORT_FEAT_POWER:
 			port_power(sl811, 0);
@@ -1413,7 +1412,7 @@ static int sl811h_show(struct seq_file *s, void *unused)
 			case SL11H_CTL1MASK_SE0: s = " se0/reset"; break;
 			case SL11H_CTL1MASK_K: s = " k/resume"; break;
 			default: s = "j"; break;
-			} s; }),
+			}; s; }),
 			(t & SL11H_CTL1MASK_LSPD) ? " lowspeed" : "",
 			(t & SL11H_CTL1MASK_SUSPEND) ? " suspend" : "");
 
@@ -1446,7 +1445,7 @@ static int sl811h_show(struct seq_file *s, void *unused)
 			case USB_PID_SETUP: s = "setup"; break;
 			case USB_PID_ACK: s = "status"; break;
 			default: s = "?"; break;
-			} s;}),
+			}; s;}),
 			ep->maxpacket,
 			ep->nak_count, ep->error_count);
 		list_for_each_entry (urb, &ep->hep->urb_list, urb_list) {
@@ -1555,7 +1554,7 @@ sl811h_start(struct usb_hcd *hcd)
 
 /*-------------------------------------------------------------------------*/
 
-static const struct hc_driver sl811h_hc_driver = {
+static struct hc_driver sl811h_hc_driver = {
 	.description =		hcd_name,
 	.hcd_priv_size =	sizeof(struct sl811),
 
@@ -1691,8 +1690,10 @@ sl811h_probe(struct platform_device *dev)
 
 	spin_lock_init(&sl811->lock);
 	INIT_LIST_HEAD(&sl811->async);
-	sl811->board = dev_get_platdata(&dev->dev);
-	timer_setup(&sl811->timer, sl811h_timer, 0);
+	sl811->board = dev->dev.platform_data;
+	init_timer(&sl811->timer);
+	sl811->timer.function = sl811h_timer;
+	sl811->timer.data = (unsigned long) sl811;
 	sl811->addr_reg = addr_reg;
 	sl811->data_reg = data_reg;
 
@@ -1730,8 +1731,6 @@ sl811h_probe(struct platform_device *dev)
 	if (retval != 0)
 		goto err6;
 
-	device_wakeup_enable(hcd->self.controller);
-
 	create_debug_file(sl811);
 	return retval;
 
@@ -1751,7 +1750,8 @@ sl811h_probe(struct platform_device *dev)
 #ifdef	CONFIG_PM
 
 /* for this device there's no useful distinction between the controller
- * and its root hub.
+ * and its root hub, except that the root hub only gets direct PM calls
+ * when CONFIG_PM_RUNTIME is enabled.
  */
 
 static int
@@ -1810,6 +1810,7 @@ struct platform_driver sl811h_driver = {
 	.resume =	sl811h_resume,
 	.driver = {
 		.name =	(char *) hcd_name,
+		.owner = THIS_MODULE,
 	},
 };
 EXPORT_SYMBOL(sl811h_driver);

@@ -55,10 +55,8 @@ static ssize_t opal_get_sys_param(u32 param_id, u32 length, void *buffer)
 	}
 
 	ret = opal_get_param(token, param_id, (u64)buffer, length);
-	if (ret != OPAL_ASYNC_COMPLETION) {
-		ret = opal_error_code(ret);
+	if (ret != OPAL_ASYNC_COMPLETION)
 		goto out_token;
-	}
 
 	ret = opal_async_wait_response(token, &msg);
 	if (ret) {
@@ -67,7 +65,7 @@ static ssize_t opal_get_sys_param(u32 param_id, u32 length, void *buffer)
 		goto out_token;
 	}
 
-	ret = opal_error_code(opal_get_async_rc(msg));
+	ret = be64_to_cpu(msg.params[1]);
 
 out_token:
 	opal_async_release_token(token);
@@ -91,10 +89,8 @@ static int opal_set_sys_param(u32 param_id, u32 length, void *buffer)
 
 	ret = opal_set_param(token, param_id, (u64)buffer, length);
 
-	if (ret != OPAL_ASYNC_COMPLETION) {
-		ret = opal_error_code(ret);
+	if (ret != OPAL_ASYNC_COMPLETION)
 		goto out_token;
-	}
 
 	ret = opal_async_wait_response(token, &msg);
 	if (ret) {
@@ -103,7 +99,7 @@ static int opal_set_sys_param(u32 param_id, u32 length, void *buffer)
 		goto out_token;
 	}
 
-	ret = opal_error_code(opal_get_async_rc(msg));
+	ret = be64_to_cpu(msg.params[1]);
 
 out_token:
 	opal_async_release_token(token);

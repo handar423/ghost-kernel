@@ -28,7 +28,6 @@
 #include <linux/types.h>
 #include <linux/crypto.h>
 #include <linux/err.h>
-#include <crypto/ablk_helper.h>
 #include <crypto/algapi.h>
 #include <crypto/cast6.h>
 #include <crypto/cryptd.h>
@@ -36,7 +35,9 @@
 #include <crypto/ctr.h>
 #include <crypto/lrw.h>
 #include <crypto/xts.h>
-#include <asm/fpu/api.h>
+#include <asm/xcr.h>
+#include <asm/xsave.h>
+#include <asm/crypto/ablk_helper.h>
 #include <asm/crypto/glue_helper.h>
 
 #define CAST6_PARALLEL_BLOCKS 8
@@ -585,11 +586,16 @@ static struct crypto_alg cast6_algs[10] = { {
 
 static int __init cast6_init(void)
 {
-	const char *feature_name;
+	u64 xcr0;
 
-	if (!cpu_has_xfeatures(XFEATURE_MASK_SSE | XFEATURE_MASK_YMM,
-				&feature_name)) {
-		pr_info("CPU feature '%s' is not supported.\n", feature_name);
+	if (!cpu_has_avx || !cpu_has_osxsave) {
+		pr_info("AVX instructions are not detected.\n");
+		return -ENODEV;
+	}
+
+	xcr0 = xgetbv(XCR_XFEATURE_ENABLED_MASK);
+	if ((xcr0 & (XSTATE_SSE | XSTATE_YMM)) != (XSTATE_SSE | XSTATE_YMM)) {
+		pr_info("AVX detected but unusable.\n");
 		return -ENODEV;
 	}
 

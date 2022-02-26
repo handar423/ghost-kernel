@@ -48,11 +48,6 @@
 #define XFS_ERRTAG_DIOWRITE_IOERR			20
 #define XFS_ERRTAG_BMAPIFORMAT				21
 #define XFS_ERRTAG_FREE_EXTENT				22
-#define XFS_ERRTAG_RMAP_FINISH_ONE			23
-#define XFS_ERRTAG_REFCOUNT_CONTINUE_UPDATE		24
-#define XFS_ERRTAG_REFCOUNT_FINISH_ONE			25
-#define XFS_ERRTAG_BMAP_FINISH_ONE			26
-#define XFS_ERRTAG_AG_RESV_CRITICAL			27
 /*
  * DEBUG mode instrumentation to test and/or trigger delayed allocation
  * block killing in the event of failed writes. When enabled, all
@@ -61,11 +56,11 @@
  * delalloc blocks!) are tossed as part of the write failure error
  * handling sequence.
  */
-#define XFS_ERRTAG_DROP_WRITES				28
-#define XFS_ERRTAG_LOG_BAD_CRC				29
-#define XFS_ERRTAG_LOG_ITEM_PIN				30
-#define XFS_ERRTAG_BUF_LRU_REF				31
-#define XFS_ERRTAG_MAX					32
+#define XFS_ERRTAG_DROP_WRITES				23
+#define XFS_ERRTAG_LOG_BAD_CRC				24
+#define XFS_ERRTAG_LOG_ITEM_PIN				25
+#define XFS_ERRTAG_BUF_LRU_REF				26
+#define XFS_ERRTAG_MAX					27
 
 /*
  * Random factors for above tags, 1 means always, 2 means 1/2 time, etc.
@@ -93,11 +88,6 @@
 #define XFS_RANDOM_DIOWRITE_IOERR			(XFS_RANDOM_DEFAULT/10)
 #define XFS_RANDOM_BMAPIFORMAT				XFS_RANDOM_DEFAULT
 #define XFS_RANDOM_FREE_EXTENT				1
-#define XFS_RANDOM_RMAP_FINISH_ONE			1
-#define XFS_RANDOM_REFCOUNT_CONTINUE_UPDATE		1
-#define XFS_RANDOM_REFCOUNT_FINISH_ONE			1
-#define XFS_RANDOM_BMAP_FINISH_ONE			1
-#define XFS_RANDOM_AG_RESV_CRITICAL			4
 #define XFS_RANDOM_DROP_WRITES				1
 #define XFS_RANDOM_LOG_BAD_CRC				1
 #define XFS_RANDOM_LOG_ITEM_PIN				1

@@ -19,7 +19,8 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; if not, see <http://www.gnu.org/licenses/>.
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  *
  *
  * Authors:
@@ -85,7 +86,7 @@ ip_vs_update_conntrack(struct sk_buff *skb, struct ip_vs_conn *cp, int outin)
 	struct nf_conn *ct = nf_ct_get(skb, &ctinfo);
 	struct nf_conntrack_tuple new_tuple;
 
-	if (ct == NULL || nf_ct_is_confirmed(ct) ||
+	if (ct == NULL || nf_ct_is_confirmed(ct) || nf_ct_is_untracked(ct) ||
 	    nf_ct_is_dying(ct))
 		return;
 
@@ -165,7 +166,7 @@ static void ip_vs_nfct_expect_callback(struct nf_conn *ct,
 
 	/* RS->CLIENT */
 	orig = &ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple;
-	ip_vs_conn_fill_param(net_ipvs(net), exp->tuple.src.l3num, orig->dst.protonum,
+	ip_vs_conn_fill_param(net, exp->tuple.src.l3num, orig->dst.protonum,
 			      &orig->src.u3, orig->src.u.tcp.port,
 			      &orig->dst.u3, orig->dst.u.tcp.port, &p);
 	cp = ip_vs_conn_out_get(&p);
@@ -232,7 +233,7 @@ void ip_vs_nfct_expect_related(struct sk_buff *skb, struct nf_conn *ct,
 {
 	struct nf_conntrack_expect *exp;
 
-	if (ct == NULL)
+	if (ct == NULL || nf_ct_is_untracked(ct))
 		return;
 
 	exp = nf_ct_expect_alloc(ct);
@@ -278,13 +279,17 @@ void ip_vs_conn_drop_conntrack(struct ip_vs_conn *cp)
 		" for conn " FMT_CONN "\n",
 		__func__, ARG_TUPLE(&tuple), ARG_CONN(cp));
 
-	h = nf_conntrack_find_get(cp->ipvs->net, &nf_ct_zone_dflt, &tuple);
+	h = nf_conntrack_find_get(ip_vs_conn_net(cp), &nf_ct_zone_dflt,
+				  &tuple);
 	if (h) {
 		ct = nf_ct_tuplehash_to_ctrack(h);
-		if (nf_ct_kill(ct)) {
-			IP_VS_DBG(7, "%s: ct=%p, deleted conntrack for tuple="
+		/* Show what happens instead of calling nf_ct_kill() */
+		if (del_timer(&ct->timeout)) {
+			IP_VS_DBG(7, "%s: ct=%p, deleted conntrack timer for tuple="
 				FMT_TUPLE "\n",
 				__func__, ct, ARG_TUPLE(&tuple));
+			if (ct->timeout.function)
+				ct->timeout.function(ct->timeout.data);
 		} else {
 			IP_VS_DBG(7, "%s: ct=%p, no conntrack timer for tuple="
 				FMT_TUPLE "\n",

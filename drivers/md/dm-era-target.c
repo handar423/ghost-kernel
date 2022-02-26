@@ -1180,7 +1180,7 @@ static bool block_size_is_power_of_two(struct era *era)
 
 static dm_block_t get_block(struct era *era, struct bio *bio)
 {
-	sector_t block_nr = bio->bi_iter.bi_sector;
+	sector_t block_nr = bio->bi_sector;
 
 	if (!block_size_is_power_of_two(era))
 		(void) sector_div(block_nr, era->sectors_per_block);
@@ -1192,7 +1192,7 @@ static dm_block_t get_block(struct era *era, struct bio *bio)
 
 static void remap_to_origin(struct era *era, struct bio *bio)
 {
-	bio_set_dev(bio, era->origin_dev->bdev);
+	bio->bi_bdev = era->origin_dev->bdev;
 }
 
 /*----------------------------------------------------------------
@@ -1377,7 +1377,7 @@ static void stop_worker(struct era *era)
 static int dev_is_congested(struct dm_dev *dev, int bdi_bits)
 {
 	struct request_queue *q = bdev_get_queue(dev->bdev);
-	return bdi_congested(q->backing_dev_info, bdi_bits);
+	return bdi_congested(&q->backing_dev_info, bdi_bits);
 }
 
 static int era_is_congested(struct dm_target_callbacks *cb, int bdi_bits)
@@ -1425,6 +1425,7 @@ static int era_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	char dummy;
 	struct era *era;
 	struct era_metadata *md;
+	static bool seen = false;
 
 	if (argc != 3) {
 		ti->error = "Invalid argument count";
@@ -1516,6 +1517,11 @@ static int era_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	era->callbacks.congested_fn = era_is_congested;
 	dm_table_add_target_callbacks(ti->table, &era->callbacks);
 
+	if (!seen) {
+		mark_tech_preview("DM era", THIS_MODULE);
+		seen = true;
+	}
+
 	return 0;
 }
 
@@ -1537,9 +1543,9 @@ static int era_map(struct dm_target *ti, struct bio *bio)
 	remap_to_origin(era, bio);
 
 	/*
-	 * REQ_PREFLUSH bios carry no data, so we're not interested in them.
+	 * REQ_FLUSH bios carry no data, so we're not interested in them.
 	 */
-	if (!(bio->bi_opf & REQ_PREFLUSH) &&
+	if (!(bio->bi_rw & REQ_FLUSH) &&
 	    (bio_data_dir(bio) == WRITE) &&
 	    !metadata_current_marked(era->md, block)) {
 		defer_bio(era, bio);
@@ -1669,6 +1675,20 @@ static int era_iterate_devices(struct dm_target *ti,
 	return fn(ti, era->origin_dev, 0, get_dev_size(era->origin_dev), data);
 }
 
+static int era_merge(struct dm_target *ti, struct bvec_merge_data *bvm,
+		     struct bio_vec *biovec, int max_size)
+{
+	struct era *era = ti->private;
+	struct request_queue *q = bdev_get_queue(era->origin_dev->bdev);
+
+	if (!q->merge_bvec_fn)
+		return max_size;
+
+	bvm->bi_bdev = era->origin_dev->bdev;
+
+	return min(max_size, q->merge_bvec_fn(q, bvm, biovec));
+}
+
 static void era_io_hints(struct dm_target *ti, struct queue_limits *limits)
 {
 	struct era *era = ti->private;
@@ -1680,6 +1700,7 @@ static void era_io_hints(struct dm_target *ti, struct queue_limits *limits)
 	 */
 	if (io_opt_sectors < era->sectors_per_block ||
 	    do_div(io_opt_sectors, era->sectors_per_block)) {
+		gmb();
 		blk_limits_io_min(limits, 0);
 		blk_limits_io_opt(limits, era->sectors_per_block << SECTOR_SHIFT);
 	}
@@ -1699,6 +1720,7 @@ static struct target_type era_target = {
 	.status = era_status,
 	.message = era_message,
 	.iterate_devices = era_iterate_devices,
+	.merge = era_merge,
 	.io_hints = era_io_hints
 };
 

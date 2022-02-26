@@ -46,7 +46,7 @@ static u64 swiotlb_powerpc_get_required(struct device *dev)
  * map_page, and unmap_page on highmem, use normal dma_ops
  * for everything else.
  */
-const struct dma_map_ops swiotlb_dma_ops = {
+struct dma_map_ops swiotlb_dma_ops = {
 	.alloc = __dma_direct_alloc_coherent,
 	.free = __dma_direct_free_coherent,
 	.mmap = dma_direct_mmap_coherent,
@@ -106,14 +106,10 @@ int __init swiotlb_setup_bus_notifier(void)
 	return 0;
 }
 
-void __init swiotlb_detect_4g(void)
+void swiotlb_detect_4g(void)
 {
-	if ((memblock_end_of_DRAM() - 1) > 0xffffffff) {
+	if ((memblock_end_of_DRAM() - 1) > 0xffffffff)
 		ppc_swiotlb_enable = 1;
-#ifdef CONFIG_ZONE_DMA32
-		limit_zone_pfn(ZONE_DMA32, (1ULL << 32) >> PAGE_SHIFT);
-#endif
-	}
 }
 
 static int __init check_swiotlb_enabled(void)

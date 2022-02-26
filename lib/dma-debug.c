@@ -17,10 +17,8 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
-#include <linux/sched/task_stack.h>
 #include <linux/scatterlist.h>
 #include <linux/dma-mapping.h>
-#include <linux/sched/task.h>
 #include <linux/stacktrace.h>
 #include <linux/dma-debug.h>
 #include <linux/spinlock.h>
@@ -104,7 +102,7 @@ static LIST_HEAD(free_entries);
 static DEFINE_SPINLOCK(free_entries_lock);
 
 /* Global disable flag - will be set in case of an error */
-static bool global_disable __read_mostly;
+static u32 global_disable __read_mostly;
 
 /* Early initialization disable flag, set at the end of dma_debug_init */
 static bool dma_debug_initialized __read_mostly;
@@ -1491,12 +1489,12 @@ void debug_dma_alloc_coherent(struct device *dev, size_t size,
 	if (unlikely(virt == NULL))
 		return;
 
-	entry = dma_entry_alloc();
-	if (!entry)
+	/* handle vmalloc and linear addresses */
+	if (!is_vmalloc_addr(virt) && !virt_addr_valid(virt))
 		return;
 
-	/* handle vmalloc and linear addresses */
-	if (!is_vmalloc_addr(virt) && !virt_to_page(virt))
+	entry = dma_entry_alloc();
+	if (!entry)
 		return;
 
 	entry->type      = dma_debug_coherent;
@@ -1528,7 +1526,7 @@ void debug_dma_free_coherent(struct device *dev, size_t size,
 	};
 
 	/* handle vmalloc and linear addresses */
-	if (!is_vmalloc_addr(virt) && !virt_to_page(virt))
+	if (!is_vmalloc_addr(virt) && !virt_addr_valid(virt))
 		return;
 
 	if (is_vmalloc_addr(virt))
@@ -1557,7 +1555,7 @@ void debug_dma_map_resource(struct device *dev, phys_addr_t addr, size_t size,
 
 	entry->type		= dma_debug_resource;
 	entry->dev		= dev;
-	entry->pfn		= PHYS_PFN(addr);
+	entry->pfn		= __phys_to_pfn(addr);
 	entry->offset		= offset_in_page(addr);
 	entry->size		= size;
 	entry->dev_addr		= dma_addr;

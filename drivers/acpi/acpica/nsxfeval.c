@@ -6,7 +6,7 @@
  ******************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2017, Intel Corp.
+ * Copyright (C) 2000 - 2013, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -84,9 +84,7 @@ acpi_evaluate_object_typed(acpi_handle handle,
 			   acpi_object_type return_type)
 {
 	acpi_status status;
-	u8 free_buffer_on_error = FALSE;
-	acpi_handle target_handle;
-	char *full_pathname;
+	u8 must_free = FALSE;
 
 	ACPI_FUNCTION_TRACE(acpi_evaluate_object_typed);
 
@@ -97,80 +95,56 @@ acpi_evaluate_object_typed(acpi_handle handle,
 	}
 
 	if (return_buffer->length == ACPI_ALLOCATE_BUFFER) {
-		free_buffer_on_error = TRUE;
-	}
-
-	if (pathname) {
-		status = acpi_get_handle(handle, pathname, &target_handle);
-		if (ACPI_FAILURE(status)) {
-			return_ACPI_STATUS(status);
-		}
-	} else {
-		target_handle = handle;
-	}
-
-	full_pathname = acpi_ns_get_external_pathname(target_handle);
-	if (!full_pathname) {
-		return_ACPI_STATUS(AE_NO_MEMORY);
+		must_free = TRUE;
 	}
 
 	/* Evaluate the object */
 
-	status = acpi_evaluate_object(target_handle, NULL, external_params,
-				      return_buffer);
+	status =
+	    acpi_evaluate_object(handle, pathname, external_params,
+				 return_buffer);
 	if (ACPI_FAILURE(status)) {
-		goto exit;
+		return_ACPI_STATUS(status);
 	}
 
-	/* Type ANY means "don't care about return value type" */
+	/* Type ANY means "don't care" */
 
 	if (return_type == ACPI_TYPE_ANY) {
-		goto exit;
+		return_ACPI_STATUS(AE_OK);
 	}
 
 	if (return_buffer->length == 0) {
 
 		/* Error because caller specifically asked for a return value */
 
-		ACPI_ERROR((AE_INFO, "%s did not return any object",
-			    full_pathname));
-		status = AE_NULL_OBJECT;
-		goto exit;
+		ACPI_ERROR((AE_INFO, "No return value"));
+		return_ACPI_STATUS(AE_NULL_OBJECT);
 	}
 
 	/* Examine the object type returned from evaluate_object */
 
 	if (((union acpi_object *)return_buffer->pointer)->type == return_type) {
-		goto exit;
+		return_ACPI_STATUS(AE_OK);
 	}
 
 	/* Return object type does not match requested type */
 
 	ACPI_ERROR((AE_INFO,
-		    "Incorrect return type from %s - received [%s], requested [%s]",
-		    full_pathname,
+		    "Incorrect return type [%s] requested [%s]",
 		    acpi_ut_get_type_name(((union acpi_object *)return_buffer->
 					   pointer)->type),
 		    acpi_ut_get_type_name(return_type)));
 
-	if (free_buffer_on_error) {
-		/*
-		 * Free a buffer created via ACPI_ALLOCATE_BUFFER.
-		 * Note: We use acpi_os_free here because acpi_os_allocate was used
-		 * to allocate the buffer. This purposefully bypasses the
-		 * (optionally enabled) allocation tracking mechanism since we
-		 * only want to track internal allocations.
-		 */
-		acpi_os_free(return_buffer->pointer);
+	if (must_free) {
+
+		/* Caller used ACPI_ALLOCATE_BUFFER, free the return buffer */
+
+		ACPI_FREE(return_buffer->pointer);
 		return_buffer->pointer = NULL;
 	}
 
 	return_buffer->length = 0;
-	status = AE_TYPE;
-
-exit:
-	ACPI_FREE(full_pathname);
-	return_ACPI_STATUS(status);
+	return_ACPI_STATUS(AE_TYPE);
 }
 
 ACPI_EXPORT_SYMBOL(acpi_evaluate_object_typed)
@@ -279,7 +253,7 @@ acpi_evaluate_object(acpi_handle handle,
 		 * Allocate a new parameter block for the internal objects
 		 * Add 1 to count to allow for null terminated internal list
 		 */
-		info->parameters = ACPI_ALLOCATE_ZEROED(((acpi_size)info->
+		info->parameters = ACPI_ALLOCATE_ZEROED(((acpi_size) info->
 							 param_count +
 							 1) * sizeof(void *));
 		if (!info->parameters) {
@@ -303,12 +277,13 @@ acpi_evaluate_object(acpi_handle handle,
 		info->parameters[info->param_count] = NULL;
 	}
 
-#ifdef _FUTURE_FEATURE
+#if 0
 
 	/*
 	 * Begin incoming argument count analysis. Check for too few args
 	 * and too many args.
 	 */
+
 	switch (acpi_ns_get_type(info->node)) {
 	case ACPI_TYPE_METHOD:
 
@@ -392,67 +367,67 @@ acpi_evaluate_object(acpi_handle handle,
 	 * If we are expecting a return value, and all went well above,
 	 * copy the return value to an external object.
 	 */
-	if (!return_buffer) {
-		goto cleanup_return_object;
-	}
-
-	if (!info->return_object) {
-		return_buffer->length = 0;
-		goto cleanup;
-	}
-
-	if (ACPI_GET_DESCRIPTOR_TYPE(info->return_object) ==
-	    ACPI_DESC_TYPE_NAMED) {
-		/*
-		 * If we received a NS Node as a return object, this means that
-		 * the object we are evaluating has nothing interesting to
-		 * return (such as a mutex, etc.)  We return an error because
-		 * these types are essentially unsupported by this interface.
-		 * We don't check up front because this makes it easier to add
-		 * support for various types at a later date if necessary.
-		 */
-		status = AE_TYPE;
-		info->return_object = NULL;	/* No need to delete a NS Node */
-		return_buffer->length = 0;
-	}
-
-	if (ACPI_FAILURE(status)) {
-		goto cleanup_return_object;
-	}
-
-	/* Dereference Index and ref_of references */
-
-	acpi_ns_resolve_references(info);
-
-	/* Get the size of the returned object */
-
-	status = acpi_ut_get_object_size(info->return_object,
-					 &buffer_space_needed);
-	if (ACPI_SUCCESS(status)) {
-
-		/* Validate/Allocate/Clear caller buffer */
-
-		status = acpi_ut_initialize_buffer(return_buffer,
-						   buffer_space_needed);
-		if (ACPI_FAILURE(status)) {
-			/*
-			 * Caller's buffer is too small or a new one can't
-			 * be allocated
-			 */
-			ACPI_DEBUG_PRINT((ACPI_DB_INFO,
-					  "Needed buffer size %X, %s\n",
-					  (u32)buffer_space_needed,
-					  acpi_format_exception(status)));
+	if (return_buffer) {
+		if (!info->return_object) {
+			return_buffer->length = 0;
 		} else {
-			/* We have enough space for the object, build it */
+			if (ACPI_GET_DESCRIPTOR_TYPE(info->return_object) ==
+			    ACPI_DESC_TYPE_NAMED) {
+				/*
+				 * If we received a NS Node as a return object, this means that
+				 * the object we are evaluating has nothing interesting to
+				 * return (such as a mutex, etc.)  We return an error because
+				 * these types are essentially unsupported by this interface.
+				 * We don't check up front because this makes it easier to add
+				 * support for various types at a later date if necessary.
+				 */
+				status = AE_TYPE;
+				info->return_object = NULL;	/* No need to delete a NS Node */
+				return_buffer->length = 0;
+			}
 
-			status =
-			    acpi_ut_copy_iobject_to_eobject(info->return_object,
-							    return_buffer);
+			if (ACPI_SUCCESS(status)) {
+
+				/* Dereference Index and ref_of references */
+
+				acpi_ns_resolve_references(info);
+
+				/* Get the size of the returned object */
+
+				status =
+				    acpi_ut_get_object_size(info->return_object,
+							    &buffer_space_needed);
+				if (ACPI_SUCCESS(status)) {
+
+					/* Validate/Allocate/Clear caller buffer */
+
+					status =
+					    acpi_ut_initialize_buffer
+					    (return_buffer,
+					     buffer_space_needed);
+					if (ACPI_FAILURE(status)) {
+						/*
+						 * Caller's buffer is too small or a new one can't
+						 * be allocated
+						 */
+						ACPI_DEBUG_PRINT((ACPI_DB_INFO,
+								  "Needed buffer size %X, %s\n",
+								  (u32)
+								  buffer_space_needed,
+								  acpi_format_exception
+								  (status)));
+					} else {
+						/* We have enough space for the object, build it */
+
+						status =
+						    acpi_ut_copy_iobject_to_eobject
+						    (info->return_object,
+						     return_buffer);
+					}
+				}
+			}
 		}
 	}
-
-cleanup_return_object:
 
 	if (info->return_object) {
 		/*
@@ -467,7 +442,7 @@ cleanup_return_object:
 		acpi_ex_exit_interpreter();
 	}
 
-cleanup:
+      cleanup:
 
 	/* Free the input parameter list (if we created one) */
 
@@ -518,9 +493,9 @@ static void acpi_ns_resolve_references(struct acpi_evaluate_info *info)
 	/*
 	 * Two types of references are supported - those created by Index and
 	 * ref_of operators. A name reference (AML_NAMEPATH_OP) can be converted
-	 * to a union acpi_object, so it is not dereferenced here. A ddb_handle
+	 * to an union acpi_object, so it is not dereferenced here. A ddb_handle
 	 * (AML_LOAD_OP) cannot be dereferenced, nor can it be converted to
-	 * a union acpi_object.
+	 * an union acpi_object.
 	 */
 	switch (info->return_object->reference.class) {
 	case ACPI_REFCLASS_INDEX:
@@ -559,9 +534,9 @@ static void acpi_ns_resolve_references(struct acpi_evaluate_info *info)
  * PARAMETERS:  type                - acpi_object_type to search for
  *              start_object        - Handle in namespace where search begins
  *              max_depth           - Depth to which search is to reach
- *              descending_callback - Called during tree descent
+ *              pre_order_visit     - Called during tree pre-order visit
  *                                    when an object of "Type" is found
- *              ascending_callback  - Called during tree ascent
+ *              post_order_visit    - Called during tree post-order visit
  *                                    when an object of "Type" is found
  *              context             - Passed to user function(s) above
  *              return_value        - Location where return value of
@@ -589,8 +564,8 @@ acpi_status
 acpi_walk_namespace(acpi_object_type type,
 		    acpi_handle start_object,
 		    u32 max_depth,
-		    acpi_walk_callback descending_callback,
-		    acpi_walk_callback ascending_callback,
+		    acpi_walk_callback pre_order_visit,
+		    acpi_walk_callback post_order_visit,
 		    void *context, void **return_value)
 {
 	acpi_status status;
@@ -600,7 +575,7 @@ acpi_walk_namespace(acpi_object_type type,
 	/* Parameter validation */
 
 	if ((type > ACPI_TYPE_LOCAL_MAX) ||
-	    (!max_depth) || (!descending_callback && !ascending_callback)) {
+	    (!max_depth) || (!pre_order_visit && !post_order_visit)) {
 		return_ACPI_STATUS(AE_BAD_PARAMETER);
 	}
 
@@ -631,19 +606,11 @@ acpi_walk_namespace(acpi_object_type type,
 		goto unlock_and_exit;
 	}
 
-	/* Now we can validate the starting node */
-
-	if (!acpi_ns_validate_handle(start_object)) {
-		status = AE_BAD_PARAMETER;
-		goto unlock_and_exit2;
-	}
-
 	status = acpi_ns_walk_namespace(type, start_object, max_depth,
-					ACPI_NS_WALK_UNLOCK,
-					descending_callback, ascending_callback,
-					context, return_value);
+					ACPI_NS_WALK_UNLOCK, pre_order_visit,
+					post_order_visit, context,
+					return_value);
 
-unlock_and_exit2:
 	(void)acpi_ut_release_mutex(ACPI_MTX_NAMESPACE);
 
 unlock_and_exit:
@@ -772,8 +739,8 @@ acpi_ns_get_device_callback(acpi_handle obj_handle,
 
 	/* We have a valid device, invoke the user function */
 
-	status = info->user_function(obj_handle, nesting_level,
-				     info->context, return_value);
+	status = info->user_function(obj_handle, nesting_level, info->context,
+				     return_value);
 	return (status);
 }
 
@@ -889,7 +856,7 @@ acpi_attach_data(acpi_handle obj_handle,
 
 	status = acpi_ns_attach_data(node, handler, data);
 
-unlock_and_exit:
+      unlock_and_exit:
 	(void)acpi_ut_release_mutex(ACPI_MTX_NAMESPACE);
 	return (status);
 }
@@ -935,7 +902,7 @@ acpi_detach_data(acpi_handle obj_handle, acpi_object_handler handler)
 
 	status = acpi_ns_detach_data(node, handler);
 
-unlock_and_exit:
+      unlock_and_exit:
 	(void)acpi_ut_release_mutex(ACPI_MTX_NAMESPACE);
 	return (status);
 }
@@ -988,7 +955,7 @@ acpi_get_data_full(acpi_handle obj_handle, acpi_object_handler handler,
 		callback(*data);
 	}
 
-unlock_and_exit:
+      unlock_and_exit:
 	(void)acpi_ut_release_mutex(ACPI_MTX_NAMESPACE);
 	return (status);
 }

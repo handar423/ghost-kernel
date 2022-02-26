@@ -1,4 +1,3 @@
-# SPDX-License-Identifier: GPL-2.0
 #
 # Makefile for Kernel-based Virtual Machine module
 #
@@ -12,6 +11,7 @@ common-objs-y = $(KVM)/kvm_main.o $(KVM)/eventfd.o
 common-objs-$(CONFIG_KVM_VFIO) += $(KVM)/vfio.o
 common-objs-$(CONFIG_KVM_MMIO) += $(KVM)/coalesced_mmio.o
 
+CFLAGS_44x_tlb.o  := -I.
 CFLAGS_e500_mmu.o := -I.
 CFLAGS_e500_mmu_host.o := -I.
 CFLAGS_emulate.o  := -I.
@@ -21,7 +21,17 @@ common-objs-y += powerpc.o emulate_loadstore.o
 obj-$(CONFIG_KVM_EXIT_TIMING) += timing.o
 obj-$(CONFIG_KVM_BOOK3S_HANDLER) += book3s_exports.o
 
-AFLAGS_booke_interrupts.o := -I$(objtree)/$(obj)
+AFLAGS_booke_interrupts.o := -I$(obj)
+
+kvm-440-objs := \
+	$(common-objs-y) \
+	booke.o \
+	booke_emulate.o \
+	booke_interrupts.o \
+	44x.o \
+	44x_tlb.o \
+	44x_emulate.o
+kvm-objs-$(CONFIG_KVM_440) := $(kvm-440-objs)
 
 kvm-e500-objs := \
 	$(common-objs-y) \
@@ -47,7 +57,7 @@ kvm-e500mc-objs := \
 	e500_emulate.o
 kvm-objs-$(CONFIG_KVM_E500MC) := $(kvm-e500mc-objs)
 
-kvm-book3s_64-builtin-objs-$(CONFIG_SPAPR_TCE_IOMMU) := \
+kvm-book3s_64-builtin-objs-$(CONFIG_KVM_BOOK3S_64_HANDLER) := \
 	book3s_64_vio_hv.o
 
 kvm-pr-y := \
@@ -71,31 +81,28 @@ endif
 kvm-hv-y += \
 	book3s_hv.o \
 	book3s_hv_interrupts.o \
-	book3s_64_mmu_hv.o \
-	book3s_64_mmu_radix.o
+	book3s_64_mmu_hv.o
 
 kvm-book3s_64-builtin-xics-objs-$(CONFIG_KVM_XICS) := \
-	book3s_hv_rm_xics.o book3s_hv_rm_xive.o
+	book3s_hv_rm_xics.o
 
 ifdef CONFIG_KVM_BOOK3S_HV_POSSIBLE
 kvm-book3s_64-builtin-objs-$(CONFIG_KVM_BOOK3S_64_HANDLER) += \
-	book3s_hv_hmi.o \
 	book3s_hv_rmhandlers.o \
 	book3s_hv_rm_mmu.o \
 	book3s_hv_ras.o \
 	book3s_hv_builtin.o \
+	book3s_hv_cma.o \
 	$(kvm-book3s_64-builtin-xics-objs-y)
 endif
 
 kvm-book3s_64-objs-$(CONFIG_KVM_XICS) += \
 	book3s_xics.o
 
-kvm-book3s_64-objs-$(CONFIG_KVM_XIVE) += book3s_xive.o
-kvm-book3s_64-objs-$(CONFIG_SPAPR_TCE_IOMMU) += book3s_64_vio.o
-
 kvm-book3s_64-module-objs := \
 	$(common-objs-y) \
 	book3s.o \
+	book3s_64_vio.o \
 	book3s_rtas.o \
 	$(kvm-book3s_64-objs-y)
 
@@ -120,6 +127,7 @@ kvm-objs-$(CONFIG_HAVE_KVM_IRQ_ROUTING) += $(KVM)/irqchip.o
 
 kvm-objs := $(kvm-objs-m) $(kvm-objs-y)
 
+obj-$(CONFIG_KVM_440) += kvm.o
 obj-$(CONFIG_KVM_E500V2) += kvm.o
 obj-$(CONFIG_KVM_E500MC) += kvm.o
 obj-$(CONFIG_KVM_BOOK3S_64) += kvm.o

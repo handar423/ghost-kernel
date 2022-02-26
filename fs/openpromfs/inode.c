@@ -16,7 +16,7 @@
 #include <asm/openprom.h>
 #include <asm/oplib.h>
 #include <asm/prom.h>
-#include <linux/uaccess.h>
+#include <asm/uaccess.h>
 
 static DEFINE_MUTEX(op_mutex);
 
@@ -162,11 +162,11 @@ static const struct file_operations openpromfs_prop_ops = {
 	.release	= seq_release,
 };
 
-static int openpromfs_readdir(struct file *, struct dir_context *);
+static int openpromfs_readdir(struct file *, void *, filldir_t);
 
 static const struct file_operations openprom_operations = {
 	.read		= generic_read_dir,
-	.iterate_shared	= openpromfs_readdir,
+	.readdir	= openpromfs_readdir,
 	.llseek		= generic_file_llseek,
 };
 
@@ -260,64 +260,71 @@ found:
 	return NULL;
 }
 
-static int openpromfs_readdir(struct file *file, struct dir_context *ctx)
+static int openpromfs_readdir(struct file * filp, void * dirent, filldir_t filldir)
 {
-	struct inode *inode = file_inode(file);
+	struct inode *inode = file_inode(filp);
 	struct op_inode_info *oi = OP_I(inode);
 	struct device_node *dp = oi->u.node;
 	struct device_node *child;
 	struct property *prop;
+	unsigned int ino;
 	int i;
 
 	mutex_lock(&op_mutex);
 	
-	if (ctx->pos == 0) {
-		if (!dir_emit(ctx, ".", 1, inode->i_ino, DT_DIR))
+	ino = inode->i_ino;
+	i = filp->f_pos;
+	switch (i) {
+	case 0:
+		if (filldir(dirent, ".", 1, i, ino, DT_DIR) < 0)
 			goto out;
-		ctx->pos = 1;
-	}
-	if (ctx->pos == 1) {
-		if (!dir_emit(ctx, "..", 2,
+		i++;
+		filp->f_pos++;
+		/* fall thru */
+	case 1:
+		if (filldir(dirent, "..", 2, i,
 			    (dp->parent == NULL ?
 			     OPENPROM_ROOT_INO :
-			     dp->parent->unique_id), DT_DIR))
+			     dp->parent->unique_id), DT_DIR) < 0) 
 			goto out;
-		ctx->pos = 2;
-	}
-	i = ctx->pos - 2;
+		i++;
+		filp->f_pos++;
+		/* fall thru */
+	default:
+		i -= 2;
 
-	/* First, the children nodes as directories.  */
-	child = dp->child;
-	while (i && child) {
-		child = child->sibling;
-		i--;
-	}
-	while (child) {
-		if (!dir_emit(ctx,
-			    child->path_component_name,
-			    strlen(child->path_component_name),
-			    child->unique_id, DT_DIR))
-			goto out;
+		/* First, the children nodes as directories.  */
+		child = dp->child;
+		while (i && child) {
+			child = child->sibling;
+			i--;
+		}
+		while (child) {
+			if (filldir(dirent,
+				    child->path_component_name,
+				    strlen(child->path_component_name),
+				    filp->f_pos, child->unique_id, DT_DIR) < 0)
+				goto out;
 
-		ctx->pos++;
-		child = child->sibling;
-	}
+			filp->f_pos++;
+			child = child->sibling;
+		}
 
-	/* Next, the properties as files.  */
-	prop = dp->properties;
-	while (i && prop) {
-		prop = prop->next;
-		i--;
-	}
-	while (prop) {
-		if (!dir_emit(ctx, prop->name, strlen(prop->name),
-			    prop->unique_id, DT_REG))
-			goto out;
+		/* Next, the properties as files.  */
+		prop = dp->properties;
+		while (i && prop) {
+			prop = prop->next;
+			i--;
+		}
+		while (prop) {
+			if (filldir(dirent, prop->name, strlen(prop->name),
+				    filp->f_pos, prop->unique_id, DT_REG) < 0)
+				goto out;
 
-		ctx->pos++;
-		prop = prop->next;
+			filp->f_pos++;
+			prop = prop->next;
+		}
 	}
-
 out:
 	mutex_unlock(&op_mutex);
 	return 0;
@@ -355,7 +362,7 @@ static struct inode *openprom_iget(struct super_block *sb, ino_t ino)
 	if (!inode)
 		return ERR_PTR(-ENOMEM);
 	if (inode->i_state & I_NEW) {
-		inode->i_mtime = inode->i_atime = inode->i_ctime = current_time(inode);
+		inode->i_mtime = inode->i_atime = inode->i_ctime = CURRENT_TIME;
 		if (inode->i_ino == OPENPROM_ROOT_INO) {
 			inode->i_op = &openprom_inode_operations;
 			inode->i_fop = &openprom_operations;
@@ -368,8 +375,7 @@ static struct inode *openprom_iget(struct super_block *sb, ino_t ino)
 
 static int openprom_remount(struct super_block *sb, int *flags, char *data)
 {
-	sync_filesystem(sb);
-	*flags |= SB_NOATIME;
+	*flags |= MS_NOATIME;
 	return 0;
 }
 
@@ -386,7 +392,7 @@ static int openprom_fill_super(struct super_block *s, void *data, int silent)
 	struct op_inode_info *oi;
 	int ret;
 
-	s->s_flags |= SB_NOATIME;
+	s->s_flags |= MS_NOATIME;
 	s->s_blocksize = 1024;
 	s->s_blocksize_bits = 10;
 	s->s_magic = OPENPROM_SUPER_MAGIC;

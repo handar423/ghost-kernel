@@ -12,15 +12,14 @@
  */
 #include <linux/edac.h>
 
-#include "edac_mc.h"
+#include "edac_core.h"
 #include "edac_module.h"
 
 #define EDAC_VERSION "Ver: 3.0.0"
 
 #ifdef CONFIG_EDAC_DEBUG
 
-static int edac_set_debug_level(const char *buf,
-				const struct kernel_param *kp)
+static int edac_set_debug_level(const char *buf, struct kernel_param *kp)
 {
 	unsigned long val;
 	int ret;
@@ -29,20 +28,32 @@ static int edac_set_debug_level(const char *buf,
 	if (ret)
 		return ret;
 
-	if (val > 4)
+	if (val < 0 || val > 4)
 		return -EINVAL;
 
 	return param_set_int(buf, kp);
 }
 
-/* Values of 0 to 4 will generate output */
-int edac_debug_level = 2;
+/*
+ * In RHEL7 this is set to -1 to disable all output by default.  This is
+ * because there are EDAC debug events that generate a message at a rate
+ * of one/second which results in a slow flood of the printk buffer and
+ * console.  This can be changed at load time by adding
+ * 'edac_core.edac_debug_level=2' as a kernel parameter, or adding a file to
+ * /etc/modprobe.d.
+ *
+ *  Values of 0 to 4 will generate output
+ */
+int edac_debug_level = -1;
 EXPORT_SYMBOL_GPL(edac_debug_level);
 
 module_param_call(edac_debug_level, edac_set_debug_level, param_get_int,
 		  &edac_debug_level, 0644);
 MODULE_PARM_DESC(edac_debug_level, "EDAC debug level: [0-4], default: 2");
 #endif
+
+/* scope is to module level only */
+struct workqueue_struct *edac_workqueue;
 
 /*
  * edac_op_state_to_string()
@@ -64,37 +75,31 @@ char *edac_op_state_to_string(int opstate)
 }
 
 /*
- * sysfs object: /sys/devices/system/edac
- *	need to export to other files
+ * edac_workqueue_setup
+ *	initialize the edac work queue for polling operations
  */
-static struct bus_type edac_subsys = {
-	.name = "edac",
-	.dev_name = "edac",
-};
-
-static int edac_subsys_init(void)
+static int edac_workqueue_setup(void)
 {
-	int err;
-
-	/* create the /sys/devices/system/edac directory */
-	err = subsys_system_register(&edac_subsys, NULL);
-	if (err)
-		printk(KERN_ERR "Error registering toplevel EDAC sysfs dir\n");
-
-	return err;
+	edac_workqueue = create_singlethread_workqueue("edac-poller");
+	if (edac_workqueue == NULL)
+		return -ENODEV;
+	else
+		return 0;
 }
 
-static void edac_subsys_exit(void)
+/*
+ * edac_workqueue_teardown
+ *	teardown the edac workqueue
+ */
+static void edac_workqueue_teardown(void)
 {
-	bus_unregister(&edac_subsys);
+	if (edac_workqueue) {
+		flush_workqueue(edac_workqueue);
+		destroy_workqueue(edac_workqueue);
+		edac_workqueue = NULL;
+	}
 }
 
-/* return pointer to the 'edac' node in sysfs */
-struct bus_type *edac_get_sysfs_subsys(void)
-{
-	return &edac_subsys;
-}
-EXPORT_SYMBOL_GPL(edac_get_sysfs_subsys);
 /*
  * edac_init
  *      module initialization entry point
@@ -104,10 +109,6 @@ static int __init edac_init(void)
 	int err = 0;
 
 	edac_printk(KERN_INFO, EDAC_MC, EDAC_VERSION "\n");
-
-	err = edac_subsys_init();
-	if (err)
-		return err;
 
 	/*
 	 * Harvest and clear any boot/initialization PCI parity errors
@@ -137,8 +138,6 @@ err_wq:
 	edac_mc_sysfs_exit();
 
 err_sysfs:
-	edac_subsys_exit();
-
 	return err;
 }
 
@@ -154,7 +153,6 @@ static void __exit edac_exit(void)
 	edac_workqueue_teardown();
 	edac_mc_sysfs_exit();
 	edac_debugfs_exit();
-	edac_subsys_exit();
 }
 
 /*

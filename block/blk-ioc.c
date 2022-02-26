@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * Functions related to io context handling
  */
@@ -7,8 +6,9 @@
 #include <linux/init.h>
 #include <linux/bio.h>
 #include <linux/blkdev.h>
+#include <linux/bootmem.h>	/* for max_pfn/max_low_pfn */
 #include <linux/slab.h>
-#include <linux/sched/task.h>
+#include <linux/delay.h>
 
 #include "blk.h"
 
@@ -43,15 +43,15 @@ static void icq_free_icq_rcu(struct rcu_head *head)
  */
 static void ioc_exit_icq(struct io_cq *icq)
 {
-	struct elevator_type *et = icq->q->elevator->type;
+	struct elevator_type_aux *aux = icq->q->elevator->aux;
 
 	if (icq->flags & ICQ_EXITED)
 		return;
 
-	if (et->uses_mq && et->ops.mq.exit_icq)
-		et->ops.mq.exit_icq(icq);
-	else if (!et->uses_mq && et->ops.sq.elevator_exit_icq_fn)
-		et->ops.sq.elevator_exit_icq_fn(icq);
+	if (aux->uses_mq && aux->ops.mq.exit_icq)
+		aux->ops.mq.exit_icq(icq);
+	else if (!aux->uses_mq && aux->ops.sq.elevator_exit_icq_fn)
+		aux->ops.sq.elevator_exit_icq_fn(icq);
 
 	icq->flags |= ICQ_EXITED;
 }
@@ -77,7 +77,7 @@ static void ioc_destroy_icq(struct io_cq *icq)
 	 * under queue_lock.  If it's not pointing to @icq now, it never
 	 * will.  Hint assignment itself can race safely.
 	 */
-	if (rcu_access_pointer(ioc->icq_hint) == icq)
+	if (rcu_dereference_raw(ioc->icq_hint) == icq)
 		rcu_assign_pointer(ioc->icq_hint, NULL);
 
 	ioc_exit_icq(icq);
@@ -118,7 +118,7 @@ static void ioc_release_fn(struct work_struct *work)
 			spin_unlock(q->queue_lock);
 		} else {
 			spin_unlock_irqrestore(&ioc->lock, flags);
-			cpu_relax();
+			cpu_chill();
 			spin_lock_irqsave_nested(&ioc->lock, flags, 1);
 		}
 	}
@@ -152,8 +152,7 @@ void put_io_context(struct io_context *ioc)
 	if (atomic_long_dec_and_test(&ioc->refcount)) {
 		spin_lock_irqsave(&ioc->lock, flags);
 		if (!hlist_empty(&ioc->icq_list))
-			queue_work(system_power_efficient_wq,
-					&ioc->release_work);
+			schedule_work(&ioc->release_work);
 		else
 			free_ioc = true;
 		spin_unlock_irqrestore(&ioc->lock, flags);
@@ -194,7 +193,7 @@ retry:
 			continue;
 
 		et = icq->q->elevator->type;
-		if (et->uses_mq) {
+		if (icq->q->elevator->aux->uses_mq) {
 			ioc_exit_icq(icq);
 		} else {
 			if (spin_trylock(icq->q->queue_lock)) {
@@ -202,7 +201,7 @@ retry:
 				spin_unlock(icq->q->queue_lock);
 			} else {
 				spin_unlock_irqrestore(&ioc->lock, flags);
-				cpu_relax();
+				cpu_chill();
 				goto retry;
 			}
 		}
@@ -321,7 +320,7 @@ struct io_context *get_task_io_context(struct task_struct *task,
 {
 	struct io_context *ioc;
 
-	might_sleep_if(gfpflags_allow_blocking(gfp_flags));
+	might_sleep_if(gfp_flags & __GFP_WAIT);
 
 	do {
 		task_lock(task);
@@ -390,6 +389,7 @@ struct io_cq *ioc_create_icq(struct io_context *ioc, struct request_queue *q,
 			     gfp_t gfp_mask)
 {
 	struct elevator_type *et = q->elevator->type;
+	struct elevator_type_aux *aux = q->elevator->aux;
 	struct io_cq *icq;
 
 	/* allocate stuff */
@@ -415,10 +415,10 @@ struct io_cq *ioc_create_icq(struct io_context *ioc, struct request_queue *q,
 	if (likely(!radix_tree_insert(&ioc->icq_tree, q->id, icq))) {
 		hlist_add_head(&icq->ioc_node, &ioc->icq_list);
 		list_add(&icq->q_node, &q->icq_list);
-		if (et->uses_mq && et->ops.mq.init_icq)
-			et->ops.mq.init_icq(icq);
-		else if (!et->uses_mq && et->ops.sq.elevator_init_icq_fn)
-			et->ops.sq.elevator_init_icq_fn(icq);
+		if (aux->uses_mq && aux->ops.mq.init_icq)
+			aux->ops.mq.init_icq(icq);
+		else if (!aux->uses_mq && aux->ops.sq.elevator_init_icq_fn)
+			aux->ops.sq.elevator_init_icq_fn(icq);
 	} else {
 		kmem_cache_free(et->icq_cache, icq);
 		icq = ioc_lookup_icq(ioc, q);

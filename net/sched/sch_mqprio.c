@@ -44,15 +44,15 @@ static void mqprio_destroy(struct Qdisc *sch)
 		kfree(priv->qdiscs);
 	}
 
-	if (priv->hw_offload && dev->netdev_ops->ndo_setup_tc) {
+	if (priv->hw_offload && __rh_has_ndo_setup_tc(dev)) {
 		struct tc_mqprio_qopt_offload mqprio = { { 0 } };
 
 		switch (priv->mode) {
 		case TC_MQPRIO_MODE_DCB:
 		case TC_MQPRIO_MODE_CHANNEL:
-			dev->netdev_ops->ndo_setup_tc(dev,
-						      TC_SETUP_QDISC_MQPRIO,
-						      &mqprio);
+			__rh_call_ndo_setup_tc(dev, 0,
+					       TC_SETUP_QDISC_MQPRIO,
+					       &mqprio);
 			break;
 		default:
 			return;
@@ -89,7 +89,7 @@ static int mqprio_parse_opt(struct net_device *dev, struct tc_mqprio_qopt *qopt)
 	 * hardware doesn't support offload and we should return an error.
 	 */
 	if (qopt->hw)
-		return dev->netdev_ops->ndo_setup_tc ? 0 : -EINVAL;
+		return __rh_has_ndo_setup_tc(dev) ? 0 : -EINVAL;
 
 	for (i = 0; i < qopt->num_tc; i++) {
 		unsigned int last = qopt->offset[i] + qopt->count[i];
@@ -126,7 +126,7 @@ static int parse_attr(struct nlattr *tb[], int maxtype, struct nlattr *nla,
 
 	if (nested_len >= nla_attr_size(0))
 		return nla_parse(tb, maxtype, nla_data(nla) + NLA_ALIGN(len),
-				 nested_len, policy, NULL);
+				 nested_len, policy);
 
 	memset(tb, 0, sizeof(struct nlattr *) * (maxtype + 1));
 	return 0;
@@ -265,9 +265,9 @@ static int mqprio_init(struct Qdisc *sch, struct nlattr *opt)
 		default:
 			return -EINVAL;
 		}
-		err = dev->netdev_ops->ndo_setup_tc(dev,
-						    TC_SETUP_QDISC_MQPRIO,
-						    &mqprio);
+		err = __rh_call_ndo_setup_tc(dev, 0,
+					     TC_SETUP_QDISC_MQPRIO,
+					     &mqprio);
 		if (err)
 			return err;
 

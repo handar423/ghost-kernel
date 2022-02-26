@@ -63,7 +63,7 @@ MODULE_PARM_DESC(enable, "Enable ad1816a based soundcard.");
 module_param_array(clockfreq, int, NULL, 0444);
 MODULE_PARM_DESC(clockfreq, "Clock frequency for ad1816a driver (default = 0).");
 
-static const struct pnp_card_device_id snd_ad1816a_pnpids[] = {
+static struct pnp_card_device_id snd_ad1816a_pnpids[] = {
 	/* Analog Devices AD1815 */
 	{ .id = "ADS7150", .devs = { { .id = "ADS7150" }, { .id = "ADS7151" } } },
 	/* Analog Device AD1816? */
@@ -142,6 +142,7 @@ static int snd_card_ad1816a_probe(int dev, struct pnp_card_link *pcard,
 	struct snd_card *card;
 	struct snd_ad1816a *chip;
 	struct snd_opl3 *opl3;
+	struct snd_timer *timer;
 
 	error = snd_card_new(&pcard->card->dev,
 			     index[dev], id[dev], THIS_MODULE,
@@ -171,7 +172,7 @@ static int snd_card_ad1816a_probe(int dev, struct pnp_card_link *pcard,
 	sprintf(card->longname, "%s, SS at 0x%lx, irq %d, dma %d&%d",
 		card->shortname, chip->port, irq[dev], dma1[dev], dma2[dev]);
 
-	if ((error = snd_ad1816a_pcm(chip, 0)) < 0) {
+	if ((error = snd_ad1816a_pcm(chip, 0, NULL)) < 0) {
 		snd_card_free(card);
 		return error;
 	}
@@ -181,7 +182,7 @@ static int snd_card_ad1816a_probe(int dev, struct pnp_card_link *pcard,
 		return error;
 	}
 
-	error = snd_ad1816a_timer(chip, 0);
+	error = snd_ad1816a_timer(chip, 0, &timer);
 	if (error < 0) {
 		snd_card_free(card);
 		return error;

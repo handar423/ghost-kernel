@@ -28,7 +28,7 @@
 #include "mb86a16.h"
 #include "mb86a16_priv.h"
 
-static unsigned int verbose = 5;
+unsigned int verbose = 5;
 module_param(verbose, int, 0644);
 
 #define ABS(x)		((x) < 0 ? (-x) : (x))
@@ -115,11 +115,9 @@ static int mb86a16_read(struct mb86a16_state *state, u8 reg, u8 *val)
 	};
 	ret = i2c_transfer(state->i2c_adap, msg, 2);
 	if (ret != 2) {
-		dprintk(verbose, MB86A16_ERROR, 1, "read error(reg=0x%02x, ret=%i)",
+		dprintk(verbose, MB86A16_ERROR, 1, "read error(reg=0x%02x, ret=0x%i)",
 			reg, ret);
 
-		if (ret < 0)
-			return ret;
 		return -EREMOTEIO;
 	}
 	*val = b1[0];
@@ -415,21 +413,27 @@ static int signal_det(struct mb86a16_state *state,
 		      int smrt,
 		      unsigned char *SIG)
 {
-	int ret;
-	int smrtd;
-	unsigned char S[3];
-	int i;
+
+	int ret ;
+	int smrtd ;
+	int wait_sym ;
+
+	u32 wait_t;
+	unsigned char S[3] ;
+	int i ;
 
 	if (*SIG > 45) {
 		if (CNTM_set(state, 2, 1, 2) < 0) {
 			dprintk(verbose, MB86A16_ERROR, 1, "CNTM set Error");
 			return -1;
 		}
+		wait_sym = 40000;
 	} else {
 		if (CNTM_set(state, 3, 1, 2) < 0) {
 			dprintk(verbose, MB86A16_ERROR, 1, "CNTM set Error");
 			return -1;
 		}
+		wait_sym = 80000;
 	}
 	for (i = 0; i < 3; i++) {
 		if (i == 0)
@@ -441,17 +445,22 @@ static int signal_det(struct mb86a16_state *state,
 		smrt_info_get(state, smrtd);
 		smrt_set(state, smrtd);
 		srst(state);
+		wait_t = (wait_sym + 99 * smrtd / 100) / smrtd;
+		if (wait_t == 0)
+			wait_t = 1;
 		msleep_interruptible(10);
 		if (mb86a16_read(state, 0x37, &(S[i])) != 2) {
 			dprintk(verbose, MB86A16_ERROR, 1, "I2C transfer error");
 			return -EREMOTEIO;
 		}
 	}
-	if ((S[1] > S[0] * 112 / 100) && (S[1] > S[2] * 112 / 100))
-		ret = 1;
-	else
-		ret = 0;
+	if ((S[1] > S[0] * 112 / 100) &&
+	    (S[1] > S[2] * 112 / 100)) {
 
+		ret = 1;
+	} else {
+		ret = 0;
+	}
 	*SIG = S[1];
 
 	if (CNTM_set(state, 0, 1, 2) < 0) {
@@ -582,7 +591,7 @@ err:
 	return -EREMOTEIO;
 }
 
-static int mb86a16_read_status(struct dvb_frontend *fe, enum fe_status *status)
+static int mb86a16_read_status(struct dvb_frontend *fe, fe_status_t *status)
 {
 	u8 stat, stat2;
 	struct mb86a16_state *state = fe->demodulator_priv;
@@ -1551,8 +1560,7 @@ err:
 	return -EREMOTEIO;
 }
 
-static int mb86a16_send_diseqc_burst(struct dvb_frontend *fe,
-				     enum fe_sec_mini_cmd burst)
+static int mb86a16_send_diseqc_burst(struct dvb_frontend *fe, fe_sec_mini_cmd_t burst)
 {
 	struct mb86a16_state *state = fe->demodulator_priv;
 
@@ -1580,7 +1588,7 @@ err:
 	return -EREMOTEIO;
 }
 
-static int mb86a16_set_tone(struct dvb_frontend *fe, enum fe_sec_tone_mode tone)
+static int mb86a16_set_tone(struct dvb_frontend *fe, fe_sec_tone_mode_t tone)
 {
 	struct mb86a16_state *state = fe->demodulator_priv;
 
@@ -1805,7 +1813,7 @@ static enum dvbfe_algo mb86a16_frontend_algo(struct dvb_frontend *fe)
 	return DVBFE_ALGO_CUSTOM;
 }
 
-static const struct dvb_frontend_ops mb86a16_ops = {
+static struct dvb_frontend_ops mb86a16_ops = {
 	.delsys = { SYS_DVBS },
 	.info = {
 		.name			= "Fujitsu MB86A16 DVB-S",

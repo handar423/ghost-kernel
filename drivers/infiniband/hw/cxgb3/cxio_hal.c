@@ -142,7 +142,8 @@ static int cxio_hal_clear_qp_ctx(struct cxio_rdev *rdev_p, u32 qpid)
 		pr_debug("%s alloc_skb failed\n", __func__);
 		return -ENOMEM;
 	}
-	wqe = skb_put_zero(skb, sizeof(*wqe));
+	wqe = (struct t3_modify_qp_wr *) skb_put(skb, sizeof(*wqe));
+	memset(wqe, 0, sizeof(*wqe));
 	build_fw_riwrh((struct fw_riwrh *) wqe, T3_WR_QP_MOD,
 		       T3_COMPLETION_FLAG | T3_NOTIFY_FLAG, 0, qpid, 7,
 		       T3_SOPEOP);
@@ -174,7 +175,6 @@ int cxio_create_cq(struct cxio_rdev *rdev_p, struct t3_cq *cq, int kernel)
 		return -ENOMEM;
 	}
 	dma_unmap_addr_set(cq, mapping, cq->dma_addr);
-	memset(cq->queue, 0, size);
 	setup.id = cq->cqid;
 	setup.base_addr = (u64) (cq->dma_addr);
 	setup.size = 1UL << cq->size_log2;
@@ -279,7 +279,7 @@ int cxio_create_qp(struct cxio_rdev *rdev_p, u32 kernel_domain,
 	if (!wq->qpid)
 		return -ENOMEM;
 
-	wq->rq = kzalloc(depth * sizeof(struct t3_swrq), GFP_KERNEL);
+	wq->rq = kcalloc(depth, sizeof(struct t3_swrq), GFP_KERNEL);
 	if (!wq->rq)
 		goto err1;
 
@@ -287,7 +287,7 @@ int cxio_create_qp(struct cxio_rdev *rdev_p, u32 kernel_domain,
 	if (!wq->rq_addr)
 		goto err2;
 
-	wq->sq = kzalloc(depth * sizeof(struct t3_swsq), GFP_KERNEL);
+	wq->sq = kcalloc(depth, sizeof(struct t3_swsq), GFP_KERNEL);
 	if (!wq->sq)
 		goto err3;
 
@@ -404,10 +404,12 @@ static void insert_sq_cqe(struct t3_wq *wq, struct t3_cq *cq,
 
 int cxio_flush_sq(struct t3_wq *wq, struct t3_cq *cq, int count)
 {
-	__u32 ptr = wq->sq_rptr + count;
+	__u32 ptr;
 	int flushed = 0;
-	struct t3_swsq *sqp = wq->sq + Q_PTR2IDX(ptr, wq->sq_size_log2);
+	struct t3_swsq *sqp = wq->sq + Q_PTR2IDX(wq->sq_rptr, wq->sq_size_log2);
 
+	ptr = wq->sq_rptr + count;
+	sqp = wq->sq + Q_PTR2IDX(ptr, wq->sq_size_log2);
 	while (ptr != wq->sq_wptr) {
 		sqp->signaled = 0;
 		insert_sq_cqe(wq, cq, sqp);
@@ -539,8 +541,6 @@ static int cxio_hal_init_ctrl_qp(struct cxio_rdev *rdev_p)
 	dma_unmap_addr_set(&rdev_p->ctrl_qp, mapping,
 			   rdev_p->ctrl_qp.dma_addr);
 	rdev_p->ctrl_qp.doorbell = (void __iomem *)rdev_p->rnic_info.kdb_addr;
-	memset(rdev_p->ctrl_qp.workq, 0,
-	       (1 << T3_CTRL_QP_SIZE_LOG2) * sizeof(union t3_wr));
 
 	mutex_init(&rdev_p->ctrl_qp.lock);
 	init_waitqueue_head(&rdev_p->ctrl_qp.waitq);
@@ -558,7 +558,8 @@ static int cxio_hal_init_ctrl_qp(struct cxio_rdev *rdev_p)
 	ctx1 |= ((u64) (V_EC_BASE_HI((u32) base_addr & 0xf) | V_EC_RESPQ(0) |
 			V_EC_TYPE(0) | V_EC_GEN(1) |
 			V_EC_UP_TOKEN(T3_CTL_QP_TID) | F_EC_VALID)) << 32;
-	wqe = skb_put_zero(skb, sizeof(*wqe));
+	wqe = (struct t3_modify_qp_wr *) skb_put(skb, sizeof(*wqe));
+	memset(wqe, 0, sizeof(*wqe));
 	build_fw_riwrh((struct fw_riwrh *) wqe, T3_WR_QP_MOD, 0, 0,
 		       T3_CTL_QP_TID, 7, T3_SOPEOP);
 	wqe->flags = cpu_to_be32(MODQP_WRITE_EC);
@@ -730,12 +731,14 @@ static int __cxio_tpt_op(struct cxio_rdev *rdev_p, u32 reset_tpt_entry,
 			((perm & TPT_MW_BIND) ? F_TPT_MW_BIND_ENABLE : 0) |
 			V_TPT_ADDR_TYPE((zbva ? TPT_ZBTO : TPT_VATO)) |
 			V_TPT_PAGE_SIZE(page_size));
-		tpt.rsvd_pbl_addr = cpu_to_be32(V_TPT_PBL_ADDR(PBL_OFF(rdev_p, pbl_addr)>>3));
+		tpt.rsvd_pbl_addr = reset_tpt_entry ? 0 :
+				    cpu_to_be32(V_TPT_PBL_ADDR(PBL_OFF(rdev_p, pbl_addr)>>3));
 		tpt.len = cpu_to_be32(len);
 		tpt.va_hi = cpu_to_be32((u32) (to >> 32));
 		tpt.va_low_or_fbo = cpu_to_be32((u32) (to & 0xFFFFFFFFULL));
 		tpt.rsvd_bind_cnt_or_pstag = 0;
-		tpt.rsvd_pbl_size = cpu_to_be32(V_TPT_PBL_SIZE(pbl_size >> 2));
+		tpt.rsvd_pbl_size = reset_tpt_entry ? 0 :
+				  cpu_to_be32(V_TPT_PBL_SIZE(pbl_size >> 2));
 	}
 	err = cxio_hal_ctrl_qp_write_mem(rdev_p,
 				       stag_idx +

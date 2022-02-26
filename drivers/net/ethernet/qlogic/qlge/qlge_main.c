@@ -1092,7 +1092,8 @@ static int ql_get_next_chunk(struct ql_adapter *qdev, struct rx_ring *rx_ring,
 {
 	if (!rx_ring->pg_chunk.page) {
 		u64 map;
-		rx_ring->pg_chunk.page = alloc_pages(__GFP_COMP | GFP_ATOMIC,
+		rx_ring->pg_chunk.page = alloc_pages(__GFP_COLD | __GFP_COMP |
+						GFP_ATOMIC,
 						qdev->lbq_buf_order);
 		if (unlikely(!rx_ring->pg_chunk.page)) {
 			netif_err(qdev, drv, qdev->ndev,
@@ -1576,7 +1577,7 @@ static void ql_process_mac_rx_page(struct ql_adapter *qdev,
 		rx_ring->rx_dropped++;
 		goto err_out;
 	}
-	skb_put_data(skb, addr, hlen);
+	memcpy(skb_put(skb, hlen), addr, hlen);
 	netif_printk(qdev, rx_status, KERN_DEBUG, qdev->ndev,
 		     "%d bytes of headers and data in large. Chain page to new skb and pull tail.\n",
 		     length);
@@ -1653,7 +1654,7 @@ static void ql_process_mac_rx_skb(struct ql_adapter *qdev,
 				    dma_unmap_len(sbq_desc, maplen),
 				    PCI_DMA_FROMDEVICE);
 
-	skb_put_data(new_skb, skb->data, length);
+	memcpy(skb_put(new_skb, length), skb->data, length);
 
 	pci_dma_sync_single_for_device(qdev->pdev,
 				       dma_unmap_addr(sbq_desc, mapaddr),
@@ -1816,7 +1817,8 @@ static struct sk_buff *ql_build_rx_skb(struct ql_adapter *qdev,
 						    dma_unmap_len
 						    (sbq_desc, maplen),
 						    PCI_DMA_FROMDEVICE);
-			skb_put_data(skb, sbq_desc->p.skb->data, length);
+			memcpy(skb_put(skb, length),
+			       sbq_desc->p.skb->data, length);
 			pci_dma_sync_single_for_device(qdev->pdev,
 						       dma_unmap_addr
 						       (sbq_desc,
@@ -2332,7 +2334,7 @@ static int ql_napi_poll_msix(struct napi_struct *napi, int budget)
 	}
 
 	if (work_done < budget) {
-		napi_complete_done(napi, work_done);
+		napi_complete(napi);
 		ql_enable_completion_interrupt(qdev, rx_ring->irq);
 	}
 	return work_done;
@@ -2358,14 +2360,14 @@ static int qlge_update_hw_vlan_features(struct net_device *ndev,
 					netdev_features_t features)
 {
 	struct ql_adapter *qdev = netdev_priv(ndev);
-	int status = 0;
 	bool need_restart = netif_running(ndev);
+	int status = 0;
 
 	if (need_restart) {
 		status = ql_adapter_down(qdev);
 		if (status) {
 			netif_err(qdev, link, qdev->ndev,
-				  "Failed to bring down the adapter\n");
+			   	  "Failed to bring down the adapter\n");
 			return status;
 		}
 	}
@@ -2377,11 +2379,10 @@ static int qlge_update_hw_vlan_features(struct net_device *ndev,
 		status = ql_adapter_up(qdev);
 		if (status) {
 			netif_err(qdev, link, qdev->ndev,
-				  "Failed to bring up the adapter\n");
+			  	  "Failed to bring up the adapter\n");
 			return status;
 		}
 	}
-
 	return status;
 }
 
@@ -4148,6 +4149,7 @@ static int ql_configure_rings(struct ql_adapter *qdev)
 		rx_ring->cq_id = i;
 		rx_ring->cpu = i % cpu_cnt;	/* CPU to run handler on. */
 		if (i < qdev->rss_ring_count) {
+			gmb();
 			/*
 			 * Inbound (RSS) queues.
 			 */
@@ -4164,6 +4166,7 @@ static int ql_configure_rings(struct ql_adapter *qdev)
 			rx_ring->sbq_buf_size = SMALL_BUF_MAP_SIZE;
 			rx_ring->type = RX_Q;
 		} else {
+			gmb();
 			/*
 			 * Outbound queue handles outbound completions only.
 			 */
@@ -4684,8 +4687,7 @@ static int ql_init_device(struct pci_dev *pdev, struct net_device *ndev,
 	/*
 	 * Set up the operating parameters.
 	 */
-	qdev->workqueue = alloc_ordered_workqueue("%s", WQ_MEM_RECLAIM,
-						  ndev->name);
+	qdev->workqueue = alloc_ordered_workqueue(ndev->name, WQ_MEM_RECLAIM);
 	INIT_DELAYED_WORK(&qdev->asic_reset_work, ql_asic_reset_work);
 	INIT_DELAYED_WORK(&qdev->mpi_reset_work, ql_mpi_reset_work);
 	INIT_DELAYED_WORK(&qdev->mpi_work, ql_mpi_work);
@@ -4712,7 +4714,7 @@ static const struct net_device_ops qlge_netdev_ops = {
 	.ndo_open		= qlge_open,
 	.ndo_stop		= qlge_close,
 	.ndo_start_xmit		= qlge_send,
-	.ndo_change_mtu		= qlge_change_mtu,
+	.ndo_change_mtu_rh74	= qlge_change_mtu,
 	.ndo_get_stats		= qlge_get_stats,
 	.ndo_set_rx_mode	= qlge_set_multicast_list,
 	.ndo_set_mac_address	= qlge_set_mac_address,
@@ -4724,9 +4726,9 @@ static const struct net_device_ops qlge_netdev_ops = {
 	.ndo_vlan_rx_kill_vid	= qlge_vlan_rx_kill_vid,
 };
 
-static void ql_timer(struct timer_list *t)
+static void ql_timer(unsigned long data)
 {
-	struct ql_adapter *qdev = from_timer(qdev, t, timer);
+	struct ql_adapter *qdev = (struct ql_adapter *)data;
 	u32 var = 0;
 
 	var = ql_read32(qdev, STS);
@@ -4787,13 +4789,6 @@ static int qlge_probe(struct pci_dev *pdev,
 	ndev->ethtool_ops = &qlge_ethtool_ops;
 	ndev->watchdog_timeo = 10 * HZ;
 
-	/* MTU range: this driver only supports 1500 or 9000, so this only
-	 * filters out values above or below, and we'll rely on
-	 * qlge_change_mtu to make sure only 1500 or 9000 are allowed
-	 */
-	ndev->min_mtu = ETH_DATA_LEN;
-	ndev->max_mtu = 9000;
-
 	err = register_netdev(ndev);
 	if (err) {
 		dev_err(&pdev->dev, "net device registration failed.\n");
@@ -4805,8 +4800,11 @@ static int qlge_probe(struct pci_dev *pdev,
 	/* Start up the timer to trigger EEH if
 	 * the bus goes dead
 	 */
-	timer_setup(&qdev->timer, ql_timer, TIMER_DEFERRABLE);
-	mod_timer(&qdev->timer, jiffies + (5*HZ));
+	init_timer_deferrable(&qdev->timer);
+	qdev->timer.data = (unsigned long)qdev;
+	qdev->timer.function = ql_timer;
+	qdev->timer.expires = jiffies + (5*HZ);
+	add_timer(&qdev->timer);
 	ql_link_off(qdev);
 	ql_display_dev_info(ndev);
 	atomic_set(&qdev->lb_count, 0);
@@ -5026,4 +5024,15 @@ static struct pci_driver qlge_driver = {
 	.err_handler = &qlge_err_handler
 };
 
-module_pci_driver(qlge_driver);
+static int __init qlge_init_module(void)
+{
+	return pci_register_driver(&qlge_driver);
+}
+
+static void __exit qlge_exit(void)
+{
+	pci_unregister_driver(&qlge_driver);
+}
+
+module_init(qlge_init_module);
+module_exit(qlge_exit);

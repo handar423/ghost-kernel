@@ -25,12 +25,9 @@
  *
  * Send feedback to <greg@kroah.com>, <kristen.c.accardi@intel.com>
  *
- * Authors:
- *   Dan Zink <dan.zink@compaq.com>
- *   Greg Kroah-Hartman <greg@kroah.com>
- *   Dely Sy <dely.l.sy@intel.com>"
  */
 
+#include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
@@ -46,10 +43,14 @@ bool pciehp_poll_mode;
 int pciehp_poll_time;
 static bool pciehp_force;
 
-/*
- * not really modular, but the easiest way to keep compat with existing
- * bootargs behaviour is to continue using module_param here.
- */
+#define DRIVER_VERSION	"0.4"
+#define DRIVER_AUTHOR	"Dan Zink <dan.zink@compaq.com>, Greg Kroah-Hartman <greg@kroah.com>, Dely Sy <dely.l.sy@intel.com>"
+#define DRIVER_DESC	"PCI Express Hot Plug Controller Driver"
+
+MODULE_AUTHOR(DRIVER_AUTHOR);
+MODULE_DESCRIPTION(DRIVER_DESC);
+MODULE_LICENSE("GPL");
+
 module_param(pciehp_debug, bool, 0644);
 module_param(pciehp_poll_mode, bool, 0644);
 module_param(pciehp_poll_time, int, 0644);
@@ -217,7 +218,6 @@ static int pciehp_probe(struct pcie_device *dev)
 	struct slot *slot;
 	u8 occupied, poweron;
 
-	/* If this is not a "hotplug" service, we have no business here. */
 	if (dev->service != PCIE_PORT_SERVICE_HP)
 		return -ENODEV;
 
@@ -297,7 +297,7 @@ static int pciehp_resume(struct pcie_device *dev)
 	ctrl = get_service_data(dev);
 
 	/* reinitialize the chipset's event detection logic */
-	pcie_enable_notification(ctrl);
+	pcie_reenable_notification(ctrl);
 
 	slot = ctrl->slot;
 
@@ -333,9 +333,19 @@ static int __init pcied_init(void)
 
 	retval = pcie_port_service_register(&hpdriver_portdrv);
 	dbg("pcie_port_service_register = %d\n", retval);
+	info(DRIVER_DESC " version: " DRIVER_VERSION "\n");
 	if (retval)
 		dbg("Failure to register service\n");
 
 	return retval;
 }
-device_initcall(pcied_init);
+
+static void __exit pcied_cleanup(void)
+{
+	dbg("unload_pciehpd()\n");
+	pcie_port_service_unregister(&hpdriver_portdrv);
+	info(DRIVER_DESC " version: " DRIVER_VERSION " unloaded\n");
+}
+
+module_init(pcied_init);
+module_exit(pcied_cleanup);

@@ -1,9 +1,8 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_SCORE_MODULE_H
 #define _ASM_SCORE_MODULE_H
 
 #include <linux/list.h>
-#include <asm/extable.h>
+#include <asm/uaccess.h>
 #include <asm-generic/module.h>
 
 struct mod_arch_specific {

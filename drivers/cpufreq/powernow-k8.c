@@ -57,6 +57,13 @@ static DEFINE_PER_CPU(struct powernow_k8_data *, powernow_data);
 
 static struct cpufreq_driver cpufreq_amd64_driver;
 
+#ifndef CONFIG_SMP
+static inline const struct cpumask *cpu_core_mask(int cpu)
+{
+	return cpumask_of(0);
+}
+#endif
+
 /* Return a frequency in MHz, given an input fid */
 static u32 find_freq_from_fid(u32 fid)
 {
@@ -613,7 +620,7 @@ static int fill_powernow_table(struct powernow_k8_data *data,
 
 	pr_debug("cfid 0x%x, cvid 0x%x\n", data->currfid, data->currvid);
 	data->powernow_table = powernow_table;
-	if (cpumask_first(topology_core_cpumask(data->cpu)) == data->cpu)
+	if (cpumask_first(cpu_core_mask(data->cpu)) == data->cpu)
 		print_basics(data);
 
 	for (j = 0; j < data->numps; j++)
@@ -777,7 +784,7 @@ static int powernow_k8_cpu_init_acpi(struct powernow_k8_data *data)
 		CPUFREQ_TABLE_END;
 	data->powernow_table = powernow_table;
 
-	if (cpumask_first(topology_core_cpumask(data->cpu)) == data->cpu)
+	if (cpumask_first(cpu_core_mask(data->cpu)) == data->cpu)
 		print_basics(data);
 
 	/* notify BIOS that we exist */
@@ -795,7 +802,7 @@ err_out_mem:
 	kfree(powernow_table);
 
 err_out:
-	acpi_processor_unregister_performance(data->cpu);
+	acpi_processor_unregister_performance(&data->acpi_data, data->cpu);
 
 	/* data->acpi_data.state_count informs us at ->exit()
 	 * whether ACPI was used */
@@ -863,7 +870,8 @@ static int fill_powernow_table_fidvid(struct powernow_k8_data *data,
 static void powernow_k8_cpu_exit_acpi(struct powernow_k8_data *data)
 {
 	if (data->acpi_data.state_count)
-		acpi_processor_unregister_performance(data->cpu);
+		acpi_processor_unregister_performance(&data->acpi_data,
+				data->cpu);
 	free_cpumask_var(data->acpi_data.shared_cpu_map);
 }
 
@@ -894,6 +902,7 @@ static int transition_frequency_fidvid(struct powernow_k8_data *data,
 	u32 vid = 0;
 	int res;
 	struct cpufreq_freqs freqs;
+	unsigned int cpu = smp_processor_id();
 
 	pr_debug("cpu %d transition to index %u\n", smp_processor_id(), index);
 
@@ -921,7 +930,12 @@ static int transition_frequency_fidvid(struct powernow_k8_data *data,
 	freqs.old = find_khz_freq_from_fid(data->currfid);
 	freqs.new = find_khz_freq_from_fid(fid);
 
-	policy = cpufreq_cpu_get(smp_processor_id());
+	policy = cpufreq_cpu_get(cpu);
+
+	if (!policy) {
+		BUG_ON(cpu != smp_processor_id());
+		return 1;
+	}
 	cpufreq_cpu_put(policy);
 
 	cpufreq_freq_transition_begin(policy, &freqs);
@@ -1043,7 +1057,7 @@ static int powernowk8_cpu_init(struct cpufreq_policy *pol)
 
 	data = kzalloc(sizeof(*data), GFP_KERNEL);
 	if (!data) {
-		pr_err("unable to alloc powernow_k8_data\n");
+		pr_err("unable to alloc powernow_k8_data");
 		return -ENOMEM;
 	}
 
@@ -1082,7 +1096,7 @@ static int powernowk8_cpu_init(struct cpufreq_policy *pol)
 	if (rc != 0)
 		goto err_out_exit_acpi;
 
-	cpumask_copy(pol->cpus, topology_core_cpumask(pol->cpu));
+	cpumask_copy(pol->cpus, cpu_core_mask(pol->cpu));
 	data->available_cores = pol->cpus;
 
 	/* min/max the cpu is capable of */
@@ -1171,8 +1185,7 @@ static struct cpufreq_driver cpufreq_amd64_driver = {
 
 static void __request_acpi_cpufreq(void)
 {
-	const char drv[] = "acpi-cpufreq";
-	const char *cur_drv;
+	const char *cur_drv, *drv = "acpi-cpufreq";
 
 	cur_drv = cpufreq_get_current_driver();
 	if (!cur_drv)

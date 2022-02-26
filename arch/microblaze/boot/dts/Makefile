@@ -1,4 +1,5 @@
-# SPDX-License-Identifier: GPL-2.0
+#
+# arch/microblaze/boot/Makefile
 #
 
 obj-y += linked_dtb.o
@@ -17,3 +18,5 @@ quiet_cmd_cp = CP      $< $@$2
 
 # Rule to build device tree blobs
 DTC_FLAGS := -p 1024
+
+clean-files += *.dtb

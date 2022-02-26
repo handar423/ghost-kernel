@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0+
 /*
  * ehci-omap.c - driver for USBHOST on OMAP3/4 processors
  *
@@ -15,6 +14,21 @@
  *	Contact: Felipe Balbi <felipe.balbi@nokia.com>
  *
  * Based on "ehci-fsl.c" and "ehci-au1xxx.c" ehci glue layers
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
+ *
  */
 
 #include <linux/kernel.h>
@@ -72,7 +86,7 @@ static inline u32 ehci_read(void __iomem *base, u32 reg)
 
 static struct hc_driver __read_mostly ehci_omap_hc_driver;
 
-static const struct ehci_driver_overrides ehci_omap_overrides __initconst = {
+static const struct ehci_driver_overrides ehci_omap_overrides __initdata = {
 	.extra_priv_size = sizeof(struct omap_hcd),
 };
 
@@ -86,11 +100,11 @@ static const struct ehci_driver_overrides ehci_omap_overrides __initconst = {
 static int ehci_hcd_omap_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
-	struct usbhs_omap_platform_data *pdata = dev_get_platdata(dev);
+	struct usbhs_omap_platform_data *pdata = dev->platform_data;
 	struct resource	*res;
 	struct usb_hcd	*hcd;
 	void __iomem *regs;
-	int ret;
+	int ret = -ENODEV;
 	int irq;
 	int i;
 	struct omap_hcd	*omap;
@@ -105,7 +119,7 @@ static int ehci_hcd_omap_probe(struct platform_device *pdev)
 
 	/* For DT boot, get platform data from parent. i.e. usbhshost */
 	if (dev->of_node) {
-		pdata = dev_get_platdata(dev->parent);
+		pdata = dev->parent->platform_data;
 		dev->platform_data = pdata;
 	}
 
@@ -116,8 +130,8 @@ static int ehci_hcd_omap_probe(struct platform_device *pdev)
 
 	irq = platform_get_irq(pdev, 0);
 	if (irq < 0) {
-		dev_err(dev, "EHCI irq failed: %d\n", irq);
-		return irq;
+		dev_err(dev, "EHCI irq failed\n");
+		return -ENODEV;
 	}
 
 	res =  platform_get_resource(pdev, IORESOURCE_MEM, 0);
@@ -130,11 +144,11 @@ static int ehci_hcd_omap_probe(struct platform_device *pdev)
 	 * Since shared usb code relies on it, set it here for now.
 	 * Once we have dma capability bindings this can go away.
 	 */
-	ret = dma_coerce_mask_and_coherent(dev, DMA_BIT_MASK(32));
-	if (ret)
-		return ret;
+	if (!dev->dma_mask)
+		dev->dma_mask = &dev->coherent_dma_mask;
+	if (!dev->coherent_dma_mask)
+		dev->coherent_dma_mask = DMA_BIT_MASK(32);
 
-	ret = -ENODEV;
 	hcd = usb_create_hcd(&ehci_omap_hc_driver, dev,
 			dev_name(dev));
 	if (!hcd) {
@@ -201,7 +215,6 @@ static int ehci_hcd_omap_probe(struct platform_device *pdev)
 		dev_err(dev, "failed to add hcd with err %d\n", ret);
 		goto err_pm_runtime;
 	}
-	device_wakeup_enable(hcd->self.controller);
 
 	/*
 	 * Bring PHYs out of reset for non PHY modes.
@@ -265,6 +278,14 @@ static int ehci_hcd_omap_remove(struct platform_device *pdev)
 	return 0;
 }
 
+static void ehci_hcd_omap_shutdown(struct platform_device *pdev)
+{
+	struct usb_hcd *hcd = dev_get_drvdata(&pdev->dev);
+
+	if (hcd->driver->shutdown)
+		hcd->driver->shutdown(hcd);
+}
+
 static const struct of_device_id omap_ehci_dt_ids[] = {
 	{ .compatible = "ti,ehci-omap" },
 	{ }
@@ -275,12 +296,12 @@ MODULE_DEVICE_TABLE(of, omap_ehci_dt_ids);
 static struct platform_driver ehci_hcd_omap_driver = {
 	.probe			= ehci_hcd_omap_probe,
 	.remove			= ehci_hcd_omap_remove,
-	.shutdown		= usb_hcd_platform_shutdown,
+	.shutdown		= ehci_hcd_omap_shutdown,
 	/*.suspend		= ehci_hcd_omap_suspend, */
 	/*.resume		= ehci_hcd_omap_resume, */
 	.driver = {
 		.name		= hcd_name,
-		.of_match_table = omap_ehci_dt_ids,
+		.of_match_table = of_match_ptr(omap_ehci_dt_ids),
 	}
 };
 

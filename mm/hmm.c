@@ -11,7 +11,7 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  *
- * Authors: JÃ©rÃ´me Glisse <jglisse@redhat.com>
+ * Authors: Jérôme Glisse <jglisse@redhat.com>
  */
 /*
  * Refer to include/linux/hmm.h for information about heterogeneous memory
@@ -19,33 +19,26 @@
  */
 #include <linux/mm.h>
 #include <linux/hmm.h>
-#include <linux/init.h>
 #include <linux/rmap.h>
 #include <linux/swap.h>
+#include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/sched.h>
+#include <linux/string.h>
+#include <linux/printk.h>
 #include <linux/mmzone.h>
 #include <linux/pagemap.h>
 #include <linux/swapops.h>
 #include <linux/hugetlb.h>
 #include <linux/memremap.h>
-#include <linux/jump_label.h>
 #include <linux/mmu_notifier.h>
 #include <linux/memory_hotplug.h>
 
 #define PA_SECTION_SIZE (1UL << PA_SECTION_SHIFT)
 
-#if defined(CONFIG_DEVICE_PRIVATE) || defined(CONFIG_DEVICE_PUBLIC)
-/*
- * Device private memory see HMM (Documentation/vm/hmm.txt) or hmm.h
- */
-DEFINE_STATIC_KEY_FALSE(device_private_key);
-EXPORT_SYMBOL(device_private_key);
-#endif /* CONFIG_DEVICE_PRIVATE || CONFIG_DEVICE_PUBLIC */
-
-
-#if IS_ENABLED(CONFIG_HMM_MIRROR)
 static const struct mmu_notifier_ops hmm_mmu_notifier_ops;
+static bool _hmm_enabled = false;
+
 
 /*
  * struct hmm - HMM per mm struct
@@ -130,6 +123,7 @@ void hmm_mm_destroy(struct mm_struct *mm)
 	kfree(mm->hmm);
 }
 
+#if IS_ENABLED(CONFIG_HMM_MIRROR)
 static void hmm_invalidate_range(struct hmm *hmm,
 				 enum hmm_update_type action,
 				 unsigned long start,
@@ -160,6 +154,20 @@ static void hmm_invalidate_range(struct hmm *hmm,
 	up_read(&hmm->mirrors_sem);
 }
 
+static void hmm_invalidate_page(struct mmu_notifier *mn,
+				struct mm_struct *mm,
+				unsigned long addr)
+{
+	unsigned long start = addr & PAGE_MASK;
+	unsigned long end = start + PAGE_SIZE;
+	struct hmm *hmm = mm->hmm;
+
+	VM_BUG_ON(!hmm);
+
+	atomic_inc(&hmm->sequence);
+	hmm_invalidate_range(mm->hmm, HMM_UPDATE_INVALIDATE, start, end);
+}
+
 static void hmm_invalidate_range_start(struct mmu_notifier *mn,
 				       struct mm_struct *mm,
 				       unsigned long start,
@@ -185,6 +193,7 @@ static void hmm_invalidate_range_end(struct mmu_notifier *mn,
 }
 
 static const struct mmu_notifier_ops hmm_mmu_notifier_ops = {
+	.invalidate_page	= hmm_invalidate_page,
 	.invalidate_range_start	= hmm_invalidate_range_start,
 	.invalidate_range_end	= hmm_invalidate_range_end,
 };
@@ -237,6 +246,7 @@ EXPORT_SYMBOL(hmm_mirror_unregister);
 
 struct hmm_vma_walk {
 	struct hmm_range	*range;
+	struct vm_area_struct	*vma;
 	unsigned long		last;
 	bool			fault;
 	bool			block;
@@ -247,9 +257,9 @@ static int hmm_vma_do_fault(struct mm_walk *walk,
 			    unsigned long addr,
 			    hmm_pfn_t *pfn)
 {
-	unsigned int flags = FAULT_FLAG_ALLOW_RETRY | FAULT_FLAG_REMOTE;
+	unsigned int flags = FAULT_FLAG_ALLOW_RETRY;
 	struct hmm_vma_walk *hmm_vma_walk = walk->private;
-	struct vm_area_struct *vma = walk->vma;
+	struct vm_area_struct *vma = hmm_vma_walk->vma;
 	int r;
 
 	flags |= hmm_vma_walk->block ? 0 : FAULT_FLAG_ALLOW_RETRY;
@@ -273,19 +283,13 @@ static void hmm_pfns_special(hmm_pfn_t *pfns,
 		*pfns = HMM_PFN_SPECIAL;
 }
 
-static int hmm_pfns_bad(unsigned long addr,
-			unsigned long end,
-			struct mm_walk *walk)
+static int hmm_pfns_bad(hmm_pfn_t *pfns,
+			unsigned long addr,
+			unsigned long end)
 {
-	struct hmm_range *range = walk->private;
-	hmm_pfn_t *pfns = range->pfns;
-	unsigned long i;
-
-	i = (addr - range->start) >> PAGE_SHIFT;
-	for (; addr < end; addr += PAGE_SIZE, i++)
-		pfns[i] = HMM_PFN_ERROR;
-
-	return 0;
+	for (; addr < end; addr += PAGE_SIZE, pfns++)
+		*pfns = HMM_PFN_ERROR;
+	return -EFAULT;
 }
 
 static void hmm_pfns_clear(hmm_pfn_t *pfns,
@@ -309,9 +313,10 @@ static int hmm_vma_walk_hole(unsigned long addr,
 	i = (addr - range->start) >> PAGE_SHIFT;
 	for (; addr < end; addr += PAGE_SIZE, i++) {
 		pfns[i] = HMM_PFN_EMPTY;
+
 		if (hmm_vma_walk->fault) {
 			int ret;
-
+ 
 			ret = hmm_vma_do_fault(walk, addr, &pfns[i]);
 			if (ret != -EAGAIN)
 				return ret;
@@ -336,7 +341,7 @@ static int hmm_vma_walk_clear(unsigned long addr,
 		pfns[i] = 0;
 		if (hmm_vma_walk->fault) {
 			int ret;
-
+ 
 			ret = hmm_vma_do_fault(walk, addr, &pfns[i]);
 			if (ret != -EAGAIN)
 				return ret;
@@ -346,14 +351,19 @@ static int hmm_vma_walk_clear(unsigned long addr,
 	return hmm_vma_walk->fault ? -EAGAIN : 0;
 }
 
+static inline unsigned long hmm_pte_index(unsigned long address)
+{
+	return (address >> PAGE_SHIFT) & (PTRS_PER_PTE - 1);
+}
+
 static int hmm_vma_walk_pmd(pmd_t *pmdp,
 			    unsigned long start,
 			    unsigned long end,
 			    struct mm_walk *walk)
 {
 	struct hmm_vma_walk *hmm_vma_walk = walk->private;
+	struct vm_area_struct *vma = hmm_vma_walk->vma;
 	struct hmm_range *range = hmm_vma_walk->range;
-	struct vm_area_struct *vma = walk->vma;
 	hmm_pfn_t *pfns = range->pfns;
 	unsigned long addr = start, i;
 	bool write_fault;
@@ -364,45 +374,26 @@ static int hmm_vma_walk_pmd(pmd_t *pmdp,
 	flag = vma->vm_flags & VM_READ ? HMM_PFN_READ : 0;
 	write_fault = hmm_vma_walk->fault & hmm_vma_walk->write;
 
-again:
 	if (pmd_none(*pmdp))
 		return hmm_vma_walk_hole(start, end, walk);
 
-	if (pmd_huge(*pmdp) && vma->vm_flags & VM_HUGETLB)
-		return hmm_pfns_bad(start, end, walk);
+	if (unlikely(pmd_trans_splitting(*pmdp)))
+		wait_split_huge_page(vma->anon_vma, pmdp);
 
-	if (pmd_devmap(*pmdp) || pmd_trans_huge(*pmdp)) {
-		unsigned long pfn;
-		pmd_t pmd;
+	if (pmd_trans_huge(*pmdp)) {
+		unsigned long pfn = pmd_pfn(*pmdp) + hmm_pte_index(addr);
 
-		/*
-		 * No need to take pmd_lock here, even if some other threads
-		 * is splitting the huge pmd we will get that event through
-		 * mmu_notifier callback.
-		 *
-		 * So just read pmd value and check again its a transparent
-		 * huge or device mapping one and compute corresponding pfn
-		 * values.
-		 */
-		pmd = pmd_read_atomic(pmdp);
-		barrier();
-		if (!pmd_devmap(pmd) && !pmd_trans_huge(pmd))
-			goto again;
-		if (pmd_protnone(pmd))
+		if (write_fault && !pmd_write(*pmdp))
 			return hmm_vma_walk_clear(start, end, walk);
 
-		if (write_fault && !pmd_write(pmd))
-			return hmm_vma_walk_clear(start, end, walk);
-
-		pfn = pmd_pfn(pmd) + pte_index(addr);
-		flag |= pmd_write(pmd) ? HMM_PFN_WRITE : 0;
+		flag |= pmd_write(*pmdp) ? HMM_PFN_WRITE : 0;
 		for (; addr < end; addr += PAGE_SIZE, i++, pfn++)
 			pfns[i] = hmm_pfn_t_from_pfn(pfn) | flag;
 		return 0;
 	}
 
 	if (pmd_bad(*pmdp))
-		return hmm_pfns_bad(start, end, walk);
+		return hmm_pfns_bad(&pfns[i], start, end);
 
 	ptep = pte_offset_map(pmdp, addr);
 	for (; addr < end; addr += PAGE_SIZE, ptep++, i++) {
@@ -425,16 +416,15 @@ again:
 					goto fault;
 				continue;
 			}
-
 			entry = pte_to_swp_entry(pte);
 
 			/*
 			 * This is a special swap entry, ignore migration, use
 			 * device and report anything else as error.
 			 */
-			if (is_device_private_entry(entry)) {
+			if (is_hmm_entry(entry)) {
 				pfns[i] = hmm_pfn_t_from_pfn(swp_offset(entry));
-				if (is_write_device_private_entry(entry)) {
+				if (is_write_hmm_entry(entry)) {
 					pfns[i] |= HMM_PFN_WRITE;
 				} else if (write_fault)
 					goto fault;
@@ -442,7 +432,7 @@ again:
 				pfns[i] |= flag;
 			} else if (is_migration_entry(entry)) {
 				if (hmm_vma_walk->fault) {
-					pte_unmap(ptep);
+					pte_unmap(ptep - 1);
 					hmm_vma_walk->last = addr;
 					migration_entry_wait(vma->vm_mm,
 							     pmdp, addr);
@@ -458,7 +448,6 @@ again:
 
 		if (write_fault && !pte_write(pte))
 			goto fault;
-
 		pfns[i] = hmm_pfn_t_from_pfn(pte_pfn(pte)) | flag;
 		pfns[i] |= pte_write(pte) ? HMM_PFN_WRITE : 0;
 		continue;
@@ -466,7 +455,7 @@ again:
 fault:
 		pte_unmap(ptep);
 		/* Fault all pages in range */
-		return hmm_vma_walk_clear(start, end, walk);
+		return hmm_vma_walk_clear(addr, end, walk);
 	}
 	pte_unmap(ptep - 1);
 
@@ -504,7 +493,8 @@ int hmm_vma_get_pfns(struct vm_area_struct *vma,
 	struct hmm *hmm;
 
 	/* FIXME support hugetlb fs */
-	if (is_vm_hugetlb_page(vma) || (vma->vm_flags & VM_SPECIAL)) {
+	if (is_vm_hugetlb_page(vma) || (vma->vm_flags & VM_SPECIAL) ||
+			vma_is_dax(vma)) {
 		hmm_pfns_special(pfns, start, end);
 		return -EINVAL;
 	}
@@ -531,19 +521,21 @@ int hmm_vma_get_pfns(struct vm_area_struct *vma,
 	list_add_rcu(&range->list, &hmm->ranges);
 	spin_unlock(&hmm->lock);
 
+	hmm_vma_walk.vma = vma;
 	hmm_vma_walk.fault = false;
 	hmm_vma_walk.range = range;
-	mm_walk.private = &hmm_vma_walk;
 
-	mm_walk.vma = vma;
 	mm_walk.mm = vma->vm_mm;
+	mm_walk.pgd_entry = NULL;
+	mm_walk.pud_entry = NULL;
 	mm_walk.pte_entry = NULL;
-	mm_walk.test_walk = NULL;
 	mm_walk.hugetlb_entry = NULL;
+	mm_walk.private = &hmm_vma_walk;
 	mm_walk.pmd_entry = hmm_vma_walk_pmd;
 	mm_walk.pte_hole = hmm_vma_walk_hole;
 
 	walk_page_range(start, end, &mm_walk);
+
 	return 0;
 }
 EXPORT_SYMBOL(hmm_vma_get_pfns);
@@ -698,23 +690,25 @@ int hmm_vma_fault(struct vm_area_struct *vma,
 	spin_unlock(&hmm->lock);
 
 	/* FIXME support hugetlb fs */
-	if (is_vm_hugetlb_page(vma) || (vma->vm_flags & VM_SPECIAL)) {
+	if (is_vm_hugetlb_page(vma) || (vma->vm_flags & VM_SPECIAL) ||
+			vma_is_dax(vma)) {
 		hmm_pfns_special(pfns, start, end);
 		return 0;
 	}
 
+	hmm_vma_walk.vma = vma;
 	hmm_vma_walk.fault = true;
 	hmm_vma_walk.write = write;
 	hmm_vma_walk.block = block;
 	hmm_vma_walk.range = range;
-	mm_walk.private = &hmm_vma_walk;
 	hmm_vma_walk.last = range->start;
 
-	mm_walk.vma = vma;
 	mm_walk.mm = vma->vm_mm;
+	mm_walk.pgd_entry = NULL;
+	mm_walk.pud_entry = NULL;
 	mm_walk.pte_entry = NULL;
-	mm_walk.test_walk = NULL;
 	mm_walk.hugetlb_entry = NULL;
+	mm_walk.private = &hmm_vma_walk;
 	mm_walk.pmd_entry = hmm_vma_walk_pmd;
 	mm_walk.pte_hole = hmm_vma_walk_hole;
 
@@ -735,8 +729,6 @@ int hmm_vma_fault(struct vm_area_struct *vma,
 EXPORT_SYMBOL(hmm_vma_fault);
 #endif /* IS_ENABLED(CONFIG_HMM_MIRROR) */
 
-
-#if IS_ENABLED(CONFIG_DEVICE_PRIVATE) ||  IS_ENABLED(CONFIG_DEVICE_PUBLIC)
 struct page *hmm_vma_alloc_locked_page(struct vm_area_struct *vma,
 				       unsigned long addr)
 {
@@ -782,7 +774,7 @@ static void hmm_devmem_ref_kill(void *data)
 
 static int hmm_devmem_fault(struct vm_area_struct *vma,
 			    unsigned long addr,
-			    const struct page *page,
+			    struct page *page,
 			    unsigned int flags,
 			    pmd_t *pmdp)
 {
@@ -795,6 +787,8 @@ static void hmm_devmem_free(struct page *page, void *data)
 {
 	struct hmm_devmem *devmem = data;
 
+	page->mapping = NULL;
+
 	devmem->ops->free(devmem, page);
 }
 
@@ -803,10 +797,11 @@ static RADIX_TREE(hmm_devmem_radix, GFP_KERNEL);
 
 static void hmm_devmem_radix_release(struct resource *resource)
 {
-	resource_size_t key, align_start, align_size;
+	resource_size_t key, align_start, align_size, align_end;
 
 	align_start = resource->start & ~(PA_SECTION_SIZE - 1);
 	align_size = ALIGN(resource_size(resource), PA_SECTION_SIZE);
+	align_end = align_start + align_size - 1;
 
 	mutex_lock(&hmm_devmem_lock);
 	for (key = resource->start;
@@ -836,13 +831,7 @@ static void hmm_devmem_release(struct device *dev, void *data)
 	page = pfn_to_page(start_pfn);
 	zone = page_zone(page);
 
-	mem_hotplug_begin();
-	if (resource->desc == IORES_DESC_DEVICE_PRIVATE_MEMORY)
-		__remove_pages(zone, start_pfn, npages);
-	else
-		arch_remove_memory(start_pfn << PAGE_SHIFT,
-				   npages << PAGE_SHIFT);
-	mem_hotplug_done();
+	__remove_pages(zone, start_pfn, npages, NULL);
 
 	hmm_devmem_radix_release(resource);
 }
@@ -866,9 +855,7 @@ static int hmm_devmem_pages_create(struct hmm_devmem *devmem)
 			   resource_size(devmem->resource),
 			   PA_SECTION_SIZE) - align_start;
 
-	is_ram = region_intersects(align_start, align_size,
-				   IORESOURCE_SYSTEM_RAM,
-				   IORES_DESC_NONE);
+	is_ram = region_intersects_ram(align_start, align_size);
 	if (is_ram == REGION_MIXED) {
 		WARN_ONCE(1, "%s attempted on mixed region %pr\n",
 				__func__, devmem->resource);
@@ -877,12 +864,17 @@ static int hmm_devmem_pages_create(struct hmm_devmem *devmem)
 	if (is_ram == REGION_INTERSECTS)
 		return -ENXIO;
 
-	if (devmem->resource->desc == IORES_DESC_DEVICE_PUBLIC_MEMORY)
-		devmem->pagemap.type = MEMORY_DEVICE_PUBLIC;
-	else
-		devmem->pagemap.type = MEMORY_DEVICE_PRIVATE;
+	is_ram = region_intersects_pmem(align_start, align_size);
+	if (is_ram == REGION_MIXED) {
+		WARN_ONCE(1, "%s attempted on mixed region %pr\n",
+				__func__, devmem->resource);
+		return -ENXIO;
+	}
+	if (is_ram == REGION_INTERSECTS)
+		return -ENXIO;
 
-	devmem->pagemap.res = devmem->resource;
+	devmem->pagemap.type = MEMORY_HMM;
+	devmem->pagemap.res = *devmem->resource;
 	devmem->pagemap.page_fault = hmm_devmem_fault;
 	devmem->pagemap.page_free = hmm_devmem_free;
 	devmem->pagemap.dev = devmem->device;
@@ -919,40 +911,24 @@ static int hmm_devmem_pages_create(struct hmm_devmem *devmem)
 	if (nid < 0)
 		nid = numa_mem_id();
 
-	mem_hotplug_begin();
-	/*
-	 * For device private memory we call add_pages() as we only need to
-	 * allocate and initialize struct page for the device memory. More-
-	 * over the device memory is un-accessible thus we do not want to
-	 * create a linear mapping for the memory like arch_add_memory()
-	 * would do.
-	 *
-	 * For device public memory, which is accesible by the CPU, we do
-	 * want the linear mapping and thus use arch_add_memory().
-	 */
-	if (devmem->pagemap.type == MEMORY_DEVICE_PUBLIC)
-		ret = arch_add_memory(nid, align_start, align_size, false);
-	else
-		ret = add_pages(nid, align_start >> PAGE_SHIFT,
-				align_size >> PAGE_SHIFT, false);
-	if (ret) {
-		mem_hotplug_done();
-		goto error_add_memory;
-	}
-	move_pfn_range_to_zone(&NODE_DATA(nid)->node_zones[ZONE_DEVICE],
-				align_start >> PAGE_SHIFT,
-				align_size >> PAGE_SHIFT);
-	mem_hotplug_done();
+	ret = add_pages(nid, align_start, align_size, NULL, true);
+	if (ret)
+		goto error_radix;
 
 	for (pfn = devmem->pfn_first; pfn < devmem->pfn_last; pfn++) {
 		struct page *page = pfn_to_page(pfn);
 
+		/*
+		 * ZONE_DEVICE pages union ->lru with a ->pgmap back
+		 * pointer.  It is a bug if a ZONE_DEVICE page is ever
+		 * freed or placed on a driver-private list. Therefore,
+		 * seed the storage with LIST_POISON* values.
+		 */
+		list_del(&page->lru);
 		page->pgmap = &devmem->pagemap;
 	}
 	return 0;
 
-error_add_memory:
-	untrack_pfn(NULL, PHYS_PFN(align_start), align_size);
 error_radix:
 	hmm_devmem_radix_release(devmem->resource);
 error:
@@ -980,14 +956,11 @@ static void hmm_devmem_pages_remove(struct hmm_devmem *devmem)
  * @size: size in bytes of the device memory to add
  * Returns: pointer to new hmm_devmem struct ERR_PTR otherwise
  *
- * This function first finds an empty range of physical address big enough to
- * contain the new resource, and then hotplugs it as ZONE_DEVICE memory, which
- * in turn allocates struct pages. It does not do anything beyond that; all
- * events affecting the memory will go through the various callbacks provided
- * by hmm_devmem_ops struct.
- *
- * Device driver should call this function during device initialization and
- * is then responsible of memory management. HMM only provides helpers.
+ * This first finds an empty range of physical address big enough to contain the
+ * new resource, and then hotplugs it as ZONE_DEVICE memory, which in turn
+ * allocates struct pages. It does not do anything beyond that; all events
+ * affecting the memory will go through the various callbacks provided by
+ * hmm_devmem_ops struct.
  */
 struct hmm_devmem *hmm_devmem_add(const struct hmm_devmem_ops *ops,
 				  struct device *device,
@@ -996,8 +969,6 @@ struct hmm_devmem *hmm_devmem_add(const struct hmm_devmem_ops *ops,
 	struct hmm_devmem *devmem;
 	resource_size_t addr;
 	int ret;
-
-	static_branch_enable(&device_private_key);
 
 	devmem = devres_alloc_node(&hmm_devmem_release, sizeof(*devmem),
 				   GFP_KERNEL, dev_to_node(device));
@@ -1022,7 +993,7 @@ struct hmm_devmem *hmm_devmem_add(const struct hmm_devmem_ops *ops,
 
 	size = ALIGN(size, PA_SECTION_SIZE);
 	addr = min((unsigned long)iomem_resource.end,
-		   (1UL << MAX_PHYSMEM_BITS) - 1);
+		   (1UL << MAX_PHYSMEM_BITS) - (128 << 20));
 	addr = addr - size + 1UL;
 
 	/*
@@ -1032,7 +1003,11 @@ struct hmm_devmem *hmm_devmem_add(const struct hmm_devmem_ops *ops,
 	 * FIXME what about ioport_resource resource ?
 	 */
 	for (; addr > size && addr >= iomem_resource.start; addr -= size) {
-		ret = region_intersects(addr, size, 0, IORES_DESC_NONE);
+		ret = region_intersects_ram(addr, size);
+		if (ret != REGION_DISJOINT)
+			continue;
+
+		ret = region_intersects_pmem(addr, size);
 		if (ret != REGION_DISJOINT)
 			continue;
 
@@ -1049,7 +1024,6 @@ struct hmm_devmem *hmm_devmem_add(const struct hmm_devmem_ops *ops,
 		goto error_no_resource;
 	}
 
-	devmem->resource->desc = IORES_DESC_DEVICE_PRIVATE_MEMORY;
 	devmem->pfn_first = devmem->resource->start >> PAGE_SHIFT;
 	devmem->pfn_last = devmem->pfn_first +
 			   (resource_size(devmem->resource) >> PAGE_SHIFT);
@@ -1081,67 +1055,6 @@ error_percpu_ref:
 }
 EXPORT_SYMBOL(hmm_devmem_add);
 
-struct hmm_devmem *hmm_devmem_add_resource(const struct hmm_devmem_ops *ops,
-					   struct device *device,
-					   struct resource *res)
-{
-	struct hmm_devmem *devmem;
-	int ret;
-
-	if (res->desc != IORES_DESC_DEVICE_PUBLIC_MEMORY)
-		return ERR_PTR(-EINVAL);
-
-	static_branch_enable(&device_private_key);
-
-	devmem = devres_alloc_node(&hmm_devmem_release, sizeof(*devmem),
-				   GFP_KERNEL, dev_to_node(device));
-	if (!devmem)
-		return ERR_PTR(-ENOMEM);
-
-	init_completion(&devmem->completion);
-	devmem->pfn_first = -1UL;
-	devmem->pfn_last = -1UL;
-	devmem->resource = res;
-	devmem->device = device;
-	devmem->ops = ops;
-
-	ret = percpu_ref_init(&devmem->ref, &hmm_devmem_ref_release,
-			      0, GFP_KERNEL);
-	if (ret)
-		goto error_percpu_ref;
-
-	ret = devm_add_action(device, hmm_devmem_ref_exit, &devmem->ref);
-	if (ret)
-		goto error_devm_add_action;
-
-
-	devmem->pfn_first = devmem->resource->start >> PAGE_SHIFT;
-	devmem->pfn_last = devmem->pfn_first +
-			   (resource_size(devmem->resource) >> PAGE_SHIFT);
-
-	ret = hmm_devmem_pages_create(devmem);
-	if (ret)
-		goto error_devm_add_action;
-
-	devres_add(device, devmem);
-
-	ret = devm_add_action(device, hmm_devmem_ref_kill, &devmem->ref);
-	if (ret) {
-		hmm_devmem_remove(devmem);
-		return ERR_PTR(ret);
-	}
-
-	return devmem;
-
-error_devm_add_action:
-	hmm_devmem_ref_kill(&devmem->ref);
-	hmm_devmem_ref_exit(&devmem->ref);
-error_percpu_ref:
-	devres_free(devmem);
-	return ERR_PTR(ret);
-}
-EXPORT_SYMBOL(hmm_devmem_add_resource);
-
 /*
  * hmm_devmem_remove() - remove device memory (kill and free ZONE_DEVICE)
  *
@@ -1155,7 +1068,6 @@ void hmm_devmem_remove(struct hmm_devmem *devmem)
 {
 	resource_size_t start, size;
 	struct device *device;
-	bool cdm = false;
 
 	if (!devmem)
 		return;
@@ -1164,15 +1076,54 @@ void hmm_devmem_remove(struct hmm_devmem *devmem)
 	start = devmem->resource->start;
 	size = resource_size(devmem->resource);
 
-	cdm = devmem->resource->desc == IORES_DESC_DEVICE_PUBLIC_MEMORY;
 	hmm_devmem_ref_kill(&devmem->ref);
 	hmm_devmem_ref_exit(&devmem->ref);
 	hmm_devmem_pages_remove(devmem);
 
-	if (!cdm)
-		devm_release_mem_region(device, start, size);
+	devm_release_mem_region(device, start, size);
 }
 EXPORT_SYMBOL(hmm_devmem_remove);
+
+/*
+ * hmm_devmem_fault_range() - migrate back a virtual range of memory
+ *
+ * @devmem: hmm_devmem struct use to track and manage the ZONE_DEVICE memory
+ * @vma: virtual memory area containing the range to be migrated
+ * @ops: migration callback for allocating destination memory and copying
+ * @src: array of unsigned long containing source pfns
+ * @dst: array of unsigned long containing destination pfns
+ * @start: start address of the range to migrate (inclusive)
+ * @addr: fault address (must be inside the range)
+ * @end: end address of the range to migrate (exclusive)
+ * @private: pointer passed back to each of the callback
+ * Returns: 0 on success, VM_FAULT_SIGBUS on error
+ *
+ * This is a wrapper around migrate_vma() which checks the migration status
+ * for a given fault address and returns the corresponding page fault handler
+ * status. That will be 0 on success, or VM_FAULT_SIGBUS if migration failed
+ * for the faulting address.
+ *
+ * This is a helper intendend to be used by the ZONE_DEVICE fault handler.
+ */
+int hmm_devmem_fault_range(struct hmm_devmem *devmem,
+			   struct vm_area_struct *vma,
+			   const struct migrate_vma_ops *ops,
+			   unsigned long *src,
+			   unsigned long *dst,
+			   unsigned long start,
+			   unsigned long addr,
+			   unsigned long end,
+			   void *private)
+{
+	if (migrate_vma(ops, vma, start, end, src, dst, private))
+		return VM_FAULT_SIGBUS;
+
+	if (dst[(addr - start) >> PAGE_SHIFT] & MIGRATE_PFN_ERROR)
+		return VM_FAULT_SIGBUS;
+
+	return 0;
+}
+EXPORT_SYMBOL(hmm_devmem_fault_range);
 
 /*
  * A device driver that wants to handle multiple devices memory through a
@@ -1211,7 +1162,7 @@ struct hmm_device *hmm_device_new(void *drvdata)
 	if (hmm_device->minor >= HMM_DEVICE_MAX) {
 		spin_unlock(&hmm_device_lock);
 		kfree(hmm_device);
-		return ERR_PTR(-EBUSY);
+		return NULL;
 	}
 	set_bit(hmm_device->minor, hmm_device_mask);
 	spin_unlock(&hmm_device_lock);
@@ -1251,6 +1202,22 @@ static int __init hmm_init(void)
 	}
 	return 0;
 }
-
 device_initcall(hmm_init);
-#endif /* CONFIG_DEVICE_PRIVATE || CONFIG_DEVICE_PUBLIC */
+
+static int __init setup_hmm(char *str)
+{
+	int ret = 0;
+
+	if (!str)
+		goto out;
+	if (!strcmp(str, "enable")) {
+		_hmm_enabled = true;
+		ret = 1;
+	}
+
+out:
+	if (!ret)
+		printk(KERN_WARNING "experimental_hmm= cannot parse, ignored\n");
+	return ret;
+}
+__setup("experimental_hmm=", setup_hmm);

@@ -62,6 +62,7 @@ static const struct pci_device_id rtsx_pci_ids[] = {
 	{ PCI_DEVICE(0x10EC, 0x5286), PCI_CLASS_OTHERS << 16, 0xFF0000 },
 	{ PCI_DEVICE(0x10EC, 0x524A), PCI_CLASS_OTHERS << 16, 0xFF0000 },
 	{ PCI_DEVICE(0x10EC, 0x525A), PCI_CLASS_OTHERS << 16, 0xFF0000 },
+	{ PCI_DEVICE(0x10EC, 0x5260), PCI_CLASS_OTHERS << 16, 0xFF0000 },
 	{ 0, }
 };
 
@@ -334,6 +335,9 @@ EXPORT_SYMBOL_GPL(rtsx_pci_read_phy_register);
 
 void rtsx_pci_stop_cmd(struct rtsx_pcr *pcr)
 {
+	if (pcr->ops->stop_cmd)
+		return pcr->ops->stop_cmd(pcr);
+
 	rtsx_pci_writel(pcr, RTSX_HCBCTLR, STOP_CMD);
 	rtsx_pci_writel(pcr, RTSX_HDBCTLR, STOP_DMA);
 
@@ -440,12 +444,12 @@ static void rtsx_pci_add_sg_tbl(struct rtsx_pcr *pcr,
 {
 	u64 *ptr = (u64 *)(pcr->host_sg_tbl_ptr) + pcr->sgi;
 	u64 val;
-	u8 option = SG_VALID | SG_TRANS_DATA;
+	u8 option = RTSX_SG_VALID | RTSX_SG_TRANS_DATA;
 
 	pcr_dbg(pcr, "DMA addr: 0x%x, Len: 0x%x\n", (unsigned int)addr, len);
 
 	if (end)
-		option |= SG_END;
+		option |= RTSX_SG_END;
 	val = ((u64)addr << 32) | ((u64)len << 12) | option;
 
 	put_unaligned_le64(val, ptr);
@@ -732,7 +736,7 @@ int rtsx_pci_switch_clock(struct rtsx_pcr *pcr, unsigned int card_clock,
 {
 	int err, clk;
 	u8 n, clk_divider, mcu_cnt, div;
-	static const u8 depth[] = {
+	u8 depth[] = {
 		[RTSX_SSC_DEPTH_4M] = SSC_DEPTH_4M,
 		[RTSX_SSC_DEPTH_2M] = SSC_DEPTH_2M,
 		[RTSX_SSC_DEPTH_1M] = SSC_DEPTH_1M,
@@ -826,7 +830,7 @@ int rtsx_pci_switch_clock(struct rtsx_pcr *pcr, unsigned int card_clock,
 		return err;
 
 	/* Wait SSC clock stable */
-	udelay(10);
+	udelay(SSC_CLOCK_STABLE_WAIT);
 	err = rtsx_pci_write_register(pcr, CLK_CTL, CLK_LOW_FREQ, 0);
 	if (err < 0)
 		return err;
@@ -856,7 +860,7 @@ EXPORT_SYMBOL_GPL(rtsx_pci_card_power_off);
 
 int rtsx_pci_card_exclusive_check(struct rtsx_pcr *pcr, int card)
 {
-	static const unsigned int cd_mask[] = {
+	unsigned int cd_mask[] = {
 		[RTSX_SD_CARD] = SD_EXIST,
 		[RTSX_MS_CARD] = MS_EXIST
 	};
@@ -963,6 +967,20 @@ static void rtsx_pci_card_detect(struct work_struct *work)
 				pcr->slots[RTSX_MS_CARD].p_dev);
 }
 
+void rtsx_pci_process_ocp(struct rtsx_pcr *pcr)
+{
+	if (pcr->ops->process_ocp)
+		pcr->ops->process_ocp(pcr);
+}
+
+int rtsx_pci_process_ocp_interrupt(struct rtsx_pcr *pcr)
+{
+	if (pcr->option.ocp_en)
+		rtsx_pci_process_ocp(pcr);
+
+	return 0;
+}
+
 static irqreturn_t rtsx_pci_isr(int irq, void *dev_id)
 {
 	struct rtsx_pcr *pcr = dev_id;
@@ -986,6 +1004,9 @@ static irqreturn_t rtsx_pci_isr(int irq, void *dev_id)
 	}
 
 	int_reg &= (pcr->bier | 0x7FFFFF);
+
+	if (int_reg & SD_OC_INT)
+		rtsx_pci_process_ocp_interrupt(pcr);
 
 	if (int_reg & SD_INT) {
 		if (int_reg & SD_EXIST) {
@@ -1028,7 +1049,7 @@ static irqreturn_t rtsx_pci_isr(int irq, void *dev_id)
 
 static int rtsx_pci_acquire_irq(struct rtsx_pcr *pcr)
 {
-	pcr_dbg(pcr, "%s: pcr->msi_en = %d, pci->irq = %d\n",
+	dev_info(&(pcr->pci->dev), "%s: pcr->msi_en = %d, pci->irq = %d\n",
 			__func__, pcr->msi_en, pcr->pci->irq);
 
 	if (request_irq(pcr->pci->irq, rtsx_pci_isr,
@@ -1119,6 +1140,102 @@ static void rtsx_pci_power_off(struct rtsx_pcr *pcr, u8 pm_state)
 }
 #endif
 
+void rtsx_pci_enable_ocp(struct rtsx_pcr *pcr)
+{
+	u8 val = SD_OCP_INT_EN | SD_DETECT_EN;
+
+	if (pcr->ops->enable_ocp)
+		pcr->ops->enable_ocp(pcr);
+	else
+		rtsx_pci_write_register(pcr, REG_OCPCTL, 0xFF, val);
+
+}
+
+void rtsx_pci_disable_ocp(struct rtsx_pcr *pcr)
+{
+	u8 mask = SD_OCP_INT_EN | SD_DETECT_EN;
+
+	if (pcr->ops->disable_ocp)
+		pcr->ops->disable_ocp(pcr);
+	else
+		rtsx_pci_write_register(pcr, REG_OCPCTL, mask, 0);
+}
+
+void rtsx_pci_init_ocp(struct rtsx_pcr *pcr)
+{
+	if (pcr->ops->init_ocp) {
+		pcr->ops->init_ocp(pcr);
+	} else {
+		struct rtsx_cr_option *option = &(pcr->option);
+
+		if (option->ocp_en) {
+			u8 val = option->sd_400mA_ocp_thd;
+
+			rtsx_pci_write_register(pcr, FPDCTL, OC_POWER_DOWN, 0);
+			rtsx_pci_write_register(pcr, REG_OCPPARA1,
+				SD_OCP_TIME_MASK, SD_OCP_TIME_800);
+			rtsx_pci_write_register(pcr, REG_OCPPARA2,
+				SD_OCP_THD_MASK, val);
+			rtsx_pci_write_register(pcr, REG_OCPGLITCH,
+				SD_OCP_GLITCH_MASK, pcr->hw_param.ocp_glitch);
+			rtsx_pci_enable_ocp(pcr);
+		} else {
+			/* OC power down */
+			rtsx_pci_write_register(pcr, FPDCTL, OC_POWER_DOWN,
+				OC_POWER_DOWN);
+		}
+	}
+}
+
+int rtsx_pci_get_ocpstat(struct rtsx_pcr *pcr, u8 *val)
+{
+	if (pcr->ops->get_ocpstat)
+		return pcr->ops->get_ocpstat(pcr, val);
+	else
+		return rtsx_pci_read_register(pcr, REG_OCPSTAT, val);
+}
+
+void rtsx_pci_clear_ocpstat(struct rtsx_pcr *pcr)
+{
+	if (pcr->ops->clear_ocpstat) {
+		pcr->ops->clear_ocpstat(pcr);
+	} else {
+		u8 mask = SD_OCP_INT_CLR | SD_OC_CLR;
+		u8 val = SD_OCP_INT_CLR | SD_OC_CLR;
+
+		rtsx_pci_write_register(pcr, REG_OCPCTL, mask, val);
+		rtsx_pci_write_register(pcr, REG_OCPCTL, mask, 0);
+	}
+}
+
+int rtsx_sd_power_off_card3v3(struct rtsx_pcr *pcr)
+{
+	rtsx_pci_write_register(pcr, CARD_CLK_EN, SD_CLK_EN |
+		MS_CLK_EN | SD40_CLK_EN, 0);
+	rtsx_pci_write_register(pcr, CARD_OE, SD_OUTPUT_EN, 0);
+
+	rtsx_pci_card_power_off(pcr, RTSX_SD_CARD);
+
+	msleep(50);
+
+	rtsx_pci_card_pull_ctl_disable(pcr, RTSX_SD_CARD);
+
+	return 0;
+}
+
+int rtsx_ms_power_off_card3v3(struct rtsx_pcr *pcr)
+{
+	rtsx_pci_write_register(pcr, CARD_CLK_EN, SD_CLK_EN |
+		MS_CLK_EN | SD40_CLK_EN, 0);
+
+	rtsx_pci_card_pull_ctl_disable(pcr, RTSX_MS_CARD);
+
+	rtsx_pci_write_register(pcr, CARD_OE, MS_OUTPUT_EN, 0);
+	rtsx_pci_card_power_off(pcr, RTSX_MS_CARD);
+
+	return 0;
+}
+
 static int rtsx_pci_init_hw(struct rtsx_pcr *pcr)
 {
 	int err;
@@ -1189,6 +1306,7 @@ static int rtsx_pci_init_hw(struct rtsx_pcr *pcr)
 	case PID_5250:
 	case PID_524A:
 	case PID_525A:
+	case PID_5260:
 		rtsx_pci_write_register(pcr, PM_CLK_FORCE_CTL, 1, 1);
 		break;
 	default:
@@ -1264,6 +1382,9 @@ static int rtsx_pci_init_chip(struct rtsx_pcr *pcr)
 
 	case 0x5286:
 		rtl8402_init_params(pcr);
+		break;
+	case 0x5260:
+		rts5260_init_params(pcr);
 		break;
 	}
 
@@ -1543,9 +1664,6 @@ static void rtsx_pci_shutdown(struct pci_dev *pcidev)
 	rtsx_pci_power_off(pcr, HOST_ENTER_S1);
 
 	pci_disable_device(pcidev);
-	free_irq(pcr->irq, (void *)pcr);
-	if (pcr->msi_en)
-		pci_disable_msi(pcr->pci);
 }
 
 #else /* CONFIG_PM */

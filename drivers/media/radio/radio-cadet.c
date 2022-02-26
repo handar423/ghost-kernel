@@ -270,31 +270,22 @@ reset_rds:
 	outb(inb(dev->io + 1) & 0x7f, dev->io + 1);
 }
 
-static bool cadet_has_rds_data(struct cadet *dev)
+
+static void cadet_handler(unsigned long data)
 {
-	bool result;
-
-	mutex_lock(&dev->lock);
-	result = dev->rdsin != dev->rdsout;
-	mutex_unlock(&dev->lock);
-	return result;
-}
-
-
-static void cadet_handler(struct timer_list *t)
-{
-	struct cadet *dev = from_timer(dev, t, readtimer);
+	struct cadet *dev = (void *)data;
 
 	/* Service the RDS fifo */
 	if (mutex_trylock(&dev->lock)) {
 		outb(0x3, dev->io);       /* Select RDS Decoder Control */
 		if ((inb(dev->io + 1) & 0x20) != 0)
-			pr_err("cadet: RDS fifo overflow\n");
+			printk(KERN_CRIT "cadet: RDS fifo overflow\n");
 		outb(0x80, dev->io);      /* Select RDS fifo */
-
 		while ((inb(dev->io) & 0x80) != 0) {
 			dev->rdsbuf[dev->rdsin] = inb(dev->io + 1);
-			if (dev->rdsin + 1 != dev->rdsout)
+			if (dev->rdsin + 1 == dev->rdsout)
+				printk(KERN_WARNING "cadet: RDS buffer overflow\n");
+			else
 				dev->rdsin++;
 		}
 		mutex_unlock(&dev->lock);
@@ -303,12 +294,15 @@ static void cadet_handler(struct timer_list *t)
 	/*
 	 * Service pending read
 	 */
-	if (cadet_has_rds_data(dev))
+	if (dev->rdsin != dev->rdsout)
 		wake_up_interruptible(&dev->read_queue);
 
 	/*
 	 * Clean up and exit
 	 */
+	init_timer(&dev->readtimer);
+	dev->readtimer.function = cadet_handler;
+	dev->readtimer.data = data;
 	dev->readtimer.expires = jiffies + msecs_to_jiffies(50);
 	add_timer(&dev->readtimer);
 }
@@ -317,7 +311,9 @@ static void cadet_start_rds(struct cadet *dev)
 {
 	dev->rdsstat = 1;
 	outb(0x80, dev->io);        /* Select RDS fifo */
-	timer_setup(&dev->readtimer, cadet_handler, 0);
+	init_timer(&dev->readtimer);
+	dev->readtimer.function = cadet_handler;
+	dev->readtimer.data = (unsigned long)dev;
 	dev->readtimer.expires = jiffies + msecs_to_jiffies(50);
 	add_timer(&dev->readtimer);
 }
@@ -331,21 +327,22 @@ static ssize_t cadet_read(struct file *file, char __user *data, size_t count, lo
 	mutex_lock(&dev->lock);
 	if (dev->rdsstat == 0)
 		cadet_start_rds(dev);
-	mutex_unlock(&dev->lock);
-
-	if (!cadet_has_rds_data(dev) && (file->f_flags & O_NONBLOCK))
-		return -EWOULDBLOCK;
-	i = wait_event_interruptible(dev->read_queue, cadet_has_rds_data(dev));
-	if (i)
-		return i;
-
-	mutex_lock(&dev->lock);
+	if (dev->rdsin == dev->rdsout) {
+		if (file->f_flags & O_NONBLOCK) {
+			i = -EWOULDBLOCK;
+			goto unlock;
+		}
+		mutex_unlock(&dev->lock);
+		interruptible_sleep_on(&dev->read_queue);
+		mutex_lock(&dev->lock);
+	}
 	while (i < count && dev->rdsin != dev->rdsout)
 		readbuf[i++] = dev->rdsbuf[dev->rdsout++];
-	mutex_unlock(&dev->lock);
 
 	if (i && copy_to_user(data, readbuf, i))
-		return -EFAULT;
+		i = -EFAULT;
+unlock:
+	mutex_unlock(&dev->lock);
 	return i;
 }
 
@@ -355,7 +352,7 @@ static int vidioc_querycap(struct file *file, void *priv,
 {
 	strlcpy(v->driver, "ADS Cadet", sizeof(v->driver));
 	strlcpy(v->card, "ADS Cadet", sizeof(v->card));
-	strlcpy(v->bus_info, "ISA:radio-cadet", sizeof(v->bus_info));
+	strlcpy(v->bus_info, "ISA", sizeof(v->bus_info));
 	v->device_caps = V4L2_CAP_TUNER | V4L2_CAP_RADIO |
 			  V4L2_CAP_READWRITE | V4L2_CAP_RDS_CAPTURE;
 	v->capabilities = v->device_caps | V4L2_CAP_DEVICE_CAPS;
@@ -494,7 +491,7 @@ static unsigned int cadet_poll(struct file *file, struct poll_table_struct *wait
 			cadet_start_rds(dev);
 		mutex_unlock(&dev->lock);
 	}
-	if (cadet_has_rds_data(dev))
+	if (dev->rdsin != dev->rdsout)
 		res |= POLLIN | POLLRDNORM;
 	return res;
 }
@@ -527,7 +524,7 @@ static const struct v4l2_ctrl_ops cadet_ctrl_ops = {
 
 #ifdef CONFIG_PNP
 
-static const struct pnp_device_id cadet_pnp_devices[] = {
+static struct pnp_device_id cadet_pnp_devices[] = {
 	/* ADS Cadet AM/FM Radio Card */
 	{.id = "MSM0c24", .driver_data = 0},
 	{.id = ""}
@@ -645,6 +642,7 @@ static int __init cadet_init(void)
 	dev->vdev.ioctl_ops = &cadet_ioctl_ops;
 	dev->vdev.release = video_device_release_empty;
 	dev->vdev.lock = &dev->lock;
+	set_bit(V4L2_FL_USE_FH_PRIO, &dev->vdev.flags);
 	video_set_drvdata(&dev->vdev, dev);
 
 	res = video_register_device(&dev->vdev, VFL_TYPE_RADIO, radio_nr);

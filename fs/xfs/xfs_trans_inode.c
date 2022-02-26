@@ -73,7 +73,7 @@ xfs_trans_ichgtime(
 	ASSERT(tp);
 	ASSERT(xfs_isilocked(ip, XFS_ILOCK_EXCL));
 
-	tv = current_time(inode);
+	tv = current_fs_time(inode->i_sb);
 
 	if (flags & XFS_ICHGTIME_MOD)
 		inode->i_mtime = tv;

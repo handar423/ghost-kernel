@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_SPARC64_COMPAT_H
 #define _ASM_SPARC64_COMPAT_H
 /*
@@ -209,6 +208,7 @@ typedef struct compat_siginfo {
 } compat_siginfo_t;
 
 #define COMPAT_OFF_T_MAX	0x7fffffff
+#define COMPAT_LOFF_T_MAX	0x7fffffffffffffffL
 
 /*
  * A pointer passed in from user mode. This should not
@@ -306,12 +306,5 @@ static inline int is_compat_task(void)
 {
 	return test_thread_flag(TIF_32BIT);
 }
-
-static inline bool in_compat_syscall(void)
-{
-	/* Vector 0x110 is LINUX_32BIT_SYSCALL_TRAP */
-	return pt_regs_trap_type(current_pt_regs()) == 0x110;
-}
-#define in_compat_syscall in_compat_syscall
 
 #endif /* _ASM_SPARC64_COMPAT_H */

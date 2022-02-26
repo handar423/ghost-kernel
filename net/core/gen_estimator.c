@@ -14,7 +14,7 @@
  *              names to make it usable in general net subsystem.
  */
 
-#include <linux/uaccess.h>
+#include <asm/uaccess.h>
 #include <linux/bitops.h>
 #include <linux/module.h>
 #include <linux/types.h>
@@ -46,7 +46,7 @@
 struct net_rate_estimator {
 	struct gnet_stats_basic_packed	*bstats;
 	spinlock_t		*stats_lock;
-	seqcount_t		*running;
+	net_seqlock_t		*running;
 	struct gnet_stats_basic_cpu __percpu *cpu_bstats;
 	u8			ewma_log;
 	u8			intvl_log; /* period : (250ms << intvl_log) */
@@ -76,9 +76,9 @@ static void est_fetch_counters(struct net_rate_estimator *e,
 
 }
 
-static void est_timer(struct timer_list *t)
+static void est_timer(unsigned long arg)
 {
-	struct net_rate_estimator *est = from_timer(est, t, timer);
+	struct net_rate_estimator *est = (struct net_rate_estimator *)arg;
 	struct gnet_stats_basic_packed b;
 	u64 rate, brate;
 
@@ -119,7 +119,7 @@ static void est_timer(struct timer_list *t)
  * as destination. A new timer with the interval specified in the
  * configuration TLV is created. Upon each interval, the latest statistics
  * will be read from &bstats and the estimated rate will be stored in
- * &rate_est with the statistics lock grabbed during this period.
+ * &rate_est with the statistics lock grabed during this period.
  *
  * Returns 0 on success or a negative error code.
  *
@@ -128,7 +128,7 @@ int gen_new_estimator(struct gnet_stats_basic_packed *bstats,
 		      struct gnet_stats_basic_cpu __percpu *cpu_bstats,
 		      struct net_rate_estimator __rcu **rate_est,
 		      spinlock_t *stats_lock,
-		      seqcount_t *running,
+		      net_seqlock_t *running,
 		      struct nlattr *opt)
 {
 	struct gnet_estimator *parm = nla_data(opt);
@@ -170,7 +170,7 @@ int gen_new_estimator(struct gnet_stats_basic_packed *bstats,
 	}
 
 	est->next_jiffies = jiffies + ((HZ/4) << intvl_log);
-	timer_setup(&est->timer, est_timer, 0);
+	setup_timer(&est->timer, est_timer, (unsigned long)est);
 	mod_timer(&est->timer, est->next_jiffies);
 
 	rcu_assign_pointer(*rate_est, est);
@@ -217,7 +217,7 @@ int gen_replace_estimator(struct gnet_stats_basic_packed *bstats,
 			  struct gnet_stats_basic_cpu __percpu *cpu_bstats,
 			  struct net_rate_estimator __rcu **rate_est,
 			  spinlock_t *stats_lock,
-			  seqcount_t *running, struct nlattr *opt)
+			  net_seqlock_t *running, struct nlattr *opt)
 {
 	return gen_new_estimator(bstats, cpu_bstats, rate_est,
 				 stats_lock, running, opt);

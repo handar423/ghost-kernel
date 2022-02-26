@@ -1,22 +1,5 @@
-/* Intel(R) Ethernet Switch Host Interface Driver
- * Copyright(c) 2013 - 2017 Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * The full GNU General Public License is included in this distribution in
- * the file called "COPYING".
- *
- * Contact Information:
- * e1000-devel Mailing List <e1000-devel@lists.sourceforge.net>
- * Intel Corporation, 5200 N.E. Elam Young Parkway, Hillsboro, OR 97124-6497
- */
+// SPDX-License-Identifier: GPL-2.0
+/* Copyright(c) 2013 - 2018 Intel Corporation. */
 
 #include <linux/module.h>
 #include <linux/interrupt.h>
@@ -29,7 +12,7 @@ static const struct fm10k_info *fm10k_info_tbl[] = {
 	[fm10k_device_vf] = &fm10k_vf_info,
 };
 
-/**
+/*
  * fm10k_pci_tbl - PCI Device ID Table
  *
  * Wildcard entries (PCI_ANY_ID) should come last
@@ -40,6 +23,8 @@ static const struct fm10k_info *fm10k_info_tbl[] = {
  */
 static const struct pci_device_id fm10k_pci_tbl[] = {
 	{ PCI_VDEVICE(INTEL, FM10K_DEV_ID_PF), fm10k_device_pf },
+	{ PCI_VDEVICE(INTEL, FM10K_DEV_ID_SDI_FM10420_QDA2), fm10k_device_pf },
+	{ PCI_VDEVICE(INTEL, FM10K_DEV_ID_SDI_FM10420_DA2), fm10k_device_pf },
 	{ PCI_VDEVICE(INTEL, FM10K_DEV_ID_VF), fm10k_device_vf },
 	/* required last entry */
 	{ 0, }
@@ -211,7 +196,7 @@ static void fm10k_start_service_event(struct fm10k_intfc *interface)
 
 /**
  * fm10k_service_timer - Timer Call-back
- * @data: pointer to interface cast into an unsigned long
+ * @t: pointer to timer data
  **/
 static void fm10k_service_timer(struct timer_list *t)
 {
@@ -649,7 +634,7 @@ void fm10k_update_stats(struct fm10k_intfc *interface)
 
 /**
  * fm10k_watchdog_flush_tx - flush queues on host not ready
- * @interface - pointer to the device interface structure
+ * @interface: pointer to the device interface structure
  **/
 static void fm10k_watchdog_flush_tx(struct fm10k_intfc *interface)
 {
@@ -679,7 +664,7 @@ static void fm10k_watchdog_flush_tx(struct fm10k_intfc *interface)
 
 /**
  * fm10k_watchdog_subtask - check and bring link up
- * @interface - pointer to the device interface structure
+ * @interface: pointer to the device interface structure
  **/
 static void fm10k_watchdog_subtask(struct fm10k_intfc *interface)
 {
@@ -703,7 +688,7 @@ static void fm10k_watchdog_subtask(struct fm10k_intfc *interface)
 
 /**
  * fm10k_check_hang_subtask - check for hung queues and dropped interrupts
- * @interface - pointer to the device interface structure
+ * @interface: pointer to the device interface structure
  *
  * This function serves two purposes.  First it strobes the interrupt lines
  * in order to make certain interrupts are occurring.  Secondly it sets the
@@ -1227,28 +1212,6 @@ static irqreturn_t fm10k_msix_mbx_vf(int __always_unused irq, void *data)
 	return IRQ_HANDLED;
 }
 
-#ifdef CONFIG_NET_POLL_CONTROLLER
-/**
- *  fm10k_netpoll - A Polling 'interrupt' handler
- *  @netdev: network interface device structure
- *
- *  This is used by netconsole to send skbs without having to re-enable
- *  interrupts. It's not called while the normal interrupt routine is executing.
- **/
-void fm10k_netpoll(struct net_device *netdev)
-{
-	struct fm10k_intfc *interface = netdev_priv(netdev);
-	int i;
-
-	/* if interface is down do nothing */
-	if (test_bit(__FM10K_DOWN, interface->state))
-		return;
-
-	for (i = 0; i < interface->num_q_vectors; i++)
-		fm10k_msix_clean_rings(0, interface->q_vector[i]);
-}
-
-#endif
 #define FM10K_ERR_MSG(type) case (type): error = #type; break
 static void fm10k_handle_fault(struct fm10k_intfc *interface, int type,
 			       struct fm10k_fault *fault)
@@ -1995,6 +1958,7 @@ skip_tx_dma_drain:
 /**
  * fm10k_sw_init - Initialize general software structures
  * @interface: host interface private structure to initialize
+ * @ent: PCI device ID entry
  *
  * fm10k_sw_init initializes the interface private data structure.
  * Fields are initialized based on PCI device information and
@@ -2099,15 +2063,14 @@ static int fm10k_sw_init(struct fm10k_intfc *interface,
 	interface->tx_itr = FM10K_TX_ITR_DEFAULT;
 	interface->rx_itr = FM10K_ITR_ADAPTIVE | FM10K_RX_ITR_DEFAULT;
 
-	/* initialize udp port lists */
+	/* initialize vxlan_port list */
 	INIT_LIST_HEAD(&interface->vxlan_port);
-	INIT_LIST_HEAD(&interface->geneve_port);
-
-	/* Initialize the MAC/VLAN queue */
-	INIT_LIST_HEAD(&interface->macvlan_requests);
 
 	netdev_rss_key_fill(rss_key, sizeof(rss_key));
 	memcpy(interface->rssrk, rss_key, sizeof(rss_key));
+
+	/* Initialize the MAC/VLAN queue */
+	INIT_LIST_HEAD(&interface->macvlan_requests);
 
 	/* Initialize the mailbox lock */
 	spin_lock_init(&interface->mbx_lock);
@@ -2244,7 +2207,10 @@ static int fm10k_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 		goto err_dma;
 	}
 
-	err = pci_request_mem_regions(pdev, fm10k_driver_name);
+	err = pci_request_selected_regions(pdev,
+					   pci_select_bars(pdev,
+							   IORESOURCE_MEM),
+					   fm10k_driver_name);
 	if (err) {
 		dev_err(&pdev->dev,
 			"pci_request_selected_regions failed: %d\n", err);
@@ -2351,7 +2317,8 @@ err_sw_init:
 err_ioremap:
 	free_netdev(netdev);
 err_alloc_netdev:
-	pci_release_mem_regions(pdev);
+	pci_release_selected_regions(pdev,
+				     pci_select_bars(pdev, IORESOURCE_MEM));
 err_pci_reg:
 err_dma:
 	pci_disable_device(pdev);
@@ -2402,7 +2369,8 @@ static void fm10k_remove(struct pci_dev *pdev)
 
 	free_netdev(netdev);
 
-	pci_release_mem_regions(pdev);
+	pci_release_selected_regions(pdev,
+				     pci_select_bars(pdev, IORESOURCE_MEM));
 
 	pci_disable_pcie_error_reporting(pdev);
 
@@ -2563,8 +2531,6 @@ static pci_ers_result_t fm10k_io_slot_reset(struct pci_dev *pdev)
 		result = PCI_ERS_RESULT_RECOVERED;
 	}
 
-	pci_cleanup_aer_uncorrect_error_status(pdev);
-
 	return result;
 }
 
@@ -2591,32 +2557,29 @@ static void fm10k_io_resume(struct pci_dev *pdev)
 }
 
 /**
- * fm10k_io_reset_prepare - called when PCI function is about to be reset
+ * fm10k_io_reset_notify - called when PCI function is reset
  * @pdev: Pointer to PCI device
  *
- * This callback is called when the PCI function is about to be reset,
- * allowing the device driver to prepare for it.
+ * This callback is called when the PCI function is reset such as from
+ * /sys/class/net/<enpX>/device/reset or similar. When prepare is true, it
+ * means we should prepare for a function reset. If prepare is false, it means
+ * the function reset just occurred.
  */
-static void fm10k_io_reset_prepare(struct pci_dev *pdev)
-{
-	/* warn incase we have any active VF devices */
-	if (pci_num_vf(pdev))
-		dev_warn(&pdev->dev,
-			 "PCIe FLR may cause issues for any active VF devices\n");
-	fm10k_prepare_suspend(pci_get_drvdata(pdev));
-}
-
-/**
- * fm10k_io_reset_done - called when PCI function has finished resetting
- * @pdev: Pointer to PCI device
- *
- * This callback is called just after the PCI function is reset, such as via
- * /sys/class/net/<enpX>/device/reset or similar.
- */
-static void fm10k_io_reset_done(struct pci_dev *pdev)
+static void fm10k_io_reset_notify(struct pci_dev *pdev, bool prepare)
 {
 	struct fm10k_intfc *interface = pci_get_drvdata(pdev);
-	int err = fm10k_handle_resume(interface);
+	int err = 0;
+
+	if (prepare) {
+		/* warn incase we have any active VF devices */
+		if (pci_num_vf(pdev))
+			dev_warn(&pdev->dev,
+				 "PCIe FLR may cause issues for any active VF devices\n");
+
+		fm10k_prepare_suspend(interface);
+	} else {
+		err = fm10k_handle_resume(interface);
+	}
 
 	if (err) {
 		dev_warn(&pdev->dev,
@@ -2625,12 +2588,15 @@ static void fm10k_io_reset_done(struct pci_dev *pdev)
 	}
 }
 
+static struct pci_driver_rh fm10k_driver_rh = {
+	.size           = sizeof(struct pci_driver_rh),
+	.reset_notify   = fm10k_io_reset_notify
+};
+
 static const struct pci_error_handlers fm10k_err_handler = {
 	.error_detected = fm10k_io_error_detected,
 	.slot_reset = fm10k_io_slot_reset,
 	.resume = fm10k_io_resume,
-	.reset_prepare = fm10k_io_reset_prepare,
-	.reset_done = fm10k_io_reset_done,
 };
 
 static SIMPLE_DEV_PM_OPS(fm10k_pm_ops, fm10k_suspend, fm10k_resume);
@@ -2644,7 +2610,8 @@ static struct pci_driver fm10k_driver = {
 		.pm		= &fm10k_pm_ops,
 	},
 	.sriov_configure	= fm10k_iov_configure,
-	.err_handler		= &fm10k_err_handler
+	.err_handler		= &fm10k_err_handler,
+	.pci_driver_rh		= &fm10k_driver_rh
 };
 
 /**

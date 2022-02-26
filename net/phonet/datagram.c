@@ -83,9 +83,10 @@ static int pn_init(struct sock *sk)
 	return 0;
 }
 
-static int pn_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
+static int pn_sendmsg(struct kiocb *iocb, struct sock *sk,
+			struct msghdr *msg, size_t len)
 {
-	DECLARE_SOCKADDR(struct sockaddr_pn *, target, msg->msg_name);
+	struct sockaddr_pn *target;
 	struct sk_buff *skb;
 	int err;
 
@@ -93,12 +94,13 @@ static int pn_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 				MSG_CMSG_COMPAT))
 		return -EOPNOTSUPP;
 
-	if (target == NULL)
+	if (msg->msg_name == NULL)
 		return -EDESTADDRREQ;
 
 	if (msg->msg_namelen < sizeof(struct sockaddr_pn))
 		return -EINVAL;
 
+	target = (struct sockaddr_pn *)msg->msg_name;
 	if (target->spn_family != AF_PHONET)
 		return -EAFNOSUPPORT;
 
@@ -124,8 +126,9 @@ static int pn_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 	return (err >= 0) ? len : err;
 }
 
-static int pn_recvmsg(struct sock *sk, struct msghdr *msg, size_t len,
-		      int noblock, int flags, int *addr_len)
+static int pn_recvmsg(struct kiocb *iocb, struct sock *sk,
+			struct msghdr *msg, size_t len, int noblock,
+			int flags, int *addr_len)
 {
 	struct sk_buff *skb = NULL;
 	struct sockaddr_pn sa;
@@ -148,7 +151,7 @@ static int pn_recvmsg(struct sock *sk, struct msghdr *msg, size_t len,
 		copylen = len;
 	}
 
-	rval = skb_copy_datagram_msg(skb, 0, msg, copylen);
+	rval = skb_copy_datagram_iovec(skb, 0, msg->msg_iov, copylen);
 	if (rval) {
 		rval = -EFAULT;
 		goto out;
@@ -157,7 +160,6 @@ static int pn_recvmsg(struct sock *sk, struct msghdr *msg, size_t len,
 	rval = (flags & MSG_TRUNC) ? skb->len : copylen;
 
 	if (msg->msg_name != NULL) {
-		__sockaddr_check_size(sizeof(sa));
 		memcpy(msg->msg_name, &sa, sizeof(sa));
 		*addr_len = sizeof(sa);
 	}
@@ -195,7 +197,7 @@ static struct proto pn_proto = {
 	.name		= "PHONET",
 };
 
-static const struct phonet_protocol pn_dgram_proto = {
+static struct phonet_protocol pn_dgram_proto = {
 	.ops		= &phonet_dgram_ops,
 	.prot		= &pn_proto,
 	.sock_type	= SOCK_DGRAM,

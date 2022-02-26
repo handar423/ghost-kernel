@@ -146,7 +146,6 @@ int asix_rx_fixup_internal(struct usbnet *dev, struct sk_buff *skb,
 								offset);
 				offset += sizeof(u32);
 			}
-
 			/* take frame length from Data header 32-bit word */
 			size = (u16)(rx->header & 0x7ff);
 			if (size != ((~rx->header >> 16) & 0x7ff)) {
@@ -168,7 +167,6 @@ int asix_rx_fixup_internal(struct usbnet *dev, struct sk_buff *skb,
 			 * word is maintained.
 			 */
 			rx->ax_skb = netdev_alloc_skb_ip_align(dev->net, size);
-
 			rx->remaining = size;
 		}
 
@@ -606,6 +604,9 @@ int asix_set_wol(struct net_device *net, struct ethtool_wolinfo *wolinfo)
 {
 	struct usbnet *dev = netdev_priv(net);
 	u8 opt = 0;
+
+	if (wolinfo->wolopts & ~(WAKE_PHY | WAKE_MAGIC))
+		return -EINVAL;
 
 	if (wolinfo->wolopts & WAKE_PHY)
 		opt |= AX_MONITOR_LINK;

@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Copyright (C) 2015, Wang Nan <wangnan0@huawei.com>
  * Copyright (C) 2015, Huawei Inc.
@@ -47,7 +46,8 @@ struct llvm_param {
 extern struct llvm_param llvm_param;
 int perf_llvm_config(const char *var, const char *value);
 
-int llvm__compile_bpf(const char *path, void **p_obj_buf, size_t *p_obj_buf_sz);
+int llvm__compile_bpf(const char *path, void **p_obj_buf,
+		     size_t *p_obj_buf_sz);
 
 /* This function is for test__llvm() use only */
 int llvm__search_clang(void);

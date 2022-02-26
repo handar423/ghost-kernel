@@ -22,18 +22,25 @@
  * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with GNU CC; see the file COPYING.  If not, see
- * <http://www.gnu.org/licenses/>.
+ * along with GNU CC; see the file COPYING.  If not, write to
+ * the Free Software Foundation, 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
  *
  * Please send any bug reports or fixes you make to the
  * email address(es):
- *    lksctp developers <linux-sctp@vger.kernel.org>
+ *    lksctp developers <lksctp-developers@lists.sourceforge.net>
+ *
+ * Or submit a bug report through the following website:
+ *    http://www.sf.net/projects/lksctp
  *
  * Written or modified by:
  *    Jon Grimm             <jgrimm@us.ibm.com>
  *    La Monte H.P. Yarroll <piggy@acm.org>
  *    Ardelle Fan	    <ardelle.fan@intel.com>
  *    Sridhar Samudrala     <sri@us.ibm.com>
+ *
+ * Any bugs reported given to us we will try to fix... any fixes shared will
+ * be incorporated into the next SCTP release.
  */
 
 #include <linux/slab.h>
@@ -158,7 +165,7 @@ struct sctp_ulpevent  *sctp_ulpevent_make_assoc_change(
 		/* Trim the buffer to the right length.  */
 		skb_trim(skb, sizeof(struct sctp_assoc_change) +
 			 ntohs(chunk->chunk_hdr->length) -
-			 sizeof(struct sctp_chunkhdr));
+			 sizeof(sctp_chunkhdr_t));
 	} else {
 		event = sctp_ulpevent_new(sizeof(struct sctp_assoc_change),
 				  MSG_NOTIFICATION, gfp);
@@ -371,19 +378,19 @@ sctp_ulpevent_make_remote_error(const struct sctp_association *asoc,
 				struct sctp_chunk *chunk, __u16 flags,
 				gfp_t gfp)
 {
-	struct sctp_remote_error *sre;
 	struct sctp_ulpevent *event;
-	struct sctp_errhdr *ch;
+	struct sctp_remote_error *sre;
 	struct sk_buff *skb;
+	sctp_errhdr_t *ch;
 	__be16 cause;
 	int elen;
 
-	ch = (struct sctp_errhdr *)(chunk->skb->data);
+	ch = (sctp_errhdr_t *)(chunk->skb->data);
 	cause = ch->cause;
-	elen = SCTP_PAD4(ntohs(ch->length)) - sizeof(*ch);
+	elen = SCTP_PAD4(ntohs(ch->length)) - sizeof(sctp_errhdr_t);
 
 	/* Pull off the ERROR header.  */
-	skb_pull(chunk->skb, sizeof(*ch));
+	skb_pull(chunk->skb, sizeof(sctp_errhdr_t));
 
 	/* Copy the skb to a new skb with room for us to prepend
 	 * notification with.
@@ -717,7 +724,6 @@ struct sctp_ulpevent *sctp_ulpevent_make_rcvmsg(struct sctp_association *asoc,
 	return event;
 
 fail_mark:
-	sctp_chunk_put(chunk);
 	kfree_skb(skb);
 fail:
 	return NULL;
@@ -841,89 +847,6 @@ struct sctp_ulpevent *sctp_ulpevent_make_sender_dry_event(
 	sdry->sender_dry_length = sizeof(struct sctp_sender_dry_event);
 	sctp_ulpevent_set_owner(event, asoc);
 	sdry->sender_dry_assoc_id = sctp_assoc2id(asoc);
-
-	return event;
-}
-
-struct sctp_ulpevent *sctp_ulpevent_make_stream_reset_event(
-	const struct sctp_association *asoc, __u16 flags, __u16 stream_num,
-	__be16 *stream_list, gfp_t gfp)
-{
-	struct sctp_stream_reset_event *sreset;
-	struct sctp_ulpevent *event;
-	struct sk_buff *skb;
-	int length, i;
-
-	length = sizeof(struct sctp_stream_reset_event) + 2 * stream_num;
-	event = sctp_ulpevent_new(length, MSG_NOTIFICATION, gfp);
-	if (!event)
-		return NULL;
-
-	skb = sctp_event2skb(event);
-	sreset = skb_put(skb, length);
-
-	sreset->strreset_type = SCTP_STREAM_RESET_EVENT;
-	sreset->strreset_flags = flags;
-	sreset->strreset_length = length;
-	sctp_ulpevent_set_owner(event, asoc);
-	sreset->strreset_assoc_id = sctp_assoc2id(asoc);
-
-	for (i = 0; i < stream_num; i++)
-		sreset->strreset_stream_list[i] = ntohs(stream_list[i]);
-
-	return event;
-}
-
-struct sctp_ulpevent *sctp_ulpevent_make_assoc_reset_event(
-	const struct sctp_association *asoc, __u16 flags, __u32 local_tsn,
-	__u32 remote_tsn, gfp_t gfp)
-{
-	struct sctp_assoc_reset_event *areset;
-	struct sctp_ulpevent *event;
-	struct sk_buff *skb;
-
-	event = sctp_ulpevent_new(sizeof(struct sctp_assoc_reset_event),
-				  MSG_NOTIFICATION, gfp);
-	if (!event)
-		return NULL;
-
-	skb = sctp_event2skb(event);
-	areset = skb_put(skb, sizeof(struct sctp_assoc_reset_event));
-
-	areset->assocreset_type = SCTP_ASSOC_RESET_EVENT;
-	areset->assocreset_flags = flags;
-	areset->assocreset_length = sizeof(struct sctp_assoc_reset_event);
-	sctp_ulpevent_set_owner(event, asoc);
-	areset->assocreset_assoc_id = sctp_assoc2id(asoc);
-	areset->assocreset_local_tsn = local_tsn;
-	areset->assocreset_remote_tsn = remote_tsn;
-
-	return event;
-}
-
-struct sctp_ulpevent *sctp_ulpevent_make_stream_change_event(
-	const struct sctp_association *asoc, __u16 flags,
-	__u32 strchange_instrms, __u32 strchange_outstrms, gfp_t gfp)
-{
-	struct sctp_stream_change_event *schange;
-	struct sctp_ulpevent *event;
-	struct sk_buff *skb;
-
-	event = sctp_ulpevent_new(sizeof(struct sctp_stream_change_event),
-				  MSG_NOTIFICATION, gfp);
-	if (!event)
-		return NULL;
-
-	skb = sctp_event2skb(event);
-	schange = skb_put(skb, sizeof(struct sctp_stream_change_event));
-
-	schange->strchange_type = SCTP_STREAM_CHANGE_EVENT;
-	schange->strchange_flags = flags;
-	schange->strchange_length = sizeof(struct sctp_stream_change_event);
-	sctp_ulpevent_set_owner(event, asoc);
-	schange->strchange_assoc_id = sctp_assoc2id(asoc);
-	schange->strchange_instrms = strchange_instrms;
-	schange->strchange_outstrms = strchange_outstrms;
 
 	return event;
 }

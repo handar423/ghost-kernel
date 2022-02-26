@@ -48,33 +48,38 @@ static int blk_flags_show(struct seq_file *m, const unsigned long flags,
 static const char *const blk_queue_flag_name[] = {
 	QUEUE_FLAG_NAME(QUEUED),
 	QUEUE_FLAG_NAME(STOPPED),
+	QUEUE_FLAG_NAME(SYNCFULL),
+	QUEUE_FLAG_NAME(ASYNCFULL),
 	QUEUE_FLAG_NAME(DYING),
+
 	QUEUE_FLAG_NAME(BYPASS),
 	QUEUE_FLAG_NAME(BIDI),
 	QUEUE_FLAG_NAME(NOMERGES),
 	QUEUE_FLAG_NAME(SAME_COMP),
 	QUEUE_FLAG_NAME(FAIL_IO),
+
+	QUEUE_FLAG_NAME(STACKABLE),
 	QUEUE_FLAG_NAME(NONROT),
 	QUEUE_FLAG_NAME(IO_STAT),
 	QUEUE_FLAG_NAME(DISCARD),
 	QUEUE_FLAG_NAME(NOXMERGES),
+
 	QUEUE_FLAG_NAME(ADD_RANDOM),
-	QUEUE_FLAG_NAME(SECERASE),
+	QUEUE_FLAG_NAME(SECDISCARD),
 	QUEUE_FLAG_NAME(SAME_FORCE),
 	QUEUE_FLAG_NAME(DEAD),
 	QUEUE_FLAG_NAME(INIT_DONE),
+
+	QUEUE_FLAG_NAME(UNPRIV_SGIO),
 	QUEUE_FLAG_NAME(NO_SG_MERGE),
-	QUEUE_FLAG_NAME(POLL),
-	QUEUE_FLAG_NAME(WC),
-	QUEUE_FLAG_NAME(FUA),
-	QUEUE_FLAG_NAME(FLUSH_NQ),
+	QUEUE_FLAG_NAME(SG_GAPS),
 	QUEUE_FLAG_NAME(DAX),
+	QUEUE_FLAG_NAME(REGISTERED),
+
 	QUEUE_FLAG_NAME(STATS),
 	QUEUE_FLAG_NAME(POLL_STATS),
-	QUEUE_FLAG_NAME(REGISTERED),
-	QUEUE_FLAG_NAME(SCSI_PASSTHROUGH),
-	QUEUE_FLAG_NAME(QUIESCED),
 	QUEUE_FLAG_NAME(PREEMPT_ONLY),
+	QUEUE_FLAG_NAME(QUIESCED),
 };
 #undef QUEUE_FLAG_NAME
 
@@ -125,62 +130,11 @@ inval:
 	return count;
 }
 
-static void print_stat(struct seq_file *m, struct blk_rq_stat *stat)
-{
-	if (stat->nr_samples) {
-		seq_printf(m, "samples=%d, mean=%lld, min=%llu, max=%llu",
-			   stat->nr_samples, stat->mean, stat->min, stat->max);
-	} else {
-		seq_puts(m, "samples=0");
-	}
-}
-
-static int queue_write_hint_show(void *data, struct seq_file *m)
-{
-	struct request_queue *q = data;
-	int i;
-
-	for (i = 0; i < BLK_MAX_WRITE_HINTS; i++)
-		seq_printf(m, "hint%d: %llu\n", i, q->write_hints[i]);
-
-	return 0;
-}
-
-static ssize_t queue_write_hint_store(void *data, const char __user *buf,
-				      size_t count, loff_t *ppos)
-{
-	struct request_queue *q = data;
-	int i;
-
-	for (i = 0; i < BLK_MAX_WRITE_HINTS; i++)
-		q->write_hints[i] = 0;
-
-	return count;
-}
-
-static int queue_poll_stat_show(void *data, struct seq_file *m)
-{
-	struct request_queue *q = data;
-	int bucket;
-
-	for (bucket = 0; bucket < BLK_MQ_POLL_STATS_BKTS/2; bucket++) {
-		seq_printf(m, "read  (%d Bytes): ", 1 << (9+bucket));
-		print_stat(m, &q->poll_stat[2*bucket]);
-		seq_puts(m, "\n");
-
-		seq_printf(m, "write (%d Bytes): ",  1 << (9+bucket));
-		print_stat(m, &q->poll_stat[2*bucket+1]);
-		seq_puts(m, "\n");
-	}
-	return 0;
-}
-
 #define HCTX_STATE_NAME(name) [BLK_MQ_S_##name] = #name
 static const char *const hctx_state_name[] = {
 	HCTX_STATE_NAME(STOPPED),
 	HCTX_STATE_NAME(TAG_ACTIVE),
 	HCTX_STATE_NAME(SCHED_RESTART),
-	HCTX_STATE_NAME(START_ON_RUN),
 };
 #undef HCTX_STATE_NAME
 
@@ -230,99 +184,68 @@ static int hctx_flags_show(void *data, struct seq_file *m)
 	return 0;
 }
 
-#define REQ_OP_NAME(name) [REQ_OP_##name] = #name
-static const char *const op_name[] = {
-	REQ_OP_NAME(READ),
-	REQ_OP_NAME(WRITE),
-	REQ_OP_NAME(FLUSH),
-	REQ_OP_NAME(DISCARD),
-	REQ_OP_NAME(ZONE_REPORT),
-	REQ_OP_NAME(SECURE_ERASE),
-	REQ_OP_NAME(ZONE_RESET),
-	REQ_OP_NAME(WRITE_SAME),
-	REQ_OP_NAME(WRITE_ZEROES),
-	REQ_OP_NAME(SCSI_IN),
-	REQ_OP_NAME(SCSI_OUT),
-	REQ_OP_NAME(DRV_IN),
-	REQ_OP_NAME(DRV_OUT),
-};
-#undef REQ_OP_NAME
-
 #define CMD_FLAG_NAME(name) [__REQ_##name] = #name
 static const char *const cmd_flag_name[] = {
+	CMD_FLAG_NAME(WRITE),
 	CMD_FLAG_NAME(FAILFAST_DEV),
 	CMD_FLAG_NAME(FAILFAST_TRANSPORT),
 	CMD_FLAG_NAME(FAILFAST_DRIVER),
 	CMD_FLAG_NAME(SYNC),
+
 	CMD_FLAG_NAME(META),
 	CMD_FLAG_NAME(PRIO),
-	CMD_FLAG_NAME(NOMERGE),
-	CMD_FLAG_NAME(IDLE),
-	CMD_FLAG_NAME(INTEGRITY),
+	CMD_FLAG_NAME(DISCARD),
+	CMD_FLAG_NAME(SECURE),
+	CMD_FLAG_NAME(WRITE_SAME),
+
+	CMD_FLAG_NAME(NOIDLE),
 	CMD_FLAG_NAME(FUA),
-	CMD_FLAG_NAME(PREFLUSH),
+	CMD_FLAG_NAME(FLUSH),
 	CMD_FLAG_NAME(RAHEAD),
-	CMD_FLAG_NAME(BACKGROUND),
-	CMD_FLAG_NAME(NOUNMAP),
-	CMD_FLAG_NAME(NOWAIT),
+	CMD_FLAG_NAME(THROTTLED),
+
+	CMD_FLAG_NAME(SORTED),
+	CMD_FLAG_NAME(SOFTBARRIER),
+	CMD_FLAG_NAME(NOMERGE),
+	CMD_FLAG_NAME(STARTED),
+	CMD_FLAG_NAME(DONTPREP),
+
+	CMD_FLAG_NAME(QUEUED),
+	CMD_FLAG_NAME(ELVPRIV),
+	CMD_FLAG_NAME(FAILED),
+	CMD_FLAG_NAME(QUIET),
+	CMD_FLAG_NAME(PREEMPT),
+
+	CMD_FLAG_NAME(ALLOCED),
+	CMD_FLAG_NAME(COPY_USER),
+	CMD_FLAG_NAME(FLUSH_SEQ),
+	CMD_FLAG_NAME(IO_STAT),
+	CMD_FLAG_NAME(MIXED_MERGE),
+
+	CMD_FLAG_NAME(KERNEL),
+	CMD_FLAG_NAME(PM),
+	CMD_FLAG_NAME(END),
+	CMD_FLAG_NAME(HASHED),
+	CMD_FLAG_NAME(MQ_INFLIGHT),
 };
 #undef CMD_FLAG_NAME
-
-#define RQF_NAME(name) [ilog2((__force u32)RQF_##name)] = #name
-static const char *const rqf_name[] = {
-	RQF_NAME(SORTED),
-	RQF_NAME(STARTED),
-	RQF_NAME(QUEUED),
-	RQF_NAME(SOFTBARRIER),
-	RQF_NAME(FLUSH_SEQ),
-	RQF_NAME(MIXED_MERGE),
-	RQF_NAME(MQ_INFLIGHT),
-	RQF_NAME(DONTPREP),
-	RQF_NAME(PREEMPT),
-	RQF_NAME(COPY_USER),
-	RQF_NAME(FAILED),
-	RQF_NAME(QUIET),
-	RQF_NAME(ELVPRIV),
-	RQF_NAME(IO_STAT),
-	RQF_NAME(ALLOCED),
-	RQF_NAME(PM),
-	RQF_NAME(HASHED),
-	RQF_NAME(STATS),
-	RQF_NAME(SPECIAL_PAYLOAD),
-};
-#undef RQF_NAME
 
 #define RQAF_NAME(name) [REQ_ATOM_##name] = #name
 static const char *const rqaf_name[] = {
 	RQAF_NAME(COMPLETE),
 	RQAF_NAME(STARTED),
-	RQAF_NAME(POLL_SLEPT),
 };
 #undef RQAF_NAME
 
 int __blk_mq_debugfs_rq_show(struct seq_file *m, struct request *rq)
 {
-	const struct blk_mq_ops *const mq_ops = rq->q->mq_ops;
-	const unsigned int op = rq->cmd_flags & REQ_OP_MASK;
-
-	seq_printf(m, "%p {.op=", rq);
-	if (op < ARRAY_SIZE(op_name) && op_name[op])
-		seq_printf(m, "%s", op_name[op]);
-	else
-		seq_printf(m, "%d", op);
 	seq_puts(m, ", .cmd_flags=");
-	blk_flags_show(m, rq->cmd_flags & ~REQ_OP_MASK, cmd_flag_name,
+	blk_flags_show(m, rq->cmd_flags, cmd_flag_name,
 		       ARRAY_SIZE(cmd_flag_name));
-	seq_puts(m, ", .rq_flags=");
-	blk_flags_show(m, (__force unsigned int)rq->rq_flags, rqf_name,
-		       ARRAY_SIZE(rqf_name));
 	seq_puts(m, ", .atomic_flags=");
 	blk_flags_show(m, rq->atomic_flags, rqaf_name, ARRAY_SIZE(rqaf_name));
-	seq_printf(m, ", .tag=%d, .internal_tag=%d", rq->tag,
-		   rq->internal_tag);
-	if (mq_ops->show_rq)
-		mq_ops->show_rq(m, rq);
-	seq_puts(m, "}\n");
+	seq_printf(m, ", .tag=%d, .internal_tag=%d}\n", rq->tag,
+		   rq_aux(rq)->internal_tag);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(__blk_mq_debugfs_rq_show);
@@ -518,25 +441,6 @@ out:
 	return res;
 }
 
-static int hctx_io_poll_show(void *data, struct seq_file *m)
-{
-	struct blk_mq_hw_ctx *hctx = data;
-
-	seq_printf(m, "considered=%lu\n", hctx->poll_considered);
-	seq_printf(m, "invoked=%lu\n", hctx->poll_invoked);
-	seq_printf(m, "success=%lu\n", hctx->poll_success);
-	return 0;
-}
-
-static ssize_t hctx_io_poll_write(void *data, const char __user *buf,
-				  size_t count, loff_t *ppos)
-{
-	struct blk_mq_hw_ctx *hctx = data;
-
-	hctx->poll_considered = hctx->poll_invoked = hctx->poll_success = 0;
-	return count;
-}
-
 static int hctx_dispatched_show(void *data, struct seq_file *m)
 {
 	struct blk_mq_hw_ctx *hctx = data;
@@ -607,6 +511,14 @@ static int hctx_active_show(void *data, struct seq_file *m)
 	return 0;
 }
 
+static int hctx_dispatch_busy_show(void *data, struct seq_file *m)
+{
+	struct blk_mq_hw_ctx *hctx = data;
+
+	seq_printf(m, "%u\n", hctx->dispatch_busy);
+	return 0;
+}
+
 static void *ctx_rq_list_start(struct seq_file *m, loff_t *pos)
 	__acquires(&ctx->lock)
 {
@@ -637,6 +549,7 @@ static const struct seq_operations ctx_rq_list_seq_ops = {
 	.stop	= ctx_rq_list_stop,
 	.show	= blk_mq_debugfs_rq_show,
 };
+
 static int ctx_dispatched_show(void *data, struct seq_file *m)
 {
 	struct blk_mq_ctx *ctx = data;
@@ -688,10 +601,16 @@ static ssize_t ctx_completed_write(void *data, const char __user *buf,
 	return count;
 }
 
+struct mq_seq_file_param {
+	const struct blk_mq_debugfs_attr *attr;
+	const struct file *file;
+};
+
 static int blk_mq_debugfs_show(struct seq_file *m, void *v)
 {
-	const struct blk_mq_debugfs_attr *attr = m->private;
-	void *data = d_inode(m->file->f_path.dentry->d_parent)->i_private;
+	const struct mq_seq_file_param *para = m->private;
+	const struct blk_mq_debugfs_attr *attr = para->attr;
+	void *data = d_inode(para->file->f_path.dentry->d_parent)->i_private;
 
 	return attr->show(data, m);
 }
@@ -700,10 +619,15 @@ static ssize_t blk_mq_debugfs_write(struct file *file, const char __user *buf,
 				    size_t count, loff_t *ppos)
 {
 	struct seq_file *m = file->private_data;
-	const struct blk_mq_debugfs_attr *attr = m->private;
+	const struct mq_seq_file_param *para = m->private;
+	const struct blk_mq_debugfs_attr *attr = para->attr;
 	void *data = d_inode(file->f_path.dentry->d_parent)->i_private;
 
-	if (!attr->write)
+	/*
+	 * If 'para' is same with 'data', it means that this attribute
+	 * only implements .seq_ops which is read-only
+	 */
+	if (para == data || !attr->write)
 		return -EPERM;
 
 	return attr->write(data, buf, count, ppos);
@@ -715,6 +639,7 @@ static int blk_mq_debugfs_open(struct inode *inode, struct file *file)
 	void *data = d_inode(file->f_path.dentry->d_parent)->i_private;
 	struct seq_file *m;
 	int ret;
+	struct mq_seq_file_param *para;
 
 	if (attr->seq_ops) {
 		ret = seq_open(file, attr->seq_ops);
@@ -728,20 +653,29 @@ static int blk_mq_debugfs_open(struct inode *inode, struct file *file)
 	if (WARN_ON_ONCE(!attr->show))
 		return -EPERM;
 
-	return single_open(file, blk_mq_debugfs_show, inode->i_private);
-}
+	para = kmalloc(sizeof(*para), GFP_KERNEL);
+	if (!para)
+		return -ENOMEM;
+
+	para->file = file;
+	para->attr = attr;
+	return single_open(file, blk_mq_debugfs_show, para);
+ }
 
 static int blk_mq_debugfs_release(struct inode *inode, struct file *file)
 {
 	const struct blk_mq_debugfs_attr *attr = inode->i_private;
 
-	if (attr->show)
+	if (attr->show) {
+		struct seq_file *m = file->private_data;
+		kfree(m->private);
+
 		return single_release(inode, file);
-	else
+	} else
 		return seq_release(inode, file);
 }
 
-static const struct file_operations blk_mq_debugfs_fops = {
+const struct file_operations blk_mq_debugfs_fops = {
 	.open		= blk_mq_debugfs_open,
 	.read		= seq_read,
 	.write		= blk_mq_debugfs_write,
@@ -750,10 +684,8 @@ static const struct file_operations blk_mq_debugfs_fops = {
 };
 
 static const struct blk_mq_debugfs_attr blk_mq_debugfs_queue_attrs[] = {
-	{"poll_stat", 0400, queue_poll_stat_show},
-	{"requeue_list", 0400, .seq_ops = &queue_requeue_list_seq_ops},
 	{"state", 0600, queue_state_show, queue_state_write},
-	{"write_hints", 0600, queue_write_hint_show, queue_write_hint_store},
+	{"requeue_list", 0400, .seq_ops = &queue_requeue_list_seq_ops},
 	{},
 };
 
@@ -767,11 +699,11 @@ static const struct blk_mq_debugfs_attr blk_mq_debugfs_hctx_attrs[] = {
 	{"tags_bitmap", 0400, hctx_tags_bitmap_show},
 	{"sched_tags", 0400, hctx_sched_tags_show},
 	{"sched_tags_bitmap", 0400, hctx_sched_tags_bitmap_show},
-	{"io_poll", 0600, hctx_io_poll_show, hctx_io_poll_write},
 	{"dispatched", 0600, hctx_dispatched_show, hctx_dispatched_write},
 	{"queued", 0600, hctx_queued_show, hctx_queued_write},
 	{"run", 0600, hctx_run_show, hctx_run_write},
 	{"active", 0400, hctx_active_show},
+	{"dispatch_busy", 0400, hctx_dispatch_busy_show},
 	{},
 };
 
@@ -923,12 +855,12 @@ void blk_mq_debugfs_unregister_hctxs(struct request_queue *q)
 
 int blk_mq_debugfs_register_sched(struct request_queue *q)
 {
-	struct elevator_type *e = q->elevator->type;
+	struct elevator_type_aux *aux = q->elevator->aux;
 
 	if (!q->debugfs_dir)
 		return -ENOENT;
 
-	if (!e->queue_debugfs_attrs)
+	if (!aux->queue_debugfs_attrs)
 		return 0;
 
 	q->sched_debugfs_dir = debugfs_create_dir("sched", q->debugfs_dir);
@@ -936,7 +868,7 @@ int blk_mq_debugfs_register_sched(struct request_queue *q)
 		return -ENOMEM;
 
 	if (!debugfs_create_files(q->sched_debugfs_dir, q,
-				  e->queue_debugfs_attrs))
+				  aux->queue_debugfs_attrs))
 		goto err;
 
 	return 0;
@@ -955,12 +887,12 @@ void blk_mq_debugfs_unregister_sched(struct request_queue *q)
 int blk_mq_debugfs_register_sched_hctx(struct request_queue *q,
 				       struct blk_mq_hw_ctx *hctx)
 {
-	struct elevator_type *e = q->elevator->type;
+	struct elevator_type_aux *aux = q->elevator->aux;
 
 	if (!hctx->debugfs_dir)
 		return -ENOENT;
 
-	if (!e->hctx_debugfs_attrs)
+	if (!aux->hctx_debugfs_attrs)
 		return 0;
 
 	hctx->sched_debugfs_dir = debugfs_create_dir("sched",
@@ -969,7 +901,7 @@ int blk_mq_debugfs_register_sched_hctx(struct request_queue *q,
 		return -ENOMEM;
 
 	if (!debugfs_create_files(hctx->sched_debugfs_dir, hctx,
-				  e->hctx_debugfs_attrs))
+				  aux->hctx_debugfs_attrs))
 		return -ENOMEM;
 
 	return 0;

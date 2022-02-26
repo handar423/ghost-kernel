@@ -20,11 +20,12 @@
 #include <linux/of.h>
 
 #include "of_helpers.h"
+#include "offline_states.h"
 #include "pseries.h"
 
 #include <asm/prom.h>
 #include <asm/machdep.h>
-#include <linux/uaccess.h>
+#include <asm/uaccess.h>
 #include <asm/rtas.h>
 
 static struct workqueue_struct *pseries_hp_wq;
@@ -63,6 +64,10 @@ static struct property *dlpar_parse_cc_property(struct cc_workarea *ccwa)
 
 	name = (char *)ccwa + be32_to_cpu(ccwa->name_offset);
 	prop->name = kstrdup(name, GFP_KERNEL);
+	if (!prop->name) {
+		dlpar_free_cc_property(prop);
+		return NULL;
+	}
 
 	prop->length = be32_to_cpu(ccwa->prop_length);
 	value = (char *)ccwa + be32_to_cpu(ccwa->prop_offset);
@@ -75,17 +80,24 @@ static struct property *dlpar_parse_cc_property(struct cc_workarea *ccwa)
 	return prop;
 }
 
-static struct device_node *dlpar_parse_cc_node(struct cc_workarea *ccwa)
+static struct device_node *dlpar_parse_cc_node(struct cc_workarea *ccwa,
+					       const char *path)
 {
 	struct device_node *dn;
-	const char *name;
+	char *name;
+
+	/* If parent node path is "/" advance path to NULL terminator to
+	 * prevent double leading slashs in full_name.
+	 */
+	if (!path[1])
+		path++;
 
 	dn = kzalloc(sizeof(*dn), GFP_KERNEL);
 	if (!dn)
 		return NULL;
 
-	name = (const char *)ccwa + be32_to_cpu(ccwa->name_offset);
-	dn->full_name = kstrdup(name, GFP_KERNEL);
+	name = (char *)ccwa + be32_to_cpu(ccwa->name_offset);
+	dn->full_name = kasprintf(GFP_KERNEL, "%s/%s", path, name);
 	if (!dn->full_name) {
 		kfree(dn);
 		return NULL;
@@ -141,6 +153,7 @@ struct device_node *dlpar_configure_connector(__be32 drc_index,
 	struct property *last_property = NULL;
 	struct cc_workarea *ccwa;
 	char *data_buf;
+	const char *parent_path = parent->full_name;
 	int cc_token;
 	int rc = -1;
 
@@ -174,7 +187,7 @@ struct device_node *dlpar_configure_connector(__be32 drc_index,
 			break;
 
 		case NEXT_SIBLING:
-			dn = dlpar_parse_cc_node(ccwa);
+			dn = dlpar_parse_cc_node(ccwa, parent_path);
 			if (!dn)
 				goto cc_error;
 
@@ -184,7 +197,10 @@ struct device_node *dlpar_configure_connector(__be32 drc_index,
 			break;
 
 		case NEXT_CHILD:
-			dn = dlpar_parse_cc_node(ccwa);
+			if (first_dn)
+				parent_path = last_dn->full_name;
+
+			dn = dlpar_parse_cc_node(ccwa, parent_path);
 			if (!dn)
 				goto cc_error;
 
@@ -215,6 +231,7 @@ struct device_node *dlpar_configure_connector(__be32 drc_index,
 
 		case PREV_PARENT:
 			last_dn = last_dn->parent;
+			parent_path = last_dn->parent->full_name;
 			break;
 
 		case CALL_AGAIN:
@@ -250,7 +267,8 @@ int dlpar_attach_node(struct device_node *dn, struct device_node *parent)
 
 	rc = of_attach_node(dn);
 	if (rc) {
-		printk(KERN_ERR "Failed to add device node %pOF\n", dn);
+		printk(KERN_ERR "Failed to add device node %s\n",
+		       dn->full_name);
 		return rc;
 	}
 
@@ -572,7 +590,7 @@ static ssize_t dlpar_show(struct class *class, struct class_attribute *attr,
 	return sprintf(buf, "%s\n", "memory,cpu");
 }
 
-static CLASS_ATTR_RW(dlpar);
+static CLASS_ATTR(dlpar, S_IWUSR | S_IRUSR, dlpar_show, dlpar_store);
 
 int __init dlpar_workqueue_init(void)
 {

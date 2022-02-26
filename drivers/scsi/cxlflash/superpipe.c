@@ -165,7 +165,7 @@ struct ctx_info *get_context(struct cxlflash_cfg *cfg, u64 rctxid,
 	struct llun_info *lli = arg;
 	u64 ctxid = DECODE_CTXID(rctxid);
 	int rc;
-	pid_t pid = task_tgid_nr(current), ctxpid = 0;
+	pid_t pid = current->tgid, ctxpid = 0;
 
 	if (ctx_ctrl & CTX_CTRL_FILE) {
 		lli = NULL;
@@ -173,7 +173,7 @@ struct ctx_info *get_context(struct cxlflash_cfg *cfg, u64 rctxid,
 	}
 
 	if (ctx_ctrl & CTX_CTRL_CLONE)
-		pid = task_ppid_nr(current);
+		pid = current->parent->tgid;
 
 	if (likely(ctxid < MAX_CONTEXT)) {
 		while (true) {
@@ -321,7 +321,6 @@ static int read_cap16(struct scsi_device *sdev, struct llun_info *lli)
 	struct cxlflash_cfg *cfg = shost_priv(sdev->host);
 	struct device *dev = &cfg->dev->dev;
 	struct glun_info *gli = lli->parent;
-	struct scsi_sense_hdr sshdr;
 	u8 *cmd_buf = NULL;
 	u8 *scsi_cmd = NULL;
 	u8 *sense_buf = NULL;
@@ -349,8 +348,7 @@ retry:
 	/* Drop the ioctl read semahpore across lengthy call */
 	up_read(&cfg->ioctl_rwsem);
 	result = scsi_execute(sdev, scsi_cmd, DMA_FROM_DEVICE, cmd_buf,
-			      CMD_BUFSIZE, sense_buf, &sshdr, to, CMD_RETRIES,
-			      0, 0, NULL);
+			      CMD_BUFSIZE, sense_buf, to, CMD_RETRIES, 0, NULL);
 	down_read(&cfg->ioctl_rwsem);
 	rc = check_state(cfg);
 	if (rc) {
@@ -363,6 +361,10 @@ retry:
 	if (driver_byte(result) == DRIVER_SENSE) {
 		result &= ~(0xFF<<24); /* DRIVER_SENSE is not an error */
 		if (result & SAM_STAT_CHECK_CONDITION) {
+			struct scsi_sense_hdr sshdr;
+
+			scsi_normalize_sense(sense_buf, SCSI_SENSE_BUFFERSIZE,
+					    &sshdr);
 			switch (sshdr.sense_key) {
 			case NO_SENSE:
 			case RECOVERED_ERROR:
@@ -824,7 +826,7 @@ static void init_context(struct ctx_info *ctxi, struct cxlflash_cfg *cfg,
 	ctxi->rht_perms = perms;
 	ctxi->ctrl_map = &afu->afu_map->ctrls[ctxid].ctrl;
 	ctxi->ctxid = ENCODE_CTXID(ctxi, ctxid);
-	ctxi->pid = task_tgid_nr(current); /* tgid = pid */
+	ctxi->pid = current->tgid; /* tgid = pid */
 	ctxi->ctx = ctx;
 	ctxi->cfg = cfg;
 	ctxi->file = file;
@@ -1072,6 +1074,7 @@ out:
 
 /**
  * cxlflash_mmap_fault() - mmap fault handler for adapter file descriptor
+ * @vma:	VM area associated with mapping.
  * @vmf:	VM fault associated with current fault.
  *
  * To support error notification via MMIO, faults are 'caught' by this routine
@@ -1085,9 +1088,8 @@ out:
  *
  * Return: 0 on success, VM_FAULT_SIGBUS on failure
  */
-static int cxlflash_mmap_fault(struct vm_fault *vmf)
+static int cxlflash_mmap_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 {
-	struct vm_area_struct *vma = vmf->vma;
 	struct file *file = vma->vm_file;
 	struct cxl_context *ctx = cxl_fops_get_context(file);
 	struct cxlflash_cfg *cfg = container_of(file->f_op, struct cxlflash_cfg,
@@ -1116,7 +1118,7 @@ static int cxlflash_mmap_fault(struct vm_fault *vmf)
 
 	if (likely(!ctxi->err_recovery_active)) {
 		vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
-		rc = ctxi->cxl_mmap_vmops->fault(vmf);
+		rc = ctxi->cxl_mmap_vmops->fault(vma, vmf);
 	} else {
 		dev_dbg(dev, "%s: err recovery active, use err_page\n",
 			__func__);
@@ -2139,7 +2141,7 @@ int cxlflash_ioctl(struct scsi_device *sdev, int cmd, void __user *arg)
 	case DK_CXLFLASH_USER_VIRTUAL:
 	case DK_CXLFLASH_VLUN_RESIZE:
 	case DK_CXLFLASH_VLUN_CLONE:
-		dev_dbg(dev, "%s: %s (%08X) on dev(%d/%d/%d/%llu)\n",
+		dev_dbg(dev, "%s: %s (%08X) on dev(%d/%d/%d/%d)\n",
 			__func__, decode_ioctl(cmd), cmd, shost->host_no,
 			sdev->channel, sdev->id, sdev->lun);
 		rc = ioctl_common(sdev, cmd);
@@ -2199,12 +2201,12 @@ int cxlflash_ioctl(struct scsi_device *sdev, int cmd, void __user *arg)
 cxlflash_ioctl_exit:
 	up_read(&cfg->ioctl_rwsem);
 	if (unlikely(rc && known_ioctl))
-		dev_err(dev, "%s: ioctl %s (%08X) on dev(%d/%d/%d/%llu) "
+		dev_err(dev, "%s: ioctl %s (%08X) on dev(%d/%d/%d/%d) "
 			"returned rc %d\n", __func__,
 			decode_ioctl(cmd), cmd, shost->host_no,
 			sdev->channel, sdev->id, sdev->lun, rc);
 	else
-		dev_dbg(dev, "%s: ioctl %s (%08X) on dev(%d/%d/%d/%llu) "
+		dev_dbg(dev, "%s: ioctl %s (%08X) on dev(%d/%d/%d/%d) "
 			"returned rc %d\n", __func__, decode_ioctl(cmd),
 			cmd, shost->host_no, sdev->channel, sdev->id,
 			sdev->lun, rc);

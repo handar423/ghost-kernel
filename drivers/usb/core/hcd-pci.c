@@ -328,9 +328,9 @@ void usb_hcd_pci_remove(struct pci_dev *dev)
 	 * to test whether the controller hardware has been removed (e.g.,
 	 * cardbus physical eject).
 	 */
-	local_irq_disable();
+	local_irq_disable_nort();
 	usb_hcd_irq(0, hcd);
-	local_irq_enable();
+	local_irq_enable_nort();
 
 	/* Note: dev_set_drvdata must be called while holding the rwsem */
 	if (dev->class == CL_EHCI) {
@@ -515,8 +515,6 @@ static int resume_common(struct device *dev, int event)
 				event == PM_EVENT_RESTORE);
 		if (retval) {
 			dev_err(dev, "PCI post-resume error %d!\n", retval);
-			if (hcd->shared_hcd)
-				usb_hc_died(hcd->shared_hcd);
 			usb_hc_died(hcd);
 		}
 	}

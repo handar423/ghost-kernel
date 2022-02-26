@@ -6,7 +6,7 @@
  *			     Kyösti Mälkki <kmalkki@cc.hut.fi>, and
  *			     Mark D. Studebaker <mdsxyz123@yahoo.com>
  * Ported to Linux 2.6 by Aurelien Jarno <aurelien@aurel32.net> with
- * the help of Jean Delvare <jdelvare@suse.de>
+ * the help of Jean Delvare <khali@linux-fr.org>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -141,8 +141,6 @@ static inline u8 FAN_TO_REG(long rpm, int div)
 {
 	if (rpm <= 0)
 		return 255;
-	if (rpm > 1350000)
-		return 1;
 	return clamp_val((1350000 + rpm * div / 2) / (rpm * div), 1, 254);
 }
 
@@ -159,7 +157,7 @@ static inline int TEMP_FROM_REG(s8 val)
 {
 	return val * 830 + 52120;
 }
-static inline s8 TEMP_TO_REG(long val)
+static inline s8 TEMP_TO_REG(int val)
 {
 	int nval = clamp_val(val, -54120, 157530) ;
 	return nval < 0 ? (nval - 5212 - 415) / 830 : (nval - 5212 + 415) / 830;
@@ -215,6 +213,7 @@ static void sis5595_init_device(struct sis5595_data *data);
 
 static struct platform_driver sis5595_driver = {
 	.driver = {
+		.owner	= THIS_MODULE,
 		.name	= "sis5595",
 	},
 	.probe		= sis5595_probe,
@@ -304,23 +303,22 @@ show_in_offset(3);
 show_in_offset(4);
 
 /* Temperature */
-static ssize_t temp1_input_show(struct device *dev,
-				struct device_attribute *attr, char *buf)
+static ssize_t show_temp(struct device *dev, struct device_attribute *attr,
+			 char *buf)
 {
 	struct sis5595_data *data = sis5595_update_device(dev);
 	return sprintf(buf, "%d\n", TEMP_FROM_REG(data->temp));
 }
 
-static ssize_t temp1_max_show(struct device *dev, struct device_attribute *attr,
+static ssize_t show_temp_over(struct device *dev, struct device_attribute *attr,
 			      char *buf)
 {
 	struct sis5595_data *data = sis5595_update_device(dev);
 	return sprintf(buf, "%d\n", TEMP_FROM_REG(data->temp_over));
 }
 
-static ssize_t temp1_max_store(struct device *dev,
-			       struct device_attribute *attr, const char *buf,
-			       size_t count)
+static ssize_t set_temp_over(struct device *dev, struct device_attribute *attr,
+			     const char *buf, size_t count)
 {
 	struct sis5595_data *data = dev_get_drvdata(dev);
 	long val;
@@ -337,16 +335,15 @@ static ssize_t temp1_max_store(struct device *dev,
 	return count;
 }
 
-static ssize_t temp1_max_hyst_show(struct device *dev,
-				   struct device_attribute *attr, char *buf)
+static ssize_t show_temp_hyst(struct device *dev, struct device_attribute *attr,
+			      char *buf)
 {
 	struct sis5595_data *data = sis5595_update_device(dev);
 	return sprintf(buf, "%d\n", TEMP_FROM_REG(data->temp_hyst));
 }
 
-static ssize_t temp1_max_hyst_store(struct device *dev,
-				    struct device_attribute *attr,
-				    const char *buf, size_t count)
+static ssize_t set_temp_hyst(struct device *dev, struct device_attribute *attr,
+			     const char *buf, size_t count)
 {
 	struct sis5595_data *data = dev_get_drvdata(dev);
 	long val;
@@ -363,9 +360,11 @@ static ssize_t temp1_max_hyst_store(struct device *dev,
 	return count;
 }
 
-static DEVICE_ATTR_RO(temp1_input);
-static DEVICE_ATTR_RW(temp1_max);
-static DEVICE_ATTR_RW(temp1_max_hyst);
+static DEVICE_ATTR(temp1_input, S_IRUGO, show_temp, NULL);
+static DEVICE_ATTR(temp1_max, S_IRUGO | S_IWUSR,
+		show_temp_over, set_temp_over);
+static DEVICE_ATTR(temp1_max_hyst, S_IRUGO | S_IWUSR,
+		show_temp_hyst, set_temp_hyst);
 
 /* 2 Fans */
 static ssize_t show_fan(struct device *dev, struct device_attribute *da,
@@ -492,13 +491,13 @@ show_fan_offset(1);
 show_fan_offset(2);
 
 /* Alarms */
-static ssize_t alarms_show(struct device *dev, struct device_attribute *attr,
+static ssize_t show_alarms(struct device *dev, struct device_attribute *attr,
 			   char *buf)
 {
 	struct sis5595_data *data = sis5595_update_device(dev);
 	return sprintf(buf, "%d\n", data->alarms);
 }
-static DEVICE_ATTR_RO(alarms);
+static DEVICE_ATTR(alarms, S_IRUGO, show_alarms, NULL);
 
 static ssize_t show_alarm(struct device *dev, struct device_attribute *da,
 			  char *buf)
@@ -516,13 +515,13 @@ static SENSOR_DEVICE_ATTR(fan1_alarm, S_IRUGO, show_alarm, NULL, 6);
 static SENSOR_DEVICE_ATTR(fan2_alarm, S_IRUGO, show_alarm, NULL, 7);
 static SENSOR_DEVICE_ATTR(temp1_alarm, S_IRUGO, show_alarm, NULL, 15);
 
-static ssize_t name_show(struct device *dev, struct device_attribute *attr,
+static ssize_t show_name(struct device *dev, struct device_attribute *attr,
 			 char *buf)
 {
 	struct sis5595_data *data = dev_get_drvdata(dev);
 	return sprintf(buf, "%s\n", data->name);
 }
-static DEVICE_ATTR_RO(name);
+static DEVICE_ATTR(name, S_IRUGO, show_name, NULL);
 
 static struct attribute *sis5595_attributes[] = {
 	&sensor_dev_attr_in0_input.dev_attr.attr,

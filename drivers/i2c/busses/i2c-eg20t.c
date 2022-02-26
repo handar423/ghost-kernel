@@ -14,6 +14,7 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/delay.h>
+#include <linux/init.h>
 #include <linux/errno.h>
 #include <linux/i2c.h>
 #include <linux/fs.h>
@@ -307,6 +308,24 @@ static void pch_i2c_start(struct i2c_algo_pch_data *adap)
 }
 
 /**
+ * pch_i2c_getack() - to confirm ACK/NACK
+ * @adap:	Pointer to struct i2c_algo_pch_data.
+ */
+static s32 pch_i2c_getack(struct i2c_algo_pch_data *adap)
+{
+	u32 reg_val;
+	void __iomem *p = adap->pch_base_address;
+	reg_val = ioread32(p + PCH_I2CSR) & PCH_GETACK;
+
+	if (reg_val != 0) {
+		pch_err(adap, "return%d\n", -EPROTO);
+		return -EPROTO;
+	}
+
+	return 0;
+}
+
+/**
  * pch_i2c_stop() - generate stop condition in normal mode.
  * @adap:	Pointer to struct i2c_algo_pch_data.
  */
@@ -321,7 +340,6 @@ static void pch_i2c_stop(struct i2c_algo_pch_data *adap)
 static int pch_i2c_wait_for_check_xfer(struct i2c_algo_pch_data *adap)
 {
 	long ret;
-	void __iomem *p = adap->pch_base_address;
 
 	ret = wait_event_timeout(pch_event,
 			(adap->pch_event_flag != 0), msecs_to_jiffies(1000));
@@ -344,9 +362,10 @@ static int pch_i2c_wait_for_check_xfer(struct i2c_algo_pch_data *adap)
 
 	adap->pch_event_flag = 0;
 
-	if (ioread32(p + PCH_I2CSR) & PCH_GETACK) {
-		pch_dbg(adap, "Receive NACK for slave address setting\n");
-		return -ENXIO;
+	if (pch_i2c_getack(adap)) {
+		pch_dbg(adap, "Receive NACK for slave address"
+			"setting\n");
+		return -EIO;
 	}
 
 	return 0;
@@ -715,7 +734,7 @@ static u32 pch_i2c_func(struct i2c_adapter *adap)
 	return I2C_FUNC_I2C | I2C_FUNC_SMBUS_EMUL | I2C_FUNC_10BIT_ADDR;
 }
 
-static const struct i2c_algorithm pch_algorithm = {
+static struct i2c_algorithm pch_algorithm = {
 	.master_xfer = pch_i2c_xfer,
 	.functionality = pch_i2c_func
 };
@@ -747,8 +766,10 @@ static int pch_i2c_probe(struct pci_dev *pdev,
 	pch_pci_dbg(pdev, "Entered.\n");
 
 	adap_info = kzalloc((sizeof(struct adapter_info)), GFP_KERNEL);
-	if (adap_info == NULL)
+	if (adap_info == NULL) {
+		pch_pci_err(pdev, "Memory allocation FAILED\n");
 		return -ENOMEM;
+	}
 
 	ret = pci_enable_device(pdev);
 	if (ret) {
@@ -773,6 +794,13 @@ static int pch_i2c_probe(struct pci_dev *pdev,
 	/* Set the number of I2C channel instance */
 	adap_info->ch_num = id->driver_data;
 
+	ret = request_irq(pdev->irq, pch_i2c_handler, IRQF_SHARED,
+		  KBUILD_MODNAME, adap_info);
+	if (ret) {
+		pch_pci_err(pdev, "request_irq FAILED\n");
+		goto err_request_irq;
+	}
+
 	for (i = 0; i < adap_info->ch_num; i++) {
 		pch_adap = &adap_info->pch_data[i].pch_adapter;
 		adap_info->pch_i2c_suspended = false;
@@ -788,19 +816,7 @@ static int pch_i2c_probe(struct pci_dev *pdev,
 		/* base_addr + offset; */
 		adap_info->pch_data[i].pch_base_address = base_addr + 0x100 * i;
 
-		pch_adap->dev.of_node = pdev->dev.of_node;
 		pch_adap->dev.parent = &pdev->dev;
-	}
-
-	ret = request_irq(pdev->irq, pch_i2c_handler, IRQF_SHARED,
-		  KBUILD_MODNAME, adap_info);
-	if (ret) {
-		pch_pci_err(pdev, "request_irq FAILED\n");
-		goto err_request_irq;
-	}
-
-	for (i = 0; i < adap_info->ch_num; i++) {
-		pch_adap = &adap_info->pch_data[i].pch_adapter;
 
 		pch_i2c_init(&adap_info->pch_data[i]);
 

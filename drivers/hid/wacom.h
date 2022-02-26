@@ -91,7 +91,6 @@
 #include <linux/mod_devicetable.h>
 #include <linux/hid.h>
 #include <linux/kfifo.h>
-#include <linux/leds.h>
 #include <linux/usb/input.h>
 #include <linux/power_supply.h>
 #include <asm/unaligned.h>
@@ -116,8 +115,6 @@ enum wacom_worker {
 struct wacom;
 
 struct wacom_led {
-	struct led_classdev cdev;
-	struct led_trigger trigger;
 	struct wacom *wacom;
 	unsigned int group;
 	unsigned int id;
@@ -130,13 +127,12 @@ struct wacom_group_leds {
 	u8 select; /* status led selector (0..3) */
 	struct wacom_led *leds;
 	unsigned int count;
-	struct device *dev;
 };
 
 struct wacom_battery {
 	struct wacom *wacom;
-	struct power_supply_desc bat_desc;
 	struct power_supply *battery;
+	struct power_supply_desc bat_desc;
 	char bat_name[WACOM_NAME_MAX];
 	int bat_status;
 	int battery_capacity;
@@ -221,10 +217,6 @@ void wacom_wac_event(struct hid_device *hdev, struct hid_field *field,
 		struct hid_usage *usage, __s32 value);
 void wacom_wac_report(struct hid_device *hdev, struct hid_report *report);
 void wacom_battery_work(struct work_struct *work);
-enum led_brightness wacom_leds_brightness_get(struct wacom_led *led);
-struct wacom_led *wacom_led_find(struct wacom *wacom, unsigned int group,
-				 unsigned int id);
-struct wacom_led *wacom_led_next(struct wacom *wacom, struct wacom_led *cur);
 int wacom_equivalent_usage(int usage);
 int wacom_initialize_leds(struct wacom *wacom);
 #endif

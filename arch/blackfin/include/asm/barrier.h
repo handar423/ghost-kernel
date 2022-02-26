@@ -78,9 +78,6 @@
 
 #endif /* !CONFIG_SMP */
 
-#define __smp_mb__before_atomic()	barrier()
-#define __smp_mb__after_atomic()	barrier()
-
 #include <asm-generic/barrier.h>
 
 #endif /* _BLACKFIN_BARRIER_H */

@@ -67,10 +67,7 @@ static int ocfs2_do_flock(struct file *file, struct inode *inode,
 		 */
 
 		locks_lock_file_wait(file,
-				&(struct file_lock) {
-					.fl_type = F_UNLCK,
-					.fl_flags = FL_FLOCK
-				});
+				     &(struct file_lock){.fl_type = F_UNLCK});
 
 		ocfs2_file_unlock(file);
 	}
@@ -85,8 +82,6 @@ static int ocfs2_do_flock(struct file *file, struct inode *inode,
 	}
 
 	ret = locks_lock_file_wait(file, fl);
-	if (ret)
-		ocfs2_file_unlock(file);
 
 out:
 	mutex_unlock(&fp->fp_mutex);

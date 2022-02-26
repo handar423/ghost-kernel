@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _LINUX_CDEV_H
 #define _LINUX_CDEV_H
 
@@ -18,7 +17,7 @@ struct cdev {
 	struct list_head list;
 	dev_t dev;
 	unsigned int count;
-} __randomize_layout;
+};
 
 void cdev_init(struct cdev *, const struct file_operations *);
 
@@ -35,5 +34,7 @@ void cdev_device_del(struct cdev *cdev, struct device *dev);
 void cdev_del(struct cdev *);
 
 void cd_forget(struct inode *);
+
+extern struct backing_dev_info directly_mappable_cdev_bdi;
 
 #endif

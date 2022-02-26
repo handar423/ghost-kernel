@@ -5,7 +5,6 @@
 #include <linux/slab.h>
 #include <linux/types.h>
 
-#include <asm/fpu/api.h>
 #include <asm/mshyperv.h>
 #include <asm/msr.h>
 #include <asm/tlbflush.h>
@@ -25,11 +24,7 @@ struct hv_flush_pcpu {
 struct hv_flush_pcpu_ex {
 	u64 address_space;
 	u64 flags;
-	struct {
-		u64 format;
-		u64 valid_bank_mask;
-		u64 bank_contents[];
-	} hv_vp_set;
+	struct hv_vpset hv_vp_set;
 	u64 gva_list[];
 };
 
@@ -70,43 +65,10 @@ static inline int fill_gva_list(u64 gva_list[], int offset,
 	return gva_n - offset;
 }
 
-/* Return the number of banks in the resulting vp_set */
-static inline int cpumask_to_vp_set(struct hv_flush_pcpu_ex *flush,
-				    const struct cpumask *cpus)
-{
-	int cpu, vcpu, vcpu_bank, vcpu_offset, nr_bank = 1;
-
-	/* valid_bank_mask can represent up to 64 banks */
-	if (hv_max_vp_index / 64 >= 64)
-		return 0;
-
-	/*
-	 * Clear all banks up to the maximum possible bank as hv_flush_pcpu_ex
-	 * structs are not cleared between calls, we risk flushing unneeded
-	 * vCPUs otherwise.
-	 */
-	for (vcpu_bank = 0; vcpu_bank <= hv_max_vp_index / 64; vcpu_bank++)
-		flush->hv_vp_set.bank_contents[vcpu_bank] = 0;
-
-	/*
-	 * Some banks may end up being empty but this is acceptable.
-	 */
-	for_each_cpu(cpu, cpus) {
-		vcpu = hv_cpu_number_to_vp_number(cpu);
-		vcpu_bank = vcpu / 64;
-		vcpu_offset = vcpu % 64;
-		__set_bit(vcpu_offset, (unsigned long *)
-			  &flush->hv_vp_set.bank_contents[vcpu_bank]);
-		if (vcpu_bank >= nr_bank)
-			nr_bank = vcpu_bank + 1;
-	}
-	flush->hv_vp_set.valid_bank_mask = GENMASK_ULL(nr_bank - 1, 0);
-
-	return nr_bank;
-}
-
 static void hyperv_flush_tlb_others(const struct cpumask *cpus,
-				    const struct flush_tlb_info *info)
+				    struct mm_struct *mm,
+				    unsigned long start,
+				    unsigned long end)
 {
 	int cpu, vcpu, gva_n, max_gvas;
 	struct hv_flush_pcpu **flush_pcpu;
@@ -114,7 +76,7 @@ static void hyperv_flush_tlb_others(const struct cpumask *cpus,
 	u64 status = U64_MAX;
 	unsigned long flags;
 
-	trace_hyperv_mmu_flush_tlb_others(cpus, info);
+	trace_hyperv_mmu_flush_tlb_others(cpus, mm, start, end);
 
 	if (!pcpu_flush || !hv_hypercall_pg)
 		goto do_native;
@@ -136,8 +98,13 @@ static void hyperv_flush_tlb_others(const struct cpumask *cpus,
 		goto do_native;
 	}
 
-	if (info->mm) {
-		flush->address_space = virt_to_phys(info->mm->pgd);
+	if (mm) {
+		/*
+		 * AddressSpace argument must match the CR3 with PCID bits
+		 * stripped out.
+		 */
+		flush->address_space = virt_to_phys(mm->pgd);
+		flush->address_space &= CR3_ADDR_MASK;
 		flush->flags = 0;
 	} else {
 		flush->address_space = 0;
@@ -164,17 +131,17 @@ static void hyperv_flush_tlb_others(const struct cpumask *cpus,
 	 */
 	max_gvas = (PAGE_SIZE - sizeof(*flush)) / sizeof(flush->gva_list[0]);
 
-	if (info->end == TLB_FLUSH_ALL) {
+	if (end == TLB_FLUSH_ALL) {
 		flush->flags |= HV_FLUSH_NON_GLOBAL_MAPPINGS_ONLY;
 		status = hv_do_hypercall(HVCALL_FLUSH_VIRTUAL_ADDRESS_SPACE,
 					 flush, NULL);
-	} else if (info->end &&
-		   ((info->end - info->start)/HV_TLB_FLUSH_UNIT) > max_gvas) {
+	} else if (end &&
+		   ((end - start)/HV_TLB_FLUSH_UNIT) > max_gvas) {
 		status = hv_do_hypercall(HVCALL_FLUSH_VIRTUAL_ADDRESS_SPACE,
 					 flush, NULL);
 	} else {
 		gva_n = fill_gva_list(flush->gva_list, 0,
-				      info->start, info->end);
+				      start, end);
 		status = hv_do_rep_hypercall(HVCALL_FLUSH_VIRTUAL_ADDRESS_LIST,
 					     gva_n, 0, flush, NULL);
 	}
@@ -184,11 +151,13 @@ static void hyperv_flush_tlb_others(const struct cpumask *cpus,
 	if (!(status & HV_HYPERCALL_RESULT_MASK))
 		return;
 do_native:
-	native_flush_tlb_others(cpus, info);
+	native_flush_tlb_others(cpus, mm, start, end);
 }
 
 static void hyperv_flush_tlb_others_ex(const struct cpumask *cpus,
-				       const struct flush_tlb_info *info)
+				       struct mm_struct *mm,
+				       unsigned long start,
+				       unsigned long end)
 {
 	int nr_bank = 0, max_gvas, gva_n;
 	struct hv_flush_pcpu_ex **flush_pcpu;
@@ -196,7 +165,7 @@ static void hyperv_flush_tlb_others_ex(const struct cpumask *cpus,
 	u64 status = U64_MAX;
 	unsigned long flags;
 
-	trace_hyperv_mmu_flush_tlb_others(cpus, info);
+	trace_hyperv_mmu_flush_tlb_others(cpus, mm, start, end);
 
 	if (!pcpu_flush_ex || !hv_hypercall_pg)
 		goto do_native;
@@ -218,8 +187,13 @@ static void hyperv_flush_tlb_others_ex(const struct cpumask *cpus,
 		goto do_native;
 	}
 
-	if (info->mm) {
-		flush->address_space = virt_to_phys(info->mm->pgd);
+	if (mm) {
+		/*
+		 * AddressSpace argument must match the CR3 with PCID bits
+		 * stripped out.
+		 */
+		flush->address_space = virt_to_phys(mm->pgd);
+		flush->address_space &= CR3_ADDR_MASK;
 		flush->flags = 0;
 	} else {
 		flush->address_space = 0;
@@ -229,8 +203,8 @@ static void hyperv_flush_tlb_others_ex(const struct cpumask *cpus,
 	flush->hv_vp_set.valid_bank_mask = 0;
 
 	if (!cpumask_equal(cpus, cpu_present_mask)) {
-		flush->hv_vp_set.format = HV_GENERIC_SET_SPARCE_4K;
-		nr_bank = cpumask_to_vp_set(flush, cpus);
+		flush->hv_vp_set.format = HV_GENERIC_SET_SPARSE_4K;
+		nr_bank = cpumask_to_vpset(&(flush->hv_vp_set), cpus);
 	}
 
 	if (!nr_bank) {
@@ -247,19 +221,19 @@ static void hyperv_flush_tlb_others_ex(const struct cpumask *cpus,
 		 sizeof(flush->hv_vp_set.bank_contents[0])) /
 		sizeof(flush->gva_list[0]);
 
-	if (info->end == TLB_FLUSH_ALL) {
+	if (end == TLB_FLUSH_ALL) {
 		flush->flags |= HV_FLUSH_NON_GLOBAL_MAPPINGS_ONLY;
 		status = hv_do_rep_hypercall(
 			HVCALL_FLUSH_VIRTUAL_ADDRESS_SPACE_EX,
 			0, nr_bank, flush, NULL);
-	} else if (info->end &&
-		   ((info->end - info->start)/HV_TLB_FLUSH_UNIT) > max_gvas) {
+	} else if (end &&
+		   ((end - start)/HV_TLB_FLUSH_UNIT) > max_gvas) {
 		status = hv_do_rep_hypercall(
 			HVCALL_FLUSH_VIRTUAL_ADDRESS_SPACE_EX,
 			0, nr_bank, flush, NULL);
 	} else {
 		gva_n = fill_gva_list(flush->gva_list, nr_bank,
-				      info->start, info->end);
+				      start, end);
 		status = hv_do_rep_hypercall(
 			HVCALL_FLUSH_VIRTUAL_ADDRESS_LIST_EX,
 			gva_n, nr_bank, flush, NULL);
@@ -270,15 +244,16 @@ static void hyperv_flush_tlb_others_ex(const struct cpumask *cpus,
 	if (!(status & HV_HYPERCALL_RESULT_MASK))
 		return;
 do_native:
-	native_flush_tlb_others(cpus, info);
+	native_flush_tlb_others(cpus, mm, start, end);
 }
+
+/* RHEL-only, see x86/mm/gup.c */
+extern struct static_key rh_flush_tlb_others_native;
 
 void hyperv_setup_mmu_ops(void)
 {
 	if (!(ms_hyperv.hints & HV_X64_REMOTE_TLB_FLUSH_RECOMMENDED))
 		return;
-
-	setup_clear_cpu_cap(X86_FEATURE_PCID);
 
 	if (!(ms_hyperv.hints & HV_X64_EX_PROCESSOR_MASKS_RECOMMENDED)) {
 		pr_info("Using hypercall for remote TLB flush\n");
@@ -293,6 +268,8 @@ void hyper_alloc_mmu(void)
 {
 	if (!(ms_hyperv.hints & HV_X64_REMOTE_TLB_FLUSH_RECOMMENDED))
 		return;
+
+	static_key_slow_dec(&rh_flush_tlb_others_native);
 
 	if (!(ms_hyperv.hints & HV_X64_EX_PROCESSOR_MASKS_RECOMMENDED))
 		pcpu_flush = alloc_percpu(struct hv_flush_pcpu *);

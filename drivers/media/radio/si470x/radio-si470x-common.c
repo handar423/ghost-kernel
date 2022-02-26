@@ -15,6 +15,10 @@
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
  */
 
 
@@ -204,8 +208,7 @@ static int si470x_set_band(struct si470x_device *radio, int band)
 static int si470x_set_chan(struct si470x_device *radio, unsigned short chan)
 {
 	int retval;
-	unsigned long time_left;
-	bool timed_out = false;
+	bool timed_out = 0;
 
 	/* start tuning */
 	radio->registers[CHANNEL] &= ~CHANNEL_CHAN;
@@ -215,10 +218,10 @@ static int si470x_set_chan(struct si470x_device *radio, unsigned short chan)
 		goto done;
 
 	/* wait till tune operation has completed */
-	reinit_completion(&radio->completion);
-	time_left = wait_for_completion_timeout(&radio->completion,
-						msecs_to_jiffies(tune_timeout));
-	if (time_left == 0)
+	INIT_COMPLETION(radio->completion);
+	retval = wait_for_completion_timeout(&radio->completion,
+			msecs_to_jiffies(tune_timeout));
+	if (!retval)
 		timed_out = true;
 
 	if ((radio->registers[STATUSRSSI] & STATUSRSSI_STC) == 0)
@@ -251,7 +254,7 @@ static unsigned int si470x_get_step(struct si470x_device *radio)
 	/* 2:  50 kHz */
 	default:
 		return 50 * 16;
-	}
+	};
 }
 
 
@@ -297,8 +300,7 @@ static int si470x_set_seek(struct si470x_device *radio,
 {
 	int band, retval;
 	unsigned int freq;
-	bool timed_out = false;
-	unsigned long time_left;
+	bool timed_out = 0;
 
 	/* set band */
 	if (seek->rangelow || seek->rangehigh) {
@@ -339,10 +341,10 @@ static int si470x_set_seek(struct si470x_device *radio,
 		return retval;
 
 	/* wait till tune operation has completed */
-	reinit_completion(&radio->completion);
-	time_left = wait_for_completion_timeout(&radio->completion,
-						msecs_to_jiffies(seek_timeout));
-	if (time_left == 0)
+	INIT_COMPLETION(radio->completion);
+	retval = wait_for_completion_timeout(&radio->completion,
+			msecs_to_jiffies(seek_timeout));
+	if (!retval)
 		timed_out = true;
 
 	if ((radio->registers[STATUSRSSI] & STATUSRSSI_STC) == 0)
@@ -749,7 +751,7 @@ static const struct v4l2_ioctl_ops si470x_ioctl_ops = {
 /*
  * si470x_viddev_template - video device interface
  */
-const struct video_device si470x_viddev_template = {
+struct video_device si470x_viddev_template = {
 	.fops			= &si470x_fops,
 	.name			= DRIVER_NAME,
 	.release		= video_device_release_empty,

@@ -183,6 +183,7 @@ static const struct net_device_ops nfeth_netdev_ops = {
 	.ndo_start_xmit		= nfeth_xmit,
 	.ndo_tx_timeout		= nfeth_tx_timeout,
 	.ndo_validate_addr	= eth_validate_addr,
+	.ndo_change_mtu		= eth_change_mtu,
 	.ndo_set_mac_address	= eth_mac_addr,
 };
 
@@ -193,8 +194,7 @@ static struct net_device * __init nfeth_probe(int unit)
 	char mac[ETH_ALEN], host_ip[32], local_ip[32];
 	int err;
 
-	if (!nf_call(nfEtherID + XIF_GET_MAC, unit, virt_to_phys(mac),
-		     ETH_ALEN))
+	if (!nf_call(nfEtherID + XIF_GET_MAC, unit, mac, ETH_ALEN))
 		return NULL;
 
 	dev = alloc_etherdev(sizeof(struct nfeth_private));
@@ -216,9 +216,9 @@ static struct net_device * __init nfeth_probe(int unit)
 	}
 
 	nf_call(nfEtherID + XIF_GET_IPHOST, unit,
-		virt_to_phys(host_ip), sizeof(host_ip));
+		host_ip, sizeof(host_ip));
 	nf_call(nfEtherID + XIF_GET_IPATARI, unit,
-		virt_to_phys(local_ip), sizeof(local_ip));
+		local_ip, sizeof(local_ip));
 
 	netdev_info(dev, KBUILD_MODNAME " addr:%s (%s) HWaddr:%pM\n", host_ip,
 		    local_ip, mac);

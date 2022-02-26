@@ -116,7 +116,7 @@ static const struct net_device_ops vsockmon_ops = {
 	.ndo_stop = vsockmon_close,
 	.ndo_start_xmit = vsockmon_xmit,
 	.ndo_get_stats64 = vsockmon_get_stats64,
-	.ndo_change_mtu = vsockmon_change_mtu,
+	.extended.ndo_change_mtu = vsockmon_change_mtu,
 };
 
 static u32 always_on(struct net_device *dev)
@@ -135,7 +135,7 @@ static void vsockmon_setup(struct net_device *dev)
 
 	dev->netdev_ops	= &vsockmon_ops;
 	dev->ethtool_ops = &vsockmon_ethtool_ops;
-	dev->needs_free_netdev = true;
+	dev->extended->needs_free_netdev = true;
 
 	dev->features = NETIF_F_SG | NETIF_F_FRAGLIST |
 			NETIF_F_HIGHDMA | NETIF_F_LLTX;

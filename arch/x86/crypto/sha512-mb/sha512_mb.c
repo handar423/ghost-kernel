@@ -66,7 +66,7 @@
 #include <crypto/crypto_wq.h>
 #include <asm/byteorder.h>
 #include <linux/hardirq.h>
-#include <asm/fpu/api.h>
+#include <asm/i387.h>
 #include "sha512_mb_ctx.h"
 
 #define FLUSH_INTERVAL 1000 /* in usec */
@@ -117,7 +117,7 @@ inline void sha512_init_digest(uint64_t *digest)
 }
 
 inline uint32_t sha512_pad(uint8_t padblock[SHA512_BLOCK_SIZE * 2],
-			 uint64_t total_len)
+			 uint32_t total_len)
 {
 	uint32_t i = total_len & (SHA512_BLOCK_SIZE - 1);
 
@@ -221,7 +221,7 @@ static struct sha512_hash_ctx *sha512_ctx_mgr_resubmit
 }
 
 static struct sha512_hash_ctx
-		*sha512_ctx_mgr_get_comp_ctx(struct mcryptd_alg_cstate *cstate)
+		*sha512_ctx_mgr_get_comp_ctx(struct sha512_ctx_mgr *mgr)
 {
 	/*
 	 * If get_comp_job returns NULL, there are no jobs complete.
@@ -233,17 +233,11 @@ static struct sha512_hash_ctx
 	 * Otherwise, all jobs currently being managed by the hash_ctx_mgr
 	 * still need processing.
 	 */
-	struct sha512_ctx_mgr *mgr;
 	struct sha512_hash_ctx *ctx;
-	unsigned long flags;
 
-	mgr = cstate->mgr;
-	spin_lock_irqsave(&cstate->work_lock, flags);
 	ctx = (struct sha512_hash_ctx *)
 				sha512_job_mgr_get_comp_job(&mgr->mgr);
-	ctx = sha512_ctx_mgr_resubmit(mgr, ctx);
-	spin_unlock_irqrestore(&cstate->work_lock, flags);
-	return ctx;
+	return sha512_ctx_mgr_resubmit(mgr, ctx);
 }
 
 static void sha512_ctx_mgr_init(struct sha512_ctx_mgr *mgr)
@@ -252,36 +246,30 @@ static void sha512_ctx_mgr_init(struct sha512_ctx_mgr *mgr)
 }
 
 static struct sha512_hash_ctx
-			*sha512_ctx_mgr_submit(struct mcryptd_alg_cstate *cstate,
+			*sha512_ctx_mgr_submit(struct sha512_ctx_mgr *mgr,
 					  struct sha512_hash_ctx *ctx,
 					  const void *buffer,
 					  uint32_t len,
 					  int flags)
 {
-	struct sha512_ctx_mgr *mgr;
-	unsigned long irqflags;
-
-	mgr = cstate->mgr;
-	spin_lock_irqsave(&cstate->work_lock, irqflags);
 	if (flags & (~HASH_ENTIRE)) {
-		/*
-		 * User should not pass anything other than FIRST, UPDATE, or
+		/* User should not pass anything other than FIRST, UPDATE, or
 		 * LAST
 		 */
 		ctx->error = HASH_CTX_ERROR_INVALID_FLAGS;
-		goto unlock;
+		return ctx;
 	}
 
 	if (ctx->status & HASH_CTX_STS_PROCESSING) {
 		/* Cannot submit to a currently processing job. */
 		ctx->error = HASH_CTX_ERROR_ALREADY_PROCESSING;
-		goto unlock;
+		return ctx;
 	}
 
 	if ((ctx->status & HASH_CTX_STS_COMPLETE) && !(flags & HASH_FIRST)) {
 		/* Cannot update a finished job. */
 		ctx->error = HASH_CTX_ERROR_ALREADY_COMPLETED;
-		goto unlock;
+		return ctx;
 	}
 
 
@@ -296,8 +284,7 @@ static struct sha512_hash_ctx
 		ctx->partial_block_buffer_length = 0;
 	}
 
-	/*
-	 * If we made it here, there were no errors during this call to
+	/* If we made it here, there were no errors during this call to
 	 * submit
 	 */
 	ctx->error = HASH_CTX_ERROR_NONE;
@@ -306,8 +293,7 @@ static struct sha512_hash_ctx
 	ctx->incoming_buffer = buffer;
 	ctx->incoming_buffer_length = len;
 
-	/*
-	 * Store the user's request flags and mark this ctx as currently being
+	/* Store the user's request flags and mark this ctx as currently being
 	 * processed.
 	 */
 	ctx->status = (flags & HASH_LAST) ?
@@ -323,7 +309,7 @@ static struct sha512_hash_ctx
 	 * Or if the user's buffer contains less than a whole block,
 	 * append as much as possible to the extra block.
 	 */
-	if (ctx->partial_block_buffer_length || len < SHA512_BLOCK_SIZE) {
+	if ((ctx->partial_block_buffer_length) | (len < SHA512_BLOCK_SIZE)) {
 		/* Compute how many bytes to copy from user buffer into extra
 		 * block
 		 */
@@ -362,27 +348,20 @@ static struct sha512_hash_ctx
 		}
 	}
 
-	ctx = sha512_ctx_mgr_resubmit(mgr, ctx);
-unlock:
-	spin_unlock_irqrestore(&cstate->work_lock, irqflags);
-	return ctx;
+	return sha512_ctx_mgr_resubmit(mgr, ctx);
 }
 
-static struct sha512_hash_ctx *sha512_ctx_mgr_flush(struct mcryptd_alg_cstate *cstate)
+static struct sha512_hash_ctx *sha512_ctx_mgr_flush(struct sha512_ctx_mgr *mgr)
 {
-	struct sha512_ctx_mgr *mgr;
 	struct sha512_hash_ctx *ctx;
-	unsigned long flags;
 
-	mgr = cstate->mgr;
-	spin_lock_irqsave(&cstate->work_lock, flags);
 	while (1) {
 		ctx = (struct sha512_hash_ctx *)
 					sha512_job_mgr_flush(&mgr->mgr);
 
 		/* If flush returned 0, there are no more jobs in flight. */
 		if (!ctx)
-			break;
+			return NULL;
 
 		/*
 		 * If flush returned a job, resubmit the job to finish
@@ -396,10 +375,8 @@ static struct sha512_hash_ctx *sha512_ctx_mgr_flush(struct mcryptd_alg_cstate *c
 		 * the sha512_ctx_mgr still need processing. Loop.
 		 */
 		if (ctx)
-			break;
+			return ctx;
 	}
-	spin_unlock_irqrestore(&cstate->work_lock, flags);
-	return ctx;
 }
 
 static int sha512_mb_init(struct ahash_request *areq)
@@ -459,11 +436,11 @@ static int sha_finish_walk(struct mcryptd_hash_request_ctx **ret_rctx,
 		sha_ctx = (struct sha512_hash_ctx *)
 						ahash_request_ctx(&rctx->areq);
 		kernel_fpu_begin();
-		sha_ctx = sha512_ctx_mgr_submit(cstate, sha_ctx,
+		sha_ctx = sha512_ctx_mgr_submit(cstate->mgr, sha_ctx,
 						rctx->walk.data, nbytes, flag);
 		if (!sha_ctx) {
 			if (flush)
-				sha_ctx = sha512_ctx_mgr_flush(cstate);
+				sha_ctx = sha512_ctx_mgr_flush(cstate->mgr);
 		}
 		kernel_fpu_end();
 		if (sha_ctx)
@@ -491,12 +468,11 @@ static int sha_complete_job(struct mcryptd_hash_request_ctx *rctx,
 	struct sha512_hash_ctx *sha_ctx;
 	struct mcryptd_hash_request_ctx *req_ctx;
 	int ret;
-	unsigned long flags;
 
 	/* remove from work list */
-	spin_lock_irqsave(&cstate->work_lock, flags);
+	spin_lock(&cstate->work_lock);
 	list_del(&rctx->waiter);
-	spin_unlock_irqrestore(&cstate->work_lock, flags);
+	spin_unlock(&cstate->work_lock);
 
 	if (irqs_disabled())
 		rctx->complete(&req->base, err);
@@ -507,25 +483,25 @@ static int sha_complete_job(struct mcryptd_hash_request_ctx *rctx,
 	}
 
 	/* check to see if there are other jobs that are done */
-	sha_ctx = sha512_ctx_mgr_get_comp_ctx(cstate);
+	sha_ctx = sha512_ctx_mgr_get_comp_ctx(cstate->mgr);
 	while (sha_ctx) {
 		req_ctx = cast_hash_to_mcryptd_ctx(sha_ctx);
 		ret = sha_finish_walk(&req_ctx, cstate, false);
 		if (req_ctx) {
-			spin_lock_irqsave(&cstate->work_lock, flags);
+			spin_lock(&cstate->work_lock);
 			list_del(&req_ctx->waiter);
-			spin_unlock_irqrestore(&cstate->work_lock, flags);
+			spin_unlock(&cstate->work_lock);
 
 			req = cast_mcryptd_ctx_to_req(req_ctx);
 			if (irqs_disabled())
-				req_ctx->complete(&req->base, ret);
+				rctx->complete(&req->base, ret);
 			else {
 				local_bh_disable();
-				req_ctx->complete(&req->base, ret);
+				rctx->complete(&req->base, ret);
 				local_bh_enable();
 			}
 		}
-		sha_ctx = sha512_ctx_mgr_get_comp_ctx(cstate);
+		sha_ctx = sha512_ctx_mgr_get_comp_ctx(cstate->mgr);
 	}
 
 	return 0;
@@ -536,7 +512,6 @@ static void sha512_mb_add_list(struct mcryptd_hash_request_ctx *rctx,
 {
 	unsigned long next_flush;
 	unsigned long delay = usecs_to_jiffies(FLUSH_INTERVAL);
-	unsigned long flags;
 
 	/* initialize tag */
 	rctx->tag.arrival = jiffies;    /* tag the arrival time */
@@ -544,9 +519,9 @@ static void sha512_mb_add_list(struct mcryptd_hash_request_ctx *rctx,
 	next_flush = rctx->tag.arrival + delay;
 	rctx->tag.expire = next_flush;
 
-	spin_lock_irqsave(&cstate->work_lock, flags);
+	spin_lock(&cstate->work_lock);
 	list_add_tail(&rctx->waiter, &cstate->work_list);
-	spin_unlock_irqrestore(&cstate->work_lock, flags);
+	spin_unlock(&cstate->work_lock);
 
 	mcryptd_arm_flusher(cstate, delay);
 }
@@ -587,7 +562,7 @@ static int sha512_mb_update(struct ahash_request *areq)
 	sha_ctx = (struct sha512_hash_ctx *) ahash_request_ctx(areq);
 	sha512_mb_add_list(rctx, cstate);
 	kernel_fpu_begin();
-	sha_ctx = sha512_ctx_mgr_submit(cstate, sha_ctx, rctx->walk.data,
+	sha_ctx = sha512_ctx_mgr_submit(cstate->mgr, sha_ctx, rctx->walk.data,
 							nbytes, HASH_UPDATE);
 	kernel_fpu_end();
 
@@ -650,7 +625,7 @@ static int sha512_mb_finup(struct ahash_request *areq)
 	sha512_mb_add_list(rctx, cstate);
 
 	kernel_fpu_begin();
-	sha_ctx = sha512_ctx_mgr_submit(cstate, sha_ctx, rctx->walk.data,
+	sha_ctx = sha512_ctx_mgr_submit(cstate->mgr, sha_ctx, rctx->walk.data,
 								nbytes, flag);
 	kernel_fpu_end();
 
@@ -699,7 +674,8 @@ static int sha512_mb_final(struct ahash_request *areq)
 	/* flag HASH_FINAL and 0 data size */
 	sha512_mb_add_list(rctx, cstate);
 	kernel_fpu_begin();
-	sha_ctx = sha512_ctx_mgr_submit(cstate, sha_ctx, &data, 0, HASH_LAST);
+	sha_ctx = sha512_ctx_mgr_submit(cstate->mgr, sha_ctx, &data, 0,
+								HASH_LAST);
 	kernel_fpu_end();
 
 	/* check if anything is returned */
@@ -961,7 +937,7 @@ static unsigned long sha512_mb_flusher(struct mcryptd_alg_cstate *cstate)
 			break;
 		kernel_fpu_begin();
 		sha_ctx = (struct sha512_hash_ctx *)
-					sha512_ctx_mgr_flush(cstate);
+					sha512_ctx_mgr_flush(cstate->mgr);
 		kernel_fpu_end();
 		if (!sha_ctx) {
 			pr_err("sha512_mb error: nothing got flushed for"

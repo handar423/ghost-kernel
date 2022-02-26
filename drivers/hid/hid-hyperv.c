@@ -313,7 +313,7 @@ static void mousevsc_on_receive(struct hv_device *device,
 
 		break;
 	default:
-		pr_err("unsupported hid msg type - type %d len %d\n",
+		pr_err("unsupported hid msg type - type %d len %d",
 		       hid_msg->header.type, hid_msg->header.size);
 		break;
 	}
@@ -611,5 +611,7 @@ static void __exit mousevsc_exit(void)
 }
 
 MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("Microsoft Hyper-V Synthetic HID Driver");
+
 module_init(mousevsc_init);
 module_exit(mousevsc_exit);

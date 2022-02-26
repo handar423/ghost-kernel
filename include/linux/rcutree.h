@@ -12,8 +12,8 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; if not, you can access it online at
- * http://www.gnu.org/licenses/gpl-2.0.html.
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  *
  * Copyright IBM Corporation, 2008
  *
@@ -30,25 +30,30 @@
 #ifndef __LINUX_RCUTREE_H
 #define __LINUX_RCUTREE_H
 
-void rcu_note_context_switch(bool preempt);
-int rcu_needs_cpu(u64 basem, u64 *nextevt);
-void rcu_cpu_stall_reset(void);
+extern void rcu_init(void);
+extern void rcu_note_context_switch(int cpu);
+extern int rcu_needs_cpu(int cpu, u64 *nextevt);
+extern void rcu_cpu_stall_reset(void);
 
 /*
  * Note a virtualization-based context switch.  This is simply a
  * wrapper around rcu_note_context_switch(), which allows TINY_RCU
- * to save a few bytes. The caller must have disabled interrupts.
+ * to save a few bytes.
  */
 static inline void rcu_virt_note_context_switch(int cpu)
 {
-	rcu_note_context_switch(false);
+	rcu_note_context_switch(cpu);
 }
 
-void synchronize_rcu_bh(void);
-void synchronize_sched_expedited(void);
-void synchronize_rcu_expedited(void);
+#ifdef CONFIG_PREEMPT_RT_FULL
+# define synchronize_rcu_bh	synchronize_rcu
+#else
+extern void synchronize_rcu_bh(void);
+#endif
+extern void synchronize_sched_expedited(void);
+extern void synchronize_rcu_expedited(void);
 
-void kfree_call_rcu(struct rcu_head *head, rcu_callback_t func);
+void kfree_call_rcu(struct rcu_head *head, void (*func)(struct rcu_head *rcu));
 
 /**
  * synchronize_rcu_bh_expedited - Brute-force RCU-bh grace period
@@ -71,35 +76,35 @@ static inline void synchronize_rcu_bh_expedited(void)
 	synchronize_sched_expedited();
 }
 
-void rcu_barrier(void);
-void rcu_barrier_bh(void);
-void rcu_barrier_sched(void);
+extern void rcu_barrier(void);
+#ifdef CONFIG_PREEMPT_RT_FULL
+# define rcu_barrier_bh		rcu_barrier
+#else
+extern void rcu_barrier_bh(void);
+#endif
+extern void rcu_barrier_sched(void);
 unsigned long get_state_synchronize_rcu(void);
 void cond_synchronize_rcu(unsigned long oldstate);
-unsigned long get_state_synchronize_sched(void);
-void cond_synchronize_sched(unsigned long oldstate);
 
-void rcu_idle_enter(void);
-void rcu_idle_exit(void);
-void rcu_irq_enter(void);
-void rcu_irq_exit(void);
-void rcu_irq_enter_irqson(void);
-void rcu_irq_exit_irqson(void);
-bool rcu_irq_enter_disabled(void);
+extern unsigned long rcutorture_testseq;
+extern unsigned long rcutorture_vernum;
+unsigned long rcu_batches_completed(void);
+unsigned long rcu_batches_completed_sched(void);
+void show_rcu_gp_kthreads(void);
 
-void exit_rcu(void);
+extern void rcu_force_quiescent_state(void);
+extern void rcu_sched_force_quiescent_state(void);
 
-void rcu_scheduler_starting(void);
+extern void rcu_scheduler_starting(void);
 extern int rcu_scheduler_active __read_mostly;
-void rcu_end_inkernel_boot(void);
-bool rcu_is_watching(void);
-void rcu_all_qs(void);
 
-/* RCUtree hotplug events */
-int rcutree_prepare_cpu(unsigned int cpu);
-int rcutree_online_cpu(unsigned int cpu);
-int rcutree_offline_cpu(unsigned int cpu);
-int rcutree_dead_cpu(unsigned int cpu);
-int rcutree_dying_cpu(unsigned int cpu);
+#ifndef CONFIG_PREEMPT_RT_FULL
+extern void rcu_bh_force_quiescent_state(void);
+unsigned long rcu_batches_completed_bh(void);
+#else
+# define rcu_bh_force_quiescent_state	rcu_force_quiescent_state
+# define rcu_batches_completed_bh	rcu_batches_completed
+#endif
+extern bool rcu_is_watching(void);
 
 #endif /* __LINUX_RCUTREE_H */

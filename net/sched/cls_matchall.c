@@ -21,10 +21,7 @@ struct cls_mall_head {
 	struct tcf_result res;
 	u32 handle;
 	u32 flags;
-	union {
-		struct work_struct work;
-		struct rcu_head	rcu;
-	};
+	struct rcu_work rwork;
 };
 
 static int mall_classify(struct sk_buff *skb, const struct tcf_proto *tp,
@@ -53,20 +50,12 @@ static void __mall_destroy(struct cls_mall_head *head)
 
 static void mall_destroy_work(struct work_struct *work)
 {
-	struct cls_mall_head *head = container_of(work, struct cls_mall_head,
-						  work);
+	struct cls_mall_head *head = container_of(to_rcu_work(work),
+						  struct cls_mall_head,
+						  rwork);
 	rtnl_lock();
 	__mall_destroy(head);
 	rtnl_unlock();
-}
-
-static void mall_destroy_rcu(struct rcu_head *rcu)
-{
-	struct cls_mall_head *head = container_of(rcu, struct cls_mall_head,
-						  rcu);
-
-	INIT_WORK(&head->work, mall_destroy_work);
-	tcf_queue_work(&head->work);
 }
 
 static void mall_destroy_hw_filter(struct tcf_proto *tp,
@@ -80,7 +69,8 @@ static void mall_destroy_hw_filter(struct tcf_proto *tp,
 	cls_mall.command = TC_CLSMATCHALL_DESTROY;
 	cls_mall.cookie = cookie;
 
-	tc_setup_cb_call(block, NULL, TC_SETUP_CLSMATCHALL, &cls_mall, false);
+	tc_setup_cb_call(block, TC_SETUP_CLSMATCHALL, &cls_mall, false);
+	tcf_block_offload_dec(block, &head->flags);
 }
 
 static int mall_replace_hw_filter(struct tcf_proto *tp,
@@ -97,13 +87,12 @@ static int mall_replace_hw_filter(struct tcf_proto *tp,
 	cls_mall.exts = &head->exts;
 	cls_mall.cookie = cookie;
 
-	err = tc_setup_cb_call(block, NULL, TC_SETUP_CLSMATCHALL,
-			       &cls_mall, skip_sw);
+	err = tc_setup_cb_call(block, TC_SETUP_CLSMATCHALL, &cls_mall, skip_sw);
 	if (err < 0) {
 		mall_destroy_hw_filter(tp, head, cookie);
 		return err;
 	} else if (err > 0) {
-		head->flags |= TCA_CLS_FLAGS_IN_HW;
+		tcf_block_offload_inc(block, &head->flags);
 	}
 
 	if (skip_sw && !(head->flags & TCA_CLS_FLAGS_IN_HW))
@@ -119,17 +108,24 @@ static void mall_destroy(struct tcf_proto *tp)
 	if (!head)
 		return;
 
+	tcf_unbind_filter(tp, &head->res);
+
 	if (!tc_skip_hw(head->flags))
 		mall_destroy_hw_filter(tp, head, (unsigned long) head);
 
 	if (tcf_exts_get_net(&head->exts))
-		call_rcu(&head->rcu, mall_destroy_rcu);
+		tcf_queue_work(&head->rwork, mall_destroy_work);
 	else
 		__mall_destroy(head);
 }
 
 static void *mall_get(struct tcf_proto *tp, u32 handle)
 {
+	struct cls_mall_head *head = rtnl_dereference(tp->root);
+
+	if (head && head->handle == handle)
+		return head;
+
 	return NULL;
 }
 
@@ -173,8 +169,8 @@ static int mall_change(struct net *net, struct sk_buff *in_skb,
 	if (head)
 		return -EEXIST;
 
-	err = nla_parse_nested(tb, TCA_MATCHALL_MAX, tca[TCA_OPTIONS],
-			       mall_policy, NULL);
+	err = nla_parse_nested(tb, TCA_MATCHALL_MAX,
+			       tca[TCA_OPTIONS], mall_policy);
 	if (err < 0)
 		return err;
 

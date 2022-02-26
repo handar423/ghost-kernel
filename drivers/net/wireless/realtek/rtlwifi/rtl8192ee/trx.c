@@ -581,9 +581,13 @@ void rtl92ee_pre_fill_tx_bd_desc(struct ieee80211_hw *hw,
 	u8 i = 0;
 	u16 real_desc_size = 0x28;
 	u16	append_early_mode_size = 0;
-	u8 segmentnum = 1 << (RTL8192EE_SEG_NUM + 1);
-	dma_addr_t desc_dma_addr;
-	bool dma64 = rtlpriv->cfg->mod_params->dma64;
+#if (RTL8192EE_SEG_NUM == 0)
+	u8 segmentnum = 2;
+#elif (RTL8192EE_SEG_NUM == 1)
+	u8 segmentnum = 4;
+#elif (RTL8192EE_SEG_NUM == 2)
+	u8 segmentnum = 8;
+#endif
 
 	tx_page_size = 2;
 	current_bd_desc = rtlpci->tx_ring[queue_index].cur_tx_wp;
@@ -605,10 +609,6 @@ void rtl92ee_pre_fill_tx_bd_desc(struct ieee80211_hw *hw,
 			psblen += 1;
 	}
 
-	/* tx desc addr */
-	desc_dma_addr = rtlpci->tx_ring[queue_index].dma +
-			(current_bd_desc * TX_DESC_SIZE);
-
 	/* Reset */
 	SET_TX_BUFF_DESC_LEN_0(tx_bd_desc, 0);
 	SET_TX_BUFF_DESC_PSB(tx_bd_desc, 0);
@@ -618,9 +618,17 @@ void rtl92ee_pre_fill_tx_bd_desc(struct ieee80211_hw *hw,
 		SET_TXBUFFER_DESC_LEN_WITH_OFFSET(tx_bd_desc, i, 0);
 		SET_TXBUFFER_DESC_AMSDU_WITH_OFFSET(tx_bd_desc, i, 0);
 		SET_TXBUFFER_DESC_ADD_LOW_WITH_OFFSET(tx_bd_desc, i, 0);
-		SET_TXBUFFER_DESC_ADD_HIGH_WITH_OFFSET(tx_bd_desc, i, 0, dma64);
+#if (DMA_IS_64BIT == 1)
+		SET_TXBUFFER_DESC_ADD_HIGT_WITH_OFFSET(tx_bd_desc, i, 0);
+#endif
 	}
+	SET_TX_BUFF_DESC_LEN_1(tx_bd_desc, 0);
+	SET_TX_BUFF_DESC_AMSDU_1(tx_bd_desc, 0);
 
+	SET_TX_BUFF_DESC_LEN_2(tx_bd_desc, 0);
+	SET_TX_BUFF_DESC_AMSDU_2(tx_bd_desc, 0);
+	SET_TX_BUFF_DESC_LEN_3(tx_bd_desc, 0);
+	SET_TX_BUFF_DESC_AMSDU_3(tx_bd_desc, 0);
 	/* Clear all status */
 	CLEAR_PCI_TX_DESC_CONTENT(desc, TX_DESC_SIZE);
 
@@ -635,16 +643,14 @@ void rtl92ee_pre_fill_tx_bd_desc(struct ieee80211_hw *hw,
 		SET_TX_BUFF_DESC_LEN_0(tx_bd_desc, desc_size);
 	}
 	SET_TX_BUFF_DESC_PSB(tx_bd_desc, psblen);
-	SET_TX_BUFF_DESC_ADDR_LOW_0(tx_bd_desc, desc_dma_addr);
-	SET_TX_BUFF_DESC_ADDR_HIGH_0(tx_bd_desc, ((u64)desc_dma_addr >> 32),
-				     dma64);
+	SET_TX_BUFF_DESC_ADDR_LOW_0(tx_bd_desc,
+				    rtlpci->tx_ring[queue_index].dma +
+				    (current_bd_desc * TX_DESC_SIZE));
 
 	SET_TXBUFFER_DESC_LEN_WITH_OFFSET(tx_bd_desc, 1, pkt_len);
 	/* don't using extendsion mode. */
 	SET_TXBUFFER_DESC_AMSDU_WITH_OFFSET(tx_bd_desc, 1, 0);
 	SET_TXBUFFER_DESC_ADD_LOW_WITH_OFFSET(tx_bd_desc, 1, addr);
-	SET_TXBUFFER_DESC_ADD_HIGH_WITH_OFFSET(tx_bd_desc, 1,
-					       ((u64)addr >> 32), dma64);
 
 	SET_TX_DESC_PKT_SIZE(desc, (u16)(pkt_len));
 	SET_TX_DESC_TX_BUFFER_SIZE(desc, (u16)(pkt_len));
@@ -912,7 +918,6 @@ void rtl92ee_set_desc(struct ieee80211_hw *hw, u8 *pdesc, bool istx,
 	static bool over_run;
 	u32 tmp = 0;
 	u8 q_idx = *val;
-	bool dma64 = rtlpriv->cfg->mod_params->dma64;
 
 	if (istx) {
 		switch (desc_name) {
@@ -977,12 +982,7 @@ void rtl92ee_set_desc(struct ieee80211_hw *hw, u8 *pdesc, bool istx,
 						       MAX_RECEIVE_BUFFER_SIZE +
 						       RX_DESC_SIZE);
 
-			SET_RX_BUFFER_PHYSICAL_LOW(pdesc, (*(dma_addr_t *)val) &
-						   DMA_BIT_MASK(32));
-			SET_RX_BUFFER_PHYSICAL_HIGH(pdesc,
-						    ((u64)(*(dma_addr_t *)val)
-						    >> 32),
-						    dma64);
+			SET_RX_BUFFER_PHYSICAL_LOW(pdesc, *(u32 *)val);
 			break;
 		case HW_DESC_RXERO:
 			SET_RX_DESC_EOR(pdesc, 1);
@@ -996,12 +996,9 @@ void rtl92ee_set_desc(struct ieee80211_hw *hw, u8 *pdesc, bool istx,
 	}
 }
 
-u64 rtl92ee_get_desc(struct ieee80211_hw *hw,
-		     u8 *pdesc, bool istx, u8 desc_name)
+u32 rtl92ee_get_desc(u8 *pdesc, bool istx, u8 desc_name)
 {
-	struct rtl_priv *rtlpriv = rtl_priv(hw);
-	u64 ret = 0;
-	bool dma64 = rtlpriv->cfg->mod_params->dma64;
+	u32 ret = 0;
 
 	if (istx) {
 		switch (desc_name) {
@@ -1010,8 +1007,6 @@ u64 rtl92ee_get_desc(struct ieee80211_hw *hw,
 			break;
 		case HW_DESC_TXBUFF_ADDR:
 			ret = GET_TXBUFFER_DESC_ADDR_LOW(pdesc, 1);
-			ret |= (u64)GET_TXBUFFER_DESC_ADDR_HIGH(pdesc, 1,
-								dma64) << 32;
 			break;
 		default:
 			WARN_ONCE(true,

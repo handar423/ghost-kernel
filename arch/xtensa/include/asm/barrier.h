@@ -13,8 +13,9 @@
 #define rmb() barrier()
 #define wmb() mb()
 
-#define __smp_mb__before_atomic()		barrier()
-#define __smp_mb__after_atomic()		barrier()
+#ifdef CONFIG_SMP
+#error smp_* not defined
+#endif
 
 #include <asm-generic/barrier.h>
 

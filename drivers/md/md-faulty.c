@@ -70,12 +70,12 @@
 #include <linux/seq_file.h>
 
 
-static void faulty_fail(struct bio *bio)
+static void faulty_fail(struct bio *bio, int error)
 {
 	struct bio *b = bio->bi_private;
 
-	b->bi_iter.bi_size = bio->bi_iter.bi_size;
-	b->bi_iter.bi_sector = bio->bi_iter.bi_sector;
+	b->bi_size = bio->bi_size;
+	b->bi_sector = bio->bi_sector;
 
 	bio_put(bio);
 
@@ -174,6 +174,24 @@ static bool faulty_make_request(struct mddev *mddev, struct bio *bio)
 {
 	struct faulty_conf *conf = mddev->private;
 	int failit = 0;
+	unsigned int max_sectors = blk_queue_get_max_sectors(mddev->queue,
+			bio->bi_rw);
+	const unsigned long do_discard = (bio->bi_rw
+					  & (REQ_DISCARD | REQ_SECURE));
+	const unsigned long do_same = (bio->bi_rw & REQ_WRITE_SAME);
+
+	if (!do_discard && !do_same && bio_sectors(bio) > max_sectors) {
+		struct bio_pair2 *bp = bio_split2(bio, max_sectors);
+		if (!bp) {
+			bio_io_error(bio);
+			return true;
+		}
+
+		generic_make_request(bp->bio1);
+		generic_make_request(bp->bio2);
+		bio_pair2_release(bp);
+		return true;
+	}
 
 	if (bio_data_dir(bio) == WRITE) {
 		/* write request */
@@ -181,47 +199,42 @@ static bool faulty_make_request(struct mddev *mddev, struct bio *bio)
 			/* special case - don't decrement, don't generic_make_request,
 			 * just fail immediately
 			 */
-			bio_io_error(bio);
+			bio_endio(bio, -EIO);
 			return true;
 		}
 
-		if (check_sector(conf, bio->bi_iter.bi_sector,
-				 bio_end_sector(bio), WRITE))
+		if (check_sector(conf, bio->bi_sector, bio_end_sector(bio), WRITE))
 			failit = 1;
 		if (check_mode(conf, WritePersistent)) {
-			add_sector(conf, bio->bi_iter.bi_sector,
-				   WritePersistent);
+			add_sector(conf, bio->bi_sector, WritePersistent);
 			failit = 1;
 		}
 		if (check_mode(conf, WriteTransient))
 			failit = 1;
 	} else {
 		/* read request */
-		if (check_sector(conf, bio->bi_iter.bi_sector,
-				 bio_end_sector(bio), READ))
+		if (check_sector(conf, bio->bi_sector, bio_end_sector(bio), READ))
 			failit = 1;
 		if (check_mode(conf, ReadTransient))
 			failit = 1;
 		if (check_mode(conf, ReadPersistent)) {
-			add_sector(conf, bio->bi_iter.bi_sector,
-				   ReadPersistent);
+			add_sector(conf, bio->bi_sector, ReadPersistent);
 			failit = 1;
 		}
 		if (check_mode(conf, ReadFixable)) {
-			add_sector(conf, bio->bi_iter.bi_sector,
-				   ReadFixable);
+			add_sector(conf, bio->bi_sector, ReadFixable);
 			failit = 1;
 		}
 	}
 	if (failit) {
-		struct bio *b = bio_clone_fast(bio, GFP_NOIO, mddev->bio_set);
+		struct bio *b = bio_clone_mddev(bio, GFP_NOIO, mddev);
 
-		bio_set_dev(b, conf->rdev->bdev);
+		b->bi_bdev = conf->rdev->bdev;
 		b->bi_private = bio;
 		b->bi_end_io = faulty_fail;
 		bio = b;
 	} else
-		bio_set_dev(bio, conf->rdev->bdev);
+		bio->bi_bdev = conf->rdev->bdev;
 
 	generic_make_request(bio);
 	return true;
@@ -305,6 +318,7 @@ static int faulty_run(struct mddev *mddev)
 	struct md_rdev *rdev;
 	int i;
 	struct faulty_conf *conf;
+	bool no_sg_merge = false;
 
 	if (md_check_no_bitmap(mddev))
 		return -EINVAL;
@@ -323,8 +337,17 @@ static int faulty_run(struct mddev *mddev)
 		conf->rdev = rdev;
 		disk_stack_limits(mddev->gendisk, rdev->bdev,
 				  rdev->data_offset << 9);
+		if (test_bit(QUEUE_FLAG_NO_SG_MERGE,
+		    &bdev_get_queue(rdev->bdev)->queue_flags))
+			no_sg_merge = true;
 	}
 
+	if (no_sg_merge)
+		queue_flag_set_unlocked(QUEUE_FLAG_NO_SG_MERGE,
+					mddev->queue);
+	else
+		queue_flag_clear_unlocked(QUEUE_FLAG_NO_SG_MERGE,
+					mddev->queue);
 	md_set_array_sectors(mddev, faulty_size(mddev, 0, 0));
 	mddev->private = conf;
 

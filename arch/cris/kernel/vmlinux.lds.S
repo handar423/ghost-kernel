@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 /* ld script to make the Linux/CRIS kernel
  * Authors: Bjorn Wesen (bjornw@axis.com)
  *
@@ -41,10 +40,8 @@ SECTIONS
 	_stext = .;
 	__stext = .;
 	.text : {
-		HEAD_TEXT
 		TEXT_TEXT
 		SCHED_TEXT
-		CPUIDLE_TEXT
 		LOCK_TEXT
 		*(.fixup)
 		*(.text.__*)
@@ -68,8 +65,6 @@ SECTIONS
 	}
 	__edata = . ;			/* End of data section. */
 	_edata = . ;
-
-	BUG_TABLE
 
 	INIT_TASK_DATA_SECTION(PAGE_SIZE)
 

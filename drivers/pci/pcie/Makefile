@@ -1,4 +1,3 @@
-# SPDX-License-Identifier: GPL-2.0
 #
 # Makefile for PCI-Express PORT Driver
 #
@@ -7,7 +6,6 @@
 obj-$(CONFIG_PCIEASPM)		+= aspm.o
 
 pcieportdrv-y			:= portdrv_core.o portdrv_pci.o portdrv_bus.o
-pcieportdrv-$(CONFIG_ACPI)	+= portdrv_acpi.o
 
 obj-$(CONFIG_PCIEPORTBUS)	+= pcieportdrv.o
 
@@ -17,4 +15,3 @@ obj-$(CONFIG_PCIEAER)		+= aer/
 obj-$(CONFIG_PCIE_PME) += pme.o
 
 obj-$(CONFIG_PCIE_DPC) += pcie-dpc.o
-obj-$(CONFIG_PCIE_PTM) += ptm.o

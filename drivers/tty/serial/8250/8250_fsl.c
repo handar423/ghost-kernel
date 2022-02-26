@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 #include <linux/serial_reg.h>
 #include <linux/serial_8250.h>
 
@@ -6,6 +5,10 @@
 
 /*
  * Freescale 16550 UART "driver", Copyright (C) 2011 Paul Gortmaker.
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
  *
  * This isn't a full driver; it just provides an alternate IRQ
  * handler to deal with an errata.  Everything else is just
@@ -25,7 +28,8 @@ int fsl8250_handle_irq(struct uart_port *port)
 	unsigned char lsr, orig_lsr;
 	unsigned long flags;
 	unsigned int iir;
-	struct uart_8250_port *up = up_to_u8250p(port);
+	struct uart_8250_port *up =
+		container_of(port, struct uart_8250_port, port);
 
 	spin_lock_irqsave(&up->port.lock, flags);
 
@@ -57,4 +61,3 @@ int fsl8250_handle_irq(struct uart_port *port)
 	spin_unlock_irqrestore(&up->port.lock, flags);
 	return 1;
 }
-EXPORT_SYMBOL_GPL(fsl8250_handle_irq);

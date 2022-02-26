@@ -258,7 +258,11 @@ struct link_qual {
 	int tx_failed;
 };
 
+#if 0 /* Different semantic on RHEL */
 DECLARE_EWMA(rssi, 10, 8)
+#else
+DECLARE_EWMA(rssi, 1024, 8)
+#endif
 
 /*
  * Antenna settings about the currently active link.

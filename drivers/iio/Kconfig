@@ -4,6 +4,7 @@
 
 menuconfig IIO
 	tristate "Industrial I/O support"
+	depends on GENERIC_HARDIRQS
 	select ANON_INODES
 	help
 	  The industrial I/O subsystem provides a unified framework for
@@ -35,7 +36,7 @@ config IIO_TRIGGER
 	help
 	  Provides IIO core support for triggers.  Currently these
 	  are used to initialize capture of samples to push into
-	  buffers.  The triggers are effectively a 'capture
+	  ring buffers.  The triggers are effectively a 'capture
 	  data now' interrupt.
 
 config IIO_CONSUMERS_PER_TRIGGER
@@ -71,27 +72,17 @@ config IIO_TRIGGERED_EVENT
 source "drivers/iio/accel/Kconfig"
 source "drivers/iio/adc/Kconfig"
 source "drivers/iio/amplifiers/Kconfig"
-source "drivers/iio/chemical/Kconfig"
 source "drivers/iio/common/Kconfig"
-source "drivers/iio/counter/Kconfig"
 source "drivers/iio/dac/Kconfig"
-source "drivers/iio/dummy/Kconfig"
 source "drivers/iio/frequency/Kconfig"
 source "drivers/iio/gyro/Kconfig"
-source "drivers/iio/health/Kconfig"
-source "drivers/iio/humidity/Kconfig"
 source "drivers/iio/imu/Kconfig"
 source "drivers/iio/light/Kconfig"
 source "drivers/iio/magnetometer/Kconfig"
-source "drivers/iio/multiplexer/Kconfig"
 source "drivers/iio/orientation/Kconfig"
 if IIO_TRIGGER
    source "drivers/iio/trigger/Kconfig"
 endif #IIO_TRIGGER
-source "drivers/iio/potentiometer/Kconfig"
-source "drivers/iio/potentiostat/Kconfig"
 source "drivers/iio/pressure/Kconfig"
-source "drivers/iio/proximity/Kconfig"
-source "drivers/iio/temperature/Kconfig"
 
 endif # IIO

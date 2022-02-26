@@ -15,12 +15,11 @@
 #ifndef __SOUND_HDA_CONTROLLER_H
 #define __SOUND_HDA_CONTROLLER_H
 
-#include <linux/timecounter.h>
 #include <linux/interrupt.h>
 #include <sound/core.h>
 #include <sound/pcm.h>
 #include <sound/initval.h>
-#include "hda_codec.h"
+#include <sound/hda_codec.h>
 #include <sound/hda_register.h>
 
 #define AZX_MAX_CODECS		HDA_MAX_CODECS
@@ -40,7 +39,7 @@
 /* 14 unused */
 #define AZX_DCAPS_CTX_WORKAROUND (1 << 15)	/* X-Fi workaround */
 #define AZX_DCAPS_POSFIX_LPIB	(1 << 16)	/* Use LPIB as default */
-/* 17 unused */
+#define AZX_DCAPS_AMD_WORKAROUND (1 << 17)	/* AMD-specific workaround */
 #define AZX_DCAPS_NO_64BIT	(1 << 18)	/* No 64bit address */
 #define AZX_DCAPS_SYNC_WRITE	(1 << 19)	/* sync each cmd write */
 #define AZX_DCAPS_OLD_SSYNC	(1 << 20)	/* Old SSYNC reg for ICH */
@@ -76,7 +75,6 @@ struct azx_dev {
 	 *  when link position is not greater than FIFO size
 	 */
 	unsigned int insufficient:1;
-	unsigned int wc_marked:1;
 };
 
 #define azx_stream(dev)		(&(dev)->core)
@@ -88,11 +86,6 @@ struct azx;
 struct hda_controller_ops {
 	/* Disable msi if supported, PCI only */
 	int (*disable_msi_reset_irq)(struct azx *);
-	int (*substream_alloc_pages)(struct azx *chip,
-				     struct snd_pcm_substream *substream,
-				     size_t size);
-	int (*substream_free_pages)(struct azx *chip,
-				    struct snd_pcm_substream *substream);
 	void (*pcm_mmap_prepare)(struct snd_pcm_substream *substream,
 				 struct vm_area_struct *area);
 	/* Check if current position is acceptable */
@@ -127,7 +120,7 @@ struct azx {
 	int capture_streams;
 	int capture_index_offset;
 	int num_streams;
-	const int *jackpoll_ms; /* per-card jack poll interval */
+	int jackpoll_interval; /* jack poll interval in jiffies */
 
 	/* Register interaction. */
 	const struct hda_controller_ops *ops;
@@ -152,14 +145,13 @@ struct azx {
 
 	/* flags */
 	int bdl_pos_adj;
-	int poll_count;
 	unsigned int running:1;
 	unsigned int fallback_to_single_cmd:1;
 	unsigned int single_cmd:1;
-	unsigned int polling_mode:1;
 	unsigned int msi:1;
 	unsigned int probing:1; /* codec probing phase */
 	unsigned int snoop:1;
+	unsigned int uc_buffer:1; /* non-cached pages for stream buffers */
 	unsigned int align_buffer_size:1;
 	unsigned int region_requested:1;
 	unsigned int disabled:1; /* disabled by vga_switcheroo */
@@ -175,11 +167,10 @@ struct azx {
 #define azx_bus(chip)	(&(chip)->bus.core)
 #define bus_to_azx(_bus)	container_of(_bus, struct azx, bus.core)
 
-#ifdef CONFIG_X86
-#define azx_snoop(chip)		((chip)->snoop)
-#else
-#define azx_snoop(chip)		true
-#endif
+static inline bool azx_snoop(struct azx *chip)
+{
+	return !IS_ENABLED(CONFIG_X86) || chip->snoop;
+}
 
 /*
  * macros for easy use

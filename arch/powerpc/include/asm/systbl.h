@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * List of powerpc syscalls. For the meaning of the _SPU suffix see
  * arch/powerpc/platforms/cell/spu_callbacks.c
@@ -78,10 +77,10 @@ SYSCALL_SPU(setreuid)
 SYSCALL_SPU(setregid)
 #define compat_sys_sigsuspend sys_sigsuspend
 SYS32ONLY(sigsuspend)
-SYSX(sys_ni_syscall,compat_sys_sigpending,sys_sigpending)
+COMPAT_SYS(sigpending)
 SYSCALL_SPU(sethostname)
 COMPAT_SYS_SPU(setrlimit)
-SYSX(sys_ni_syscall,compat_sys_old_getrlimit,sys_old_getrlimit)
+COMPAT_SYS(old_getrlimit)
 COMPAT_SYS_SPU(getrusage)
 COMPAT_SYS_SPU(gettimeofday)
 COMPAT_SYS_SPU(settimeofday)
@@ -365,9 +364,9 @@ SYSCALL_SPU(sched_getattr)
 SYSCALL_SPU(renameat2)
 SYSCALL_SPU(seccomp)
 SYSCALL_SPU(getrandom)
-SYSCALL_SPU(memfd_create)
-SYSCALL_SPU(bpf)
-COMPAT_SYS(execveat)
+SYSCALL_SPU(memfd_create) /* sys_memfd_create */
+SYSCALL(bpf)
+SYSCALL(ni_syscall) /* sys_execveat */
 PPC64ONLY(switch_endian)
 SYSCALL_SPU(userfaultfd)
 SYSCALL_SPU(membarrier)
@@ -385,7 +384,3 @@ SYSCALL(ni_syscall)
 SYSCALL(ni_syscall)
 SYSCALL(mlock2)
 SYSCALL(copy_file_range)
-COMPAT_SYS_SPU(preadv2)
-COMPAT_SYS_SPU(pwritev2)
-SYSCALL(kexec_file_load)
-SYSCALL(statx)

@@ -335,24 +335,16 @@ static ssize_t store_ctlr_enabled(struct device *dev,
 				  const char *buf, size_t count)
 {
 	struct fcoe_ctlr_device *ctlr = dev_to_ctlr(dev);
-	bool enabled;
 	int rc;
-
-	if (*buf == '1')
-		enabled = true;
-	else if (*buf == '0')
-		enabled = false;
-	else
-		return -EINVAL;
 
 	switch (ctlr->enabled) {
 	case FCOE_CTLR_ENABLED:
-		if (enabled)
+		if (*buf == '1')
 			return count;
 		ctlr->enabled = FCOE_CTLR_DISABLED;
 		break;
 	case FCOE_CTLR_DISABLED:
-		if (!enabled)
+		if (*buf == '0')
 			return count;
 		ctlr->enabled = FCOE_CTLR_ENABLED;
 		break;
@@ -392,113 +384,6 @@ static ssize_t show_ctlr_enabled_state(struct device *dev,
 static FCOE_DEVICE_ATTR(ctlr, enabled, S_IRUGO | S_IWUSR,
 			show_ctlr_enabled_state,
 			store_ctlr_enabled);
-
-static ssize_t store_ctlr_fip_resp(struct device *dev,
-			      struct device_attribute *attr,
-			      const char *buf, size_t count)
-{
-	struct fcoe_ctlr_device *ctlr = dev_to_ctlr(dev);
-	struct fcoe_ctlr *fip = fcoe_ctlr_device_priv(ctlr);
-
-	mutex_lock(&fip->ctlr_mutex);
-	if ((buf[1] == '\0') || ((buf[1] == '\n') && (buf[2] == '\0'))) {
-		if (buf[0] == '1') {
-			fip->fip_resp = 1;
-			mutex_unlock(&fip->ctlr_mutex);
-			return count;
-		}
-		if (buf[0] == '0') {
-			fip->fip_resp = 0;
-			mutex_unlock(&fip->ctlr_mutex);
-			return count;
-		}
-	}
-	mutex_unlock(&fip->ctlr_mutex);
-	return -EINVAL;
-}
-
-static ssize_t show_ctlr_fip_resp(struct device *dev,
-				  struct device_attribute *attr,
-				  char *buf)
-{
-	struct fcoe_ctlr_device *ctlr = dev_to_ctlr(dev);
-	struct fcoe_ctlr *fip = fcoe_ctlr_device_priv(ctlr);
-
-	return sprintf(buf, "%d\n", fip->fip_resp ? 1 : 0);
-}
-
-static FCOE_DEVICE_ATTR(ctlr, fip_vlan_responder, S_IRUGO | S_IWUSR,
-			show_ctlr_fip_resp,
-			store_ctlr_fip_resp);
-
-static ssize_t
-fcoe_ctlr_var_store(u32 *var, const char *buf, size_t count)
-{
-	int err;
-	unsigned long v;
-
-	err = kstrtoul(buf, 10, &v);
-	if (err || v > UINT_MAX)
-		return -EINVAL;
-
-	*var = v;
-
-	return count;
-}
-
-static ssize_t store_ctlr_r_a_tov(struct device *dev,
-				  struct device_attribute *attr,
-				  const char *buf, size_t count)
-{
-	struct fcoe_ctlr_device *ctlr_dev = dev_to_ctlr(dev);
-	struct fcoe_ctlr *ctlr = fcoe_ctlr_device_priv(ctlr_dev);
-
-	if (ctlr_dev->enabled == FCOE_CTLR_ENABLED)
-		return -EBUSY;
-	if (ctlr_dev->enabled == FCOE_CTLR_DISABLED)
-		return fcoe_ctlr_var_store(&ctlr->lp->r_a_tov, buf, count);
-	return -ENOTSUPP;
-}
-
-static ssize_t show_ctlr_r_a_tov(struct device *dev,
-				 struct device_attribute *attr,
-				 char *buf)
-{
-	struct fcoe_ctlr_device *ctlr_dev = dev_to_ctlr(dev);
-	struct fcoe_ctlr *ctlr = fcoe_ctlr_device_priv(ctlr_dev);
-
-	return sprintf(buf, "%d\n", ctlr->lp->r_a_tov);
-}
-
-static FCOE_DEVICE_ATTR(ctlr, r_a_tov, S_IRUGO | S_IWUSR,
-			show_ctlr_r_a_tov, store_ctlr_r_a_tov);
-
-static ssize_t store_ctlr_e_d_tov(struct device *dev,
-				  struct device_attribute *attr,
-				  const char *buf, size_t count)
-{
-	struct fcoe_ctlr_device *ctlr_dev = dev_to_ctlr(dev);
-	struct fcoe_ctlr *ctlr = fcoe_ctlr_device_priv(ctlr_dev);
-
-	if (ctlr_dev->enabled == FCOE_CTLR_ENABLED)
-		return -EBUSY;
-	if (ctlr_dev->enabled == FCOE_CTLR_DISABLED)
-		return fcoe_ctlr_var_store(&ctlr->lp->e_d_tov, buf, count);
-	return -ENOTSUPP;
-}
-
-static ssize_t show_ctlr_e_d_tov(struct device *dev,
-				 struct device_attribute *attr,
-				 char *buf)
-{
-	struct fcoe_ctlr_device *ctlr_dev = dev_to_ctlr(dev);
-	struct fcoe_ctlr *ctlr = fcoe_ctlr_device_priv(ctlr_dev);
-
-	return sprintf(buf, "%d\n", ctlr->lp->e_d_tov);
-}
-
-static FCOE_DEVICE_ATTR(ctlr, e_d_tov, S_IRUGO | S_IWUSR,
-			show_ctlr_e_d_tov, store_ctlr_e_d_tov);
 
 static ssize_t
 store_private_fcoe_ctlr_fcf_dev_loss_tmo(struct device *dev,
@@ -582,10 +467,7 @@ static struct attribute_group fcoe_ctlr_lesb_attr_group = {
 };
 
 static struct attribute *fcoe_ctlr_attrs[] = {
-	&device_attr_fcoe_ctlr_fip_vlan_responder.attr,
 	&device_attr_fcoe_ctlr_fcf_dev_loss_tmo.attr,
-	&device_attr_fcoe_ctlr_r_a_tov.attr,
-	&device_attr_fcoe_ctlr_e_d_tov.attr,
 	&device_attr_fcoe_ctlr_enabled.attr,
 	&device_attr_fcoe_ctlr_mode.attr,
 	NULL,
@@ -625,7 +507,7 @@ static const struct attribute_group *fcoe_fcf_attr_groups[] = {
 	NULL,
 };
 
-static struct bus_type fcoe_bus_type;
+struct bus_type fcoe_bus_type;
 
 static int fcoe_bus_match(struct device *dev,
 			  struct device_driver *drv)
@@ -659,13 +541,13 @@ static void fcoe_fcf_device_release(struct device *dev)
 	kfree(fcf);
 }
 
-static const struct device_type fcoe_ctlr_device_type = {
+struct device_type fcoe_ctlr_device_type = {
 	.name = "fcoe_ctlr",
 	.groups = fcoe_ctlr_attr_groups,
 	.release = fcoe_ctlr_device_release,
 };
 
-static const struct device_type fcoe_fcf_device_type = {
+struct device_type fcoe_fcf_device_type = {
 	.name = "fcoe_fcf",
 	.groups = fcoe_fcf_attr_groups,
 	.release = fcoe_fcf_device_release,
@@ -681,7 +563,7 @@ static struct attribute *fcoe_bus_attrs[] = {
 };
 ATTRIBUTE_GROUPS(fcoe_bus);
 
-static struct bus_type fcoe_bus_type = {
+struct bus_type fcoe_bus_type = {
 	.name = "fcoe",
 	.match = &fcoe_bus_match,
 	.bus_groups = fcoe_bus_groups,
@@ -691,7 +573,7 @@ static struct bus_type fcoe_bus_type = {
  * fcoe_ctlr_device_flush_work() - Flush a FIP ctlr's workqueue
  * @ctlr: Pointer to the FIP ctlr whose workqueue is to be flushed
  */
-static void fcoe_ctlr_device_flush_work(struct fcoe_ctlr_device *ctlr)
+void fcoe_ctlr_device_flush_work(struct fcoe_ctlr_device *ctlr)
 {
 	if (!fcoe_ctlr_work_q(ctlr)) {
 		printk(KERN_ERR
@@ -712,8 +594,8 @@ static void fcoe_ctlr_device_flush_work(struct fcoe_ctlr_device *ctlr)
  * Return value:
  *	1 on success / 0 already queued / < 0 for error
  */
-static int fcoe_ctlr_device_queue_work(struct fcoe_ctlr_device *ctlr,
-				       struct work_struct *work)
+int fcoe_ctlr_device_queue_work(struct fcoe_ctlr_device *ctlr,
+			       struct work_struct *work)
 {
 	if (unlikely(!fcoe_ctlr_work_q(ctlr))) {
 		printk(KERN_ERR
@@ -731,7 +613,7 @@ static int fcoe_ctlr_device_queue_work(struct fcoe_ctlr_device *ctlr,
  * fcoe_ctlr_device_flush_devloss() - Flush a FIP ctlr's devloss workqueue
  * @ctlr: Pointer to FIP ctlr whose workqueue is to be flushed
  */
-static void fcoe_ctlr_device_flush_devloss(struct fcoe_ctlr_device *ctlr)
+void fcoe_ctlr_device_flush_devloss(struct fcoe_ctlr_device *ctlr)
 {
 	if (!fcoe_ctlr_devloss_work_q(ctlr)) {
 		printk(KERN_ERR
@@ -753,9 +635,9 @@ static void fcoe_ctlr_device_flush_devloss(struct fcoe_ctlr_device *ctlr)
  * Return value:
  *	1 on success / 0 already queued / < 0 for error
  */
-static int fcoe_ctlr_device_queue_devloss_work(struct fcoe_ctlr_device *ctlr,
-					       struct delayed_work *work,
-					       unsigned long delay)
+int fcoe_ctlr_device_queue_devloss_work(struct fcoe_ctlr_device *ctlr,
+				       struct delayed_work *work,
+				       unsigned long delay)
 {
 	if (unlikely(!fcoe_ctlr_devloss_work_q(ctlr))) {
 		printk(KERN_ERR

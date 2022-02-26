@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 extern struct platform_device pxa_device_pmu;
 extern struct platform_device pxa_device_mci;
 extern struct platform_device pxa3xx_device_mci2;
@@ -28,9 +27,6 @@ extern struct platform_device pxa25x_device_assp;
 extern struct platform_device pxa27x_device_ssp1;
 extern struct platform_device pxa27x_device_ssp2;
 extern struct platform_device pxa27x_device_ssp3;
-extern struct platform_device pxa3xx_device_ssp1;
-extern struct platform_device pxa3xx_device_ssp2;
-extern struct platform_device pxa3xx_device_ssp3;
 extern struct platform_device pxa3xx_device_ssp4;
 
 extern struct platform_device pxa25x_device_pwm0;
@@ -55,4 +51,3 @@ extern struct platform_device pxa3xx_device_gpio;
 extern struct platform_device pxa93x_device_gpio;
 
 void __init pxa_register_device(struct platform_device *dev, void *data);
-void __init pxa2xx_set_dmac_info(int nb_channels, int nb_requestors);

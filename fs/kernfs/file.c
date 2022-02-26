@@ -13,7 +13,7 @@
 #include <linux/slab.h>
 #include <linux/poll.h>
 #include <linux/pagemap.h>
-#include <linux/sched/mm.h>
+#include <linux/sched.h>
 #include <linux/fsnotify.h>
 
 #include "kernfs-internal.h"
@@ -106,7 +106,7 @@ static void *kernfs_seq_start(struct seq_file *sf, loff_t *ppos)
 	const struct kernfs_ops *ops;
 
 	/*
-	 * @of->mutex nests outside active ref and is primarily to ensure that
+	 * @of->mutex nests outside active ref and is just to ensure that
 	 * the ops aren't called concurrently for the same open file.
 	 */
 	mutex_lock(&of->mutex);
@@ -189,16 +189,12 @@ static ssize_t kernfs_file_direct_read(struct kernfs_open_file *of,
 	const struct kernfs_ops *ops;
 	char *buf;
 
-	buf = of->prealloc_buf;
-	if (buf)
-		mutex_lock(&of->prealloc_mutex);
-	else
-		buf = kmalloc(len, GFP_KERNEL);
+	buf = kmalloc(len, GFP_KERNEL);
 	if (!buf)
 		return -ENOMEM;
 
 	/*
-	 * @of->mutex nests outside active ref and is used both to ensure that
+	 * @of->mutex nests outside active ref and is just to ensure that
 	 * the ops aren't called concurrently for the same open file.
 	 */
 	mutex_lock(&of->mutex);
@@ -208,7 +204,6 @@ static ssize_t kernfs_file_direct_read(struct kernfs_open_file *of,
 		goto out_free;
 	}
 
-	of->event = atomic_read(&of->kn->attr.open->event);
 	ops = kernfs_ops(of->kn);
 	if (ops->read)
 		len = ops->read(of, buf, len, *ppos);
@@ -229,10 +224,7 @@ static ssize_t kernfs_file_direct_read(struct kernfs_open_file *of,
 	*ppos += len;
 
  out_free:
-	if (buf == of->prealloc_buf)
-		mutex_unlock(&of->prealloc_mutex);
-	else
-		kfree(buf);
+	kfree(buf);
 	return len;
 }
 
@@ -286,11 +278,7 @@ static ssize_t kernfs_fop_write(struct file *file, const char __user *user_buf,
 		len = min_t(size_t, count, PAGE_SIZE);
 	}
 
-	buf = of->prealloc_buf;
-	if (buf)
-		mutex_lock(&of->prealloc_mutex);
-	else
-		buf = kmalloc(len + 1, GFP_KERNEL);
+	buf = kmalloc(len + 1, GFP_KERNEL);
 	if (!buf)
 		return -ENOMEM;
 
@@ -301,7 +289,7 @@ static ssize_t kernfs_fop_write(struct file *file, const char __user *user_buf,
 	buf[len] = '\0';	/* guarantee string termination */
 
 	/*
-	 * @of->mutex nests outside active ref and is used both to ensure that
+	 * @of->mutex nests outside active ref and is just to ensure that
 	 * the ops aren't called concurrently for the same open file.
 	 */
 	mutex_lock(&of->mutex);
@@ -322,12 +310,8 @@ static ssize_t kernfs_fop_write(struct file *file, const char __user *user_buf,
 
 	if (len > 0)
 		*ppos += len;
-
 out_free:
-	if (buf == of->prealloc_buf)
-		mutex_unlock(&of->prealloc_mutex);
-	else
-		kfree(buf);
+	kfree(buf);
 	return len;
 }
 
@@ -348,9 +332,9 @@ static void kernfs_vma_open(struct vm_area_struct *vma)
 	kernfs_put_active(of->kn);
 }
 
-static int kernfs_vma_fault(struct vm_fault *vmf)
+static int kernfs_vma_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 {
-	struct file *file = vmf->vma->vm_file;
+	struct file *file = vma->vm_file;
 	struct kernfs_open_file *of = kernfs_of(file);
 	int ret;
 
@@ -362,15 +346,16 @@ static int kernfs_vma_fault(struct vm_fault *vmf)
 
 	ret = VM_FAULT_SIGBUS;
 	if (of->vm_ops->fault)
-		ret = of->vm_ops->fault(vmf);
+		ret = of->vm_ops->fault(vma, vmf);
 
 	kernfs_put_active(of->kn);
 	return ret;
 }
 
-static int kernfs_vma_page_mkwrite(struct vm_fault *vmf)
+static int kernfs_vma_page_mkwrite(struct vm_area_struct *vma,
+				   struct vm_fault *vmf)
 {
-	struct file *file = vmf->vma->vm_file;
+	struct file *file = vma->vm_file;
 	struct kernfs_open_file *of = kernfs_of(file);
 	int ret;
 
@@ -382,7 +367,7 @@ static int kernfs_vma_page_mkwrite(struct vm_fault *vmf)
 
 	ret = 0;
 	if (of->vm_ops->page_mkwrite)
-		ret = of->vm_ops->page_mkwrite(vmf);
+		ret = of->vm_ops->page_mkwrite(vma, vmf);
 	else
 		file_update_time(file);
 
@@ -454,6 +439,27 @@ static struct mempolicy *kernfs_vma_get_policy(struct vm_area_struct *vma,
 	return pol;
 }
 
+static int kernfs_vma_migrate(struct vm_area_struct *vma,
+			      const nodemask_t *from, const nodemask_t *to,
+			      unsigned long flags)
+{
+	struct file *file = vma->vm_file;
+	struct kernfs_open_file *of = kernfs_of(file);
+	int ret;
+
+	if (!of->vm_ops)
+		return 0;
+
+	if (!kernfs_get_active(of->kn))
+		return 0;
+
+	ret = 0;
+	if (of->vm_ops->migrate)
+		ret = of->vm_ops->migrate(vma, from, to, flags);
+
+	kernfs_put_active(of->kn);
+	return ret;
+}
 #endif
 
 static const struct vm_operations_struct kernfs_vm_ops = {
@@ -464,6 +470,7 @@ static const struct vm_operations_struct kernfs_vm_ops = {
 #ifdef CONFIG_NUMA
 	.set_policy	= kernfs_vma_set_policy,
 	.get_policy	= kernfs_vma_get_policy,
+	.migrate	= kernfs_vma_migrate,
 #endif
 };
 
@@ -515,7 +522,7 @@ static int kernfs_fop_mmap(struct file *file, struct vm_area_struct *vma)
 		goto out_put;
 
 	rc = 0;
-	of->mmapped = true;
+	of->mmapped = 1;
 	of->vm_ops = vma->vm_ops;
 	vma->vm_ops = &kernfs_vm_ops;
 out_put:
@@ -678,23 +685,6 @@ static int kernfs_fop_open(struct inode *inode, struct file *file)
 	 */
 	of->atomic_write_len = ops->atomic_write_len;
 
-	error = -EINVAL;
-	/*
-	 * ->seq_show is incompatible with ->prealloc,
-	 * as seq_read does its own allocation.
-	 * ->read must be used instead.
-	 */
-	if (ops->prealloc && ops->seq_show)
-		goto err_free;
-	if (ops->prealloc) {
-		int len = of->atomic_write_len ?: PAGE_SIZE;
-		of->prealloc_buf = kmalloc(len + 1, GFP_KERNEL);
-		error = -ENOMEM;
-		if (!of->prealloc_buf)
-			goto err_free;
-		mutex_init(&of->prealloc_mutex);
-	}
-
 	/*
 	 * Always instantiate seq_file even if read access doesn't use
 	 * seq_file or is not requested.  This unifies private data access
@@ -707,8 +697,7 @@ static int kernfs_fop_open(struct inode *inode, struct file *file)
 	if (error)
 		goto err_free;
 
-	of->seq_file = file->private_data;
-	of->seq_file->private = of;
+	((struct seq_file *)file->private_data)->private = of;
 
 	/* seq_file clears PWRITE unconditionally, restore it if WRITE */
 	if (file->f_mode & FMODE_WRITE)
@@ -717,53 +706,19 @@ static int kernfs_fop_open(struct inode *inode, struct file *file)
 	/* make sure we have open node struct */
 	error = kernfs_get_open_node(kn, of);
 	if (error)
-		goto err_seq_release;
-
-	if (ops->open) {
-		/* nobody has access to @of yet, skip @of->mutex */
-		error = ops->open(of);
-		if (error)
-			goto err_put_node;
-	}
+		goto err_close;
 
 	/* open succeeded, put active references */
 	kernfs_put_active(kn);
 	return 0;
 
-err_put_node:
-	kernfs_put_open_node(kn, of);
-err_seq_release:
+err_close:
 	seq_release(inode, file);
 err_free:
-	kfree(of->prealloc_buf);
 	kfree(of);
 err_out:
 	kernfs_put_active(kn);
 	return error;
-}
-
-/* used from release/drain to ensure that ->release() is called exactly once */
-static void kernfs_release_file(struct kernfs_node *kn,
-				struct kernfs_open_file *of)
-{
-	/*
-	 * @of is guaranteed to have no other file operations in flight and
-	 * we just want to synchronize release and drain paths.
-	 * @kernfs_open_file_mutex is enough.  @of->mutex can't be used
-	 * here because drain path may be called from places which can
-	 * cause circular dependency.
-	 */
-	lockdep_assert_held(&kernfs_open_file_mutex);
-
-	if (!of->released) {
-		/*
-		 * A file is never detached without being released and we
-		 * need to be able to release files which are deactivated
-		 * and being drained.  Don't use kernfs_ops().
-		 */
-		kn->attr.ops->release(of);
-		of->released = true;
-	}
 }
 
 static int kernfs_fop_release(struct inode *inode, struct file *filp)
@@ -771,26 +726,19 @@ static int kernfs_fop_release(struct inode *inode, struct file *filp)
 	struct kernfs_node *kn = inode->i_private;
 	struct kernfs_open_file *of = kernfs_of(filp);
 
-	if (kn->flags & KERNFS_HAS_RELEASE) {
-		mutex_lock(&kernfs_open_file_mutex);
-		kernfs_release_file(kn, of);
-		mutex_unlock(&kernfs_open_file_mutex);
-	}
-
 	kernfs_put_open_node(kn, of);
 	seq_release(inode, filp);
-	kfree(of->prealloc_buf);
 	kfree(of);
 
 	return 0;
 }
 
-void kernfs_drain_open_files(struct kernfs_node *kn)
+void kernfs_unmap_bin_file(struct kernfs_node *kn)
 {
 	struct kernfs_open_node *on;
 	struct kernfs_open_file *of;
 
-	if (!(kn->flags & (KERNFS_HAS_MMAP | KERNFS_HAS_RELEASE)))
+	if (!(kn->flags & KERNFS_HAS_MMAP))
 		return;
 
 	spin_lock_irq(&kernfs_open_node_lock);
@@ -802,17 +750,10 @@ void kernfs_drain_open_files(struct kernfs_node *kn)
 		return;
 
 	mutex_lock(&kernfs_open_file_mutex);
-
 	list_for_each_entry(of, &on->files, list) {
 		struct inode *inode = file_inode(of->file);
-
-		if (kn->flags & KERNFS_HAS_MMAP)
-			unmap_mapping_range(inode->i_mapping, 0, 0, 1);
-
-		if (kn->flags & KERNFS_HAS_RELEASE)
-			kernfs_release_file(kn, of);
+		unmap_mapping_range(inode->i_mapping, 0, 0, 1);
 	}
-
 	mutex_unlock(&kernfs_open_file_mutex);
 
 	kernfs_put_open_node(kn, NULL);
@@ -838,6 +779,7 @@ static unsigned int kernfs_fop_poll(struct file *filp, poll_table *wait)
 	struct kernfs_node *kn = kernfs_dentry_node(filp->f_path.dentry);
 	struct kernfs_open_node *on = kn->attr.open;
 
+	/* need parent for the kobj, grab both */
 	if (!kernfs_get_active(kn))
 		goto trigger;
 
@@ -852,29 +794,6 @@ static unsigned int kernfs_fop_poll(struct file *filp, poll_table *wait)
 
  trigger:
 	return DEFAULT_POLLMASK|POLLERR|POLLPRI;
-}
-
-static long kernfs_fop_ioctl(struct file *file, unsigned int cmd,
-                            unsigned long arg)
-{
-	struct kernfs_open_file *of = kernfs_of(file);
-	const struct kernfs_ops *ops;
-	long ret;
-
-	/*
-	 * Not locking of->mutex: you can have concurrent ioctl calls on the
-	 * same file.
-	 */
-	if (!kernfs_get_active(of->kn))
-		return -ENODEV;
-	ops = kernfs_ops(of->kn);
-	if (ops->ioctl)
-		ret = ops->ioctl(of, cmd, arg);
-	else
-		ret = -ENOIOCTLCMD;
-	kernfs_put_active(of->kn);
-
-	return ret;
 }
 
 static void kernfs_notify_workfn(struct work_struct *work)
@@ -918,7 +837,7 @@ repeat:
 		 * have the matching @file available.  Look up the inodes
 		 * and generate the events manually.
 		 */
-		inode = ilookup(info->sb, kn->id.ino);
+		inode = ilookup(info->sb, kn->ino);
 		if (!inode)
 			continue;
 
@@ -926,7 +845,7 @@ repeat:
 		if (parent) {
 			struct inode *p_inode;
 
-			p_inode = ilookup(info->sb, parent->id.ino);
+			p_inode = ilookup(info->sb, parent->ino);
 			if (p_inode) {
 				fsnotify(p_inode, FS_MODIFY | FS_EVENT_ON_CHILD,
 					 inode, FSNOTIFY_EVENT_INODE, kn->name, 0);
@@ -980,16 +899,7 @@ const struct file_operations kernfs_file_fops = {
 	.open		= kernfs_fop_open,
 	.release	= kernfs_fop_release,
 	.poll		= kernfs_fop_poll,
-	.unlocked_ioctl	= kernfs_fop_ioctl,
-	.fsync		= noop_fsync,
 };
-
-struct kernfs_node *kernfs_node_from_file(struct file *file)
-{
-	if (file->f_op != &kernfs_file_fops)
-		return NULL;
-	return file->f_inode->i_private;
-}
 
 /**
  * __kernfs_create_file - kernfs internal function to create a file
@@ -1000,6 +910,7 @@ struct kernfs_node *kernfs_node_from_file(struct file *file)
  * @ops: kernfs operations for the file
  * @priv: private data for the file
  * @ns: optional namespace tag of the file
+ * @static_name: don't copy file name
  * @key: lockdep key for the file's active_ref, %NULL to disable lockdep
  *
  * Returns the created node on success, ERR_PTR() value on error.
@@ -1009,6 +920,7 @@ struct kernfs_node *__kernfs_create_file(struct kernfs_node *parent,
 					 umode_t mode, loff_t size,
 					 const struct kernfs_ops *ops,
 					 void *priv, const void *ns,
+					 bool name_is_static,
 					 struct lock_class_key *key)
 {
 	struct kernfs_node *kn;
@@ -1016,6 +928,8 @@ struct kernfs_node *__kernfs_create_file(struct kernfs_node *parent,
 	int rc;
 
 	flags = KERNFS_FILE;
+	if (name_is_static)
+		flags |= KERNFS_STATIC_NAME;
 
 	kn = kernfs_new_node(parent, name, (mode & S_IALLUGO) | S_IFREG, flags);
 	if (!kn)
@@ -1028,7 +942,7 @@ struct kernfs_node *__kernfs_create_file(struct kernfs_node *parent,
 
 #ifdef CONFIG_DEBUG_LOCK_ALLOC
 	if (key) {
-		lockdep_init_map(&kn->dep_map, "kn->count", key, 0);
+		lockdep_init_map(&kn->dep_map, "s_active", key, 0);
 		kn->flags |= KERNFS_LOCKDEP;
 	}
 #endif
@@ -1042,8 +956,6 @@ struct kernfs_node *__kernfs_create_file(struct kernfs_node *parent,
 		kn->flags |= KERNFS_HAS_SEQ_SHOW;
 	if (ops->mmap)
 		kn->flags |= KERNFS_HAS_MMAP;
-	if (ops->release)
-		kn->flags |= KERNFS_HAS_RELEASE;
 
 	rc = kernfs_add_one(kn);
 	if (rc) {

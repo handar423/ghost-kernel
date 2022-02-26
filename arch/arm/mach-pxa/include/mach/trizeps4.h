@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 /************************************************************************
  * Include file for TRIZEPS4 SoM and ConXS eval-board
  * Copyright (c) Jürgen Schindele
@@ -10,8 +9,6 @@
  */
 #ifndef _TRIPEPS4_H_
 #define _TRIPEPS4_H_
-
-#include "irqs.h" /* PXA_GPIO_TO_IRQ */
 
 /* physical memory regions */
 #define TRIZEPS4_FLASH_PHYS	(PXA_CS0_PHYS)  /* Flash region */

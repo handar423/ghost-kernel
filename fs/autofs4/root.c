@@ -39,7 +39,7 @@ const struct file_operations autofs4_root_operations = {
 	.open		= dcache_dir_open,
 	.release	= dcache_dir_close,
 	.read		= generic_read_dir,
-	.iterate_shared	= dcache_readdir,
+	.readdir	= dcache_readdir,
 	.llseek		= dcache_dir_lseek,
 	.unlocked_ioctl	= autofs4_root_ioctl,
 #ifdef CONFIG_COMPAT
@@ -51,7 +51,7 @@ const struct file_operations autofs4_dir_operations = {
 	.open		= autofs4_dir_open,
 	.release	= dcache_dir_close,
 	.read		= generic_read_dir,
-	.iterate_shared	= dcache_readdir,
+	.readdir	= dcache_readdir,
 	.llseek		= dcache_dir_lseek,
 };
 
@@ -281,8 +281,11 @@ static int autofs4_mount_wait(const struct path *path, bool rcu_walk)
 		pr_debug("waiting for mount name=%pd\n", path->dentry);
 		status = autofs4_wait(sbi, path, NFY_MOUNT);
 		pr_debug("mount wait done status=%d\n", status);
+		ino->last_used = jiffies;
+		return status;
 	}
-	ino->last_used = jiffies;
+	if (!(sbi->flags & AUTOFS_SBI_STRICTEXPIRE))
+		ino->last_used = jiffies;
 	return status;
 }
 
@@ -516,7 +519,8 @@ static struct dentry *autofs4_lookup(struct inode *dir,
 	sbi = autofs4_sbi(dir->i_sb);
 
 	pr_debug("pid = %u, pgrp = %u, catatonic = %d, oz_mode = %d\n",
-		 current->pid, task_pgrp_nr(current), sbi->catatonic,
+		 current->pid, task_pgrp_nr(current),
+		 sbi->flags & AUTOFS_SBI_CATATONIC,
 		 autofs4_oz_mode(sbi));
 
 	active = autofs4_lookup_active(dentry);
@@ -565,6 +569,13 @@ static int autofs4_dir_symlink(struct inode *dir,
 	if (!autofs4_oz_mode(sbi))
 		return -EACCES;
 
+	/* autofs4_oz_mode() needs to allow path walks when the
+	 * autofs mount is catatonic but the state of an autofs
+	 * file system needs to be preserved over restarts.
+	 */
+	if (sbi->flags & AUTOFS_SBI_CATATONIC)
+		return -EACCES;
+
 	BUG_ON(!ino);
 
 	autofs4_clean_ino(ino);
@@ -592,7 +603,7 @@ static int autofs4_dir_symlink(struct inode *dir,
 	if (p_ino && !IS_ROOT(dentry))
 		atomic_inc(&p_ino->count);
 
-	dir->i_mtime = current_time(dir);
+	dir->i_mtime = CURRENT_TIME;
 
 	return 0;
 }
@@ -618,9 +629,15 @@ static int autofs4_dir_unlink(struct inode *dir, struct dentry *dentry)
 	struct autofs_info *ino = autofs4_dentry_ino(dentry);
 	struct autofs_info *p_ino;
 
-	/* This allows root to remove symlinks */
-	if (!autofs4_oz_mode(sbi) && !capable(CAP_SYS_ADMIN))
-		return -EPERM;
+	if (!autofs4_oz_mode(sbi))
+		return -EACCES;
+
+	/* autofs4_oz_mode() needs to allow path walks when the
+	 * autofs mount is catatonic but the state of an autofs
+	 * file system needs to be preserved over restarts.
+	 */
+	if (sbi->flags & AUTOFS_SBI_CATATONIC)
+		return -EACCES;
 
 	if (atomic_dec_and_test(&ino->count)) {
 		p_ino = autofs4_dentry_ino(dentry->d_parent);
@@ -632,7 +649,7 @@ static int autofs4_dir_unlink(struct inode *dir, struct dentry *dentry)
 	d_inode(dentry)->i_size = 0;
 	clear_nlink(d_inode(dentry));
 
-	dir->i_mtime = current_time(dir);
+	dir->i_mtime = CURRENT_TIME;
 
 	spin_lock(&sbi->lookup_lock);
 	__autofs4_add_expiring(dentry);
@@ -685,7 +702,7 @@ static void autofs_clear_leaf_automount_flags(struct dentry *dentry)
 	/* only consider parents below dentrys in the root */
 	if (IS_ROOT(parent->d_parent))
 		return;
-	d_child = &dentry->d_child;
+	d_child = &dentry->d_u.d_child;
 	/* Set parent managed if it's becoming empty */
 	if (d_child->next == &parent->d_subdirs &&
 	    d_child->prev == &parent->d_subdirs)
@@ -701,6 +718,13 @@ static int autofs4_dir_rmdir(struct inode *dir, struct dentry *dentry)
 	pr_debug("dentry %p, removing %pd\n", dentry, dentry);
 
 	if (!autofs4_oz_mode(sbi))
+		return -EACCES;
+
+	/* autofs4_oz_mode() needs to allow path walks when the
+	 * autofs mount is catatonic but the state of an autofs
+	 * file system needs to be preserved over restarts.
+	 */
+	if (sbi->flags & AUTOFS_SBI_CATATONIC)
 		return -EACCES;
 
 	spin_lock(&sbi->lookup_lock);
@@ -741,6 +765,13 @@ static int autofs4_dir_mkdir(struct inode *dir,
 	if (!autofs4_oz_mode(sbi))
 		return -EACCES;
 
+	/* autofs4_oz_mode() needs to allow path walks when the
+	 * autofs mount is catatonic but the state of an autofs
+	 * file system needs to be preserved over restarts.
+	 */
+	if (sbi->flags & AUTOFS_SBI_CATATONIC)
+		return -EACCES;
+
 	pr_debug("dentry %p, creating %pd\n", dentry, dentry);
 
 	BUG_ON(!ino);
@@ -763,7 +794,7 @@ static int autofs4_dir_mkdir(struct inode *dir,
 	if (p_ino && !IS_ROOT(dentry))
 		atomic_inc(&p_ino->count);
 	inc_nlink(dir);
-	dir->i_mtime = current_time(dir);
+	dir->i_mtime = CURRENT_TIME;
 
 	return 0;
 }

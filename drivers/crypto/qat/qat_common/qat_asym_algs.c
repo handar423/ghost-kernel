@@ -519,7 +519,7 @@ err_clear_ctx:
 	return ret;
 }
 
-static unsigned int qat_dh_max_size(struct crypto_kpp *tfm)
+static int qat_dh_max_size(struct crypto_kpp *tfm)
 {
 	struct qat_dh_ctx *ctx = kpp_tfm_ctx(tfm);
 
@@ -969,7 +969,8 @@ unmap_src:
 	return ret;
 }
 
-int qat_rsa_set_n(struct qat_rsa_ctx *ctx, const char *value, size_t vlen)
+static int qat_rsa_set_n(struct qat_rsa_ctx *ctx, const char *value,
+			 size_t vlen)
 {
 	struct qat_crypto_instance *inst = ctx->inst;
 	struct device *dev = &GET_DEV(inst->accel_dev);
@@ -1000,7 +1001,8 @@ err:
 	return ret;
 }
 
-int qat_rsa_set_e(struct qat_rsa_ctx *ctx, const char *value, size_t vlen)
+static int qat_rsa_set_e(struct qat_rsa_ctx *ctx, const char *value,
+			 size_t vlen)
 {
 	struct qat_crypto_instance *inst = ctx->inst;
 	struct device *dev = &GET_DEV(inst->accel_dev);
@@ -1024,7 +1026,8 @@ int qat_rsa_set_e(struct qat_rsa_ctx *ctx, const char *value, size_t vlen)
 	return 0;
 }
 
-int qat_rsa_set_d(struct qat_rsa_ctx *ctx, const char *value, size_t vlen)
+static int qat_rsa_set_d(struct qat_rsa_ctx *ctx, const char *value,
+			 size_t vlen)
 {
 	struct qat_crypto_instance *inst = ctx->inst;
 	struct device *dev = &GET_DEV(inst->accel_dev);
@@ -1254,7 +1257,7 @@ static int qat_rsa_setprivkey(struct crypto_akcipher *tfm, const void *key,
 	return qat_rsa_setkey(tfm, key, keylen, true);
 }
 
-static unsigned int qat_rsa_max_size(struct crypto_akcipher *tfm)
+static int qat_rsa_max_size(struct crypto_akcipher *tfm)
 {
 	struct qat_rsa_ctx *ctx = akcipher_tfm_ctx(tfm);
 

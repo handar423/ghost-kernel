@@ -282,7 +282,7 @@ struct l2cap_conn_rsp {
 #define L2CAP_CR_BAD_KEY_SIZE	0x0007
 #define L2CAP_CR_ENCRYPTION	0x0008
 #define L2CAP_CR_INVALID_SCID	0x0009
-#define L2CAP_CR_SCID_IN_USE	0x000A
+#define L2CAP_CR_SCID_IN_USE	0x0010
 
 /* connect/create channel status */
 #define L2CAP_CS_NO_INFO	0x0000
@@ -619,6 +619,12 @@ struct l2cap_ops {
 	struct sk_buff		*(*alloc_skb) (struct l2cap_chan *chan,
 					       unsigned long hdr_len,
 					       unsigned long len, int nb);
+	int			(*filter) (struct l2cap_chan * chan,
+					   struct sk_buff *skb);
+	int			(*memcpy_fromiovec) (struct l2cap_chan *chan,
+						     unsigned char *kdata,
+						     struct msghdr *msg,
+						     int len);
 };
 
 struct l2cap_conn {
@@ -909,6 +915,31 @@ static inline void l2cap_chan_no_set_shutdown(struct l2cap_chan *chan)
 
 static inline long l2cap_chan_no_get_sndtimeo(struct l2cap_chan *chan)
 {
+	return 0;
+}
+
+static inline int l2cap_chan_no_memcpy_fromiovec(struct l2cap_chan *chan,
+						 unsigned char *kdata,
+						 struct msghdr *msg,
+						 int len)
+{
+	/* Following is safe since for compiler definitions of kvec and
+	 * iovec are identical, yielding the same in-core layout and alignment
+	 */
+	struct kvec *vec = (struct kvec *)msg->msg_iov;
+
+	while (len > 0) {
+		if (vec->iov_len) {
+			int copy = min_t(unsigned int, len, vec->iov_len);
+			memcpy(kdata, vec->iov_base, copy);
+			len -= copy;
+			kdata += copy;
+			vec->iov_base += copy;
+			vec->iov_len -= copy;
+		}
+		vec++;
+	}
+
 	return 0;
 }
 

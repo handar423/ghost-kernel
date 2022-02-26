@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2017, Intel Corp.
+ * Copyright (C) 2000 - 2016, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -208,7 +208,9 @@ static int ap_do_options(int argc, char **argv)
 		case 'r':	/* Dump tables from specified RSDP */
 
 			status =
-			    acpi_ut_strtoul64(acpi_gbl_optarg, &gbl_rsdp_base);
+			    acpi_ut_strtoul64(acpi_gbl_optarg,
+					      ACPI_STRTOUL_64BIT,
+					      &gbl_rsdp_base);
 			if (ACPI_FAILURE(status)) {
 				fprintf(stderr,
 					"%s: Could not convert to a physical address\n",
@@ -298,7 +300,7 @@ static int ap_do_options(int argc, char **argv)
  *
  ******************************************************************************/
 
-#if !defined(_GNU_EFI) && !defined(_EDK2_EFI)
+#ifndef _GNU_EFI
 int ACPI_SYSTEM_XFACE main(int argc, char *argv[])
 #else
 int ACPI_SYSTEM_XFACE acpi_main(int argc, char *argv[])

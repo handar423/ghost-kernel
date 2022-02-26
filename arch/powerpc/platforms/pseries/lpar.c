@@ -21,12 +21,12 @@
 
 /* Enables debugging of low-level hash table routines - careful! */
 #undef DEBUG
+#define pr_fmt(fmt) "lpar: " fmt
 
 #include <linux/kernel.h>
 #include <linux/dma-mapping.h>
 #include <linux/console.h>
 #include <linux/export.h>
-#include <linux/jump_label.h>
 #include <linux/delay.h>
 #include <linux/stop_machine.h>
 #include <asm/processor.h>
@@ -64,6 +64,24 @@ EXPORT_SYMBOL(plpar_hcall);
 EXPORT_SYMBOL(plpar_hcall9);
 EXPORT_SYMBOL(plpar_hcall_norets);
 
+/*
+ * H_BLOCK_REMOVE supported block size for this page size in segment who's base
+ * page size is that page size.
+ *
+ * The first index is the segment base page size, the second one is the actual
+ * page size.
+ */
+static int hblkrm_size[MMU_PAGE_COUNT][MMU_PAGE_COUNT];
+
+/*
+ * Due to the involved complexity, and that the current hypervisor is only
+ * returning this value or 0, we are limiting the support of the H_BLOCK_REMOVE
+ * buffer size to 8 size block.
+ */
+#define HBLKRM_SUPPORTED_BLOCK_SIZE 8
+
+extern void pSeries_find_serial_port(void);
+
 void vpa_init(int cpu)
 {
 	int hwcpu = get_hard_smp_processor_id(cpu);
@@ -92,21 +110,18 @@ void vpa_init(int cpu)
 		       "%lx failed with %ld\n", cpu, hwcpu, addr, ret);
 		return;
 	}
-
-#ifdef CONFIG_PPC_BOOK3S_64
 	/*
 	 * PAPR says this feature is SLB-Buffer but firmware never
 	 * reports that.  All SPLPAR support SLB shadow buffer.
 	 */
-	if (!radix_enabled() && firmware_has_feature(FW_FEATURE_SPLPAR)) {
-		addr = __pa(paca[cpu].slb_shadow_ptr);
+	addr = __pa(paca[cpu].slb_shadow_ptr);
+	if (firmware_has_feature(FW_FEATURE_SPLPAR)) {
 		ret = register_slb_shadow(hwcpu, addr);
 		if (ret)
 			pr_err("WARNING: SLB shadow buffer registration for "
 			       "cpu %d (hw %d) of area %lx failed with %ld\n",
 			       cpu, hwcpu, addr, ret);
 	}
-#endif /* CONFIG_PPC_BOOK3S_64 */
 
 	/*
 	 * Register dispatch trace log, if one has been allocated.
@@ -128,8 +143,6 @@ void vpa_init(int cpu)
 		lppaca_of(cpu).dtl_enable_mask = 2;
 	}
 }
-
-#ifdef CONFIG_PPC_BOOK3S_64
 
 static long pSeries_lpar_hpte_insert(unsigned long hpte_group,
 				     unsigned long vpn, unsigned long pa,
@@ -159,6 +172,10 @@ static long pSeries_lpar_hpte_insert(unsigned long hpte_group,
 	/* I-cache synchronize = 0     */
 	/* Exact = 0                   */
 	flags = 0;
+
+	/* Make pHyp happy */
+	if ((rflags & _PAGE_NO_CACHE) && !(rflags & _PAGE_WRITETHRU))
+		hpte_r &= ~HPTE_R_M;
 
 	if (firmware_has_feature(FW_FEATURE_XCMO) && !(hpte_r & HPTE_R_N))
 		flags |= H_COALESCE_CAND;
@@ -283,8 +300,24 @@ static void pseries_hpte_clear_all(void)
 	 * This is also called on boot when a fadump happens. In that case we
 	 * must not change the exception endian mode.
 	 */
-	if (firmware_has_feature(FW_FEATURE_SET_MODE) && !is_fadump_active())
-		pseries_big_endian_exceptions();
+	if (firmware_has_feature(FW_FEATURE_SET_MODE) && !is_fadump_active()) {
+		long rc;
+
+		rc = pseries_big_endian_exceptions();
+		/*
+		 * At this point it is unlikely panic() will get anything
+		 * out to the user, but at least this will stop us from
+		 * continuing on further and creating an even more
+		 * difficult to debug situation.
+		 *
+		 * There is a known problem when kdump'ing, if cpus are offline
+		 * the above call will fail. Rather than panicking again, keep
+		 * going and hope the kdump kernel is also little endian, which
+		 * it usually is.
+		 */
+		if (rc && !kdump_in_progress())
+			panic("Could not enable big endian exceptions");
+	}
 #endif
 }
 
@@ -301,18 +334,13 @@ static long pSeries_lpar_hpte_updatepp(unsigned long slot,
 				       int ssize, unsigned long inv_flags)
 {
 	unsigned long lpar_rc;
-	unsigned long flags;
+	unsigned long flags = (newpp & 7) | H_AVPN;
 	unsigned long want_v;
 
 	want_v = hpte_encode_avpn(vpn, psize, ssize);
 
 	pr_devel("    update: avpnv=%016lx, hash=%016lx, f=%lx, psize: %d ...",
 		 want_v, slot, flags, psize);
-
-	flags = (newpp & 7) | H_AVPN;
-	if (mmu_has_feature(MMU_FTR_KERNEL_RO))
-		/* Move pp0 into bit 8 (IBM 55) */
-		flags |= (newpp & HPTE_R_PP0) >> 55;
 
 	lpar_rc = plpar_pte_protect(flags, slot, want_v);
 
@@ -328,48 +356,48 @@ static long pSeries_lpar_hpte_updatepp(unsigned long slot,
 	return 0;
 }
 
-static long __pSeries_lpar_hpte_find(unsigned long want_v, unsigned long hpte_group)
+static unsigned long pSeries_lpar_hpte_getword0(unsigned long slot)
 {
-	long lpar_rc;
-	unsigned long i, j;
-	struct {
-		unsigned long pteh;
-		unsigned long ptel;
-	} ptes[4];
+	unsigned long dword0;
+	unsigned long lpar_rc;
+	unsigned long dummy_word1;
+	unsigned long flags;
 
-	for (i = 0; i < HPTES_PER_GROUP; i += 4, hpte_group += 4) {
+	/* Read 1 pte at a time                        */
+	/* Do not need RPN to logical page translation */
+	/* No cross CEC PFT access                     */
+	flags = 0;
 
-		lpar_rc = plpar_pte_read_4(0, hpte_group, (void *)ptes);
-		if (lpar_rc != H_SUCCESS)
-			continue;
+	lpar_rc = plpar_pte_read(flags, slot, &dword0, &dummy_word1);
 
-		for (j = 0; j < 4; j++) {
-			if (HPTE_V_COMPARE(ptes[j].pteh, want_v) &&
-			    (ptes[j].pteh & HPTE_V_VALID))
-				return i + j;
-		}
-	}
+	BUG_ON(lpar_rc != H_SUCCESS);
 
-	return -1;
+	return dword0;
 }
 
 static long pSeries_lpar_hpte_find(unsigned long vpn, int psize, int ssize)
 {
-	long slot;
 	unsigned long hash;
-	unsigned long want_v;
-	unsigned long hpte_group;
+	unsigned long i;
+	long slot;
+	unsigned long want_v, hpte_v;
 
 	hash = hpt_hash(vpn, mmu_psize_defs[psize].shift, ssize);
 	want_v = hpte_encode_avpn(vpn, psize, ssize);
 
 	/* Bolted entries are always in the primary group */
-	hpte_group = (hash & htab_hash_mask) * HPTES_PER_GROUP;
-	slot = __pSeries_lpar_hpte_find(want_v, hpte_group);
-	if (slot < 0)
-		return -1;
-	return hpte_group + slot;
-}
+	slot = (hash & htab_hash_mask) * HPTES_PER_GROUP;
+	for (i = 0; i < HPTES_PER_GROUP; i++) {
+		hpte_v = pSeries_lpar_hpte_getword0(slot);
+
+		if (HPTE_V_COMPARE(hpte_v, want_v) && (hpte_v & HPTE_V_VALID))
+			/* HPTE matches */
+			return slot;
+		++slot;
+	}
+
+	return -1;
+} 
 
 static void pSeries_lpar_hpte_updateboltedpp(unsigned long newpp,
 					     unsigned long ea,
@@ -385,10 +413,6 @@ static void pSeries_lpar_hpte_updateboltedpp(unsigned long newpp,
 	BUG_ON(slot == -1);
 
 	flags = newpp & 7;
-	if (mmu_has_feature(MMU_FTR_KERNEL_RO))
-		/* Move pp0 into bit 8 (IBM 55) */
-		flags |= (newpp & HPTE_R_PP0) >> 55;
-
 	lpar_rc = plpar_pte_protect(flags, slot, 0);
 
 	BUG_ON(lpar_rc != H_SUCCESS);
@@ -413,24 +437,147 @@ static void pSeries_lpar_hpte_invalidate(unsigned long slot, unsigned long vpn,
 	BUG_ON(lpar_rc != H_SUCCESS);
 }
 
-#ifdef CONFIG_TRANSPARENT_HUGEPAGE
+
+/*
+ * As defined in the PAPR's section 14.5.4.1.8
+ * The control mask doesn't include the returned reference and change bit from
+ * the processed PTE.
+ */
+#define HBLKR_AVPN		0x0100000000000000UL
+#define HBLKR_CTRL_MASK		0xf800000000000000UL
+#define HBLKR_CTRL_SUCCESS	0x8000000000000000UL
+#define HBLKR_CTRL_ERRNOTFOUND	0x8800000000000000UL
+#define HBLKR_CTRL_ERRBUSY	0xa000000000000000UL
+
+/*
+ * Returned true if we are supporting this block size for the specified segment
+ * base page size and actual page size.
+ *
+ * Currently, we only support 8 size block.
+ */
+static inline bool is_supported_hlbkrm(int bpsize, int psize)
+{
+	return (hblkrm_size[bpsize][psize] == HBLKRM_SUPPORTED_BLOCK_SIZE);
+}
+
+/**
+ * H_BLOCK_REMOVE caller.
+ * @idx should point to the latest @param entry set with a PTEX.
+ * If PTE cannot be processed because another CPUs has already locked that
+ * group, those entries are put back in @param starting at index 1.
+ * If entries has to be retried and @retry_busy is set to true, these entries
+ * are retried until success. If @retry_busy is set to false, the returned
+ * is the number of entries yet to process.
+ */
+static unsigned long call_block_remove(unsigned long idx, unsigned long *param,
+				       bool retry_busy)
+{
+	unsigned long i, rc, new_idx;
+	unsigned long retbuf[PLPAR_HCALL9_BUFSIZE];
+
+	if (idx < 2) {
+		pr_warn("Unexpected empty call to H_BLOCK_REMOVE");
+		return 0;
+	}
+again:
+	new_idx = 0;
+	if (idx > PLPAR_HCALL9_BUFSIZE) {
+		pr_err("Too many PTEs (%lu) for H_BLOCK_REMOVE", idx);
+		idx = PLPAR_HCALL9_BUFSIZE;
+	} else if (idx < PLPAR_HCALL9_BUFSIZE)
+		param[idx] = HBR_END;
+
+	rc = plpar_hcall9(H_BLOCK_REMOVE, retbuf,
+			  param[0], /* AVA */
+			  param[1],  param[2],  param[3],  param[4], /* TS0-7 */
+			  param[5],  param[6],  param[7],  param[8]);
+	if (rc == H_SUCCESS)
+		return 0;
+
+	BUG_ON(rc != H_PARTIAL);
+
+	/* Check that the unprocessed entries were 'not found' or 'busy' */
+	for (i = 0; i < idx-1; i++) {
+		unsigned long ctrl = retbuf[i] & HBLKR_CTRL_MASK;
+
+		if (ctrl == HBLKR_CTRL_ERRBUSY) {
+			param[++new_idx] = param[i+1];
+			continue;
+		}
+
+		BUG_ON(ctrl != HBLKR_CTRL_SUCCESS
+		       && ctrl != HBLKR_CTRL_ERRNOTFOUND);
+	}
+
+	/*
+	 * If there were entries found busy, retry these entries if requested,
+	 * of if all the entries have to be retried.
+	 */
+	if (new_idx && (retry_busy || new_idx == (PLPAR_HCALL9_BUFSIZE-1))) {
+		idx = new_idx + 1;
+		goto again;
+	}
+
+	return new_idx;
+}
+
 /*
  * Limit iterations holding pSeries_lpar_tlbie_lock to 3. We also need
  * to make sure that we avoid bouncing the hypervisor tlbie lock.
  */
 #define PPC64_HUGE_HPTE_BATCH 12
 
-static void __pSeries_lpar_hugepage_invalidate(unsigned long *slot,
-					     unsigned long *vpn, int count,
-					     int psize, int ssize)
+static void hugepage_block_invalidate(unsigned long *slot, unsigned long *vpn,
+				      int count, int psize, int ssize)
+{
+	unsigned long param[PLPAR_HCALL9_BUFSIZE];
+	unsigned long shift, current_vpgb, vpgb;
+	int i, pix = 0;
+
+	shift = mmu_psize_defs[psize].shift;
+
+	for (i = 0; i < count; i++) {
+		/*
+		 * Shifting 3 bits more on the right to get a
+		 * 8 pages aligned virtual addresse.
+		 */
+		vpgb = (vpn[i] >> (shift - VPN_SHIFT + 3));
+		if (!pix || vpgb != current_vpgb) {
+			/*
+			 * Need to start a new 8 pages block, flush
+			 * the current one if needed.
+			 */
+			if (pix)
+				(void)call_block_remove(pix, param, true);
+			current_vpgb = vpgb;
+			param[0] = hpte_encode_avpn(vpn[i], psize, ssize);
+			pix = 1;
+		}
+
+		param[pix++] = HBR_REQUEST | HBLKR_AVPN | slot[i];
+		if (pix == PLPAR_HCALL9_BUFSIZE) {
+			pix = call_block_remove(pix, param, false);
+			/*
+			 * pix = 0 means that all the entries were
+			 * removed, we can start a new block.
+			 * Otherwise, this means that there are entries
+			 * to retry, and pix points to latest one, so
+			 * we should increment it and try to continue
+			 * the same block.
+			 */
+			if (pix)
+				pix++;
+		}
+	}
+	if (pix)
+		(void)call_block_remove(pix, param, true);
+}
+
+static void hugepage_bulk_invalidate(unsigned long *slot, unsigned long *vpn,
+				     int count, int psize, int ssize)
 {
 	unsigned long param[PLPAR_HCALL9_BUFSIZE];
 	int i = 0, pix = 0, rc;
-	unsigned long flags = 0;
-	int lock_tlbie = !mmu_has_feature(MMU_FTR_LOCKLESS_TLBIE);
-
-	if (lock_tlbie)
-		spin_lock_irqsave(&pSeries_lpar_tlbie_lock, flags);
 
 	for (i = 0; i < count; i++) {
 
@@ -458,6 +605,24 @@ static void __pSeries_lpar_hugepage_invalidate(unsigned long *slot,
 				  param[6], param[7]);
 		BUG_ON(rc != H_SUCCESS);
 	}
+}
+
+static inline void __pSeries_lpar_hugepage_invalidate(unsigned long *slot,
+						      unsigned long *vpn,
+						      int count, int psize,
+						      int ssize)
+{
+	unsigned long flags = 0;
+	int lock_tlbie = !mmu_has_feature(MMU_FTR_LOCKLESS_TLBIE);
+
+	if (lock_tlbie)
+		spin_lock_irqsave(&pSeries_lpar_tlbie_lock, flags);
+
+	/* Assuming THP size is 16M */
+	if (is_supported_hlbkrm(psize, MMU_PAGE_16M))
+		hugepage_block_invalidate(slot, vpn, count, psize, ssize);
+	else
+		hugepage_bulk_invalidate(slot, vpn, count, psize, ssize);
 
 	if (lock_tlbie)
 		spin_unlock_irqrestore(&pSeries_lpar_tlbie_lock, flags);
@@ -466,7 +631,7 @@ static void __pSeries_lpar_hugepage_invalidate(unsigned long *slot,
 static void pSeries_lpar_hugepage_invalidate(unsigned long vsid,
 					     unsigned long addr,
 					     unsigned char *hpte_slot_array,
-					     int psize, int ssize, int local)
+					     int psize, int ssize)
 {
 	int i, index = 0;
 	unsigned long s_addr = addr;
@@ -512,18 +677,9 @@ static void pSeries_lpar_hugepage_invalidate(unsigned long vsid,
 		__pSeries_lpar_hugepage_invalidate(slot_array, vpn_array,
 						   index, psize, ssize);
 }
-#else
-static void pSeries_lpar_hugepage_invalidate(unsigned long vsid,
-					     unsigned long addr,
-					     unsigned char *hpte_slot_array,
-					     int psize, int ssize, int local)
-{
-	WARN(1, "%s called without THP support\n", __func__);
-}
-#endif
 
-static int pSeries_lpar_hpte_removebolted(unsigned long ea,
-					  int psize, int ssize)
+static void pSeries_lpar_hpte_removebolted(unsigned long ea,
+					   int psize, int ssize)
 {
 	unsigned long vpn;
 	unsigned long slot, vsid;
@@ -532,14 +688,225 @@ static int pSeries_lpar_hpte_removebolted(unsigned long ea,
 	vpn = hpt_vpn(ea, vsid, ssize);
 
 	slot = pSeries_lpar_hpte_find(vpn, psize, ssize);
-	if (slot == -1)
-		return -ENOENT;
-
+	BUG_ON(slot == -1);
 	/*
 	 * lpar doesn't use the passed actual page size
 	 */
 	pSeries_lpar_hpte_invalidate(slot, vpn, psize, 0, ssize, 0);
-	return 0;
+}
+
+
+static inline unsigned long compute_slot(real_pte_t pte,
+					 unsigned long vpn,
+					 unsigned long index,
+					 unsigned long shift,
+					 int ssize)
+{
+	unsigned long slot, hash, hidx;
+
+	hash = hpt_hash(vpn, shift, ssize);
+	hidx = __rpte_to_hidx(pte, index);
+	if (hidx & _PTEIDX_SECONDARY)
+		hash = ~hash;
+	slot = (hash & htab_hash_mask) * HPTES_PER_GROUP;
+	slot += hidx & _PTEIDX_GROUP_IX;
+	return slot;
+}
+
+/**
+ * The hcall H_BLOCK_REMOVE implies that the virtual pages to processed are
+ * "all within the same naturally aligned 8 page virtual address block".
+ */
+static void do_block_remove(unsigned long number, struct ppc64_tlb_batch *batch,
+			    unsigned long *param)
+{
+	unsigned long vpn;
+	unsigned long i, pix = 0;
+	unsigned long index, shift, slot, current_vpgb, vpgb;
+	real_pte_t pte;
+	int psize, ssize;
+
+	psize = batch->psize;
+	ssize = batch->ssize;
+
+	for (i = 0; i < number; i++) {
+		vpn = batch->vpn[i];
+		pte = batch->pte[i];
+		pte_iterate_hashed_subpages(pte, psize, vpn, index, shift) {
+			/*
+			 * Shifting 3 bits more on the right to get a
+			 * 8 pages aligned virtual addresse.
+			 */
+			vpgb = (vpn >> (shift - VPN_SHIFT + 3));
+			if (!pix || vpgb != current_vpgb) {
+				/*
+				 * Need to start a new 8 pages block, flush
+				 * the current one if needed.
+				 */
+				if (pix)
+					(void)call_block_remove(pix, param,
+								true);
+				current_vpgb = vpgb;
+				param[0] = hpte_encode_avpn(vpn, psize,
+							    ssize);
+				pix = 1;
+			}
+
+			slot = compute_slot(pte, vpn, index, shift, ssize);
+			param[pix++] = HBR_REQUEST | HBLKR_AVPN | slot;
+
+			if (pix == PLPAR_HCALL9_BUFSIZE) {
+				pix = call_block_remove(pix, param, false);
+				/*
+				 * pix = 0 means that all the entries were
+				 * removed, we can start a new block.
+				 * Otherwise, this means that there are entries
+				 * to retry, and pix points to latest one, so
+				 * we should increment it and try to continue
+				 * the same block.
+				 */
+				if (pix)
+					pix++;
+			}
+		} pte_iterate_hashed_end();
+	}
+
+	if (pix)
+		(void)call_block_remove(pix, param, true);
+}
+
+/*
+ * TLB Block Invalidate Characteristics
+ *
+ * These characteristics define the size of the block the hcall H_BLOCK_REMOVE
+ * is able to process for each couple segment base page size, actual page size.
+ *
+ * The ibm,get-system-parameter properties is returning a buffer with the
+ * following layout:
+ *
+ * [ 2 bytes size of the RTAS buffer (excluding these 2 bytes) ]
+ * -----------------
+ * TLB Block Invalidate Specifiers:
+ * [ 1 byte LOG base 2 of the TLB invalidate block size being specified ]
+ * [ 1 byte Number of page sizes (N) that are supported for the specified
+ *          TLB invalidate block size ]
+ * [ 1 byte Encoded segment base page size and actual page size
+ *          MSB=0 means 4k segment base page size and actual page size
+ *          MSB=1 the penc value in mmu_psize_def ]
+ * ...
+ * -----------------
+ * Next TLB Block Invalidate Specifiers...
+ * -----------------
+ * [ 0 ]
+ */
+static inline void set_hblkrm_bloc_size(int bpsize, int psize,
+					unsigned int block_size)
+{
+	if (block_size > hblkrm_size[bpsize][psize])
+		hblkrm_size[bpsize][psize] = block_size;
+}
+
+/*
+ * Decode the Encoded segment base page size and actual page size.
+ * PAPR specifies:
+ *   - bit 7 is the L bit
+ *   - bits 0-5 are the penc value
+ * If the L bit is 0, this means 4K segment base page size and actual page size
+ * otherwise the penc value should be read.
+ */
+#define HBLKRM_L_MASK		0x80
+#define HBLKRM_PENC_MASK	0x3f
+static inline void __init check_lp_set_hblkrm(unsigned int lp,
+					      unsigned int block_size)
+{
+	unsigned int bpsize, psize;
+
+	/* First, check the L bit, if not set, this means 4K */
+	if ((lp & HBLKRM_L_MASK) == 0) {
+		set_hblkrm_bloc_size(MMU_PAGE_4K, MMU_PAGE_4K, block_size);
+		return;
+	}
+
+	lp &= HBLKRM_PENC_MASK;
+	for (bpsize = 0; bpsize < MMU_PAGE_COUNT; bpsize++) {
+		struct mmu_psize_def *def = &mmu_psize_defs[bpsize];
+
+		for (psize = 0; psize < MMU_PAGE_COUNT; psize++) {
+			if (def->penc[psize] == lp) {
+				set_hblkrm_bloc_size(bpsize, psize, block_size);
+				return;
+			}
+		}
+	}
+}
+
+#define SPLPAR_TLB_BIC_TOKEN		50
+
+/*
+ * The size of the TLB Block Invalidate Characteristics is variable. But at the
+ * maximum it will be the number of possible page sizes *2 + 10 bytes.
+ * Currently MMU_PAGE_COUNT is 16, which means 42 bytes. Use a cache line size
+ * (128 bytes) for the buffer to get plenty of space.
+ */
+#define SPLPAR_TLB_BIC_MAXLENGTH	128
+
+void __init pseries_lpar_read_hblkrm_characteristics(void)
+{
+	unsigned char local_buffer[SPLPAR_TLB_BIC_MAXLENGTH];
+	int call_status, len, idx, bpsize;
+
+	if (!firmware_has_feature(FW_FEATURE_BLOCK_REMOVE))
+		return;
+
+	spin_lock(&rtas_data_buf_lock);
+	memset(rtas_data_buf, 0, RTAS_DATA_BUF_SIZE);
+	call_status = rtas_call(rtas_token("ibm,get-system-parameter"), 3, 1,
+				NULL,
+				SPLPAR_TLB_BIC_TOKEN,
+				__pa(rtas_data_buf),
+				RTAS_DATA_BUF_SIZE);
+	memcpy(local_buffer, rtas_data_buf, SPLPAR_TLB_BIC_MAXLENGTH);
+	local_buffer[SPLPAR_TLB_BIC_MAXLENGTH - 1] = '\0';
+	spin_unlock(&rtas_data_buf_lock);
+
+	if (call_status != 0) {
+		pr_warn("%s %s Error calling get-system-parameter (0x%x)\n",
+			__FILE__, __func__, call_status);
+		return;
+	}
+
+	/*
+	 * The first two (2) bytes of the data in the buffer are the length of
+	 * the returned data, not counting these first two (2) bytes.
+	 */
+	len = be16_to_cpu(*((u16 *)local_buffer)) + 2;
+	if (len > SPLPAR_TLB_BIC_MAXLENGTH) {
+		pr_warn("%s too large returned buffer %d", __func__, len);
+		return;
+	}
+
+	idx = 2;
+	while (idx < len) {
+		u8 block_shift = local_buffer[idx++];
+		u32 block_size;
+		unsigned int npsize;
+
+		if (!block_shift)
+			break;
+
+		block_size = 1 << block_shift;
+
+		for (npsize = local_buffer[idx++];
+		     npsize > 0 && idx < len; npsize--)
+			check_lp_set_hblkrm((unsigned int) local_buffer[idx++],
+					    block_size);
+	}
+
+	for (bpsize = 0; bpsize < MMU_PAGE_COUNT; bpsize++)
+		for (idx = 0; idx < MMU_PAGE_COUNT; idx++)
+			if (hblkrm_size[bpsize][idx])
+				pr_info("H_BLOCK_REMOVE supports base psize:%d psize:%d block size:%d",
+					bpsize, idx, hblkrm_size[bpsize][idx]);
 }
 
 /*
@@ -551,15 +918,20 @@ static void pSeries_lpar_flush_hash_range(unsigned long number, int local)
 	unsigned long vpn;
 	unsigned long i, pix, rc;
 	unsigned long flags = 0;
-	struct ppc64_tlb_batch *batch = this_cpu_ptr(&ppc64_tlb_batch);
+	struct ppc64_tlb_batch *batch = &__get_cpu_var(ppc64_tlb_batch);
 	int lock_tlbie = !mmu_has_feature(MMU_FTR_LOCKLESS_TLBIE);
 	unsigned long param[PLPAR_HCALL9_BUFSIZE];
-	unsigned long hash, index, shift, hidx, slot;
+	unsigned long index, shift, slot;
 	real_pte_t pte;
 	int psize, ssize;
 
 	if (lock_tlbie)
 		spin_lock_irqsave(&pSeries_lpar_tlbie_lock, flags);
+
+	if (is_supported_hlbkrm(batch->psize, batch->psize)) {
+		do_block_remove(number, batch, param);
+		goto out;
+	}
 
 	psize = batch->psize;
 	ssize = batch->ssize;
@@ -568,12 +940,7 @@ static void pSeries_lpar_flush_hash_range(unsigned long number, int local)
 		vpn = batch->vpn[i];
 		pte = batch->pte[i];
 		pte_iterate_hashed_subpages(pte, psize, vpn, index, shift) {
-			hash = hpt_hash(vpn, shift, ssize);
-			hidx = __rpte_to_hidx(pte, index);
-			if (hidx & _PTEIDX_SECONDARY)
-				hash = ~hash;
-			slot = (hash & htab_hash_mask) * HPTES_PER_GROUP;
-			slot += hidx & _PTEIDX_GROUP_IX;
+			slot = compute_slot(pte, vpn, index, shift, ssize);
 			if (!firmware_has_feature(FW_FEATURE_BULK_REMOVE)) {
 				/*
 				 * lpar doesn't use the passed actual page size
@@ -604,6 +971,7 @@ static void pSeries_lpar_flush_hash_range(unsigned long number, int local)
 		BUG_ON(rc != H_SUCCESS);
 	}
 
+out:
 	if (lock_tlbie)
 		spin_unlock_irqrestore(&pSeries_lpar_tlbie_lock, flags);
 }
@@ -612,8 +980,8 @@ static int __init disable_bulk_remove(char *str)
 {
 	if (strcmp(str, "off") == 0 &&
 	    firmware_has_feature(FW_FEATURE_BULK_REMOVE)) {
-			printk(KERN_INFO "Disabling BULK_REMOVE firmware feature");
-			powerpc_firmware_features &= ~FW_FEATURE_BULK_REMOVE;
+		pr_info("Disabling BULK_REMOVE firmware feature");
+		powerpc_firmware_features &= ~FW_FEATURE_BULK_REMOVE;
 	}
 	return 1;
 }
@@ -659,8 +1027,7 @@ static int pseries_lpar_resize_hpt(unsigned long shift)
 	if (!firmware_has_feature(FW_FEATURE_HPT_RESIZE))
 		return -ENODEV;
 
-	printk(KERN_INFO "lpar: Attempting to resize HPT to shift %lu\n",
-	       shift);
+	pr_info("Attempting to resize HPT to shift %lu\n", shift);
 
 	t0 = ktime_get();
 
@@ -672,8 +1039,7 @@ static int pseries_lpar_resize_hpt(unsigned long shift)
 			/* prepare with shift==0 cancels an in-progress resize */
 			rc = plpar_resize_hpt_prepare(0, 0);
 			if (rc != H_SUCCESS)
-				printk(KERN_WARNING
-				       "lpar: Unexpected error %d cancelling timed out HPT resize\n",
+				pr_warn("Unexpected error %d cancelling timed out HPT resize\n",
 				       rc);
 			return -ETIMEDOUT;
 		}
@@ -687,13 +1053,13 @@ static int pseries_lpar_resize_hpt(unsigned long shift)
 		break;
 
 	case H_PARAMETER:
+		pr_warn("Invalid argument from H_RESIZE_HPT_PREPARE\n");
 		return -EINVAL;
 	case H_RESOURCE:
+		pr_warn("Operation not permitted from H_RESIZE_HPT_PREPARE\n");
 		return -EPERM;
 	default:
-		printk(KERN_WARNING
-		       "lpar: Unexpected error %d from H_RESIZE_HPT_PREPARE\n",
-		       rc);
+		pr_warn("Unexpected error %d from H_RESIZE_HPT_PREPARE\n", rc);
 		return -EIO;
 	}
 
@@ -706,69 +1072,36 @@ static int pseries_lpar_resize_hpt(unsigned long shift)
 	if (rc != 0) {
 		switch (state.commit_rc) {
 		case H_PTEG_FULL:
-			printk(KERN_WARNING
-			       "lpar: Hash collision while resizing HPT\n");
 			return -ENOSPC;
 
 		default:
-			printk(KERN_WARNING
-			       "lpar: Unexpected error %d from H_RESIZE_HPT_COMMIT\n",
-			       state.commit_rc);
+			pr_warn("Unexpected error %d from H_RESIZE_HPT_COMMIT\n",
+				state.commit_rc);
 			return -EIO;
 		};
 	}
 
-	printk(KERN_INFO
-	       "lpar: HPT resize to shift %lu complete (%lld ms / %lld ms)\n",
-	       shift, (long long) ktime_ms_delta(t1, t0),
-	       (long long) ktime_ms_delta(t2, t1));
+	pr_info("HPT resize to shift %lu complete (%lld ms / %lld ms)\n",
+		shift, (long long) ktime_ms_delta(t1, t0),
+		(long long) ktime_ms_delta(t2, t1));
 
 	return 0;
 }
 
-/* Actually only used for radix, so far */
-static int pseries_lpar_register_process_table(unsigned long base,
-			unsigned long page_size, unsigned long table_size)
+void __init hpte_init_lpar(void)
 {
-	long rc;
-	unsigned long flags = PROC_TABLE_NEW;
-
-	if (radix_enabled())
-		flags |= PROC_TABLE_RADIX | PROC_TABLE_GTSE;
-	for (;;) {
-		rc = plpar_hcall_norets(H_REGISTER_PROC_TBL, flags, base,
-					page_size, table_size);
-		if (!H_IS_LONG_BUSY(rc))
-			break;
-		mdelay(get_longbusy_msecs(rc));
-	}
-	if (rc != H_SUCCESS) {
-		pr_err("Failed to register process table (rc=%ld)\n", rc);
-		BUG();
-	}
-	return rc;
-}
-
-void __init hpte_init_pseries(void)
-{
-	mmu_hash_ops.hpte_invalidate	 = pSeries_lpar_hpte_invalidate;
-	mmu_hash_ops.hpte_updatepp	 = pSeries_lpar_hpte_updatepp;
-	mmu_hash_ops.hpte_updateboltedpp = pSeries_lpar_hpte_updateboltedpp;
-	mmu_hash_ops.hpte_insert	 = pSeries_lpar_hpte_insert;
-	mmu_hash_ops.hpte_remove	 = pSeries_lpar_hpte_remove;
-	mmu_hash_ops.hpte_removebolted   = pSeries_lpar_hpte_removebolted;
-	mmu_hash_ops.flush_hash_range	 = pSeries_lpar_flush_hash_range;
-	mmu_hash_ops.hpte_clear_all      = pseries_hpte_clear_all;
-	mmu_hash_ops.hugepage_invalidate = pSeries_lpar_hugepage_invalidate;
+	ppc_md.hpte_invalidate	= pSeries_lpar_hpte_invalidate;
+	ppc_md.hpte_updatepp	= pSeries_lpar_hpte_updatepp;
+	ppc_md.hpte_updateboltedpp = pSeries_lpar_hpte_updateboltedpp;
+	ppc_md.hpte_insert	= pSeries_lpar_hpte_insert;
+	ppc_md.hpte_remove	= pSeries_lpar_hpte_remove;
+	ppc_md.hpte_removebolted = pSeries_lpar_hpte_removebolted;
+	ppc_md.flush_hash_range	= pSeries_lpar_flush_hash_range;
+	ppc_md.hpte_clear_all   = pseries_hpte_clear_all;
+	ppc_md.hugepage_invalidate = pSeries_lpar_hugepage_invalidate;
 
 	if (firmware_has_feature(FW_FEATURE_HPT_RESIZE))
-		mmu_hash_ops.resize_hpt = pseries_lpar_resize_hpt;
-}
-
-void radix_init_pseries(void)
-{
-	pr_info("Using radix MMU under hypervisor\n");
-	register_process_table = pseries_lpar_register_process_table;
+		ppc_md.resize_hpt =  pseries_lpar_resize_hpt;
 }
 
 #ifdef CONFIG_PPC_SMLPAR
@@ -781,13 +1114,13 @@ static int __init cmo_free_hint(char *str)
 	parm = strstrip(str);
 
 	if (strcasecmp(parm, "no") == 0 || strcasecmp(parm, "off") == 0) {
-		printk(KERN_INFO "cmo_free_hint: CMO free page hinting is not active.\n");
+		pr_info("%s: CMO free page hinting is not active.\n", __func__);
 		cmo_free_hint_flag = 0;
 		return 1;
 	}
 
 	cmo_free_hint_flag = 1;
-	printk(KERN_INFO "cmo_free_hint: CMO free page hinting is active.\n");
+	pr_info("%s: CMO free page hinting is active.\n", __func__);
 
 	if (strcasecmp(parm, "yes") == 0 || strcasecmp(parm, "on") == 0)
 		return 1;
@@ -814,8 +1147,6 @@ static void pSeries_set_page_state(struct page *page, int order,
 
 void arch_free_page(struct page *page, int order)
 {
-	if (radix_enabled())
-		return;
 	if (!cmo_free_hint_flag || !firmware_has_feature(FW_FEATURE_CMO))
 		return;
 
@@ -823,24 +1154,9 @@ void arch_free_page(struct page *page, int order)
 }
 EXPORT_SYMBOL(arch_free_page);
 
-#endif /* CONFIG_PPC_SMLPAR */
-#endif /* CONFIG_PPC_BOOK3S_64 */
+#endif
 
 #ifdef CONFIG_TRACEPOINTS
-#ifdef HAVE_JUMP_LABEL
-struct static_key hcall_tracepoint_key = STATIC_KEY_INIT;
-
-int hcall_tracepoint_regfunc(void)
-{
-	static_key_slow_inc(&hcall_tracepoint_key);
-	return 0;
-}
-
-void hcall_tracepoint_unregfunc(void)
-{
-	static_key_slow_dec(&hcall_tracepoint_key);
-}
-#else
 /*
  * We optimise our hcall path by placing hcall_tracepoint_refcount
  * directly in the TOC so we can check if the hcall tracepoints are
@@ -850,25 +1166,22 @@ void hcall_tracepoint_unregfunc(void)
 /* NB: reg/unreg are called while guarded with the tracepoints_mutex */
 extern long hcall_tracepoint_refcount;
 
-int hcall_tracepoint_regfunc(void)
-{
-	hcall_tracepoint_refcount++;
-	return 0;
-}
-
-void hcall_tracepoint_unregfunc(void)
-{
-	hcall_tracepoint_refcount--;
-}
-#endif
-
-/*
+/* 
  * Since the tracing code might execute hcalls we need to guard against
  * recursion. One example of this are spinlocks calling H_YIELD on
  * shared processor partitions.
  */
 static DEFINE_PER_CPU(unsigned int, hcall_trace_depth);
 
+void hcall_tracepoint_regfunc(void)
+{
+	hcall_tracepoint_refcount++;
+}
+
+void hcall_tracepoint_unregfunc(void)
+{
+	hcall_tracepoint_refcount--;
+}
 
 void __trace_hcall_entry(unsigned long opcode, unsigned long *args)
 {
@@ -884,7 +1197,7 @@ void __trace_hcall_entry(unsigned long opcode, unsigned long *args)
 
 	local_irq_save(flags);
 
-	depth = this_cpu_ptr(&hcall_trace_depth);
+	depth = &__get_cpu_var(hcall_trace_depth);
 
 	if (*depth)
 		goto out;
@@ -909,7 +1222,7 @@ void __trace_hcall_exit(long opcode, unsigned long retval,
 
 	local_irq_save(flags);
 
-	depth = this_cpu_ptr(&hcall_trace_depth);
+	depth = &__get_cpu_var(hcall_trace_depth);
 
 	if (*depth)
 		goto out;
@@ -967,64 +1280,3 @@ int h_get_mpp_x(struct hvcall_mpp_x_data *mpp_x_data)
 
 	return rc;
 }
-
-static unsigned long vsid_unscramble(unsigned long vsid, int ssize)
-{
-	unsigned long protovsid;
-	unsigned long va_bits = VA_BITS;
-	unsigned long modinv, vsid_modulus;
-	unsigned long max_mod_inv, tmp_modinv;
-
-	if (!mmu_has_feature(MMU_FTR_68_BIT_VA))
-		va_bits = 65;
-
-	if (ssize == MMU_SEGSIZE_256M) {
-		modinv = VSID_MULINV_256M;
-		vsid_modulus = ((1UL << (va_bits - SID_SHIFT)) - 1);
-	} else {
-		modinv = VSID_MULINV_1T;
-		vsid_modulus = ((1UL << (va_bits - SID_SHIFT_1T)) - 1);
-	}
-
-	/*
-	 * vsid outside our range.
-	 */
-	if (vsid >= vsid_modulus)
-		return 0;
-
-	/*
-	 * If modinv is the modular multiplicate inverse of (x % vsid_modulus)
-	 * and vsid = (protovsid * x) % vsid_modulus, then we say:
-	 *   protovsid = (vsid * modinv) % vsid_modulus
-	 */
-
-	/* Check if (vsid * modinv) overflow (63 bits) */
-	max_mod_inv = 0x7fffffffffffffffull / vsid;
-	if (modinv < max_mod_inv)
-		return (vsid * modinv) % vsid_modulus;
-
-	tmp_modinv = modinv/max_mod_inv;
-	modinv %= max_mod_inv;
-
-	protovsid = (((vsid * max_mod_inv) % vsid_modulus) * tmp_modinv) % vsid_modulus;
-	protovsid = (protovsid + vsid * modinv) % vsid_modulus;
-
-	return protovsid;
-}
-
-static int __init reserve_vrma_context_id(void)
-{
-	unsigned long protovsid;
-
-	/*
-	 * Reserve context ids which map to reserved virtual addresses. For now
-	 * we only reserve the context id which maps to the VRMA VSID. We ignore
-	 * the addresses in "ibm,adjunct-virtual-addresses" because we don't
-	 * enable adjunct support via the "ibm,client-architecture-support"
-	 * interface.
-	 */
-	protovsid = vsid_unscramble(VRMA_VSID, MMU_SEGSIZE_1T);
-	hash__reserve_context_id(protovsid >> ESID_BITS_1T);
-	return 0;
-}
-machine_device_initcall(pseries, reserve_vrma_context_id);

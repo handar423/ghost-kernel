@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _RDS_IB_H
 #define _RDS_IB_H
 
@@ -15,10 +14,9 @@
 
 #define RDS_IB_DEFAULT_RECV_WR		1024
 #define RDS_IB_DEFAULT_SEND_WR		256
-#define RDS_IB_DEFAULT_FR_WR		256
-#define RDS_IB_DEFAULT_FR_INV_WR	256
+#define RDS_IB_DEFAULT_FR_WR		512
 
-#define RDS_IB_DEFAULT_RETRY_COUNT	1
+#define RDS_IB_DEFAULT_RETRY_COUNT	2
 
 #define RDS_IB_SUPPORTED_PROTOCOLS	0x00000003	/* minor versions supported */
 
@@ -127,7 +125,6 @@ struct rds_ib_connection {
 
 	/* To control the number of wrs from fastreg */
 	atomic_t		i_fastreg_wrs;
-	atomic_t		i_fastunreg_wrs;
 
 	/* interrupt handling */
 	struct tasklet_struct	i_send_tasklet;
@@ -152,7 +149,6 @@ struct rds_ib_connection {
 	u64			i_ack_recv;	/* last ACK received */
 	struct rds_ib_refill_cache i_cache_incs;
 	struct rds_ib_refill_cache i_cache_frags;
-	atomic_t		i_cache_allocs;
 
 	/* sending acks */
 	unsigned long		i_ack_flags;
@@ -183,14 +179,6 @@ struct rds_ib_connection {
 
 	/* Batched completions */
 	unsigned int		i_unsignaled_wrs;
-
-	/* Endpoint role in connection */
-	bool			i_active_side;
-	atomic_t		i_cq_quiesce;
-
-	/* Send/Recv vectors */
-	int			i_scq_vector;
-	int			i_rcq_vector;
 };
 
 /* This assumes that atomic_t is at least 32 bits */
@@ -216,6 +204,8 @@ struct rds_ib_device {
 	struct list_head	conn_list;
 	struct ib_device	*dev;
 	struct ib_pd		*pd;
+	bool                    has_fmr;
+	bool                    has_fr;
 	bool                    use_fastreg;
 
 	unsigned int		max_mrs;
@@ -229,12 +219,11 @@ struct rds_ib_device {
 	unsigned int		max_initiator_depth;
 	unsigned int		max_responder_resources;
 	spinlock_t		spinlock;	/* protect the above */
-	refcount_t		refcount;
+	atomic_t		refcount;
 	struct work_struct	free_work;
-	int			*vector_load;
 };
 
-#define ibdev_to_node(ibdev) dev_to_node((ibdev)->dev.parent)
+#define ibdev_to_node(ibdev) dev_to_node(ibdev->dma_device)
 #define rdsibdev_to_node(rdsibdev) ibdev_to_node(rdsibdev->dev)
 
 /* bits for i_ack_flags */
@@ -260,8 +249,6 @@ struct rds_ib_statistics {
 	uint64_t	s_ib_rx_refill_from_cq;
 	uint64_t	s_ib_rx_refill_from_thread;
 	uint64_t	s_ib_rx_alloc_limit;
-	uint64_t	s_ib_rx_total_frags;
-	uint64_t	s_ib_rx_total_incs;
 	uint64_t	s_ib_rx_credit_updates;
 	uint64_t	s_ib_ack_sent;
 	uint64_t	s_ib_ack_send_failure;
@@ -284,8 +271,6 @@ struct rds_ib_statistics {
 	uint64_t	s_ib_rdma_mr_1m_reused;
 	uint64_t	s_ib_atomic_cswp;
 	uint64_t	s_ib_atomic_fadd;
-	uint64_t	s_ib_recv_added_to_cache;
-	uint64_t	s_ib_recv_removed_from_cache;
 };
 
 extern struct workqueue_struct *rds_ib_wq;
@@ -375,7 +360,8 @@ int rds_ib_recv_alloc_caches(struct rds_ib_connection *ic);
 void rds_ib_recv_free_caches(struct rds_ib_connection *ic);
 void rds_ib_recv_refill(struct rds_connection *conn, int prefill, gfp_t gfp);
 void rds_ib_inc_free(struct rds_incoming *inc);
-int rds_ib_inc_copy_to_user(struct rds_incoming *inc, struct iov_iter *to);
+int rds_ib_inc_copy_to_user(struct rds_incoming *inc, struct iovec *iov,
+			     size_t size);
 void rds_ib_recv_cqe_handler(struct rds_ib_connection *ic, struct ib_wc *wc,
 			     struct rds_ib_ack_state *state);
 void rds_ib_recv_tasklet_fn(unsigned long data);
@@ -416,8 +402,6 @@ int rds_ib_xmit_atomic(struct rds_connection *conn, struct rm_atomic_op *op);
 /* ib_stats.c */
 DECLARE_PER_CPU(struct rds_ib_statistics, rds_ib_stats);
 #define rds_ib_stats_inc(member) rds_stats_inc_which(rds_ib_stats, member)
-#define rds_ib_stats_add(member, count) \
-		rds_stats_add_which(rds_ib_stats, member, count)
 unsigned int rds_ib_stats_info_copy(struct rds_info_iterator *iter,
 				    unsigned int avail);
 

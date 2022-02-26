@@ -31,7 +31,7 @@
 #include <linux/clk.h>
 #include <linux/slab.h>
 #include <linux/input/matrix_keypad.h>
-#include <linux/reset.h>
+#include <linux/clk/tegra.h>
 #include <linux/err.h>
 
 #define KBC_MAX_KPENT	8
@@ -116,7 +116,6 @@ struct tegra_kbc {
 	u32 wakeup_key;
 	struct timer_list timer;
 	struct clk *clk;
-	struct reset_control *rst;
 	const struct tegra_kbc_hw_support *hw_support;
 	int max_keys;
 	int num_rows_and_columns;
@@ -251,9 +250,9 @@ static void tegra_kbc_set_fifo_interrupt(struct tegra_kbc *kbc, bool enable)
 	writel(val, kbc->mmio + KBC_CONTROL_0);
 }
 
-static void tegra_kbc_keypress_timer(struct timer_list *t)
+static void tegra_kbc_keypress_timer(unsigned long data)
 {
-	struct tegra_kbc *kbc = from_timer(kbc, t, timer);
+	struct tegra_kbc *kbc = (struct tegra_kbc *)data;
 	unsigned long flags;
 	u32 val;
 	unsigned int i;
@@ -370,16 +369,13 @@ static int tegra_kbc_start(struct tegra_kbc *kbc)
 {
 	unsigned int debounce_cnt;
 	u32 val = 0;
-	int ret;
 
-	ret = clk_prepare_enable(kbc->clk);
-	if (ret)
-		return ret;
+	clk_prepare_enable(kbc->clk);
 
 	/* Reset the KBC controller to clear all previous status.*/
-	reset_control_assert(kbc->rst);
+	tegra_periph_reset_assert(kbc->clk);
 	udelay(100);
-	reset_control_deassert(kbc->rst);
+	tegra_periph_reset_deassert(kbc->clk);
 	udelay(100);
 
 	tegra_kbc_config_pins(kbc);
@@ -520,8 +516,7 @@ static int tegra_kbc_parse_dt(struct tegra_kbc *kbc)
 	if (of_find_property(np, "nvidia,needs-ghost-filter", NULL))
 		kbc->use_ghost_filter = true;
 
-	if (of_property_read_bool(np, "wakeup-source") ||
-	    of_property_read_bool(np, "nvidia,wakeup-source")) /* legacy */
+	if (of_find_property(np, "nvidia,wakeup-source", NULL))
 		kbc->wakeup = true;
 
 	if (!of_get_property(np, "nvidia,kbc-row-pins", &proplen)) {
@@ -555,7 +550,7 @@ static int tegra_kbc_parse_dt(struct tegra_kbc *kbc)
 
 	if (!num_rows || !num_cols || ((num_rows + num_cols) > KBC_MAX_GPIO)) {
 		dev_err(kbc->dev,
-			"keypad rows/columns not properly specified\n");
+			"keypad rows/columns not porperly specified\n");
 		return -EINVAL;
 	}
 
@@ -619,7 +614,7 @@ static int tegra_kbc_probe(struct platform_device *pdev)
 	unsigned int keymap_rows;
 	const struct of_device_id *match;
 
-	match = of_match_device(tegra_kbc_of_match, &pdev->dev);
+	match = of_match_device(of_match_ptr(tegra_kbc_of_match), &pdev->dev);
 
 	kbc = devm_kzalloc(&pdev->dev, sizeof(*kbc), GFP_KERNEL);
 	if (!kbc) {
@@ -643,6 +638,12 @@ static int tegra_kbc_probe(struct platform_device *pdev)
 	if (!tegra_kbc_check_pin_cfg(kbc, &num_rows))
 		return -EINVAL;
 
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	if (!res) {
+		dev_err(&pdev->dev, "failed to get I/O memory\n");
+		return -ENXIO;
+	}
+
 	kbc->irq = platform_get_irq(pdev, 0);
 	if (kbc->irq < 0) {
 		dev_err(&pdev->dev, "failed to get keyboard IRQ\n");
@@ -655,9 +656,8 @@ static int tegra_kbc_probe(struct platform_device *pdev)
 		return -ENOMEM;
 	}
 
-	timer_setup(&kbc->timer, tegra_kbc_keypress_timer, 0);
+	setup_timer(&kbc->timer, tegra_kbc_keypress_timer, (unsigned long)kbc);
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	kbc->mmio = devm_ioremap_resource(&pdev->dev, res);
 	if (IS_ERR(kbc->mmio))
 		return PTR_ERR(kbc->mmio);
@@ -666,12 +666,6 @@ static int tegra_kbc_probe(struct platform_device *pdev)
 	if (IS_ERR(kbc->clk)) {
 		dev_err(&pdev->dev, "failed to get keyboard clock\n");
 		return PTR_ERR(kbc->clk);
-	}
-
-	kbc->rst = devm_reset_control_get(&pdev->dev, "kbc");
-	if (IS_ERR(kbc->rst)) {
-		dev_err(&pdev->dev, "failed to get keyboard reset\n");
-		return PTR_ERR(kbc->rst);
 	}
 
 	/*
@@ -709,7 +703,7 @@ static int tegra_kbc_probe(struct platform_device *pdev)
 	input_set_drvdata(kbc->idev, kbc);
 
 	err = devm_request_irq(&pdev->dev, kbc->irq, tegra_kbc_isr,
-			       IRQF_TRIGGER_HIGH, pdev->name, kbc);
+			  IRQF_NO_SUSPEND | IRQF_TRIGGER_HIGH, pdev->name, kbc);
 	if (err) {
 		dev_err(&pdev->dev, "failed to request keyboard IRQ\n");
 		return err;
@@ -826,6 +820,7 @@ static struct platform_driver tegra_kbc_driver = {
 	.probe		= tegra_kbc_probe,
 	.driver	= {
 		.name	= "tegra-kbc",
+		.owner  = THIS_MODULE,
 		.pm	= &tegra_kbc_pm_ops,
 		.of_match_table = tegra_kbc_of_match,
 	},

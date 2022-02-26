@@ -39,6 +39,7 @@
  */
 
 #include <linux/kernel.h>
+#include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
@@ -525,7 +526,7 @@ static int synusb_reset_resume(struct usb_interface *intf)
 	return synusb_resume(intf);
 }
 
-static const struct usb_device_id synusb_idtable[] = {
+static struct usb_device_id synusb_idtable[] = {
 	{ USB_DEVICE_SYNAPTICS(TP, SYNUSB_TOUCHPAD) },
 	{ USB_DEVICE_SYNAPTICS(INT_TP, SYNUSB_TOUCHPAD) },
 	{ USB_DEVICE_SYNAPTICS(CPAD,

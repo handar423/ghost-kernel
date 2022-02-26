@@ -76,11 +76,11 @@ static inline int local_sid_setup_one(struct id *entry)
 	unsigned long sid;
 	int ret = -1;
 
-	sid = __this_cpu_inc_return(pcpu_last_used_sid);
+	sid = ++(__get_cpu_var(pcpu_last_used_sid));
 	if (sid < NUM_TIDS) {
-		__this_cpu_write(pcpu_sids.entry[sid], entry);
+		__get_cpu_var(pcpu_sids).entry[sid] = entry;
 		entry->val = sid;
-		entry->pentry = this_cpu_ptr(&pcpu_sids.entry[sid]);
+		entry->pentry = &__get_cpu_var(pcpu_sids).entry[sid];
 		ret = sid;
 	}
 
@@ -108,8 +108,8 @@ static inline int local_sid_setup_one(struct id *entry)
 static inline int local_sid_lookup(struct id *entry)
 {
 	if (entry && entry->val != 0 &&
-	    __this_cpu_read(pcpu_sids.entry[entry->val]) == entry &&
-	    entry->pentry == this_cpu_ptr(&pcpu_sids.entry[entry->val]))
+	    __get_cpu_var(pcpu_sids).entry[entry->val] == entry &&
+	    entry->pentry == &__get_cpu_var(pcpu_sids).entry[entry->val])
 		return entry->val;
 	return -1;
 }
@@ -117,8 +117,8 @@ static inline int local_sid_lookup(struct id *entry)
 /* Invalidate all id mappings on local core -- call with preempt disabled */
 static inline void local_sid_destroy_all(void)
 {
-	__this_cpu_write(pcpu_last_used_sid, 0);
-	memset(this_cpu_ptr(&pcpu_sids), 0, sizeof(pcpu_sids));
+	__get_cpu_var(pcpu_last_used_sid) = 0;
+	memset(&__get_cpu_var(pcpu_sids), 0, sizeof(__get_cpu_var(pcpu_sids)));
 }
 
 static void *kvmppc_e500_id_table_alloc(struct kvmppc_vcpu_e500 *vcpu_e500)
@@ -237,8 +237,7 @@ void kvmppc_e500_tlbil_one(struct kvmppc_vcpu_e500 *vcpu_e500,
                            struct kvm_book3e_206_tlb_entry *gtlbe)
 {
 	struct vcpu_id_table *idt = vcpu_e500->idt;
-	unsigned int pr, tid, ts;
-	int pid;
+	unsigned int pr, tid, ts, pid;
 	u32 val, eaddr;
 	unsigned long flags;
 
@@ -455,20 +454,16 @@ static struct kvm_vcpu *kvmppc_core_vcpu_create_e500(struct kvm *kvm,
 	if (err)
 		goto free_vcpu;
 
-	if (kvmppc_e500_id_table_alloc(vcpu_e500) == NULL) {
-		err = -ENOMEM;
+	if (kvmppc_e500_id_table_alloc(vcpu_e500) == NULL)
 		goto uninit_vcpu;
-	}
 
 	err = kvmppc_e500_tlb_init(vcpu_e500);
 	if (err)
 		goto uninit_id;
 
 	vcpu->arch.shared = (void*)__get_free_page(GFP_KERNEL|__GFP_ZERO);
-	if (!vcpu->arch.shared) {
-		err = -ENOMEM;
+	if (!vcpu->arch.shared)
 		goto uninit_tlb;
-	}
 
 	return vcpu;
 

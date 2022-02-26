@@ -21,8 +21,6 @@
 
 #include <sound/core.h>
 #include <linux/slab.h>
-#include <linux/sched/signal.h>
-
 #include "seq_fifo.h"
 #include "seq_lock.h"
 
@@ -125,7 +123,7 @@ int snd_seq_fifo_event_in(struct snd_seq_fifo *f,
 		return -EINVAL;
 
 	snd_use_lock_use(&f->use_lock);
-	err = snd_seq_event_dup(f->pool, event, &cell, 1, NULL); /* always non-blocking */
+	err = snd_seq_event_dup(f->pool, event, &cell, 1, NULL, NULL); /* always non-blocking */
 	if (err < 0) {
 		if ((err == -ENOMEM) || (err == -EAGAIN))
 			atomic_inc(&f->overflow);
@@ -179,7 +177,7 @@ int snd_seq_fifo_cell_out(struct snd_seq_fifo *f,
 {
 	struct snd_seq_event_cell *cell;
 	unsigned long flags;
-	wait_queue_entry_t wait;
+	wait_queue_t wait;
 
 	if (snd_BUG_ON(!f))
 		return -EINVAL;
@@ -195,9 +193,9 @@ int snd_seq_fifo_cell_out(struct snd_seq_fifo *f,
 		}
 		set_current_state(TASK_INTERRUPTIBLE);
 		add_wait_queue(&f->input_sleep, &wait);
-		spin_unlock_irq(&f->lock);
+		spin_unlock_irqrestore(&f->lock, flags);
 		schedule();
-		spin_lock_irq(&f->lock);
+		spin_lock_irqsave(&f->lock, flags);
 		remove_wait_queue(&f->input_sleep, &wait);
 		if (signal_pending(current)) {
 			spin_unlock_irqrestore(&f->lock, flags);
@@ -279,4 +277,21 @@ int snd_seq_fifo_resize(struct snd_seq_fifo *f, int poolsize)
 	snd_seq_pool_delete(&oldpool);
 
 	return 0;
+}
+
+/* get the number of unused cells safely */
+int snd_seq_fifo_unused_cells(struct snd_seq_fifo *f)
+{
+	unsigned long flags;
+	int cells;
+
+	if (!f)
+		return 0;
+
+	snd_use_lock_use(&f->use_lock);
+	spin_lock_irqsave(&f->lock, flags);
+	cells = snd_seq_unused_cells(f->pool);
+	spin_unlock_irqrestore(&f->lock, flags);
+	snd_use_lock_free(&f->use_lock);
+	return cells;
 }

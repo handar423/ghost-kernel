@@ -11,9 +11,6 @@
  *  2 of the License, or (at your option) any later version.
  *
  */
-
-#define pr_fmt(fmt)	"OF: " fmt
-
 #include <linux/errno.h>
 #include <linux/module.h>
 #include <linux/amba/bus.h>
@@ -22,15 +19,12 @@
 #include <linux/slab.h>
 #include <linux/of_address.h>
 #include <linux/of_device.h>
-#include <linux/of_iommu.h>
 #include <linux/of_irq.h>
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
 
 const struct of_device_id of_default_bus_match_table[] = {
 	{ .compatible = "simple-bus", },
-	{ .compatible = "simple-mfd", },
-	{ .compatible = "isa", },
 #ifdef CONFIG_ARM_AMBA
 	{ .compatible = "arm,amba-bus", },
 #endif /* CONFIG_ARM_AMBA */
@@ -46,9 +40,6 @@ static int of_dev_node_match(struct device *dev, void *data)
  * of_find_device_by_node - Find the platform_device associated with a node
  * @np: Pointer to device tree node
  *
- * Takes a reference to the embedded struct device which needs to be dropped
- * after use.
- *
  * Returns platform_device pointer, or NULL if not found
  */
 struct platform_device *of_find_device_by_node(struct device_node *np)
@@ -59,6 +50,10 @@ struct platform_device *of_find_device_by_node(struct device_node *np)
 	return dev ? to_platform_device(dev) : NULL;
 }
 EXPORT_SYMBOL(of_find_device_by_node);
+
+#if defined(CONFIG_PPC_DCR)
+#include <asm/dcr.h>
+#endif
 
 #ifdef CONFIG_OF_ADDRESS
 /*
@@ -77,11 +72,31 @@ EXPORT_SYMBOL(of_find_device_by_node);
  * derive a unique name. If it cannot, then it will prepend names from
  * parent nodes until a unique name can be derived.
  */
-static void of_device_make_bus_id(struct device *dev)
+void of_device_make_bus_id(struct device *dev)
 {
 	struct device_node *node = dev->of_node;
 	const __be32 *reg;
 	u64 addr;
+
+#ifdef CONFIG_PPC_DCR
+	/*
+	 * If it's a DCR based device, use 'd' for native DCRs
+	 * and 'D' for MMIO DCRs.
+	 */
+	reg = of_get_property(node, "dcr-reg", NULL);
+	if (reg) {
+#ifdef CONFIG_PPC_DCR_NATIVE
+		dev_set_name(dev, "d%x.%s", *reg, node->name);
+#else /* CONFIG_PPC_DCR_NATIVE */
+		u64 addr = of_translate_dcr_address(node, *reg, NULL);
+		if (addr != OF_BAD_ADDR) {
+			dev_set_name(dev, "D%llx.%s",
+				     (unsigned long long)addr, node->name);
+			return;
+		}
+#endif /* !CONFIG_PPC_DCR_NATIVE */
+	}
+#endif /* CONFIG_PPC_DCR */
 
 	/* Construct the name, using parent nodes if necessary to ensure uniqueness */
 	while (node->parent) {
@@ -99,7 +114,7 @@ static void of_device_make_bus_id(struct device *dev)
 
 		/* format arguments only used if dev_name() resolves to NULL */
 		dev_set_name(dev, dev_name(dev) ? "%s:%s" : "%s",
-			     kbasename(node->full_name), dev_name(dev));
+			     strrchr(node->full_name, '/') + 1, dev_name(dev));
 		node = node->parent;
 	}
 }
@@ -118,7 +133,7 @@ struct platform_device *of_device_alloc(struct device_node *np,
 	int rc, i, num_reg = 0, num_irq;
 	struct resource *res, temp_res;
 
-	dev = platform_device_alloc("", PLATFORM_DEVID_NONE);
+	dev = platform_device_alloc("", -1);
 	if (!dev)
 		return NULL;
 
@@ -141,13 +156,13 @@ struct platform_device *of_device_alloc(struct device_node *np,
 			rc = of_address_to_resource(np, i, res);
 			WARN_ON(rc);
 		}
-		if (of_irq_to_resource_table(np, res, num_irq) != num_irq)
-			pr_debug("not all legacy IRQ resources mapped for %s\n",
-				 np->name);
+		WARN_ON(of_irq_to_resource_table(np, res, num_irq) != num_irq);
 	}
 
 	dev->dev.of_node = of_node_get(np);
-	dev->dev.fwnode = &np->fwnode;
+#if defined(CONFIG_MICROBLAZE)
+	dev->dev.dma_mask = &dev->archdata.dma_mask;
+#endif
 	dev->dev.parent = parent ? : &platform_bus;
 
 	if (bus_id)
@@ -169,7 +184,7 @@ EXPORT_SYMBOL(of_device_alloc);
  * Returns pointer to created platform device, or NULL if a device was not
  * registered.  Unavailable devices will not get registered.
  */
-static struct platform_device *of_platform_device_create_pdata(
+struct platform_device *of_platform_device_create_pdata(
 					struct device_node *np,
 					const char *bus_id,
 					void *platform_data,
@@ -177,28 +192,31 @@ static struct platform_device *of_platform_device_create_pdata(
 {
 	struct platform_device *dev;
 
-	if (!of_device_is_available(np) ||
-	    of_node_test_and_set_flag(np, OF_POPULATED))
+	if (!of_device_is_available(np))
 		return NULL;
 
 	dev = of_device_alloc(np, bus_id, parent);
 	if (!dev)
-		goto err_clear_flag;
+		return NULL;
 
+#if defined(CONFIG_MICROBLAZE)
+	dev->archdata.dma_mask = 0xffffffffUL;
+#endif
+	dev->dev.coherent_dma_mask = DMA_BIT_MASK(32);
 	dev->dev.bus = &platform_bus_type;
 	dev->dev.platform_data = platform_data;
-	of_msi_configure(&dev->dev, dev->dev.of_node);
+
+	/* We do not fill the DMA ops for platform devices by default.
+	 * This is currently the responsibility of the platform code
+	 * to do such, possibly using a device notifier
+	 */
 
 	if (of_device_add(dev) != 0) {
 		platform_device_put(dev);
-		goto err_clear_flag;
+		return NULL;
 	}
 
 	return dev;
-
-err_clear_flag:
-	of_node_clear_flag(np, OF_POPULATED);
-	return NULL;
 }
 
 /**
@@ -228,25 +246,27 @@ static struct amba_device *of_amba_device_create(struct device_node *node,
 	const void *prop;
 	int i, ret;
 
-	pr_debug("Creating amba device %pOF\n", node);
+	pr_debug("Creating amba device %s\n", node->full_name);
 
-	if (!of_device_is_available(node) ||
-	    of_node_test_and_set_flag(node, OF_POPULATED))
+	if (!of_device_is_available(node))
 		return NULL;
 
 	dev = amba_device_alloc(NULL, 0, 0);
 	if (!dev)
-		goto err_clear_flag;
+		return NULL;
 
 	/* setup generic device info */
+	dev->dev.coherent_dma_mask = ~0;
 	dev->dev.of_node = of_node_get(node);
-	dev->dev.fwnode = &node->fwnode;
 	dev->dev.parent = parent ? : &platform_bus;
 	dev->dev.platform_data = platform_data;
 	if (bus_id)
 		dev_set_name(&dev->dev, "%s", bus_id);
 	else
 		of_device_make_bus_id(&dev->dev);
+
+	/* setup amba-specific device info */
+	dev->dma_mask = ~0;
 
 	/* Allow the HW Peripheral ID to be overridden */
 	prop = of_get_property(node, "arm,primecell-periphid", NULL);
@@ -258,25 +278,17 @@ static struct amba_device *of_amba_device_create(struct device_node *node,
 		dev->irq[i] = irq_of_parse_and_map(node, i);
 
 	ret = of_address_to_resource(node, 0, &dev->res);
-	if (ret) {
-		pr_err("amba: of_address_to_resource() failed (%d) for %pOF\n",
-		       ret, node);
+	if (ret)
 		goto err_free;
-	}
 
 	ret = amba_device_add(dev, &iomem_resource);
-	if (ret) {
-		pr_err("amba_device_add() failed (%d) for %pOF\n",
-		       ret, node);
+	if (ret)
 		goto err_free;
-	}
 
 	return dev;
 
 err_free:
 	amba_device_put(dev);
-err_clear_flag:
-	of_node_clear_flag(node, OF_POPULATED);
 	return NULL;
 }
 #else /* CONFIG_ARM_AMBA */
@@ -295,37 +307,19 @@ static struct amba_device *of_amba_device_create(struct device_node *node,
 static const struct of_dev_auxdata *of_dev_lookup(const struct of_dev_auxdata *lookup,
 				 struct device_node *np)
 {
-	const struct of_dev_auxdata *auxdata;
 	struct resource res;
-	int compatible = 0;
 
 	if (!lookup)
 		return NULL;
 
-	auxdata = lookup;
-	for (; auxdata->compatible; auxdata++) {
-		if (!of_device_is_compatible(np, auxdata->compatible))
+	for(; lookup->compatible != NULL; lookup++) {
+		if (!of_device_is_compatible(np, lookup->compatible))
 			continue;
-		compatible++;
 		if (!of_address_to_resource(np, 0, &res))
-			if (res.start != auxdata->phys_addr)
+			if (res.start != lookup->phys_addr)
 				continue;
-		pr_debug("%pOF: devname=%s\n", np, auxdata->name);
-		return auxdata;
-	}
-
-	if (!compatible)
-		return NULL;
-
-	/* Try compatible match if no phys_addr and name are specified */
-	auxdata = lookup;
-	for (; auxdata->compatible; auxdata++) {
-		if (!of_device_is_compatible(np, auxdata->compatible))
-			continue;
-		if (!auxdata->phys_addr && !auxdata->name) {
-			pr_debug("%pOF: compatible match\n", np);
-			return auxdata;
-		}
+		pr_debug("%s: devname=%s\n", np->full_name, lookup->name);
+		return lookup;
 	}
 
 	return NULL;
@@ -356,14 +350,8 @@ static int of_platform_bus_create(struct device_node *bus,
 
 	/* Make sure it has a compatible property */
 	if (strict && (!of_get_property(bus, "compatible", NULL))) {
-		pr_debug("%s() - skipping %pOF, no compatible prop\n",
-			 __func__, bus);
-		return 0;
-	}
-
-	if (of_node_check_flag(bus, OF_POPULATED_BUS)) {
-		pr_debug("%s() - skipping %pOF, already populated\n",
-			__func__, bus);
+		pr_debug("%s() - skipping %s, no compatible prop\n",
+			 __func__, bus->full_name);
 		return 0;
 	}
 
@@ -374,10 +362,6 @@ static int of_platform_bus_create(struct device_node *bus,
 	}
 
 	if (of_device_is_compatible(bus, "arm,primecell")) {
-		/*
-		 * Don't return an error here to keep compatibility with older
-		 * device tree files.
-		 */
 		of_amba_device_create(bus, bus_id, platform_data, parent);
 		return 0;
 	}
@@ -387,14 +371,13 @@ static int of_platform_bus_create(struct device_node *bus,
 		return 0;
 
 	for_each_child_of_node(bus, child) {
-		pr_debug("   create child: %pOF\n", child);
+		pr_debug("   create child: %s\n", child->full_name);
 		rc = of_platform_bus_create(child, matches, lookup, &dev->dev, strict);
 		if (rc) {
 			of_node_put(child);
 			break;
 		}
 	}
-	of_node_set_flag(bus, OF_POPULATED_BUS);
 	return rc;
 }
 
@@ -418,8 +401,8 @@ int of_platform_bus_probe(struct device_node *root,
 	if (!root)
 		return -EINVAL;
 
-	pr_debug("%s()\n", __func__);
-	pr_debug(" starting at: %pOF\n", root);
+	pr_debug("of_platform_bus_probe()\n");
+	pr_debug(" starting at: %s\n", root->full_name);
 
 	/* Do a self check of bus type, if there's a match, create children */
 	if (of_match_node(matches, root)) {
@@ -428,10 +411,8 @@ int of_platform_bus_probe(struct device_node *root,
 		if (!of_match_node(matches, child))
 			continue;
 		rc = of_platform_bus_create(child, matches, NULL, parent, false);
-		if (rc) {
-			of_node_put(child);
+		if (rc)
 			break;
-		}
 	}
 
 	of_node_put(root);
@@ -470,236 +451,14 @@ int of_platform_populate(struct device_node *root,
 	if (!root)
 		return -EINVAL;
 
-	pr_debug("%s()\n", __func__);
-	pr_debug(" starting at: %pOF\n", root);
-
 	for_each_child_of_node(root, child) {
 		rc = of_platform_bus_create(child, matches, lookup, parent, true);
-		if (rc) {
-			of_node_put(child);
+		if (rc)
 			break;
-		}
 	}
-	of_node_set_flag(root, OF_POPULATED_BUS);
 
 	of_node_put(root);
 	return rc;
 }
 EXPORT_SYMBOL_GPL(of_platform_populate);
-
-int of_platform_default_populate(struct device_node *root,
-				 const struct of_dev_auxdata *lookup,
-				 struct device *parent)
-{
-	return of_platform_populate(root, of_default_bus_match_table, lookup,
-				    parent);
-}
-EXPORT_SYMBOL_GPL(of_platform_default_populate);
-
-#ifndef CONFIG_PPC
-static const struct of_device_id reserved_mem_matches[] = {
-	{ .compatible = "qcom,rmtfs-mem" },
-	{ .compatible = "ramoops" },
-	{}
-};
-
-static int __init of_platform_default_populate_init(void)
-{
-	struct device_node *node;
-
-	if (!of_have_populated_dt())
-		return -ENODEV;
-
-	/*
-	 * Handle certain compatibles explicitly, since we don't want to create
-	 * platform_devices for every node in /reserved-memory with a
-	 * "compatible",
-	 */
-	for_each_matching_node(node, reserved_mem_matches)
-		of_platform_device_create(node, NULL, NULL);
-
-	/* Populate everything else. */
-	of_platform_default_populate(NULL, NULL, NULL);
-
-	return 0;
-}
-arch_initcall_sync(of_platform_default_populate_init);
-#endif
-
-int of_platform_device_destroy(struct device *dev, void *data)
-{
-	/* Do not touch devices not populated from the device tree */
-	if (!dev->of_node || !of_node_check_flag(dev->of_node, OF_POPULATED))
-		return 0;
-
-	/* Recurse for any nodes that were treated as busses */
-	if (of_node_check_flag(dev->of_node, OF_POPULATED_BUS))
-		device_for_each_child(dev, NULL, of_platform_device_destroy);
-
-	if (dev->bus == &platform_bus_type)
-		platform_device_unregister(to_platform_device(dev));
-#ifdef CONFIG_ARM_AMBA
-	else if (dev->bus == &amba_bustype)
-		amba_device_unregister(to_amba_device(dev));
-#endif
-
-	of_node_clear_flag(dev->of_node, OF_POPULATED);
-	of_node_clear_flag(dev->of_node, OF_POPULATED_BUS);
-	return 0;
-}
-EXPORT_SYMBOL_GPL(of_platform_device_destroy);
-
-/**
- * of_platform_depopulate() - Remove devices populated from device tree
- * @parent: device which children will be removed
- *
- * Complementary to of_platform_populate(), this function removes children
- * of the given device (and, recurrently, their children) that have been
- * created from their respective device tree nodes (and only those,
- * leaving others - eg. manually created - unharmed).
- */
-void of_platform_depopulate(struct device *parent)
-{
-	if (parent->of_node && of_node_check_flag(parent->of_node, OF_POPULATED_BUS)) {
-		device_for_each_child(parent, NULL, of_platform_device_destroy);
-		of_node_clear_flag(parent->of_node, OF_POPULATED_BUS);
-	}
-}
-EXPORT_SYMBOL_GPL(of_platform_depopulate);
-
-static void devm_of_platform_populate_release(struct device *dev, void *res)
-{
-	of_platform_depopulate(*(struct device **)res);
-}
-
-/**
- * devm_of_platform_populate() - Populate platform_devices from device tree data
- * @dev: device that requested to populate from device tree data
- *
- * Similar to of_platform_populate(), but will automatically call
- * of_platform_depopulate() when the device is unbound from the bus.
- *
- * Returns 0 on success, < 0 on failure.
- */
-int devm_of_platform_populate(struct device *dev)
-{
-	struct device **ptr;
-	int ret;
-
-	if (!dev)
-		return -EINVAL;
-
-	ptr = devres_alloc(devm_of_platform_populate_release,
-			   sizeof(*ptr), GFP_KERNEL);
-	if (!ptr)
-		return -ENOMEM;
-
-	ret = of_platform_populate(dev->of_node, NULL, NULL, dev);
-	if (ret) {
-		devres_free(ptr);
-	} else {
-		*ptr = dev;
-		devres_add(dev, ptr);
-	}
-
-	return ret;
-}
-EXPORT_SYMBOL_GPL(devm_of_platform_populate);
-
-static int devm_of_platform_match(struct device *dev, void *res, void *data)
-{
-	struct device **ptr = res;
-
-	if (!ptr) {
-		WARN_ON(!ptr);
-		return 0;
-	}
-
-	return *ptr == data;
-}
-
-/**
- * devm_of_platform_depopulate() - Remove devices populated from device tree
- * @dev: device that requested to depopulate from device tree data
- *
- * Complementary to devm_of_platform_populate(), this function removes children
- * of the given device (and, recurrently, their children) that have been
- * created from their respective device tree nodes (and only those,
- * leaving others - eg. manually created - unharmed).
- */
-void devm_of_platform_depopulate(struct device *dev)
-{
-	int ret;
-
-	ret = devres_release(dev, devm_of_platform_populate_release,
-			     devm_of_platform_match, dev);
-
-	WARN_ON(ret);
-}
-EXPORT_SYMBOL_GPL(devm_of_platform_depopulate);
-
-#ifdef CONFIG_OF_DYNAMIC
-static int of_platform_notify(struct notifier_block *nb,
-				unsigned long action, void *arg)
-{
-	struct of_reconfig_data *rd = arg;
-	struct platform_device *pdev_parent, *pdev;
-	bool children_left;
-
-	switch (of_reconfig_get_state_change(action, rd)) {
-	case OF_RECONFIG_CHANGE_ADD:
-		/* verify that the parent is a bus */
-		if (!of_node_check_flag(rd->dn->parent, OF_POPULATED_BUS))
-			return NOTIFY_OK;	/* not for us */
-
-		/* already populated? (driver using of_populate manually) */
-		if (of_node_check_flag(rd->dn, OF_POPULATED))
-			return NOTIFY_OK;
-
-		/* pdev_parent may be NULL when no bus platform device */
-		pdev_parent = of_find_device_by_node(rd->dn->parent);
-		pdev = of_platform_device_create(rd->dn, NULL,
-				pdev_parent ? &pdev_parent->dev : NULL);
-		of_dev_put(pdev_parent);
-
-		if (pdev == NULL) {
-			pr_err("%s: failed to create for '%pOF'\n",
-					__func__, rd->dn);
-			/* of_platform_device_create tosses the error code */
-			return notifier_from_errno(-EINVAL);
-		}
-		break;
-
-	case OF_RECONFIG_CHANGE_REMOVE:
-
-		/* already depopulated? */
-		if (!of_node_check_flag(rd->dn, OF_POPULATED))
-			return NOTIFY_OK;
-
-		/* find our device by node */
-		pdev = of_find_device_by_node(rd->dn);
-		if (pdev == NULL)
-			return NOTIFY_OK;	/* no? not meant for us */
-
-		/* unregister takes one ref away */
-		of_platform_device_destroy(&pdev->dev, &children_left);
-
-		/* and put the reference of the find */
-		of_dev_put(pdev);
-		break;
-	}
-
-	return NOTIFY_OK;
-}
-
-static struct notifier_block platform_of_notifier = {
-	.notifier_call = of_platform_notify,
-};
-
-void of_platform_register_reconfig_notifier(void)
-{
-	WARN_ON(of_reconfig_notifier_register(&platform_of_notifier));
-}
-#endif /* CONFIG_OF_DYNAMIC */
-
 #endif /* CONFIG_OF_ADDRESS */

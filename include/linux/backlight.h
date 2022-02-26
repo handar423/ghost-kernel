@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Backlight Lowlevel Control Abstraction
  *
@@ -10,7 +9,6 @@
 #define _LINUX_BACKLIGHT_H
 
 #include <linux/device.h>
-#include <linux/fb.h>
 #include <linux/mutex.h>
 #include <linux/notifier.h>
 
@@ -107,45 +105,36 @@ struct backlight_device {
 	/* The framebuffer notifier block */
 	struct notifier_block fb_notif;
 
-	/* list entry of all registered backlight devices */
-	struct list_head entry;
-
 	struct device dev;
 
-	/* Multiple framebuffers may share one backlight device */
-	bool fb_bl_on[FB_MAX];
+#ifndef __GENKSYMS__
+	/*
+	 * Currently used only by acpi_video driver through
+	 * backlight_device_registered.
+	 */
 
-	int use_count;
+	/* list entry of all registered backlight devices */
+	struct list_head entry;
+#endif
 };
 
-static inline int backlight_update_status(struct backlight_device *bd)
+static inline void backlight_update_status(struct backlight_device *bd)
 {
-	int ret = -ENOENT;
-
 	mutex_lock(&bd->update_lock);
 	if (bd->ops && bd->ops->update_status)
-		ret = bd->ops->update_status(bd);
+		bd->ops->update_status(bd);
 	mutex_unlock(&bd->update_lock);
-
-	return ret;
 }
 
 extern struct backlight_device *backlight_device_register(const char *name,
 	struct device *dev, void *devdata, const struct backlight_ops *ops,
 	const struct backlight_properties *props);
-extern struct backlight_device *devm_backlight_device_register(
-	struct device *dev, const char *name, struct device *parent,
-	void *devdata, const struct backlight_ops *ops,
-	const struct backlight_properties *props);
 extern void backlight_device_unregister(struct backlight_device *bd);
-extern void devm_backlight_device_unregister(struct device *dev,
-					struct backlight_device *bd);
 extern void backlight_force_update(struct backlight_device *bd,
 				   enum backlight_update_reason reason);
+extern bool backlight_device_registered(enum backlight_type type);
 extern int backlight_register_notifier(struct notifier_block *nb);
 extern int backlight_unregister_notifier(struct notifier_block *nb);
-extern struct backlight_device *backlight_device_get_by_type(enum backlight_type type);
-extern int backlight_device_set_brightness(struct backlight_device *bd, unsigned long brightness);
 
 #define to_backlight_device(obj) container_of(obj, struct backlight_device, dev)
 

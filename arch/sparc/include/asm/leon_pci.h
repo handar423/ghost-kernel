@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * asm/leon_pci.h
  *
@@ -17,7 +16,7 @@ struct leon_pci_info {
 	int (*map_irq)(const struct pci_dev *dev, u8 slot, u8 pin);
 };
 
-void leon_pci_init(struct platform_device *ofdev,
-		   struct leon_pci_info *info);
+extern void leon_pci_init(struct platform_device *ofdev,
+				struct leon_pci_info *info);
 
 #endif /* _ASM_LEON_PCI_H_ */

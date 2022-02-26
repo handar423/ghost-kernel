@@ -89,10 +89,10 @@ static char version[] __initdata =
 #define DEB(x,y)	if (i596_debug & (x)) y
 
 
-#if IS_ENABLED(CONFIG_MVME16x_NET)
+#if defined(CONFIG_MVME16x_NET) || defined(CONFIG_MVME16x_NET_MODULE)
 #define ENABLE_MVME16x_NET
 #endif
-#if IS_ENABLED(CONFIG_BVME6000_NET)
+#if defined(CONFIG_BVME6000_NET) || defined(CONFIG_BVME6000_NET_MODULE)
 #define ENABLE_BVME6000_NET
 #endif
 
@@ -809,8 +809,7 @@ memory_squeeze:
 				if (!rx_in_place) {
 					/* 16 byte align the data fields */
 					skb_reserve(skb, 2);
-					skb_put_data(skb, rbd->v_data,
-						     pkt_len);
+					memcpy(skb_put(skb,pkt_len), rbd->v_data, pkt_len);
 				}
 				skb->protocol=eth_type_trans(skb,dev);
 				skb->len = pkt_len;
@@ -1119,6 +1118,7 @@ static const struct net_device_ops i596_netdev_ops = {
 	.ndo_start_xmit		= i596_start_xmit,
 	.ndo_set_rx_mode	= set_multicast_list,
 	.ndo_tx_timeout		= i596_tx_timeout,
+	.ndo_change_mtu		= eth_change_mtu,
 	.ndo_set_mac_address 	= eth_mac_addr,
 	.ndo_validate_addr	= eth_validate_addr,
 };
@@ -1527,7 +1527,9 @@ int __init init_module(void)
 	if (debug >= 0)
 		i596_debug = debug;
 	dev_82596 = i82596_probe(-1);
-	return PTR_ERR_OR_ZERO(dev_82596);
+	if (IS_ERR(dev_82596))
+		return PTR_ERR(dev_82596);
+	return 0;
 }
 
 void __exit cleanup_module(void)

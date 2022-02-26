@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * linux/fs/nfs/nfs4_fs.h
  *
@@ -145,7 +144,7 @@ struct nfs4_lock_state {
 	unsigned long		ls_flags;
 	struct nfs_seqid_counter	ls_seqid;
 	nfs4_stateid		ls_stateid;
-	refcount_t		ls_count;
+	atomic_t		ls_count;
 	fl_owner_t		ls_owner;
 };
 
@@ -239,8 +238,7 @@ int nfs_atomic_open(struct inode *, struct dentry *, struct file *,
 extern struct file_system_type nfs4_fs_type;
 
 /* nfs4namespace.c */
-struct rpc_clnt *nfs4_negotiate_security(struct rpc_clnt *, struct inode *,
-					 const struct qstr *);
+struct rpc_clnt *nfs4_negotiate_security(struct rpc_clnt *, struct inode *, struct qstr *);
 struct vfsmount *nfs4_submount(struct nfs_server *, struct dentry *,
 			       struct nfs_fh *, struct nfs_fattr *);
 int nfs4_replace_transport(struct nfs_server *server,
@@ -267,7 +265,7 @@ extern int nfs4_proc_fs_locations(struct rpc_clnt *, struct inode *, const struc
 extern int nfs4_proc_get_locations(struct inode *, struct nfs4_fs_locations *,
 		struct page *page, struct rpc_cred *);
 extern int nfs4_proc_fsid_present(struct inode *, struct rpc_cred *);
-extern struct rpc_clnt *nfs4_proc_lookup_mountpoint(struct inode *, const struct qstr *,
+extern struct rpc_clnt *nfs4_proc_lookup_mountpoint(struct inode *, struct qstr *,
 			    struct nfs_fh *, struct nfs_fattr *);
 extern int nfs4_proc_secinfo(struct inode *, const struct qstr *, struct nfs4_secinfo_flavors *);
 extern const struct xattr_handler *nfs4_xattr_handlers[];
@@ -307,17 +305,6 @@ _nfs4_state_protect(struct nfs_client *clp, unsigned long sp4_mode,
 	struct rpc_cred *newcred = NULL;
 	rpc_authflavor_t flavor;
 
-	if (sp4_mode == NFS_SP4_MACH_CRED_CLEANUP ||
-	    sp4_mode == NFS_SP4_MACH_CRED_PNFS_CLEANUP) {
-		/* Using machine creds for cleanup operations
-		 * is only relevent if the client credentials
-		 * might expire. So don't bother for
-		 * RPC_AUTH_UNIX.  If file was only exported to
-		 * sec=sys, the PUTFH would fail anyway.
-		 */
-		if ((*clntp)->cl_auth->au_flavor == RPC_AUTH_UNIX)
-			return false;
-	}
 	if (test_bit(sp4_mode, &clp->cl_sp4_flags)) {
 		spin_lock(&clp->cl_lock);
 		if (clp->cl_machine_cred != NULL)
@@ -490,7 +477,6 @@ extern struct nfs_subversion nfs_v4;
 struct dentry *nfs4_try_mount(int, const char *, struct nfs_mount_info *, struct nfs_subversion *);
 extern bool nfs4_disable_idmapping;
 extern unsigned short max_session_slots;
-extern unsigned short max_session_cb_slots;
 extern unsigned short send_implementation_id;
 extern bool recover_lost_locks;
 
@@ -513,13 +499,13 @@ static inline void nfs4_unregister_sysctl(void)
 #endif
 
 /* nfs4xdr.c */
-extern const struct rpc_procinfo nfs4_procedures[];
+extern struct rpc_procinfo nfs4_procedures[];
 
 struct nfs4_mount_data;
 
 /* callback_xdr.c */
-extern const struct svc_version nfs4_callback_version1;
-extern const struct svc_version nfs4_callback_version4;
+extern struct svc_version nfs4_callback_version1;
+extern struct svc_version nfs4_callback_version4;
 
 static inline void nfs4_stateid_copy(nfs4_stateid *dst, const nfs4_stateid *src)
 {

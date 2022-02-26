@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
 /*
  * Copyright (c) 2003-2007 Network Appliance, Inc. All rights reserved.
  *
@@ -56,6 +57,8 @@
 #define RPCRDMA_DEF_INLINE  (4096)	/* default inline thresh */
 #define RPCRDMA_MAX_INLINE  (65536)	/* max inline thresh */
 
+#define RPCRDMA_INLINE_PAD_THRESH  (512)/* payload threshold to pad (bytes) */
+
 /* Memory registration strategies, by number.
  * This is part of a kernel / user space API. Do not remove. */
 enum rpcrdma_memreg {
@@ -64,7 +67,7 @@ enum rpcrdma_memreg {
 	RPCRDMA_MEMWINDOWS,
 	RPCRDMA_MEMWINDOWS_ASYNC,
 	RPCRDMA_MTHCAFMR,
-	RPCRDMA_FRMR,
+	RPCRDMA_FRWR,
 	RPCRDMA_ALLPHYSICAL,
 	RPCRDMA_LAST
 };

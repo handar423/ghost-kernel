@@ -24,9 +24,8 @@
 #include <linux/module.h>
 #include <linux/ratelimit.h>
 #include <linux/crc-t10dif.h>
-#include <linux/t10-pi.h>
 #include <asm/unaligned.h>
-#include <scsi/scsi_proto.h>
+#include <scsi/scsi.h>
 #include <scsi/scsi_tcq.h>
 
 #include <target/target_core_base.h>
@@ -360,6 +359,10 @@ static sense_reason_t xdreadwrite_callback(struct se_cmd *cmd, bool success,
 	unsigned int offset;
 	sense_reason_t ret = TCM_NO_SENSE;
 	int i, count;
+
+	if (!success)
+		return 0;
+
 	/*
 	 * From sbc3r22.pdf section 5.48 XDWRITEREAD (10) command
 	 *
@@ -425,14 +428,8 @@ static sense_reason_t compare_and_write_post(struct se_cmd *cmd, bool success,
 	struct se_device *dev = cmd->se_dev;
 	sense_reason_t ret = TCM_NO_SENSE;
 
-	/*
-	 * Only set SCF_COMPARE_AND_WRITE_POST to force a response fall-through
-	 * within target_complete_ok_work() if the command was successfully
-	 * sent to the backend driver.
-	 */
 	spin_lock_irq(&cmd->t_state_lock);
-	if (cmd->transport_state & CMD_T_SENT) {
-		cmd->se_cmd_flags |= SCF_COMPARE_AND_WRITE_POST;
+	if (success) {
 		*post_ret = 1;
 
 		if (cmd->scsi_status == SAM_STAT_CHECK_CONDITION)
@@ -453,7 +450,8 @@ static sense_reason_t compare_and_write_callback(struct se_cmd *cmd, bool succes
 						 int *post_ret)
 {
 	struct se_device *dev = cmd->se_dev;
-	struct scatterlist *write_sg = NULL, *sg;
+	struct sg_table write_tbl = { };
+	struct scatterlist *write_sg, *sg;
 	unsigned char *buf = NULL, *addr;
 	struct sg_mapping_iter m;
 	unsigned int offset = 0, len;
@@ -494,14 +492,12 @@ static sense_reason_t compare_and_write_callback(struct se_cmd *cmd, bool succes
 		goto out;
 	}
 
-	write_sg = kmalloc_array(cmd->t_data_nents, sizeof(*write_sg),
-				 GFP_KERNEL);
-	if (!write_sg) {
+	if (sg_alloc_table(&write_tbl, cmd->t_data_nents, GFP_KERNEL) < 0) {
 		pr_err("Unable to allocate compare_and_write sg\n");
 		ret = TCM_OUT_OF_RESOURCES;
 		goto out;
 	}
-	sg_init_table(write_sg, cmd->t_data_nents);
+	write_sg = write_tbl.sgl;
 	/*
 	 * Setup verify and write data payloads from total NumberLBAs.
 	 */
@@ -597,7 +593,7 @@ out:
 	 * sbc_compare_and_write() before the original READ I/O submission.
 	 */
 	up(&dev->caw_sem);
-	kfree(write_sg);
+	sg_free_table(&write_tbl);
 	kfree(buf);
 	return ret;
 }
@@ -1235,7 +1231,7 @@ void
 sbc_dif_generate(struct se_cmd *cmd)
 {
 	struct se_device *dev = cmd->se_dev;
-	struct t10_pi_tuple *sdt;
+	struct se_dif_v1_tuple *sdt;
 	struct scatterlist *dsg = cmd->t_data_sg, *psg;
 	sector_t sector = cmd->t_task_lba;
 	void *daddr, *paddr;
@@ -1247,7 +1243,7 @@ sbc_dif_generate(struct se_cmd *cmd)
 		daddr = kmap_atomic(sg_page(dsg)) + dsg->offset;
 
 		for (j = 0; j < psg->length;
-				j += sizeof(*sdt)) {
+				j += sizeof(struct se_dif_v1_tuple)) {
 			__u16 crc;
 			unsigned int avail;
 
@@ -1300,7 +1296,7 @@ sbc_dif_generate(struct se_cmd *cmd)
 }
 
 static sense_reason_t
-sbc_dif_v1_verify(struct se_cmd *cmd, struct t10_pi_tuple *sdt,
+sbc_dif_v1_verify(struct se_cmd *cmd, struct se_dif_v1_tuple *sdt,
 		  __u16 crc, sector_t sector, unsigned int ei_lba)
 {
 	__be16 csum;
@@ -1390,7 +1386,7 @@ sbc_dif_verify(struct se_cmd *cmd, sector_t start, unsigned int sectors,
 	       unsigned int ei_lba, struct scatterlist *psg, int psg_off)
 {
 	struct se_device *dev = cmd->se_dev;
-	struct t10_pi_tuple *sdt;
+	struct se_dif_v1_tuple *sdt;
 	struct scatterlist *dsg = cmd->t_data_sg;
 	sector_t sector = start;
 	void *daddr, *paddr;
@@ -1405,7 +1401,7 @@ sbc_dif_verify(struct se_cmd *cmd, sector_t start, unsigned int sectors,
 
 		for (i = psg_off; i < psg->length &&
 				sector < start + sectors;
-				i += sizeof(*sdt)) {
+				i += sizeof(struct se_dif_v1_tuple)) {
 			__u16 crc;
 			unsigned int avail;
 
@@ -1427,7 +1423,7 @@ sbc_dif_verify(struct se_cmd *cmd, sector_t start, unsigned int sectors,
 				 (unsigned long long)sector, sdt->guard_tag,
 				 sdt->app_tag, be32_to_cpu(sdt->ref_tag));
 
-			if (sdt->app_tag == T10_PI_APP_ESCAPE) {
+			if (sdt->app_tag == cpu_to_be16(0xffff)) {
 				dsg_off += block_size;
 				goto next;
 			}

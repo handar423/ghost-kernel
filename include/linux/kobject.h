@@ -26,16 +26,14 @@
 #include <linux/kernel.h>
 #include <linux/wait.h>
 #include <linux/atomic.h>
-#include <linux/workqueue.h>
+#include <linux/rh_kabi.h>
 
 #define UEVENT_HELPER_PATH_LEN		256
 #define UEVENT_NUM_ENVP			32	/* number of env pointers */
 #define UEVENT_BUFFER_SIZE		2048	/* buffer for the variables */
 
-#ifdef CONFIG_UEVENT_HELPER
 /* path to the userspace helper executed on an event */
 extern char uevent_helper[];
-#endif
 
 /* counter to tag the uevent, read only except for the kobject core */
 extern u64 uevent_seqnum;
@@ -57,8 +55,6 @@ enum kobject_action {
 	KOBJ_MOVE,
 	KOBJ_ONLINE,
 	KOBJ_OFFLINE,
-	KOBJ_BIND,
-	KOBJ_UNBIND,
 	KOBJ_MAX
 };
 
@@ -68,11 +64,8 @@ struct kobject {
 	struct kobject		*parent;
 	struct kset		*kset;
 	struct kobj_type	*ktype;
-	struct kernfs_node	*sd; /* sysfs directory entry */
+	RH_KABI_REPLACE(struct sysfs_dirent *sd, struct kernfs_node	*sd)
 	struct kref		kref;
-#ifdef CONFIG_DEBUG_KOBJECT_RELEASE
-	struct delayed_work	release;
-#endif
 	unsigned int state_initialized:1;
 	unsigned int state_in_sysfs:1;
 	unsigned int state_add_uevent_sent:1;
@@ -82,9 +75,8 @@ struct kobject {
 
 extern __printf(2, 3)
 int kobject_set_name(struct kobject *kobj, const char *name, ...);
-extern __printf(2, 0)
-int kobject_set_name_vargs(struct kobject *kobj, const char *fmt,
-			   va_list vargs);
+extern int kobject_set_name_vargs(struct kobject *kobj, const char *fmt,
+				  va_list vargs);
 
 static inline const char *kobject_name(const struct kobject *kobj)
 {
@@ -126,7 +118,6 @@ struct kobj_type {
 };
 
 struct kobj_uevent_env {
-	char *argv[3];
 	char *envp[UEVENT_NUM_ENVP];
 	int envp_idx;
 	char buf[UEVENT_BUFFER_SIZE];
@@ -174,7 +165,7 @@ struct kset {
 	spinlock_t list_lock;
 	struct kobject kobj;
 	const struct kset_uevent_ops *uevent_ops;
-} __randomize_layout;
+};
 
 extern void kset_init(struct kset *kset);
 extern int __must_check kset_register(struct kset *kset);
@@ -219,9 +210,11 @@ extern struct kobject *firmware_kobj;
 int kobject_uevent(struct kobject *kobj, enum kobject_action action);
 int kobject_uevent_env(struct kobject *kobj, enum kobject_action action,
 			char *envp[]);
-int kobject_synth_uevent(struct kobject *kobj, const char *buf, size_t count);
 
 __printf(2, 3)
 int add_uevent_var(struct kobj_uevent_env *env, const char *format, ...);
+
+int kobject_action_type(const char *buf, size_t count,
+			enum kobject_action *type);
 
 #endif /* _KOBJECT_H_ */

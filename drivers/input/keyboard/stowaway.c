@@ -32,6 +32,7 @@
 #include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/input.h>
+#include <linux/init.h>
 #include <linux/serio.h>
 
 #define DRIVER_DESC	"Stowaway keyboard driver"
@@ -146,7 +147,7 @@ static void skbd_disconnect(struct serio *serio)
 	kfree(skbd);
 }
 
-static const struct serio_device_id skbd_serio_ids[] = {
+static struct serio_device_id skbd_serio_ids[] = {
 	{
 		.type	= SERIO_RS232,
 		.proto	= SERIO_STOWAWAY,

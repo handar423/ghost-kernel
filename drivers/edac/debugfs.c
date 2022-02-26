@@ -53,7 +53,7 @@ int __init edac_debugfs_init(void)
 
 void edac_debugfs_exit(void)
 {
-	debugfs_remove_recursive(edac_debugfs);
+	debugfs_remove(edac_debugfs);
 }
 
 int edac_create_debugfs_nodes(struct mem_ctl_info *mci)
@@ -98,7 +98,7 @@ int edac_create_debugfs_nodes(struct mem_ctl_info *mci)
 	mci->debugfs = parent;
 	return 0;
 nomem:
-	edac_debugfs_remove_recursive(mci->debugfs);
+	debugfs_remove(mci->debugfs);
 	return -ENOMEM;
 }
 

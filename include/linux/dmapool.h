@@ -11,10 +11,8 @@
 #ifndef LINUX_DMAPOOL_H
 #define	LINUX_DMAPOOL_H
 
-#include <linux/scatterlist.h>
 #include <asm/io.h>
-
-struct device;
+#include <asm/scatterlist.h>
 
 struct dma_pool *dma_pool_create(const char *name, struct device *dev, 
 			size_t size, size_t align, size_t allocation);

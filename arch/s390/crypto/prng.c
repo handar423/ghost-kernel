@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright IBM Corp. 2006, 2015
  * Author(s): Jan Glauber <jan.glauber@de.ibm.com>
@@ -18,13 +17,10 @@
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/mutex.h>
-#include <linux/cpufeature.h>
 #include <linux/random.h>
 #include <linux/slab.h>
-#include <linux/sched/signal.h>
-
 #include <asm/debug.h>
-#include <linux/uaccess.h>
+#include <asm/uaccess.h>
 #include <asm/timex.h>
 #include <asm/cpacf.h>
 
@@ -113,30 +109,22 @@ static const u8 initial_parm_block[32] __initconst = {
 
 /*** helper functions ***/
 
-/*
- * generate_entropy:
- * This algorithm produces 64 bytes of entropy data based on 1024
- * individual stckf() invocations assuming that each stckf() value
- * contributes 0.25 bits of entropy. So the caller gets 256 bit
- * entropy per 64 byte or 4 bits entropy per byte.
- */
 static int generate_entropy(u8 *ebuf, size_t nbytes)
 {
 	int n, ret = 0;
-	u8 *pg, *h, hash[64];
+	u8 *pg, *h, hash[32];
 
-	/* allocate 2 pages */
-	pg = (u8 *) __get_free_pages(GFP_KERNEL, 1);
+	pg = (u8 *) __get_free_page(GFP_KERNEL);
 	if (!pg) {
 		prng_errorflag = PRNG_GEN_ENTROPY_FAILED;
 		return -ENOMEM;
 	}
 
 	while (nbytes) {
-		/* fill pages with urandom bytes */
-		get_random_bytes(pg, 2*PAGE_SIZE);
-		/* exor pages with 1024 stckf values */
-		for (n = 0; n < 2 * PAGE_SIZE / sizeof(u64); n++) {
+		/* fill page with urandom bytes */
+		get_random_bytes(pg, PAGE_SIZE);
+		/* exor page with stckf values */
+		for (n = 0; n < PAGE_SIZE / sizeof(u64); n++) {
 			u64 *p = ((u64 *)pg) + n;
 			*p ^= get_tod_clock_fast();
 		}
@@ -145,8 +133,8 @@ static int generate_entropy(u8 *ebuf, size_t nbytes)
 			h = hash;
 		else
 			h = ebuf;
-		/* hash over the filled pages */
-		cpacf_kimd(CPACF_KIMD_SHA_512, h, pg, 2*PAGE_SIZE);
+		/* generate sha256 from this page */
+		cpacf_kimd(CPACF_KIMD_SHA_256, h, pg, PAGE_SIZE);
 		if (n < sizeof(hash))
 			memcpy(ebuf, hash, n);
 		ret += n;
@@ -154,7 +142,7 @@ static int generate_entropy(u8 *ebuf, size_t nbytes)
 		nbytes -= n;
 	}
 
-	free_pages((unsigned long)pg, 1);
+	free_page((unsigned long)pg);
 	return ret;
 }
 
@@ -345,7 +333,7 @@ static int __init prng_sha512_selftest(void)
 static int __init prng_sha512_instantiate(void)
 {
 	int ret, datalen;
-	u8 seed[64 + 32 + 16];
+	u8 seed[64];
 
 	pr_debug("prng runs in SHA-512 mode "
 		 "with chunksize=%d and reseed_limit=%u\n",
@@ -368,12 +356,12 @@ static int __init prng_sha512_instantiate(void)
 	if (ret)
 		goto outfree;
 
-	/* generate initial seed bytestring, with 256 + 128 bits entropy */
-	ret = generate_entropy(seed, 64 + 32);
-	if (ret != 64 + 32)
+	/* generate initial seed bytestring, first 48 bytes of entropy */
+	ret = generate_entropy(seed, 48);
+	if (ret != 48)
 		goto outfree;
 	/* followed by 16 bytes of unique nonce */
-	get_tod_clock_ext(seed + 64 + 32);
+	get_tod_clock_ext(seed + 48);
 
 	/* initial seed of the prno drng */
 	cpacf_prno(CPACF_PRNO_SHA512_DRNG_SEED,
@@ -406,9 +394,9 @@ static void prng_sha512_deinstantiate(void)
 static int prng_sha512_reseed(void)
 {
 	int ret;
-	u8 seed[64];
+	u8 seed[32];
 
-	/* fetch 256 bits of fresh entropy */
+	/* generate 32 bytes of fresh entropy */
 	ret = generate_entropy(seed, sizeof(seed));
 	if (ret != sizeof(seed))
 		return ret;
@@ -445,7 +433,7 @@ static int prng_sha512_generate(u8 *buf, size_t nbytes)
 		memcpy(prng_data->prev, buf, nbytes);
 	}
 
-	return nbytes;
+	return ret;
 }
 
 
@@ -518,10 +506,8 @@ static ssize_t prng_tdes_read(struct file *file, char __user *ubuf,
 		prng_data->prngws.byte_counter += n;
 		prng_data->prngws.reseed_counter += n;
 
-		if (copy_to_user(ubuf, prng_data->buf, chunk)) {
-			ret = -EFAULT;
-			break;
-		}
+		if (copy_to_user(ubuf, prng_data->buf, chunk))
+			return -EFAULT;
 
 		nbytes -= chunk;
 		ret += chunk;
@@ -624,13 +610,11 @@ static const struct file_operations prng_tdes_fops = {
 static struct miscdevice prng_sha512_dev = {
 	.name	= "prandom",
 	.minor	= MISC_DYNAMIC_MINOR,
-	.mode	= 0644,
 	.fops	= &prng_sha512_fops,
 };
 static struct miscdevice prng_tdes_dev = {
 	.name	= "prandom",
 	.minor	= MISC_DYNAMIC_MINOR,
-	.mode	= 0644,
 	.fops	= &prng_tdes_fops,
 };
 
@@ -871,5 +855,6 @@ static void __exit prng_exit(void)
 	}
 }
 
-module_cpu_feature_match(MSA, prng_init);
+
+module_init(prng_init);
 module_exit(prng_exit);

@@ -39,9 +39,7 @@
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <asm/io.h>
-#ifdef CONFIG_X86
-#include <asm/set_memory.h>
-#endif
+#include <asm/cacheflush.h>
 #include <asm/pgtable.h>
 #include "agp.h"
 

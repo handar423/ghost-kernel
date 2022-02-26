@@ -60,7 +60,7 @@
 #include <linux/moduleparam.h>
 #include <linux/netdevice.h>
 #include <linux/proc_fs.h>
-#include <linux/sched/signal.h>
+#include <linux/sched.h>
 #include <linux/signal.h>
 #include <linux/slab.h>
 #include <linux/stat.h>
@@ -989,18 +989,18 @@ static int usbatm_heavy_init(struct usbatm_data *instance)
 	return 0;
 }
 
-static void usbatm_tasklet_schedule(struct timer_list *t)
+static void usbatm_tasklet_schedule(unsigned long data)
 {
-	struct usbatm_channel *channel = from_timer(channel, t, delay);
-
-	tasklet_schedule(&channel->tasklet);
+	tasklet_schedule((struct tasklet_struct *) data);
 }
 
 static void usbatm_init_channel(struct usbatm_channel *channel)
 {
 	spin_lock_init(&channel->lock);
 	INIT_LIST_HEAD(&channel->list);
-	timer_setup(&channel->delay, usbatm_tasklet_schedule, 0);
+	channel->delay.function = usbatm_tasklet_schedule;
+	channel->delay.data = (unsigned long) &channel->tasklet;
+	init_timer(&channel->delay);
 }
 
 int usbatm_usb_probe(struct usb_interface *intf, const struct usb_device_id *id,

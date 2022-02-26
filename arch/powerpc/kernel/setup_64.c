@@ -10,7 +10,7 @@
  *      2 of the License, or (at your option) any later version.
  */
 
-#define DEBUG
+#undef DEBUG
 
 #include <linux/export.h>
 #include <linux/string.h>
@@ -35,10 +35,11 @@
 #include <linux/pci.h>
 #include <linux/lockdep.h>
 #include <linux/memblock.h>
+#include <linux/hugetlb.h>
 #include <linux/memory.h>
 #include <linux/nmi.h>
+#include <linux/debugfs.h>
 
-#include <asm/debugfs.h>
 #include <asm/io.h>
 #include <asm/kdump.h>
 #include <asm/prom.h>
@@ -50,7 +51,6 @@
 #include <asm/paca.h>
 #include <asm/time.h>
 #include <asm/cputable.h>
-#include <asm/dt_cpu_ftrs.h>
 #include <asm/sections.h>
 #include <asm/btext.h>
 #include <asm/nvram.h>
@@ -65,12 +65,11 @@
 #include <asm/xmon.h>
 #include <asm/udbg.h>
 #include <asm/kexec.h>
+#include <asm/mmu_context.h>
 #include <asm/code-patching.h>
+#include <asm/kvm_ppc.h>
+#include <asm/hugetlb.h>
 #include <asm/livepatch.h>
-#include <asm/opal.h>
-#include <asm/cputhreads.h>
-
-#include "setup.h"
 
 #ifdef DEBUG
 #define DBG(fmt...) udbg_printf(fmt)
@@ -81,58 +80,31 @@
 int spinning_secondaries;
 u64 ppc64_pft_size;
 
+/* Pick defaults since we might want to patch instructions
+ * before we've read this from the device tree.
+ */
 struct ppc64_caches ppc64_caches = {
-	.l1d = {
-		.block_size = 0x40,
-		.log_block_size = 6,
-	},
-	.l1i = {
-		.block_size = 0x40,
-		.log_block_size = 6
-	},
+	.dline_size = 0x40,
+	.log_dline_size = 6,
+	.iline_size = 0x40,
+	.log_iline_size = 6
 };
 EXPORT_SYMBOL_GPL(ppc64_caches);
 
-#if defined(CONFIG_PPC_BOOK3E) && defined(CONFIG_SMP)
-void __init setup_tlb_core_data(void)
-{
-	int cpu;
-
-	BUILD_BUG_ON(offsetof(struct tlb_core_data, lock) != 0);
-
-	for_each_possible_cpu(cpu) {
-		int first = cpu_first_thread_sibling(cpu);
-
-		/*
-		 * If we boot via kdump on a non-primary thread,
-		 * make sure we point at the thread that actually
-		 * set up this TLB.
-		 */
-		if (cpu_first_thread_sibling(boot_cpuid) == first)
-			first = boot_cpuid;
-
-		paca[cpu].tcd_ptr = &paca[first].tcd;
-
-		/*
-		 * If we have threads, we need either tlbsrx.
-		 * or e6500 tablewalk mode, or else TLB handlers
-		 * will be racy and could produce duplicate entries.
-		 * Should we panic instead?
-		 */
-		WARN_ONCE(smt_enabled_at_boot >= 2 &&
-			  !mmu_has_feature(MMU_FTR_USE_TLBRSRV) &&
-			  book3e_htw_mode != PPC_HTW_E6500,
-			  "%s: unsupported MMU configuration\n", __func__);
-	}
-}
-#endif
+/*
+ * These are used in binfmt_elf.c to put aux entries on the stack
+ * for each elf executable being started.
+ */
+int dcache_bsize;
+int icache_bsize;
+int ucache_bsize;
 
 #ifdef CONFIG_SMP
 
 static char *smt_enabled_cmdline;
 
 /* Look for ibm,smt-enabled OF option */
-void __init check_smt_enabled(void)
+static void check_smt_enabled(void)
 {
 	struct device_node *dn;
 	const char *smt_option;
@@ -181,10 +153,12 @@ static int __init early_smt_enabled(char *p)
 }
 early_param("smt-enabled", early_smt_enabled);
 
+#else
+#define check_smt_enabled()
 #endif /* CONFIG_SMP */
 
 /** Fix up paca fields required for the boot cpu */
-static void __init fixup_boot_paca(void)
+static void fixup_boot_paca(void)
 {
 	/* The boot cpu is started */
 	get_paca()->cpu_start = 1;
@@ -192,65 +166,17 @@ static void __init fixup_boot_paca(void)
 	get_paca()->data_offset = 0;
 }
 
-static void __init configure_exceptions(void)
-{
-	/*
-	 * Setup the trampolines from the lowmem exception vectors
-	 * to the kdump kernel when not using a relocatable kernel.
-	 */
-	setup_kdump_trampoline();
-
-	/* Under a PAPR hypervisor, we need hypercalls */
-	if (firmware_has_feature(FW_FEATURE_SET_MODE)) {
-		/* Enable AIL if possible */
-		pseries_enable_reloc_on_exc();
-
-		/*
-		 * Tell the hypervisor that we want our exceptions to
-		 * be taken in little endian mode.
-		 *
-		 * We don't call this for big endian as our calling convention
-		 * makes us always enter in BE, and the call may fail under
-		 * some circumstances with kdump.
-		 */
-#ifdef __LITTLE_ENDIAN__
-		pseries_little_endian_exceptions();
-#endif
-	} else {
-		/* Set endian mode using OPAL */
-		if (firmware_has_feature(FW_FEATURE_OPAL))
-			opal_configure_cores();
-
-		/* AIL on native is done in cpu_ready_for_interrupts() */
-	}
-}
-
 static void cpu_ready_for_interrupts(void)
 {
-	/*
-	 * Enable AIL if supported, and we are in hypervisor mode. This
-	 * is called once for every processor.
-	 *
-	 * If we are not in hypervisor mode the job is done once for
-	 * the whole partition in configure_exceptions().
-	 */
+	/* Set IR and DR in PACA MSR */
+	get_paca()->kernel_msr = MSR_KERNEL;
+
+	/* Enable AIL if supported */
 	if (cpu_has_feature(CPU_FTR_HVMODE) &&
 	    cpu_has_feature(CPU_FTR_ARCH_207S)) {
 		unsigned long lpcr = mfspr(SPRN_LPCR);
 		mtspr(SPRN_LPCR, lpcr | LPCR_AIL_3);
 	}
-
-	/*
-	 * Fixup HFSCR:TM based on CPU features. The bit is set by our
-	 * early asm init because at that point we haven't updated our
-	 * CPU features from firmware and device-tree. Here we have,
-	 * so let's do it.
-	 */
-	if (cpu_has_feature(CPU_FTR_HVMODE) && !cpu_has_feature(CPU_FTR_TM_COMP))
-		mtspr(SPRN_HFSCR, mfspr(SPRN_HFSCR) & ~HFSCR_TM);
-
-	/* Set IR and DR in PACA MSR */
-	get_paca()->kernel_msr = MSR_KERNEL;
 }
 
 /*
@@ -278,15 +204,16 @@ void __init early_setup(unsigned long dt_ptr)
 
 	/* -------- printk is _NOT_ safe to use here ! ------- */
 
-	/* Try new device tree based feature discovery ... */
-	if (!dt_cpu_ftrs_init(__va(dt_ptr)))
-		/* Otherwise use the old style CPU table */
-		identify_cpu(0, mfspr(SPRN_PVR));
+	/* Identify CPU type */
+	identify_cpu(0, mfspr(SPRN_PVR));
 
 	/* Assume we're on cpu 0 for now. Don't write to the paca yet! */
 	initialise_paca(&boot_paca, 0);
 	setup_paca(&boot_paca);
 	fixup_boot_paca();
+
+	/* Initialize lockdep early or else spinlocks will blow */
+	lockdep_init();
 
 	/* -------- printk is now safe to use ------- */
 
@@ -306,25 +233,15 @@ void __init early_setup(unsigned long dt_ptr)
 	setup_paca(&paca[boot_cpuid]);
 	fixup_boot_paca();
 
-	/*
-	 * Configure exception handlers. This include setting up trampolines
-	 * if needed, setting exception endian mode, etc...
-	 */
-	configure_exceptions();
+	/* Probe the machine type */
+	probe_machine();
 
-	/* Apply all the dynamic patching */
-	apply_feature_fixups();
-	setup_feature_keys();
+	setup_kdump_trampoline();
+
+	DBG("Found, Initializing memory management...\n");
 
 	/* Initialize the hash table or TLB handling */
 	early_init_mmu();
-
-	/*
-	 * After firmware and early platform setup code has set things up,
-	 * we note the SPR values for configurable control/performance
-	 * registers, and use those as initial defaults.
-	 */
-	record_spr_defaults();
 
 	/*
 	 * At this point, we can let interrupts switch to virtual mode
@@ -333,25 +250,30 @@ void __init early_setup(unsigned long dt_ptr)
 	 */
 	cpu_ready_for_interrupts();
 
-	DBG(" <- early_setup()\n");
+	/* Reserve large chunks of memory for use by CMA for KVM */
+	kvm_cma_reserve();
 
-#ifdef CONFIG_PPC_EARLY_DEBUG_BOOTX
 	/*
-	 * This needs to be done *last* (after the above DBG() even)
-	 *
-	 * Right after we return from this function, we turn on the MMU
-	 * which means the real-mode access trick that btext does will
-	 * no longer work, it needs to switch to using a real MMU
-	 * mapping. This call will ensure that it does
+	 * Reserve any gigantic pages requested on the command line.
+	 * memblock needs to have been initialized by the time this is
+	 * called since this will reserve memory.
 	 */
-	btext_map();
-#endif /* CONFIG_PPC_EARLY_DEBUG_BOOTX */
+	reserve_hugetlb_gpages();
+
+	/*
+	 * We enable ftrace here, but since we only support DYNAMIC_FTRACE, it
+	 * will only actually get enabled on the boot cpu much later once
+	 * ftrace itself has been initialized.
+	 */
+	this_cpu_enable_ftrace();
+
+	DBG(" <- early_setup()\n");
 }
 
 #ifdef CONFIG_SMP
 void early_setup_secondary(void)
 {
-	/* Mark interrupts disabled in PACA */
+	/* Mark interrupts enabled in PACA */
 	get_paca()->soft_enabled = 0;
 
 	/* Initialize the hash table or TLB handling */
@@ -367,34 +289,11 @@ void early_setup_secondary(void)
 
 #endif /* CONFIG_SMP */
 
-#if defined(CONFIG_SMP) || defined(CONFIG_KEXEC_CORE)
-static bool use_spinloop(void)
-{
-	if (IS_ENABLED(CONFIG_PPC_BOOK3S)) {
-		/*
-		 * See comments in head_64.S -- not all platforms insert
-		 * secondaries at __secondary_hold and wait at the spin
-		 * loop.
-		 */
-		if (firmware_has_feature(FW_FEATURE_OPAL))
-			return false;
-		return true;
-	}
-
-	/*
-	 * When book3e boots from kexec, the ePAPR spin table does
-	 * not get used.
-	 */
-	return of_property_read_bool(of_chosen, "linux,booted-from-kexec");
-}
-
+#if defined(CONFIG_SMP) || defined(CONFIG_KEXEC)
 void smp_release_cpus(void)
 {
 	unsigned long *ptr;
 	int i;
-
-	if (!use_spinloop())
-		return;
 
 	DBG(" -> smp_release_cpus()\n");
 
@@ -420,7 +319,7 @@ void smp_release_cpus(void)
 
 	DBG(" <- smp_release_cpus()\n");
 }
-#endif /* CONFIG_SMP || CONFIG_KEXEC_CORE */
+#endif /* CONFIG_SMP || CONFIG_KEXEC */
 
 /*
  * Initialize some remaining members of the ppc64_caches and systemcfg
@@ -429,143 +328,176 @@ void smp_release_cpus(void)
  * cache informations about the CPU that will be used by cache flush
  * routines and/or provided to userland
  */
-
-static void init_cache_info(struct ppc_cache_info *info, u32 size, u32 lsize,
-			    u32 bsize, u32 sets)
+static void __init initialize_cache_info(void)
 {
-	info->size = size;
-	info->sets = sets;
-	info->line_size = lsize;
-	info->block_size = bsize;
-	info->log_block_size = __ilog2(bsize);
-	if (bsize)
-		info->blocks_per_page = PAGE_SIZE / bsize;
-	else
-		info->blocks_per_page = 0;
-
-	if (sets == 0)
-		info->assoc = 0xffff;
-	else
-		info->assoc = size / (sets * lsize);
-}
-
-static bool __init parse_cache_info(struct device_node *np,
-				    bool icache,
-				    struct ppc_cache_info *info)
-{
-	static const char *ipropnames[] __initdata = {
-		"i-cache-size",
-		"i-cache-sets",
-		"i-cache-block-size",
-		"i-cache-line-size",
-	};
-	static const char *dpropnames[] __initdata = {
-		"d-cache-size",
-		"d-cache-sets",
-		"d-cache-block-size",
-		"d-cache-line-size",
-	};
-	const char **propnames = icache ? ipropnames : dpropnames;
-	const __be32 *sizep, *lsizep, *bsizep, *setsp;
-	u32 size, lsize, bsize, sets;
-	bool success = true;
-
-	size = 0;
-	sets = -1u;
-	lsize = bsize = cur_cpu_spec->dcache_bsize;
-	sizep = of_get_property(np, propnames[0], NULL);
-	if (sizep != NULL)
-		size = be32_to_cpu(*sizep);
-	setsp = of_get_property(np, propnames[1], NULL);
-	if (setsp != NULL)
-		sets = be32_to_cpu(*setsp);
-	bsizep = of_get_property(np, propnames[2], NULL);
-	lsizep = of_get_property(np, propnames[3], NULL);
-	if (bsizep == NULL)
-		bsizep = lsizep;
-	if (lsizep != NULL)
-		lsize = be32_to_cpu(*lsizep);
-	if (bsizep != NULL)
-		bsize = be32_to_cpu(*bsizep);
-	if (sizep == NULL || bsizep == NULL || lsizep == NULL)
-		success = false;
-
-	/*
-	 * OF is weird .. it represents fully associative caches
-	 * as "1 way" which doesn't make much sense and doesn't
-	 * leave room for direct mapped. We'll assume that 0
-	 * in OF means direct mapped for that reason.
-	 */
-	if (sets == 1)
-		sets = 0;
-	else if (sets == 0)
-		sets = 1;
-
-	init_cache_info(info, size, lsize, bsize, sets);
-
-	return success;
-}
-
-void __init initialize_cache_info(void)
-{
-	struct device_node *cpu = NULL, *l2, *l3 = NULL;
-	u32 pvr;
+	struct device_node *np;
+	unsigned long num_cpus = 0;
 
 	DBG(" -> initialize_cache_info()\n");
 
-	/*
-	 * All shipping POWER8 machines have a firmware bug that
-	 * puts incorrect information in the device-tree. This will
-	 * be (hopefully) fixed for future chips but for now hard
-	 * code the values if we are running on one of these
-	 */
-	pvr = PVR_VER(mfspr(SPRN_PVR));
-	if (pvr == PVR_POWER8 || pvr == PVR_POWER8E ||
-	    pvr == PVR_POWER8NVL) {
-						/* size    lsize   blk  sets */
-		init_cache_info(&ppc64_caches.l1i, 0x8000,   128,  128, 32);
-		init_cache_info(&ppc64_caches.l1d, 0x10000,  128,  128, 64);
-		init_cache_info(&ppc64_caches.l2,  0x80000,  128,  0,   512);
-		init_cache_info(&ppc64_caches.l3,  0x800000, 128,  0,   8192);
-	} else
-		cpu = of_find_node_by_type(NULL, "cpu");
-
-	/*
-	 * We're assuming *all* of the CPUs have the same
-	 * d-cache and i-cache sizes... -Peter
-	 */
-	if (cpu) {
-		if (!parse_cache_info(cpu, false, &ppc64_caches.l1d))
-			DBG("Argh, can't find dcache properties !\n");
-
-		if (!parse_cache_info(cpu, true, &ppc64_caches.l1i))
-			DBG("Argh, can't find icache properties !\n");
+	for_each_node_by_type(np, "cpu") {
+		num_cpus += 1;
 
 		/*
-		 * Try to find the L2 and L3 if any. Assume they are
-		 * unified and use the D-side properties.
+		 * We're assuming *all* of the CPUs have the same
+		 * d-cache and i-cache sizes... -Peter
 		 */
-		l2 = of_find_next_cache_node(cpu);
-		of_node_put(cpu);
-		if (l2) {
-			parse_cache_info(l2, false, &ppc64_caches.l2);
-			l3 = of_find_next_cache_node(l2);
-			of_node_put(l2);
-		}
-		if (l3) {
-			parse_cache_info(l3, false, &ppc64_caches.l3);
-			of_node_put(l3);
+		if (num_cpus == 1) {
+			const __be32 *sizep, *lsizep;
+			u32 size, lsize;
+
+			size = 0;
+			lsize = cur_cpu_spec->dcache_bsize;
+			sizep = of_get_property(np, "d-cache-size", NULL);
+			if (sizep != NULL)
+				size = be32_to_cpu(*sizep);
+			lsizep = of_get_property(np, "d-cache-block-size",
+						 NULL);
+			/* fallback if block size missing */
+			if (lsizep == NULL)
+				lsizep = of_get_property(np,
+							 "d-cache-line-size",
+							 NULL);
+			if (lsizep != NULL)
+				lsize = be32_to_cpu(*lsizep);
+			if (sizep == NULL || lsizep == NULL)
+				DBG("Argh, can't find dcache properties ! "
+				    "sizep: %p, lsizep: %p\n", sizep, lsizep);
+
+			ppc64_caches.dsize = size;
+			ppc64_caches.dline_size = lsize;
+			ppc64_caches.log_dline_size = __ilog2(lsize);
+			ppc64_caches.dlines_per_page = PAGE_SIZE / lsize;
+
+			size = 0;
+			lsize = cur_cpu_spec->icache_bsize;
+			sizep = of_get_property(np, "i-cache-size", NULL);
+			if (sizep != NULL)
+				size = be32_to_cpu(*sizep);
+			lsizep = of_get_property(np, "i-cache-block-size",
+						 NULL);
+			if (lsizep == NULL)
+				lsizep = of_get_property(np,
+							 "i-cache-line-size",
+							 NULL);
+			if (lsizep != NULL)
+				lsize = be32_to_cpu(*lsizep);
+			if (sizep == NULL || lsizep == NULL)
+				DBG("Argh, can't find icache properties ! "
+				    "sizep: %p, lsizep: %p\n", sizep, lsizep);
+
+			ppc64_caches.isize = size;
+			ppc64_caches.iline_size = lsize;
+			ppc64_caches.log_iline_size = __ilog2(lsize);
+			ppc64_caches.ilines_per_page = PAGE_SIZE / lsize;
 		}
 	}
 
-	/* For use by binfmt_elf */
-	dcache_bsize = ppc64_caches.l1d.block_size;
-	icache_bsize = ppc64_caches.l1i.block_size;
-
-	cur_cpu_spec->dcache_bsize = dcache_bsize;
-	cur_cpu_spec->icache_bsize = icache_bsize;
-
 	DBG(" <- initialize_cache_info()\n");
+}
+
+
+/*
+ * Do some initial setup of the system.  The parameters are those which 
+ * were passed in from the bootloader.
+ */
+void __init setup_system(void)
+{
+	DBG(" -> setup_system()\n");
+
+	/* Apply the CPUs-specific and firmware specific fixups to kernel
+	 * text (nop out sections not relevant to this CPU or this firmware)
+	 */
+	do_feature_fixups(cur_cpu_spec->cpu_features,
+			  &__start___ftr_fixup, &__stop___ftr_fixup);
+	do_feature_fixups(cur_cpu_spec->mmu_features,
+			  &__start___mmu_ftr_fixup, &__stop___mmu_ftr_fixup);
+	do_feature_fixups(powerpc_firmware_features,
+			  &__start___fw_ftr_fixup, &__stop___fw_ftr_fixup);
+	do_lwsync_fixups(cur_cpu_spec->cpu_features,
+			 &__start___lwsync_fixup, &__stop___lwsync_fixup);
+	do_final_fixups();
+
+	/*
+	 * Unflatten the device-tree passed by prom_init or kexec
+	 */
+	unflatten_device_tree();
+
+	/*
+	 * Fill the ppc64_caches & systemcfg structures with informations
+ 	 * retrieved from the device-tree.
+	 */
+	initialize_cache_info();
+
+#ifdef CONFIG_PPC_RTAS
+	/*
+	 * Initialize RTAS if available
+	 */
+	rtas_initialize();
+#endif /* CONFIG_PPC_RTAS */
+
+	/*
+	 * Check if we have an initrd provided via the device-tree
+	 */
+	check_for_initrd();
+
+	/*
+	 * Do some platform specific early initializations, that includes
+	 * setting up the hash table pointers. It also sets up some interrupt-mapping
+	 * related options that will be used by finish_device_tree()
+	 */
+	if (ppc_md.init_early)
+		ppc_md.init_early();
+
+ 	/*
+	 * We can discover serial ports now since the above did setup the
+	 * hash table management for us, thus ioremap works. We do that early
+	 * so that further code can be debugged
+	 */
+	find_legacy_serial_ports();
+
+	/*
+	 * Register early console
+	 */
+	register_early_udbg_console();
+
+	/*
+	 * Initialize xmon
+	 */
+	xmon_setup();
+
+	smp_setup_cpu_maps();
+	check_smt_enabled();
+
+#ifdef CONFIG_SMP
+	/* Release secondary cpus out of their spinloops at 0x60 now that
+	 * we can map physical -> logical CPU ids
+	 */
+	smp_release_cpus();
+#endif
+
+	printk("Starting Linux PPC64 %s\n", init_utsname()->version);
+
+	printk("-----------------------------------------------------\n");
+	printk("ppc64_pft_size                = 0x%llx\n", ppc64_pft_size);
+	printk("physicalMemorySize            = 0x%llx\n", memblock_phys_mem_size());
+	if (ppc64_caches.dline_size != 0x80)
+		printk("ppc64_caches.dcache_line_size = 0x%x\n",
+		       ppc64_caches.dline_size);
+	if (ppc64_caches.iline_size != 0x80)
+		printk("ppc64_caches.icache_line_size = 0x%x\n",
+		       ppc64_caches.iline_size);
+#ifdef CONFIG_PPC_STD_MMU_64
+	if (htab_address)
+		printk("htab_address                  = 0x%p\n", htab_address);
+	printk("htab_hash_mask                = 0x%lx\n", htab_hash_mask);
+#endif /* CONFIG_PPC_STD_MMU_64 */
+	if (PHYSICAL_START > 0)
+		printk("physical_start                = 0x%llx\n",
+		       (unsigned long long)PHYSICAL_START);
+	printk("-----------------------------------------------------\n");
+
+	DBG(" <- setup_system()\n");
 }
 
 /* This returns the limit below which memory accesses to the linear
@@ -573,7 +505,7 @@ void __init initialize_cache_info(void)
  * used to allocate interrupt or emergency stacks for which our
  * exception entry path doesn't deal with being interrupted.
  */
-static __init u64 safe_stack_limit(void)
+static u64 safe_stack_limit(void)
 {
 #ifdef CONFIG_PPC_BOOK3E
 	/* Freescale BookE bolts the entire linear mapping */
@@ -582,9 +514,6 @@ static __init u64 safe_stack_limit(void)
 	/* Other BookE, we assume the first GB is bolted */
 	return 1ul << 30;
 #else
-	if (early_radix_enabled())
-		return ULONG_MAX;
-
 	/* BookS, the first segment is bolted */
 	if (mmu_has_feature(MMU_FTR_1T_SEGMENT))
 		return 1UL << SID_SHIFT_1T;
@@ -592,15 +521,14 @@ static __init u64 safe_stack_limit(void)
 #endif
 }
 
-void __init irqstack_early_init(void)
+static void __init irqstack_early_init(void)
 {
 	u64 limit = safe_stack_limit();
 	unsigned int i;
 
 	/*
 	 * Interrupt stacks must be in the first segment since we
-	 * cannot afford to take SLB misses on them. They are not
-	 * accessed in realmode.
+	 * cannot afford to take SLB misses on them.
 	 */
 	for_each_possible_cpu(i) {
 		softirq_ctx[i] = (struct thread_info *)
@@ -613,54 +541,36 @@ void __init irqstack_early_init(void)
 }
 
 #ifdef CONFIG_PPC_BOOK3E
-void __init exc_lvl_early_init(void)
+static void __init exc_lvl_early_init(void)
 {
+	extern unsigned int interrupt_base_book3e;
+	extern unsigned int exc_debug_debug_book3e;
+
 	unsigned int i;
-	unsigned long sp;
 
 	for_each_possible_cpu(i) {
-		sp = memblock_alloc(THREAD_SIZE, THREAD_SIZE);
-		critirq_ctx[i] = (struct thread_info *)__va(sp);
-		paca[i].crit_kstack = __va(sp + THREAD_SIZE);
-
-		sp = memblock_alloc(THREAD_SIZE, THREAD_SIZE);
-		dbgirq_ctx[i] = (struct thread_info *)__va(sp);
-		paca[i].dbg_kstack = __va(sp + THREAD_SIZE);
-
-		sp = memblock_alloc(THREAD_SIZE, THREAD_SIZE);
-		mcheckirq_ctx[i] = (struct thread_info *)__va(sp);
-		paca[i].mc_kstack = __va(sp + THREAD_SIZE);
+		critirq_ctx[i] = (struct thread_info *)
+			__va(memblock_alloc(THREAD_SIZE, THREAD_SIZE));
+		dbgirq_ctx[i] = (struct thread_info *)
+			__va(memblock_alloc(THREAD_SIZE, THREAD_SIZE));
+		mcheckirq_ctx[i] = (struct thread_info *)
+			__va(memblock_alloc(THREAD_SIZE, THREAD_SIZE));
 	}
 
 	if (cpu_has_feature(CPU_FTR_DEBUG_LVL_EXC))
-		patch_exception(0x040, exc_debug_debug_book3e);
+		patch_branch(&interrupt_base_book3e + (0x040 / 4) + 1,
+			     (unsigned long)&exc_debug_debug_book3e, 0);
 }
+#else
+#define exc_lvl_early_init()
 #endif
-
-/*
- * Emergency stacks are used for a range of things, from asynchronous
- * NMIs (system reset, machine check) to synchronous, process context.
- * We set preempt_count to zero, even though that isn't necessarily correct. To
- * get the right value we'd need to copy it from the previous thread_info, but
- * doing that might fault causing more problems.
- * TODO: what to do with accounting?
- */
-static void emerg_stack_init_thread_info(struct thread_info *ti, int cpu)
-{
-	ti->task = NULL;
-	ti->cpu = cpu;
-	ti->preempt_count = 0;
-	ti->local_flags = 0;
-	ti->flags = 0;
-	klp_init_thread_info(ti);
-}
 
 /*
  * Stack space used when we detect a bad kernel stack pointer, and
  * early in SMP boots before relocation is enabled. Exclusive emergency
  * stack for machine checks.
  */
-void __init emergency_stack_init(void)
+static void __init emergency_stack_init(void)
 {
 	u64 limit;
 	unsigned int i;
@@ -671,37 +581,115 @@ void __init emergency_stack_init(void)
 	 * aligned.
 	 *
 	 * Since we use these as temporary stacks during secondary CPU
-	 * bringup, machine check, system reset, and HMI, we need to get
-	 * at them in real mode. This means they must also be within the RMO
-	 * region.
-	 *
-	 * The IRQ stacks allocated elsewhere in this file are zeroed and
-	 * initialized in kernel/irq.c. These are initialized here in order
-	 * to have emergency stacks available as early as possible.
+	 * bringup, we need to get at them in real mode. This means they
+	 * must also be within the RMO region.
 	 */
 	limit = min(safe_stack_limit(), ppc64_rma_size);
 
 	for_each_possible_cpu(i) {
 		struct thread_info *ti;
 		ti = __va(memblock_alloc_base(THREAD_SIZE, THREAD_SIZE, limit));
-		memset(ti, 0, THREAD_SIZE);
-		emerg_stack_init_thread_info(ti, i);
+		klp_init_thread_info(ti);
 		paca[i].emergency_sp = (void *)ti + THREAD_SIZE;
 
 #ifdef CONFIG_PPC_BOOK3S_64
-		/* emergency stack for NMI exception handling. */
-		ti = __va(memblock_alloc_base(THREAD_SIZE, THREAD_SIZE, limit));
-		memset(ti, 0, THREAD_SIZE);
-		emerg_stack_init_thread_info(ti, i);
-		paca[i].nmi_emergency_sp = (void *)ti + THREAD_SIZE;
-
 		/* emergency stack for machine check exception handling. */
 		ti = __va(memblock_alloc_base(THREAD_SIZE, THREAD_SIZE, limit));
-		memset(ti, 0, THREAD_SIZE);
-		emerg_stack_init_thread_info(ti, i);
+		klp_init_thread_info(ti);
 		paca[i].mc_emergency_sp = (void *)ti + THREAD_SIZE;
 #endif
 	}
+}
+
+/*
+ * Called into from start_kernel this initializes bootmem, which is used
+ * to manage page allocation until mem_init is called.
+ */
+void __init setup_arch(char **cmdline_p)
+{
+	ppc64_boot_msg(0x12, "Setup Arch");
+
+	*cmdline_p = cmd_line;
+
+	/*
+	 * Set cache line size based on type of cpu as a default.
+	 * Systems with OF can look in the properties on the cpu node(s)
+	 * for a possibly more accurate value.
+	 */
+	dcache_bsize = ppc64_caches.dline_size;
+	icache_bsize = ppc64_caches.iline_size;
+
+	if (ppc_md.panic)
+		setup_panic();
+
+	klp_init_thread_info(&init_thread_info);
+
+	init_mm.start_code = (unsigned long)_stext;
+	init_mm.end_code = (unsigned long) _etext;
+	init_mm.end_data = (unsigned long) _edata;
+	init_mm.brk = klimit;
+#ifdef CONFIG_PPC_64K_PAGES
+	init_mm.context.pte_frag = NULL;
+#endif
+#ifdef CONFIG_SPAPR_TCE_IOMMU
+	mm_iommu_init(&init_mm);
+#endif
+	irqstack_early_init();
+	exc_lvl_early_init();
+	emergency_stack_init();
+
+#ifdef CONFIG_PPC_STD_MMU_64
+	stabs_alloc();
+#endif
+	/* set up the bootmem stuff with available memory */
+	do_init_bootmem();
+	sparse_init();
+
+#ifdef CONFIG_DUMMY_CONSOLE
+	conswitchp = &dummy_con;
+#endif
+
+	if (ppc_md.setup_arch)
+		ppc_md.setup_arch();
+
+	setup_barrier_nospec();
+
+	paging_init();
+
+	/* Initialize the MMU context management stuff */
+	mmu_context_init();
+
+	/* Interrupt code needs to be 64K-aligned */
+	if ((unsigned long)_stext & 0xffff)
+		panic("Kernelbase not 64K-aligned (0x%lx)!\n",
+		      (unsigned long)_stext);
+
+	ppc64_boot_msg(0x15, "Setup Done");
+}
+
+
+/* ToDo: do something useful if ppc_md is not yet setup. */
+#define PPC64_LINUX_FUNCTION 0x0f000000
+#define PPC64_IPL_MESSAGE 0xc0000000
+#define PPC64_TERM_MESSAGE 0xb0000000
+
+static void ppc64_do_msg(unsigned int src, const char *msg)
+{
+	if (ppc_md.progress) {
+		char buf[128];
+
+		sprintf(buf, "%08X\n", src);
+		ppc_md.progress(buf, 0);
+		snprintf(buf, 128, "%s", msg);
+		ppc_md.progress(buf, 0);
+	}
+}
+
+/* Print a boot progress message. */
+void ppc64_boot_msg(unsigned int src, const char *msg)
+{
+	ppc64_do_msg(PPC64_LINUX_FUNCTION|PPC64_IPL_MESSAGE|src, msg);
+	printk("[boot]%04x %s\n", src, msg);
 }
 
 #ifdef CONFIG_SMP
@@ -709,7 +697,7 @@ void __init emergency_stack_init(void)
 
 static void * __init pcpu_fc_alloc(unsigned int cpu, size_t size, size_t align)
 {
-	return __alloc_bootmem_node(NODE_DATA(early_cpu_to_node(cpu)), size, align,
+	return __alloc_bootmem_node(NODE_DATA(cpu_to_node(cpu)), size, align,
 				    __pa(MAX_DMA_ADDRESS));
 }
 
@@ -720,7 +708,7 @@ static void __init pcpu_fc_free(void *ptr, size_t size)
 
 static int pcpu_cpu_distance(unsigned int from, unsigned int to)
 {
-	if (early_cpu_to_node(from) == early_cpu_to_node(to))
+	if (cpu_to_node(from) == cpu_to_node(to))
 		return LOCAL_DISTANCE;
 	else
 		return REMOTE_DISTANCE;
@@ -775,37 +763,29 @@ struct ppc_pci_io ppc_pci_io;
 EXPORT_SYMBOL(ppc_pci_io);
 #endif
 
-#ifdef CONFIG_HARDLOCKUP_DETECTOR_PERF
+#ifdef CONFIG_HARDLOCKUP_DETECTOR
 u64 hw_nmi_get_sample_period(int watchdog_thresh)
 {
 	return ppc_proc_freq * watchdog_thresh;
 }
-#endif
 
 /*
- * The perf based hardlockup detector breaks PMU event based branches, so
- * disable it by default. Book3S has a soft-nmi hardlockup detector based
- * on the decrementer interrupt, so it does not suffer from this problem.
- *
- * It is likely to get false positives in VM guests, so disable it there
- * by default too.
+ * The hardlockup detector breaks PMU event based branches and is likely
+ * to get false positives in KVM guests, so disable it by default.
  */
 static int __init disable_hardlockup_detector(void)
 {
-#ifdef CONFIG_HARDLOCKUP_DETECTOR_PERF
 	hardlockup_detector_disable();
-#else
-	if (firmware_has_feature(FW_FEATURE_LPAR))
-		hardlockup_detector_disable();
-#endif
 
 	return 0;
 }
 early_initcall(disable_hardlockup_detector);
+#endif
 
 #ifdef CONFIG_PPC_BOOK3S_64
 static enum l1d_flush_type enabled_flush_types;
-static void *l1d_flush_fallback_area;
+#define MAX_L1D_SIZE (64 * 1024)
+static char l1d_flush_fallback_area[2 * MAX_L1D_SIZE] __page_aligned_bss;
 static bool no_rfi_flush;
 bool rfi_flush;
 
@@ -839,9 +819,6 @@ static void do_nothing(void *unused)
 
 void rfi_flush_enable(bool enable)
 {
-	if (rfi_flush == enable)
-		return;
-
 	if (enable) {
 		do_rfi_flush_fixups(enabled_flush_types);
 		on_each_cpu(do_nothing, NULL, 1);
@@ -851,67 +828,61 @@ void rfi_flush_enable(bool enable)
 	rfi_flush = enable;
 }
 
-static void init_fallback_flush(void)
-{
-	u64 l1d_size, limit;
-	int cpu;
-
-	l1d_size = ppc64_caches.l1d.size;
-	limit = min(safe_stack_limit(), ppc64_rma_size);
-
-	/*
-	 * Align to L1d size, and size it at 2x L1d size, to catch possible
-	 * hardware prefetch runoff. We don't have a recipe for load patterns to
-	 * reliably avoid the prefetcher.
-	 */
-	l1d_flush_fallback_area = __va(memblock_alloc_base(l1d_size * 2, l1d_size, limit));
-	memset(l1d_flush_fallback_area, 0, l1d_size * 2);
-
-	for_each_possible_cpu(cpu) {
-		/*
-		 * The fallback flush is currently coded for 8-way
-		 * associativity. Different associativity is possible, but it
-		 * will be treated as 8-way and may not evict the lines as
-		 * effectively.
-		 *
-		 * 128 byte lines are mandatory.
-		 */
-		u64 c = l1d_size / 8;
-
-		paca[cpu].rfi_flush_fallback_area = l1d_flush_fallback_area;
-		paca[cpu].l1d_flush_congruence = c;
-		paca[cpu].l1d_flush_sets = c / 128;
-	}
-}
-
-void __init setup_rfi_flush(enum l1d_flush_type types, bool enable)
+void setup_rfi_flush(enum l1d_flush_type types, bool enable)
 {
 	if (types & L1D_FLUSH_FALLBACK) {
-		pr_info("rfi-flush: Using fallback displacement flush\n");
-		init_fallback_flush();
+		int cpu;
+		u64 l1d_size = ppc64_caches.dsize;
+
+		pr_info("rfi-flush: fallback displacement flush available\n");
+
+		/*
+		 * We allocate 2x L1d size for the dummy area, to
+		 * catch possible hardware prefetch runoff.
+		 *
+		 * We can't use memblock_alloc here because bootmem has
+		 * been initialized, and the bootmem APIs don't work well
+		 * with an upper limit we need, so we allocate it statically
+		 * from BSS. The biggest L1d supported by this kernel is
+		 * 64kB (POWER8), so 128kB is reserved above.
+		 */
+
+		WARN_ON(l1d_size > MAX_L1D_SIZE);
+
+		for_each_possible_cpu(cpu) {
+			struct paca_aux_struct *paca_aux = paca_aux_of(cpu);
+			paca_aux->rfi_flush_fallback_area = l1d_flush_fallback_area;
+			paca_aux->l1d_flush_size = l1d_size;
+		}
 	}
 
 	if (types & L1D_FLUSH_ORI)
-		pr_info("rfi-flush: Using ori type flush\n");
+		pr_info("rfi-flush: ori type flush available\n");
 
 	if (types & L1D_FLUSH_MTTRIG)
-		pr_info("rfi-flush: Using mttrig type flush\n");
+		pr_info("rfi-flush: mttrig type flush available\n");
 
 	enabled_flush_types = types;
 
-	if (!no_rfi_flush)
+	if (!no_rfi_flush && !cpu_mitigations_off())
 		rfi_flush_enable(enable);
 }
 
 #ifdef CONFIG_DEBUG_FS
 static int rfi_flush_set(void *data, u64 val)
 {
+	bool enable;
+
 	if (val == 1)
-		rfi_flush_enable(true);
+		enable = true;
 	else if (val == 0)
-		rfi_flush_enable(false);
+		enable = false;
 	else
 		return -EINVAL;
+
+	/* Only do anything if we're changing state */
+	if (enable != rfi_flush)
+		rfi_flush_enable(enable);
 
 	return 0;
 }
@@ -931,12 +902,4 @@ static __init int rfi_flush_debugfs_init(void)
 }
 device_initcall(rfi_flush_debugfs_init);
 #endif
-
-ssize_t cpu_show_meltdown(struct device *dev, struct device_attribute *attr, char *buf)
-{
-	if (rfi_flush)
-		return sprintf(buf, "Mitigation: RFI Flush\n");
-
-	return sprintf(buf, "Vulnerable\n");
-}
 #endif /* CONFIG_PPC_BOOK3S_64 */

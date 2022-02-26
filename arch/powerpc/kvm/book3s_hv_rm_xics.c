@@ -16,13 +16,13 @@
 #include <asm/kvm_ppc.h>
 #include <asm/hvcall.h>
 #include <asm/xics.h>
+#include <asm/debug.h>
 #include <asm/synch.h>
 #include <asm/cputhreads.h>
 #include <asm/pgtable.h>
 #include <asm/ppc-opcode.h>
 #include <asm/pnv-pci.h>
 #include <asm/opal.h>
-#include <asm/smp.h>
 
 #include "book3s_xics.h"
 
@@ -30,12 +30,10 @@
 
 int h_ipi_redirect = 1;
 EXPORT_SYMBOL(h_ipi_redirect);
-int kvm_irq_bypass = 1;
-EXPORT_SYMBOL(kvm_irq_bypass);
 
 static void icp_rm_deliver_irq(struct kvmppc_xics *xics, struct kvmppc_icp *icp,
 			    u32 new_irq, bool check_resend);
-static int xics_opal_set_server(unsigned int hw_irq, int server_cpu);
+static int xics_opal_rm_set_server(unsigned int hw_irq, int server_cpu);
 
 /* -- ICS routines -- */
 static void ics_rm_check_resend(struct kvmppc_xics *xics,
@@ -61,9 +59,7 @@ static inline void icp_send_hcore_msg(int hcore, struct kvm_vcpu *vcpu)
 	hcpu = hcore << threads_shift;
 	kvmppc_host_rm_ops_hv->rm_core[hcore].rm_data = vcpu;
 	smp_muxed_ipi_set_message(hcpu, PPC_MSG_RM_HOST_ACTION);
-	kvmppc_set_host_ipi(hcpu, 1);
-	smp_mb();
-	kvmhv_rm_send_ipi(hcpu);
+	icp_native_cause_ipi_rm(hcpu);
 }
 #else
 static inline void icp_send_hcore_msg(int hcore, struct kvm_vcpu *vcpu) { }
@@ -446,7 +442,7 @@ static void icp_rm_down_cppr(struct kvmppc_xics *xics, struct kvmppc_icp *icp,
 	 * in virtual mode.
 	 */
 	do {
-		old_state = new_state = READ_ONCE(icp->state);
+		old_state = new_state = ACCESS_ONCE(icp->state);
 
 		/* Down_CPPR */
 		new_state.cppr = new_cppr;
@@ -484,7 +480,7 @@ static void icp_rm_down_cppr(struct kvmppc_xics *xics, struct kvmppc_icp *icp,
 }
 
 
-unsigned long xics_rm_h_xirr(struct kvm_vcpu *vcpu)
+unsigned long kvmppc_rm_h_xirr(struct kvm_vcpu *vcpu)
 {
 	union kvmppc_icp_state old_state, new_state;
 	struct kvmppc_xics *xics = vcpu->kvm->arch.xics;
@@ -505,7 +501,7 @@ unsigned long xics_rm_h_xirr(struct kvm_vcpu *vcpu)
 	 * pending priority
 	 */
 	do {
-		old_state = new_state = READ_ONCE(icp->state);
+		old_state = new_state = ACCESS_ONCE(icp->state);
 
 		xirr = old_state.xisr | (((u32)old_state.cppr) << 24);
 		if (!old_state.xisr)
@@ -522,8 +518,8 @@ unsigned long xics_rm_h_xirr(struct kvm_vcpu *vcpu)
 	return check_too_hard(xics, icp);
 }
 
-int xics_rm_h_ipi(struct kvm_vcpu *vcpu, unsigned long server,
-		  unsigned long mfrr)
+int kvmppc_rm_h_ipi(struct kvm_vcpu *vcpu, unsigned long server,
+		    unsigned long mfrr)
 {
 	union kvmppc_icp_state old_state, new_state;
 	struct kvmppc_xics *xics = vcpu->kvm->arch.xics;
@@ -571,7 +567,7 @@ int xics_rm_h_ipi(struct kvm_vcpu *vcpu, unsigned long server,
 	 * whenever the MFRR is made less favored.
 	 */
 	do {
-		old_state = new_state = READ_ONCE(icp->state);
+		old_state = new_state = ACCESS_ONCE(icp->state);
 
 		/* Set_MFRR */
 		new_state.mfrr = mfrr;
@@ -609,7 +605,7 @@ int xics_rm_h_ipi(struct kvm_vcpu *vcpu, unsigned long server,
 	return check_too_hard(xics, this_icp);
 }
 
-int xics_rm_h_cppr(struct kvm_vcpu *vcpu, unsigned long cppr)
+int kvmppc_rm_h_cppr(struct kvm_vcpu *vcpu, unsigned long cppr)
 {
 	union kvmppc_icp_state old_state, new_state;
 	struct kvmppc_xics *xics = vcpu->kvm->arch.xics;
@@ -646,7 +642,7 @@ int xics_rm_h_cppr(struct kvm_vcpu *vcpu, unsigned long cppr)
 	icp_rm_clr_vcpu_irq(icp->vcpu);
 
 	do {
-		old_state = new_state = READ_ONCE(icp->state);
+		old_state = new_state = ACCESS_ONCE(icp->state);
 
 		reject = 0;
 		new_state.cppr = cppr;
@@ -719,7 +715,7 @@ static int ics_rm_eoi(struct kvm_vcpu *vcpu, u32 irq)
 			++vcpu->stat.pthru_host;
 			if (state->intr_cpu != pcpu) {
 				++vcpu->stat.pthru_bad_aff;
-				xics_opal_set_server(state->host_irq, pcpu);
+				xics_opal_rm_set_server(state->host_irq, pcpu);
 			}
 			state->intr_cpu = -1;
 		}
@@ -729,7 +725,7 @@ static int ics_rm_eoi(struct kvm_vcpu *vcpu, u32 irq)
 	return check_too_hard(xics, icp);
 }
 
-int xics_rm_h_eoi(struct kvm_vcpu *vcpu, unsigned long xirr)
+int kvmppc_rm_h_eoi(struct kvm_vcpu *vcpu, unsigned long xirr)
 {
 	struct kvmppc_xics *xics = vcpu->kvm->arch.xics;
 	struct kvmppc_icp *icp = vcpu->arch.icp;
@@ -763,9 +759,9 @@ int xics_rm_h_eoi(struct kvm_vcpu *vcpu, unsigned long xirr)
 
 unsigned long eoi_rc;
 
-static void icp_eoi(struct irq_chip *c, u32 hwirq, __be32 xirr, bool *again)
+static void icp_eoi(struct irq_chip *c, u32 hwirq, u32 xirr)
 {
-	void __iomem *xics_phys;
+	unsigned long xics_phys;
 	int64_t rc;
 
 	rc = pnv_opal_pci_msi_eoi(c, hwirq);
@@ -777,19 +773,14 @@ static void icp_eoi(struct irq_chip *c, u32 hwirq, __be32 xirr, bool *again)
 
 	/* EOI it */
 	xics_phys = local_paca->kvm_hstate.xics_phys;
-	if (xics_phys) {
-		__raw_rm_writel(xirr, xics_phys + XICS_XIRR);
-	} else {
-		rc = opal_int_eoi(be32_to_cpu(xirr));
-		*again = rc > 0;
-	}
+	_stwcix(xics_phys + XICS_XIRR, xirr);
 }
 
-static int xics_opal_set_server(unsigned int hw_irq, int server_cpu)
+static int xics_opal_rm_set_server(unsigned int hw_irq, int server_cpu)
 {
 	unsigned int mangle_cpu = get_hard_smp_processor_id(server_cpu) << 2;
 
-	return opal_set_xive(hw_irq, mangle_cpu, DEFAULT_PRIORITY);
+	return opal_rm_set_xive(hw_irq, mangle_cpu, DEFAULT_PRIORITY);
 }
 
 /*
@@ -840,10 +831,9 @@ static void kvmppc_rm_handle_irq_desc(struct irq_desc *desc)
 }
 
 long kvmppc_deliver_irq_passthru(struct kvm_vcpu *vcpu,
-				 __be32 xirr,
+				 u32 xirr,
 				 struct kvmppc_irq_map *irq_map,
-				 struct kvmppc_passthru_irqmap *pimap,
-				 bool *again)
+				 struct kvmppc_passthru_irqmap *pimap)
 {
 	struct kvmppc_xics *xics;
 	struct kvmppc_icp *icp;
@@ -876,11 +866,10 @@ long kvmppc_deliver_irq_passthru(struct kvm_vcpu *vcpu,
 		icp_rm_deliver_irq(xics, icp, irq, false);
 
 	/* EOI the interrupt */
-	icp_eoi(irq_desc_get_chip(irq_map->desc), irq_map->r_hwirq, xirr,
-		again);
+	icp_eoi(irq_desc_get_chip(irq_map->desc), irq_map->r_hwirq, xirr);
 
 	if (check_too_hard(xics, icp) == H_TOO_HARD)
-		return 2;
+		return 1;
 	else
 		return -2;
 }

@@ -29,7 +29,6 @@ static int ath_set_channel(struct ath_softc *sc)
 	struct cfg80211_chan_def *chandef = &sc->cur_chan->chandef;
 	struct ieee80211_channel *chan = chandef->chan;
 	int pos = chan->hw_value;
-	unsigned long flags;
 	int old_pos = -1;
 	int r;
 
@@ -43,9 +42,9 @@ static int ath_set_channel(struct ath_softc *sc)
 		chan->center_freq, chandef->width);
 
 	/* update survey stats for the old channel before switching */
-	spin_lock_irqsave(&common->cc_lock, flags);
+	spin_lock_bh(&common->cc_lock);
 	ath_update_survey_stats(sc);
-	spin_unlock_irqrestore(&common->cc_lock, flags);
+	spin_unlock_bh(&common->cc_lock);
 
 	ath9k_cmn_get_channel(hw, ah, chandef);
 
@@ -1043,9 +1042,9 @@ static void ath_scan_channel_start(struct ath_softc *sc)
 	mod_timer(&sc->offchannel.timer, jiffies + sc->offchannel.duration);
 }
 
-static void ath_chanctx_timer(struct timer_list *t)
+static void ath_chanctx_timer(unsigned long data)
 {
-	struct ath_softc *sc = from_timer(sc, t, sched.timer);
+	struct ath_softc *sc = (struct ath_softc *) data;
 	struct ath_common *common = ath9k_hw_common(sc->sc_ah);
 
 	ath_dbg(common, CHAN_CTX,
@@ -1054,9 +1053,9 @@ static void ath_chanctx_timer(struct timer_list *t)
 	ath_chanctx_event(sc, NULL, ATH_CHANCTX_EVENT_TSF_TIMER);
 }
 
-static void ath_offchannel_timer(struct timer_list *t)
+static void ath_offchannel_timer(unsigned long data)
 {
-	struct ath_softc *sc = from_timer(sc, t, offchannel.timer);
+	struct ath_softc *sc = (struct ath_softc *)data;
 	struct ath_chanctx *ctx;
 	struct ath_common *common = ath9k_hw_common(sc->sc_ah);
 
@@ -1113,7 +1112,7 @@ ath_chanctx_send_vif_ps_frame(struct ath_softc *sc, struct ath_vif *avp,
 		if (!avp->assoc)
 			return false;
 
-		skb = ieee80211_nullfunc_get(sc->hw, vif, false);
+		skb = ieee80211_nullfunc_get(sc->hw, vif);
 		if (!skb)
 			return false;
 
@@ -1362,8 +1361,10 @@ void ath9k_init_channel_context(struct ath_softc *sc)
 {
 	INIT_WORK(&sc->chanctx_work, ath_chanctx_work);
 
-	timer_setup(&sc->offchannel.timer, ath_offchannel_timer, 0);
-	timer_setup(&sc->sched.timer, ath_chanctx_timer, 0);
+	setup_timer(&sc->offchannel.timer, ath_offchannel_timer,
+		    (unsigned long)sc);
+	setup_timer(&sc->sched.timer, ath_chanctx_timer,
+		    (unsigned long)sc);
 
 	init_completion(&sc->go_beacon);
 }

@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 #ifndef _UAPI_ASM_GENERIC_RESOURCE_H
 #define _UAPI_ASM_GENERIC_RESOURCE_H
 
@@ -56,6 +55,13 @@
  */
 #ifndef RLIM_INFINITY
 # define RLIM_INFINITY		(~0UL)
+#endif
+
+/*
+ * RLIMIT_STACK default maximum - some architectures override it:
+ */
+#ifndef _STK_LIM_MAX
+# define _STK_LIM_MAX		RLIM_INFINITY
 #endif
 
 

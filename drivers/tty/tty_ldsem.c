@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * Ldisc rw semaphore
  *
@@ -23,6 +22,9 @@
  * Michel Lespinasse <walken@google.com>.
  *
  * Copyright (C) 2013 Peter Hurley <peter@hurleysoftware.com>
+ *
+ * This file may be redistributed under the terms of the GNU General Public
+ * License v2.
  */
 
 #include <linux/list.h>
@@ -30,8 +32,6 @@
 #include <linux/atomic.h>
 #include <linux/tty.h>
 #include <linux/sched.h>
-#include <linux/sched/debug.h>
-#include <linux/sched/task.h>
 
 
 #ifdef CONFIG_DEBUG_LOCK_ALLOC
@@ -39,10 +39,17 @@
 				lock_acquire(&(l)->dep_map, s, t, r, c, n, i)
 # define __rel(l, n, i)				\
 				lock_release(&(l)->dep_map, n, i)
-#define lockdep_acquire(l, s, t, i)		__acq(l, s, t, 0, 1, NULL, i)
-#define lockdep_acquire_nest(l, s, t, n, i)	__acq(l, s, t, 0, 1, n, i)
-#define lockdep_acquire_read(l, s, t, i)	__acq(l, s, t, 1, 1, NULL, i)
-#define lockdep_release(l, n, i)		__rel(l, n, i)
+# ifdef CONFIG_PROVE_LOCKING
+#  define lockdep_acquire(l, s, t, i)		__acq(l, s, t, 0, 2, NULL, i)
+#  define lockdep_acquire_nest(l, s, t, n, i)	__acq(l, s, t, 0, 2, n, i)
+#  define lockdep_acquire_read(l, s, t, i)	__acq(l, s, t, 1, 2, NULL, i)
+#  define lockdep_release(l, n, i)		__rel(l, n, i)
+# else
+#  define lockdep_acquire(l, s, t, i)		__acq(l, s, t, 0, 1, NULL, i)
+#  define lockdep_acquire_nest(l, s, t, n, i)	__acq(l, s, t, 0, 1, n, i)
+#  define lockdep_acquire_read(l, s, t, i)	__acq(l, s, t, 1, 1, NULL, i)
+#  define lockdep_release(l, n, i)		__rel(l, n, i)
+# endif
 #else
 # define lockdep_acquire(l, s, t, i)		do { } while (0)
 # define lockdep_acquire_nest(l, s, t, n, i)	do { } while (0)
@@ -200,6 +207,7 @@ static struct ld_semaphore __sched *
 down_read_failed(struct ld_semaphore *sem, long count, long timeout)
 {
 	struct ldsem_waiter waiter;
+	struct task_struct *tsk = current;
 	long adjust = -LDSEM_ACTIVE_BIAS + LDSEM_WAIT_BIAS;
 
 	/* set up my own style of waitqueue */
@@ -220,8 +228,8 @@ down_read_failed(struct ld_semaphore *sem, long count, long timeout)
 	list_add_tail(&waiter.list, &sem->read_wait);
 	sem->wait_readers++;
 
-	waiter.task = current;
-	get_task_struct(current);
+	waiter.task = tsk;
+	get_task_struct(tsk);
 
 	/* if there are no active locks, wake the new lock owner(s) */
 	if ((count & LDSEM_ACTIVE_MASK) == 0)
@@ -231,7 +239,7 @@ down_read_failed(struct ld_semaphore *sem, long count, long timeout)
 
 	/* wait to be given the lock */
 	for (;;) {
-		set_current_state(TASK_UNINTERRUPTIBLE);
+		set_task_state(tsk, TASK_UNINTERRUPTIBLE);
 
 		if (!waiter.task)
 			break;
@@ -240,7 +248,7 @@ down_read_failed(struct ld_semaphore *sem, long count, long timeout)
 		timeout = schedule_timeout(timeout);
 	}
 
-	__set_current_state(TASK_RUNNING);
+	__set_task_state(tsk, TASK_RUNNING);
 
 	if (!timeout) {
 		/* lock timed out but check if this task was just
@@ -267,6 +275,7 @@ static struct ld_semaphore __sched *
 down_write_failed(struct ld_semaphore *sem, long count, long timeout)
 {
 	struct ldsem_waiter waiter;
+	struct task_struct *tsk = current;
 	long adjust = -LDSEM_ACTIVE_BIAS;
 	int locked = 0;
 
@@ -287,18 +296,17 @@ down_write_failed(struct ld_semaphore *sem, long count, long timeout)
 
 	list_add_tail(&waiter.list, &sem->write_wait);
 
-	waiter.task = current;
+	waiter.task = tsk;
 
-	set_current_state(TASK_UNINTERRUPTIBLE);
+	set_task_state(tsk, TASK_UNINTERRUPTIBLE);
 	for (;;) {
 		if (!timeout)
 			break;
 		raw_spin_unlock_irq(&sem->wait_lock);
 		timeout = schedule_timeout(timeout);
 		raw_spin_lock_irq(&sem->wait_lock);
-		set_current_state(TASK_UNINTERRUPTIBLE);
-		locked = writer_trylock(sem);
-		if (locked)
+		set_task_state(tsk, TASK_UNINTERRUPTIBLE);
+		if ((locked = writer_trylock(sem)))
 			break;
 	}
 
@@ -307,7 +315,7 @@ down_write_failed(struct ld_semaphore *sem, long count, long timeout)
 	list_del(&waiter.list);
 	raw_spin_unlock_irq(&sem->wait_lock);
 
-	__set_current_state(TASK_RUNNING);
+	__set_task_state(tsk, TASK_RUNNING);
 
 	/* lock wait may have timed out */
 	if (!locked)
@@ -317,7 +325,7 @@ down_write_failed(struct ld_semaphore *sem, long count, long timeout)
 
 
 
-static int __ldsem_down_read_nested(struct ld_semaphore *sem,
+static inline int __ldsem_down_read_nested(struct ld_semaphore *sem,
 					   int subclass, long timeout)
 {
 	long count;
@@ -336,7 +344,7 @@ static int __ldsem_down_read_nested(struct ld_semaphore *sem,
 	return 1;
 }
 
-static int __ldsem_down_write_nested(struct ld_semaphore *sem,
+static inline int __ldsem_down_write_nested(struct ld_semaphore *sem,
 					    int subclass, long timeout)
 {
 	long count;

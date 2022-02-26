@@ -1,11 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * UIO Hilscher CIF card driver
  *
  * (C) 2007 Hans J. Koch <hjk@hansjkoch.de>
  * Original code (C) 2005 Benedikt Spranger <b.spranger@linutronix.de>
- *
- * Licensed under GPL version 2 only.
- *
  */
 
 #include <linux/device.h>
@@ -106,6 +104,7 @@ static void hilscher_pci_remove(struct pci_dev *dev)
 	uio_unregister_device(info);
 	pci_release_regions(dev);
 	pci_disable_device(dev);
+	pci_set_drvdata(dev, NULL);
 	iounmap(info->mem[0].internal_addr);
 
 	kfree (info);
@@ -134,7 +133,19 @@ static struct pci_driver hilscher_pci_driver = {
 	.remove = hilscher_pci_remove,
 };
 
-module_pci_driver(hilscher_pci_driver);
+static int __init hilscher_init_module(void)
+{
+	return pci_register_driver(&hilscher_pci_driver);
+}
+
+static void __exit hilscher_exit_module(void)
+{
+	pci_unregister_driver(&hilscher_pci_driver);
+}
+
+module_init(hilscher_init_module);
+module_exit(hilscher_exit_module);
+
 MODULE_DEVICE_TABLE(pci, hilscher_pci_ids);
 MODULE_LICENSE("GPL v2");
 MODULE_AUTHOR("Hans J. Koch, Benedikt Spranger");

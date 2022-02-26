@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * check TSC synchronization.
  *
@@ -45,7 +44,7 @@ void mark_tsc_async_resets(char *reason)
 	pr_info("tsc: Marking TSC async resets true due to %s\n", reason);
 }
 
-void tsc_verify_tsc_adjust(bool resume)
+void tsc_verify_tsc_adjust(void)
 {
 	struct tsc_adjust *adj = this_cpu_ptr(&tsc_adjust);
 	s64 curval;
@@ -58,7 +57,7 @@ void tsc_verify_tsc_adjust(bool resume)
 		return;
 
 	/* Rate limit the MSR check */
-	if (!resume && time_before(jiffies, adj->nextcheck))
+	if (time_before(jiffies, adj->nextcheck))
 		return;
 
 	adj->nextcheck = jiffies + HZ;
@@ -70,7 +69,7 @@ void tsc_verify_tsc_adjust(bool resume)
 	/* Restore the original value */
 	wrmsrl(MSR_IA32_TSC_ADJUST, adj->adjusted);
 
-	if (!adj->warned || resume) {
+	if (!adj->warned) {
 		pr_warn(FW_BUG "TSC ADJUST differs: CPU%u %lld --> %lld. Restoring\n",
 			smp_processor_id(), adj->adjusted, curval);
 		adj->warned = true;
@@ -113,7 +112,7 @@ static void tsc_sanitize_first_cpu(struct tsc_adjust *cur, s64 bootval,
 #ifndef CONFIG_SMP
 bool __init tsc_store_and_check_tsc_adjust(bool bootcpu)
 {
-	struct tsc_adjust *cur = this_cpu_ptr(&tsc_adjust);
+	struct tsc_adjust *ref, *cur = this_cpu_ptr(&tsc_adjust);
 	s64 bootval;
 
 	if (!boot_cpu_has(X86_FEATURE_TSC_ADJUST))
@@ -318,6 +317,13 @@ void check_tsc_sync_source(int cpu)
 	if (unsynchronized_tsc())
 		return;
 
+	if (tsc_clocksource_reliable) {
+		if (cpu == (nr_cpu_ids-1) || system_state != SYSTEM_BOOTING)
+			pr_info(
+			"Skipped synchronization checks as TSC is reliable.\n");
+		return;
+	}
+
 	/*
 	 * Set the maximum number of test runs to
 	 *  1 if the CPU does not provide the TSC_ADJUST MSR
@@ -405,19 +411,14 @@ void check_tsc_sync_target(void)
 	int cpus = 2;
 
 	/* Also aborts if there is no TSC. */
-	if (unsynchronized_tsc())
+	if (unsynchronized_tsc() || tsc_clocksource_reliable)
 		return;
 
 	/*
 	 * Store, verify and sanitize the TSC adjust register. If
 	 * successful skip the test.
-	 *
-	 * The test is also skipped when the TSC is marked reliable. This
-	 * is true for SoCs which have no fallback clocksource. On these
-	 * SoCs the TSC is frequency synchronized, but still the TSC ADJUST
-	 * register might have been wreckaged by the BIOS..
 	 */
-	if (tsc_store_and_check_tsc_adjust(false) || tsc_clocksource_reliable) {
+	if (tsc_store_and_check_tsc_adjust(false)) {
 		atomic_inc(&skip_test);
 		return;
 	}

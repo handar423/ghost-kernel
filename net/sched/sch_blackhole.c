@@ -42,4 +42,4 @@ static int __init blackhole_init(void)
 {
 	return register_qdisc(&blackhole_qdisc_ops);
 }
-device_initcall(blackhole_init)
+device_initcall(blackhole_init);

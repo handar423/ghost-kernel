@@ -24,7 +24,7 @@
  *
  *
  *  libata documentation is available via 'make {ps|pdf}docs',
- *  as Documentation/driver-api/libata.rst
+ *  as Documentation/DocBook/libata.*
  *
  *  Hardware documentation available under NDA.
  *
@@ -1020,7 +1020,8 @@ static void pdc20621_get_from_dimm(struct ata_host *host, void *psource,
 	idx++;
 	dist = ((long) (window_size - (offset + size))) >= 0 ? size :
 		(long) (window_size - offset);
-	memcpy_fromio(psource, dimm_mmio + offset / 4, dist);
+	memcpy_fromio((char *) psource, (char *) (dimm_mmio + offset / 4),
+		      dist);
 
 	psource += dist;
 	size -= dist;
@@ -1029,7 +1030,8 @@ static void pdc20621_get_from_dimm(struct ata_host *host, void *psource,
 		readl(mmio + PDC_GENERAL_CTLR);
 		writel(((idx) << page_mask), mmio + PDC_DIMM_WINDOW_CTLR);
 		readl(mmio + PDC_DIMM_WINDOW_CTLR);
-		memcpy_fromio(psource, dimm_mmio, window_size / 4);
+		memcpy_fromio((char *) psource, (char *) (dimm_mmio),
+			      window_size / 4);
 		psource += window_size;
 		size -= window_size;
 		idx++;
@@ -1040,7 +1042,8 @@ static void pdc20621_get_from_dimm(struct ata_host *host, void *psource,
 		readl(mmio + PDC_GENERAL_CTLR);
 		writel(((idx) << page_mask), mmio + PDC_DIMM_WINDOW_CTLR);
 		readl(mmio + PDC_DIMM_WINDOW_CTLR);
-		memcpy_fromio(psource, dimm_mmio, size / 4);
+		memcpy_fromio((char *) psource, (char *) (dimm_mmio),
+			      size / 4);
 	}
 }
 #endif
@@ -1486,10 +1489,10 @@ static int pdc_sata_init_one(struct pci_dev *pdev,
 	}
 
 	/* configure and activate */
-	rc = dma_set_mask(&pdev->dev, ATA_DMA_MASK);
+	rc = pci_set_dma_mask(pdev, ATA_DMA_MASK);
 	if (rc)
 		return rc;
-	rc = dma_set_coherent_mask(&pdev->dev, ATA_DMA_MASK);
+	rc = pci_set_consistent_dma_mask(pdev, ATA_DMA_MASK);
 	if (rc)
 		return rc;
 

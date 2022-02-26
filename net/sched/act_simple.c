@@ -24,7 +24,7 @@
 #include <linux/tc_act/tc_defact.h>
 #include <net/tc_act/tc_defact.h>
 
-static unsigned int simp_net_id;
+static int simp_net_id;
 static struct tc_action_ops act_simp_ops;
 
 #define SIMP_MAX_DATA	32
@@ -53,22 +53,22 @@ static void tcf_simp_release(struct tc_action *a, int bind)
 	kfree(d->tcfd_defdata);
 }
 
-static int alloc_defdata(struct tcf_defact *d, char *defdata)
+static int alloc_defdata(struct tcf_defact *d, const struct nlattr *defdata)
 {
 	d->tcfd_defdata = kzalloc(SIMP_MAX_DATA, GFP_KERNEL);
 	if (unlikely(!d->tcfd_defdata))
 		return -ENOMEM;
-	strlcpy(d->tcfd_defdata, defdata, SIMP_MAX_DATA);
+	nla_strlcpy(d->tcfd_defdata, defdata, SIMP_MAX_DATA);
 	return 0;
 }
 
-static void reset_policy(struct tcf_defact *d, char *defdata,
+static void reset_policy(struct tcf_defact *d, const struct nlattr *defdata,
 			 struct tc_defact *p)
 {
 	spin_lock_bh(&d->tcf_lock);
 	d->tcf_action = p->action;
 	memset(d->tcfd_defdata, 0, SIMP_MAX_DATA);
-	strlcpy(d->tcfd_defdata, defdata, SIMP_MAX_DATA);
+	nla_strlcpy(d->tcfd_defdata, defdata, SIMP_MAX_DATA);
 	spin_unlock_bh(&d->tcf_lock);
 }
 
@@ -87,12 +87,11 @@ static int tcf_simp_init(struct net *net, struct nlattr *nla,
 	struct tcf_defact *d;
 	bool exists = false;
 	int ret = 0, err;
-	char *defdata;
 
 	if (nla == NULL)
 		return -EINVAL;
 
-	err = nla_parse_nested(tb, TCA_DEF_MAX, nla, simple_policy, NULL);
+	err = nla_parse_nested(tb, TCA_DEF_MAX, nla, simple_policy);
 	if (err < 0)
 		return err;
 
@@ -110,8 +109,6 @@ static int tcf_simp_init(struct net *net, struct nlattr *nla,
 		return -EINVAL;
 	}
 
-	defdata = nla_data(tb[TCA_DEF_DATA]);
-
 	if (!exists) {
 		ret = tcf_idr_create(tn, parm->index, est, a,
 				     &act_simp_ops, bind, false);
@@ -119,9 +116,9 @@ static int tcf_simp_init(struct net *net, struct nlattr *nla,
 			return ret;
 
 		d = to_defact(*a);
-		ret = alloc_defdata(d, defdata);
+		ret = alloc_defdata(d, tb[TCA_DEF_DATA]);
 		if (ret < 0) {
-			tcf_idr_cleanup(*a, est);
+			tcf_idr_release(*a, bind);
 			return ret;
 		}
 		d->tcf_action = parm->action;
@@ -129,11 +126,12 @@ static int tcf_simp_init(struct net *net, struct nlattr *nla,
 	} else {
 		d = to_defact(*a);
 
-		tcf_idr_release(*a, bind);
-		if (!ovr)
+		if (!ovr) {
+			tcf_idr_release(*a, bind);
 			return -EEXIST;
+		}
 
-		reset_policy(d, defdata, parm);
+		reset_policy(d, tb[TCA_DEF_DATA], parm);
 	}
 
 	if (ret == ACT_P_CREATED)

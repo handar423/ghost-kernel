@@ -240,7 +240,7 @@ mwifiex_wmm_setup_queue_priorities(struct mwifiex_private *priv,
 	mwifiex_dbg(priv->adapter, INFO,
 		    "info: WMM Parameter IE: version=%d,\t"
 		    "qos_info Parameter Set Count=%d, Reserved=%#x\n",
-		    wmm_ie->vend_hdr.version, wmm_ie->qos_info_bitmap &
+		    wmm_ie->version, wmm_ie->qos_info_bitmap &
 		    IEEE80211_WMM_IE_AP_QOSINFO_PARAM_SET_CNT_MASK,
 		    wmm_ie->reserved);
 
@@ -265,14 +265,18 @@ mwifiex_wmm_setup_queue_priorities(struct mwifiex_private *priv,
 	for (i = 0; i < num_ac; i++) {
 		for (j = 1; j < num_ac - i; j++) {
 			if (tmp[j - 1] > tmp[j]) {
+				gmb();
 				swap(tmp[j - 1], tmp[j]);
 				swap(priv->wmm.queue_priority[j - 1],
 				     priv->wmm.queue_priority[j]);
 			} else if (tmp[j - 1] == tmp[j]) {
+				gmb();
 				if (priv->wmm.queue_priority[j - 1]
-				    < priv->wmm.queue_priority[j])
+				    < priv->wmm.queue_priority[j]) {
+					gmb();
 					swap(priv->wmm.queue_priority[j - 1],
 					     priv->wmm.queue_priority[j]);
+				}
 			}
 		}
 	}
@@ -359,8 +363,7 @@ static enum mwifiex_wmm_ac_e
 mwifiex_wmm_convert_tos_to_ac(struct mwifiex_adapter *adapter, u32 tos)
 {
 	/* Map of TOS UP values to WMM AC */
-	static const enum mwifiex_wmm_ac_e tos_to_ac[] = {
-		WMM_AC_BE,
+	const enum mwifiex_wmm_ac_e tos_to_ac[] = { WMM_AC_BE,
 		WMM_AC_BK,
 		WMM_AC_BK,
 		WMM_AC_BE,
@@ -976,6 +979,10 @@ int mwifiex_ret_wmm_get_status(struct mwifiex_private *priv,
 				    "info: CMD_RESP: WMM_GET_STATUS:\t"
 				    "WMM Parameter Set Count: %d\n",
 				    wmm_param_ie->qos_info_bitmap & mask);
+
+			if (wmm_param_ie->vend_hdr.len + 2 >
+				sizeof(struct ieee_types_wmm_parameter))
+				break;
 
 			memcpy((u8 *) &priv->curr_bss_params.bss_descriptor.
 			       wmm_ie, wmm_param_ie,

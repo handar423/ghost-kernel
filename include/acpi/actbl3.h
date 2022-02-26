@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2017, Intel Corp.
+ * Copyright (C) 2000 - 2013, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -69,9 +69,6 @@
 #define ACPI_SIG_PCCT           "PCCT"	/* Platform Communications Channel Table */
 #define ACPI_SIG_PMTT           "PMTT"	/* Platform Memory Topology Table */
 #define ACPI_SIG_RASF           "RASF"	/* RAS Feature table */
-#define ACPI_SIG_STAO           "STAO"	/* Status Override table */
-#define ACPI_SIG_WPBT           "WPBT"	/* Windows Platform Binary Table */
-#define ACPI_SIG_XENV           "XENV"	/* Xen Environment table */
 
 #define ACPI_SIG_S3PT           "S3PT"	/* S3 Performance (sub)Table */
 #define ACPI_SIG_PCCS           "PCC"	/* PCC Shared Memory Region */
@@ -80,6 +77,7 @@
 
 #define ACPI_SIG_MATR           "MATR"	/* Memory Address Translation Table */
 #define ACPI_SIG_MSDM           "MSDM"	/* Microsoft Data Management Table */
+#define ACPI_SIG_WPBT           "WPBT"	/* Windows Platform Binary Table */
 
 /*
  * All tables must be byte-packed to match the ACPI specification, since
@@ -116,16 +114,9 @@ struct acpi_table_bgrt {
 	u32 image_offset_y;
 };
 
-/* Flags for Status field above */
-
-#define ACPI_BGRT_DISPLAYED                 (1)
-#define ACPI_BGRT_ORIENTATION_OFFSET        (3 << 1)
-
 /*******************************************************************************
  *
  * DRTM - Dynamic Root of Trust for Measurement table
- * Conforms to "TCG D-RTM Architecture" June 17 2013, Version 1.0.0
- * Table version 1
  *
  ******************************************************************************/
 
@@ -142,40 +133,22 @@ struct acpi_table_drtm {
 	u32 flags;
 };
 
-/* Flag Definitions for above */
+/* 1) Validated Tables List */
 
-#define ACPI_DRTM_ACCESS_ALLOWED            (1)
-#define ACPI_DRTM_ENABLE_GAP_CODE           (1<<1)
-#define ACPI_DRTM_INCOMPLETE_MEASUREMENTS   (1<<2)
-#define ACPI_DRTM_AUTHORITY_ORDER           (1<<3)
-
-/* 1) Validated Tables List (64-bit addresses) */
-
-struct acpi_drtm_vtable_list {
-	u32 validated_table_count;
-	u64 validated_tables[1];
+struct acpi_drtm_vtl_list {
+	u32 validated_table_list_count;
 };
 
-/* 2) Resources List (of Resource Descriptors) */
-
-/* Resource Descriptor */
-
-struct acpi_drtm_resource {
-	u8 size[7];
-	u8 type;
-	u64 address;
-};
+/* 2) Resources List */
 
 struct acpi_drtm_resource_list {
-	u32 resource_count;
-	struct acpi_drtm_resource resources[1];
+	u32 resource_list_count;
 };
 
 /* 3) Platform-specific Identifiers List */
 
-struct acpi_drtm_dps_id {
-	u32 dps_id_length;
-	u8 dps_id[16];
+struct acpi_drtm_id_list {
+	u32 id_list_count;
 };
 
 /*******************************************************************************
@@ -189,7 +162,7 @@ struct acpi_table_fpdt {
 	struct acpi_table_header header;	/* Common ACPI table header */
 };
 
-/* FPDT subtable header (Performance Record Structure) */
+/* FPDT subtable header */
 
 struct acpi_fpdt_header {
 	u16 type;
@@ -210,57 +183,6 @@ enum acpi_fpdt_type {
 
 /* 0: Firmware Basic Boot Performance Record */
 
-struct acpi_fpdt_boot_pointer {
-	struct acpi_fpdt_header header;
-	u8 reserved[4];
-	u64 address;
-};
-
-/* 1: S3 Performance Table Pointer Record */
-
-struct acpi_fpdt_s3pt_pointer {
-	struct acpi_fpdt_header header;
-	u8 reserved[4];
-	u64 address;
-};
-
-/*
- * S3PT - S3 Performance Table. This table is pointed to by the
- * S3 Pointer Record above.
- */
-struct acpi_table_s3pt {
-	u8 signature[4];	/* "S3PT" */
-	u32 length;
-};
-
-/*
- * S3PT Subtables (Not part of the actual FPDT)
- */
-
-/* Values for Type field in S3PT header */
-
-enum acpi_s3pt_type {
-	ACPI_S3PT_TYPE_RESUME = 0,
-	ACPI_S3PT_TYPE_SUSPEND = 1,
-	ACPI_FPDT_BOOT_PERFORMANCE = 2
-};
-
-struct acpi_s3pt_resume {
-	struct acpi_fpdt_header header;
-	u32 resume_count;
-	u64 full_resume;
-	u64 average_resume;
-};
-
-struct acpi_s3pt_suspend {
-	struct acpi_fpdt_header header;
-	u64 suspend_start;
-	u64 suspend_end;
-};
-
-/*
- * FPDT Boot Performance Record (Not part of the actual FPDT)
- */
 struct acpi_fpdt_boot {
 	struct acpi_fpdt_header header;
 	u8 reserved[4];
@@ -271,103 +193,81 @@ struct acpi_fpdt_boot {
 	u64 exit_services_exit;
 };
 
+/* 1: S3 Performance Table Pointer Record */
+
+struct acpi_fpdt_s3pt_ptr {
+	struct acpi_fpdt_header header;
+	u8 reserved[4];
+	u64 address;
+};
+
+/*
+ * S3PT - S3 Performance Table. This table is pointed to by the
+ * FPDT S3 Pointer Record above.
+ */
+struct acpi_table_s3pt {
+	u8 signature[4];	/* "S3PT" */
+	u32 length;
+};
+
+/*
+ * S3PT Subtables
+ */
+struct acpi_s3pt_header {
+	u16 type;
+	u8 length;
+	u8 revision;
+};
+
+/* Values for Type field above */
+
+enum acpi_s3pt_type {
+	ACPI_S3PT_TYPE_RESUME = 0,
+	ACPI_S3PT_TYPE_SUSPEND = 1
+};
+
+struct acpi_s3pt_resume {
+	struct acpi_s3pt_header header;
+	u32 resume_count;
+	u64 full_resume;
+	u64 average_resume;
+};
+
+struct acpi_s3pt_suspend {
+	struct acpi_s3pt_header header;
+	u64 suspend_start;
+	u64 suspend_end;
+};
+
 /*******************************************************************************
  *
- * GTDT - Generic Timer Description Table (ACPI 5.1)
- *        Version 2
+ * GTDT - Generic Timer Description Table (ACPI 5.0)
+ *        Version 1
  *
  ******************************************************************************/
 
 struct acpi_table_gtdt {
 	struct acpi_table_header header;	/* Common ACPI table header */
-	u64 counter_block_addresss;
-	u32 reserved;
-	u32 secure_el1_interrupt;
-	u32 secure_el1_flags;
-	u32 non_secure_el1_interrupt;
-	u32 non_secure_el1_flags;
+	u64 address;
+	u32 flags;
+	u32 secure_pl1_interrupt;
+	u32 secure_pl1_flags;
+	u32 non_secure_pl1_interrupt;
+	u32 non_secure_pl1_flags;
 	u32 virtual_timer_interrupt;
 	u32 virtual_timer_flags;
-	u32 non_secure_el2_interrupt;
-	u32 non_secure_el2_flags;
-	u64 counter_read_block_address;
-	u32 platform_timer_count;
-	u32 platform_timer_offset;
+	u32 non_secure_pl2_interrupt;
+	u32 non_secure_pl2_flags;
 };
 
-/* Flag Definitions: Timer Block Physical Timers and Virtual timers */
+/* Values for Flags field above */
 
-#define ACPI_GTDT_INTERRUPT_MODE        (1)
-#define ACPI_GTDT_INTERRUPT_POLARITY    (1<<1)
-#define ACPI_GTDT_ALWAYS_ON             (1<<2)
+#define ACPI_GTDT_MAPPED_BLOCK_PRESENT      1
 
-/* Common GTDT subtable header */
+/* Values for all "TimerFlags" fields above */
 
-struct acpi_gtdt_header {
-	u8 type;
-	u16 length;
-};
-
-/* Values for GTDT subtable type above */
-
-enum acpi_gtdt_type {
-	ACPI_GTDT_TYPE_TIMER_BLOCK = 0,
-	ACPI_GTDT_TYPE_WATCHDOG = 1,
-	ACPI_GTDT_TYPE_RESERVED = 2	/* 2 and greater are reserved */
-};
-
-/* GTDT Subtables, correspond to Type in struct acpi_gtdt_header */
-
-/* 0: Generic Timer Block */
-
-struct acpi_gtdt_timer_block {
-	struct acpi_gtdt_header header;
-	u8 reserved;
-	u64 block_address;
-	u32 timer_count;
-	u32 timer_offset;
-};
-
-/* Timer Sub-Structure, one per timer */
-
-struct acpi_gtdt_timer_entry {
-	u8 frame_number;
-	u8 reserved[3];
-	u64 base_address;
-	u64 el0_base_address;
-	u32 timer_interrupt;
-	u32 timer_flags;
-	u32 virtual_timer_interrupt;
-	u32 virtual_timer_flags;
-	u32 common_flags;
-};
-
-/* Flag Definitions: timer_flags and virtual_timer_flags above */
-
-#define ACPI_GTDT_GT_IRQ_MODE               (1)
-#define ACPI_GTDT_GT_IRQ_POLARITY           (1<<1)
-
-/* Flag Definitions: common_flags above */
-
-#define ACPI_GTDT_GT_IS_SECURE_TIMER        (1)
-#define ACPI_GTDT_GT_ALWAYS_ON              (1<<1)
-
-/* 1: SBSA Generic Watchdog Structure */
-
-struct acpi_gtdt_watchdog {
-	struct acpi_gtdt_header header;
-	u8 reserved;
-	u64 refresh_frame_address;
-	u64 control_frame_address;
-	u32 timer_interrupt;
-	u32 timer_flags;
-};
-
-/* Flag Definitions: timer_flags above */
-
-#define ACPI_GTDT_WATCHDOG_IRQ_MODE         (1)
-#define ACPI_GTDT_WATCHDOG_IRQ_POLARITY     (1<<1)
-#define ACPI_GTDT_WATCHDOG_SECURE           (1<<2)
+#define ACPI_GTDT_INTERRUPT_MODE            1
+#define ACPI_GTDT_INTERRUPT_POLARITY        2
 
 /*******************************************************************************
  *
@@ -467,7 +367,7 @@ struct acpi_mpst_shared {
 /*******************************************************************************
  *
  * PCCT - Platform Communications Channel Table (ACPI 5.0)
- *        Version 2 (ACPI 6.2)
+ *        Version 1
  *
  ******************************************************************************/
 
@@ -487,9 +387,7 @@ enum acpi_pcct_type {
 	ACPI_PCCT_TYPE_GENERIC_SUBSPACE = 0,
 	ACPI_PCCT_TYPE_HW_REDUCED_SUBSPACE = 1,
 	ACPI_PCCT_TYPE_HW_REDUCED_SUBSPACE_TYPE2 = 2,	/* ACPI 6.1 */
-	ACPI_PCCT_TYPE_EXT_PCC_MASTER_SUBSPACE = 3,	/* ACPI 6.2 */
-	ACPI_PCCT_TYPE_EXT_PCC_SLAVE_SUBSPACE = 4,	/* ACPI 6.2 */
-	ACPI_PCCT_TYPE_RESERVED = 5	/* 5 and greater are reserved */
+	ACPI_PCCT_TYPE_RESERVED = 3	/* 3 and greater are reserved */
 };
 
 /*
@@ -515,7 +413,7 @@ struct acpi_pcct_subspace {
 
 struct acpi_pcct_hw_reduced {
 	struct acpi_subtable_header header;
-	u32 platform_interrupt;
+	u32 doorbell_interrupt;
 	u8 flags;
 	u8 reserved;
 	u64 base_address;
@@ -532,7 +430,7 @@ struct acpi_pcct_hw_reduced {
 
 struct acpi_pcct_hw_reduced_type2 {
 	struct acpi_subtable_header header;
-	u32 platform_interrupt;
+	u32 doorbell_interrupt;
 	u8 flags;
 	u8 reserved;
 	u64 base_address;
@@ -543,65 +441,9 @@ struct acpi_pcct_hw_reduced_type2 {
 	u32 latency;
 	u32 max_access_rate;
 	u16 min_turnaround_time;
-	struct acpi_generic_address platform_ack_register;
+	struct acpi_generic_address doorbell_ack_register;
 	u64 ack_preserve_mask;
 	u64 ack_write_mask;
-};
-
-/* 3: Extended PCC Master Subspace Type 3 (ACPI 6.2) */
-
-struct acpi_pcct_ext_pcc_master {
-	struct acpi_subtable_header header;
-	u32 platform_interrupt;
-	u8 flags;
-	u8 reserved1;
-	u64 base_address;
-	u32 length;
-	struct acpi_generic_address doorbell_register;
-	u64 preserve_mask;
-	u64 write_mask;
-	u32 latency;
-	u32 max_access_rate;
-	u32 min_turnaround_time;
-	struct acpi_generic_address platform_ack_register;
-	u64 ack_preserve_mask;
-	u64 ack_set_mask;
-	u64 reserved2;
-	struct acpi_generic_address cmd_complete_register;
-	u64 cmd_complete_mask;
-	struct acpi_generic_address cmd_update_register;
-	u64 cmd_update_preserve_mask;
-	u64 cmd_update_set_mask;
-	struct acpi_generic_address error_status_register;
-	u64 error_status_mask;
-};
-
-/* 4: Extended PCC Slave Subspace Type 4 (ACPI 6.2) */
-
-struct acpi_pcct_ext_pcc_slave {
-	struct acpi_subtable_header header;
-	u32 platform_interrupt;
-	u8 flags;
-	u8 reserved1;
-	u64 base_address;
-	u32 length;
-	struct acpi_generic_address doorbell_register;
-	u64 preserve_mask;
-	u64 write_mask;
-	u32 latency;
-	u32 max_access_rate;
-	u32 min_turnaround_time;
-	struct acpi_generic_address platform_ack_register;
-	u64 ack_preserve_mask;
-	u64 ack_set_mask;
-	u64 reserved2;
-	struct acpi_generic_address cmd_complete_register;
-	u64 cmd_complete_mask;
-	struct acpi_generic_address cmd_update_register;
-	u64 cmd_update_preserve_mask;
-	u64 cmd_update_set_mask;
-	struct acpi_generic_address error_status_register;
-	u64 error_status_mask;
 };
 
 /* Values for doorbell flags above */
@@ -619,15 +461,6 @@ struct acpi_pcct_shared_memory {
 	u32 signature;
 	u16 command;
 	u16 status;
-};
-
-/* Extended PCC Subspace Shared Memory Region (ACPI 6.2) */
-
-struct acpi_pcct_ext_pcc_shared_memory {
-	u32 signature;
-	u32 flags;
-	u32 length;
-	u32 command;
 };
 
 /*******************************************************************************
@@ -802,56 +635,6 @@ enum acpi_rasf_status {
 #define ACPI_RASF_SCI_DOORBELL          (1<<1)
 #define ACPI_RASF_ERROR                 (1<<2)
 #define ACPI_RASF_STATUS                (0x1F<<3)
-
-/*******************************************************************************
- *
- * STAO - Status Override Table (_STA override) - ACPI 6.0
- *        Version 1
- *
- * Conforms to "ACPI Specification for Status Override Table"
- * 6 January 2015
- *
- ******************************************************************************/
-
-struct acpi_table_stao {
-	struct acpi_table_header header;	/* Common ACPI table header */
-	u8 ignore_uart;
-};
-
-/*******************************************************************************
- *
- * WPBT - Windows Platform Environment Table (ACPI 6.0)
- *        Version 1
- *
- * Conforms to "Windows Platform Binary Table (WPBT)" 29 November 2011
- *
- ******************************************************************************/
-
-struct acpi_table_wpbt {
-	struct acpi_table_header header;	/* Common ACPI table header */
-	u32 handoff_size;
-	u64 handoff_address;
-	u8 layout;
-	u8 type;
-	u16 arguments_length;
-};
-
-/*******************************************************************************
- *
- * XENV - Xen Environment Table (ACPI 6.0)
- *        Version 1
- *
- * Conforms to "ACPI Specification for Xen Environment Table" 4 January 2015
- *
- ******************************************************************************/
-
-struct acpi_table_xenv {
-	struct acpi_table_header header;	/* Common ACPI table header */
-	u64 grant_table_address;
-	u64 grant_table_size;
-	u32 event_interrupt;
-	u8 event_flags;
-};
 
 /* Reset to default packing */
 

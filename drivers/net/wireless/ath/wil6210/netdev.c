@@ -103,7 +103,11 @@ static int wil6210_netdev_poll_tx(struct napi_struct *napi, int budget)
 static void wil_dev_setup(struct net_device *dev)
 {
 	ether_setup(dev);
+#if 0 /* Not in RHEL */
 	dev->max_mtu = mtu_max;
+#else
+	dev->extended->max_mtu = mtu_max;
+#endif
 	dev->tx_queue_len = WIL_TX_Q_LEN_DEFAULT;
 }
 
@@ -138,7 +142,11 @@ void *wil_if_alloc(struct device *dev)
 	ch = wdev->wiphy->bands[NL80211_BAND_60GHZ]->channels;
 	cfg80211_chandef_create(&wdev->preset_chandef, ch, NL80211_CHAN_NO_HT);
 
+#if 0 /* Not in RHEL */
 	ndev = alloc_netdev(0, "wlan%d", NET_NAME_UNKNOWN, wil_dev_setup);
+#else
+	ndev = alloc_netdev(0, "wlan%d", wil_dev_setup);
+#endif
 	if (!ndev) {
 		dev_err(dev, "alloc_netdev_mqs failed\n");
 		rc = -ENOMEM;

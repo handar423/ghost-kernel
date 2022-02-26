@@ -41,15 +41,14 @@ static inline int arch_spin_is_locked(arch_spinlock_t *lock)
 	 * to claim the lock is held, since it will be momentarily
 	 * if not already.  There's no need to wait for a "valid"
 	 * lock->next_ticket to become available.
-	 * Use READ_ONCE() to ensure that calling this in a loop is OK.
 	 */
-	int curr = READ_ONCE(lock->current_ticket);
-	int next = READ_ONCE(lock->next_ticket);
-
-	return next != curr;
+	return lock->next_ticket != lock->current_ticket;
 }
 
 void arch_spin_lock(arch_spinlock_t *lock);
+
+/* We cannot take an interrupt after getting a ticket, so don't enable them. */
+#define arch_spin_lock_flags(lock, flags) arch_spin_lock(lock)
 
 int arch_spin_trylock(arch_spinlock_t *lock);
 
@@ -60,6 +59,8 @@ static inline void arch_spin_unlock(arch_spinlock_t *lock)
 	wmb();  /* guarantee anything modified under the lock is visible */
 	lock->current_ticket = old_ticket + TICKET_QUANTUM;
 }
+
+void arch_spin_unlock_wait(arch_spinlock_t *lock);
 
 /*
  * Read-write spinlocks, allowing multiple readers
@@ -75,6 +76,22 @@ static inline void arch_spin_unlock(arch_spinlock_t *lock)
 #define _WR_WIDTH       8
 #define _RD_COUNT_SHIFT 24
 #define _RD_COUNT_WIDTH 8
+
+/**
+ * arch_read_can_lock() - would read_trylock() succeed?
+ */
+static inline int arch_read_can_lock(arch_rwlock_t *rwlock)
+{
+	return (rwlock->lock << _RD_COUNT_WIDTH) == 0;
+}
+
+/**
+ * arch_write_can_lock() - would write_trylock() succeed?
+ */
+static inline int arch_write_can_lock(arch_rwlock_t *rwlock)
+{
+	return rwlock->lock == 0;
+}
 
 /**
  * arch_read_lock() - acquire a read lock.
@@ -105,5 +122,8 @@ void arch_read_unlock(arch_rwlock_t *rwlock);
  * arch_write_unlock() - release a write lock.
  */
 void arch_write_unlock(arch_rwlock_t *rwlock);
+
+#define arch_read_lock_flags(lock, flags) arch_read_lock(lock)
+#define arch_write_lock_flags(lock, flags) arch_write_lock(lock)
 
 #endif /* _ASM_TILE_SPINLOCK_32_H */

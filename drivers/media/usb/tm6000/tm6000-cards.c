@@ -11,6 +11,10 @@
  *  but WITHOUT ANY WARRANTY; without even the implied warranty of
  *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  *  GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 #include <linux/init.h>
@@ -22,7 +26,7 @@
 #include <linux/slab.h>
 #include <media/v4l2-common.h>
 #include <media/tuner.h>
-#include <media/i2c/tvaudio.h>
+#include <media/tvaudio.h>
 #include <media/i2c-addr.h>
 #include <media/rc-map.h>
 
@@ -613,7 +617,7 @@ static struct tm6000_board tm6000_boards[] = {
 };
 
 /* table of devices that work with this driver */
-static const struct usb_device_id tm6000_id_table[] = {
+static struct usb_device_id tm6000_id_table[] = {
 	{ USB_DEVICE(0x6000, 0x0001), .driver_info = TM5600_BOARD_GENERIC },
 	{ USB_DEVICE(0x6000, 0x0002), .driver_info = TM6010_BOARD_GENERIC },
 	{ USB_DEVICE(0x06e1, 0xf332), .driver_info = TM6000_BOARD_ADSTECH_DUAL_TV },
@@ -1110,13 +1114,13 @@ static int tm6000_init_dev(struct tm6000_core *dev)
 	/* Default values for STD and resolutions */
 	dev->width = 720;
 	dev->height = 480;
-	dev->norm = V4L2_STD_NTSC_M;
+	dev->norm = V4L2_STD_PAL_M;
 
 	/* Configure tuner */
 	tm6000_config_tuner(dev);
 
 	/* Set video standard */
-	v4l2_device_call_all(&dev->v4l2_dev, 0, video, s_std, dev->norm);
+	v4l2_device_call_all(&dev->v4l2_dev, 0, core, s_std, dev->norm);
 
 	/* Set tuner frequency - also loads firmware on xc2028/xc3028 */
 	f.tuner = 0;
@@ -1184,7 +1188,7 @@ static int tm6000_usb_probe(struct usb_interface *interface,
 			    const struct usb_device_id *id)
 {
 	struct usb_device *usbdev;
-	struct tm6000_core *dev;
+	struct tm6000_core *dev = NULL;
 	int i, rc = 0;
 	int nr = 0;
 	char *speed;
@@ -1194,21 +1198,22 @@ static int tm6000_usb_probe(struct usb_interface *interface,
 	/* Selects the proper interface */
 	rc = usb_set_interface(usbdev, 0, 1);
 	if (rc < 0)
-		goto report_failure;
+		goto err;
 
 	/* Check to see next free device and mark as used */
 	nr = find_first_zero_bit(&tm6000_devused, TM6000_MAXBOARDS);
 	if (nr >= TM6000_MAXBOARDS) {
 		printk(KERN_ERR "tm6000: Supports only %i tm60xx boards.\n", TM6000_MAXBOARDS);
-		rc = -ENOMEM;
-		goto put_device;
+		usb_put_dev(usbdev);
+		return -ENOMEM;
 	}
 
 	/* Create and initialize dev struct */
 	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
-	if (!dev) {
-		rc = -ENOMEM;
-		goto put_device;
+	if (dev == NULL) {
+		printk(KERN_ERR "tm6000" ": out of memory!\n");
+		usb_put_dev(usbdev);
+		return -ENOMEM;
 	}
 	spin_lock_init(&dev->slock);
 	mutex_init(&dev->usb_lock);
@@ -1312,7 +1317,8 @@ static int tm6000_usb_probe(struct usb_interface *interface,
 	if (!dev->isoc_in.endp) {
 		printk(KERN_ERR "tm6000: probing error: no IN ISOC endpoint!\n");
 		rc = -ENODEV;
-		goto free_device;
+
+		goto err;
 	}
 
 	/* save our data pointer in this interface device */
@@ -1322,18 +1328,17 @@ static int tm6000_usb_probe(struct usb_interface *interface,
 
 	rc = tm6000_init_dev(dev);
 	if (rc < 0)
-		goto free_device;
+		goto err;
 
 	return 0;
 
-free_device:
-	kfree(dev);
-report_failure:
+err:
 	printk(KERN_ERR "tm6000: Error %d while registering\n", rc);
 
 	clear_bit(nr, &tm6000_devused);
-put_device:
 	usb_put_dev(usbdev);
+
+	kfree(dev);
 	return rc;
 }
 

@@ -16,7 +16,7 @@
 #ifndef BOOT_BOOT_H
 #define BOOT_BOOT_H
 
-#define STACK_SIZE	1024	/* Minimum number of bytes for stack */
+#define STACK_SIZE	512	/* Minimum number of bytes for stack */
 
 #ifndef __ASSEMBLY__
 
@@ -24,7 +24,6 @@
 #include <linux/types.h>
 #include <linux/edd.h>
 #include <asm/setup.h>
-#include <asm/asm.h>
 #include "bitops.h"
 #include "ctype.h"
 #include "cpuflags.h"
@@ -177,18 +176,18 @@ static inline void wrgs32(u32 v, addr_t addr)
 }
 
 /* Note: these only return true/false, not a signed return value! */
-static inline bool memcmp_fs(const void *s1, addr_t s2, size_t len)
+static inline int memcmp_fs(const void *s1, addr_t s2, size_t len)
 {
-	bool diff;
-	asm volatile("fs; repe; cmpsb" CC_SET(nz)
-		     : CC_OUT(nz) (diff), "+D" (s1), "+S" (s2), "+c" (len));
+	u8 diff;
+	asm volatile("fs; repe; cmpsb; setnz %0"
+		     : "=qm" (diff), "+D" (s1), "+S" (s2), "+c" (len));
 	return diff;
 }
-static inline bool memcmp_gs(const void *s1, addr_t s2, size_t len)
+static inline int memcmp_gs(const void *s1, addr_t s2, size_t len)
 {
-	bool diff;
-	asm volatile("gs; repe; cmpsb" CC_SET(nz)
-		     : CC_OUT(nz) (diff), "+D" (s1), "+S" (s2), "+c" (len));
+	u8 diff;
+	asm volatile("gs; repe; cmpsb; setnz %0"
+		     : "=qm" (diff), "+D" (s1), "+S" (s2), "+c" (len));
 	return diff;
 }
 
@@ -307,6 +306,9 @@ void query_edd(void);
 
 /* header.S */
 void __attribute__((noreturn)) die(void);
+
+/* mca.c */
+int query_mca(void);
 
 /* memory.c */
 int detect_memory(void);

@@ -22,15 +22,17 @@
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/fcntl.h>
+#include <linux/aio.h>
 #include <linux/poll.h>
 #include <linux/init.h>
 #include <linux/ioctl.h>
 #include <linux/cdev.h>
-#include <linux/sched/signal.h>
+#include <linux/sched.h>
 #include <linux/uuid.h>
 #include <linux/compat.h>
 #include <linux/jiffies.h>
 #include <linux/interrupt.h>
+#include <linux/idr.h>
 
 #include <linux/mei.h>
 
@@ -179,26 +181,32 @@ static ssize_t mei_read(struct file *file, char __user *ubuf,
 		goto out;
 	}
 
-	mutex_unlock(&dev->device_lock);
-	if (wait_event_interruptible(cl->rx_wait,
-				     !list_empty(&cl->rd_completed) ||
-				     !mei_cl_is_connected(cl))) {
-		if (signal_pending(current))
-			return -EINTR;
-		return -ERESTARTSYS;
-	}
-	mutex_lock(&dev->device_lock);
-
-	if (!mei_cl_is_connected(cl)) {
-		rets = -ENODEV;
+	if (rets == -EBUSY &&
+	    !mei_cl_enqueue_ctrl_wr_cb(cl, length, MEI_FOP_READ, file)) {
+		rets = -ENOMEM;
 		goto out;
 	}
 
-	cb = mei_cl_read_cb(cl, file);
-	if (!cb) {
-		rets = 0;
-		goto out;
-	}
+	do {
+		mutex_unlock(&dev->device_lock);
+
+		if (wait_event_interruptible(cl->rx_wait,
+					     (!list_empty(&cl->rd_completed)) ||
+					     (!mei_cl_is_connected(cl)))) {
+
+			if (signal_pending(current))
+				return -EINTR;
+			return -ERESTARTSYS;
+		}
+
+		mutex_lock(&dev->device_lock);
+		if (!mei_cl_is_connected(cl)) {
+			rets = -ENODEV;
+			goto out;
+		}
+
+		cb = mei_cl_read_cb(cl, file);
+	} while (!cb);
 
 copy_buffer:
 	/* now copy the data to user space */

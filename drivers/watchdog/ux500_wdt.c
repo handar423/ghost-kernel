@@ -12,6 +12,7 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/moduleparam.h>
+#include <linux/miscdevice.h>
 #include <linux/err.h>
 #include <linux/uaccess.h>
 #include <linux/watchdog.h>
@@ -87,7 +88,7 @@ static struct watchdog_device ux500_wdt = {
 static int ux500_wdt_probe(struct platform_device *pdev)
 {
 	int ret;
-	struct ux500_wdt_data *pdata = dev_get_platdata(&pdev->dev);
+	struct ux500_wdt_data *pdata = pdev->dev.platform_data;
 
 	if (pdata) {
 		if (pdata->timeout > 0)
@@ -157,6 +158,7 @@ static struct platform_driver ux500_wdt_driver = {
 	.suspend	= ux500_wdt_suspend,
 	.resume		= ux500_wdt_resume,
 	.driver		= {
+		.owner	= THIS_MODULE,
 		.name	= "ux500_wdt",
 	},
 };
@@ -166,4 +168,5 @@ module_platform_driver(ux500_wdt_driver);
 MODULE_AUTHOR("Jonas Aaberg <jonas.aberg@stericsson.com>");
 MODULE_DESCRIPTION("Ux500 Watchdog Driver");
 MODULE_LICENSE("GPL");
+MODULE_ALIAS_MISCDEV(WATCHDOG_MINOR);
 MODULE_ALIAS("platform:ux500_wdt");

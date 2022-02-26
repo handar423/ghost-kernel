@@ -1,7 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
-#ifndef __X86_MCE_INTERNAL_H__
-#define __X86_MCE_INTERNAL_H__
-
 #include <linux/device.h>
 #include <asm/mce.h>
 
@@ -35,7 +31,7 @@ struct mce_evt_llist {
 	struct mce mce;
 };
 
-void mce_gen_pool_process(struct work_struct *__unused);
+void mce_gen_pool_process(void);
 bool mce_gen_pool_empty(void);
 int mce_gen_pool_add(struct mce *mce);
 int mce_gen_pool_init(void);
@@ -100,19 +96,3 @@ static inline bool mce_cmp(struct mce *m1, struct mce *m2)
 		m1->addr != m2->addr ||
 		m1->misc != m2->misc;
 }
-
-extern struct device_attribute dev_attr_trigger;
-
-#ifdef CONFIG_X86_MCELOG_LEGACY
-void mce_work_trigger(void);
-void mce_register_injector_chain(struct notifier_block *nb);
-void mce_unregister_injector_chain(struct notifier_block *nb);
-#else
-static inline void mce_work_trigger(void)	{ }
-static inline void mce_register_injector_chain(struct notifier_block *nb)	{ }
-static inline void mce_unregister_injector_chain(struct notifier_block *nb)	{ }
-#endif
-
-extern struct mca_config mca_cfg;
-
-#endif /* __X86_MCE_INTERNAL_H__ */

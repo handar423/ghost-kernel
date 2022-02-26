@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 /*
  *  fs/ext4/extents_status.h
  *
@@ -66,16 +65,6 @@ struct extent_status {
 struct ext4_es_tree {
 	struct rb_root root;
 	struct extent_status *cache_es;	/* recently accessed extent */
-};
-
-struct ext4_es_stats {
-	unsigned long es_stats_shrunk;
-	unsigned long es_stats_cache_hits;
-	unsigned long es_stats_cache_misses;
-	u64 es_stats_scan_time;
-	u64 es_stats_max_scan_time;
-	struct percpu_counter es_stats_all_cnt;
-	struct percpu_counter es_stats_shk_cnt;
 };
 
 extern int __init ext4_init_es(void);
@@ -170,9 +159,7 @@ static inline void ext4_es_store_pblock_status(struct extent_status *es,
 		      (pb & ~ES_MASK);
 }
 
-extern int ext4_es_register_shrinker(struct ext4_sb_info *sbi);
+extern void ext4_es_register_shrinker(struct ext4_sb_info *sbi);
 extern void ext4_es_unregister_shrinker(struct ext4_sb_info *sbi);
-
-extern int ext4_seq_es_shrinker_info_show(struct seq_file *seq, void *v);
 
 #endif /* _EXT4_EXTENTS_STATUS_H */

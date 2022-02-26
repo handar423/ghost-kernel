@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * Variant of atomic_t specialized for reference counts.
  *
@@ -60,9 +59,9 @@
  */
 bool refcount_add_not_zero(unsigned int i, refcount_t *r)
 {
-	unsigned int new, val = atomic_read(&r->refs);
+	unsigned int old, new, val = atomic_read(&r->refs);
 
-	do {
+	for (;;) {
 		if (!val)
 			return false;
 
@@ -72,8 +71,12 @@ bool refcount_add_not_zero(unsigned int i, refcount_t *r)
 		new = val + i;
 		if (new < val)
 			new = UINT_MAX;
+		old = atomic_cmpxchg_relaxed(&r->refs, val, new);
+		if (old == val)
+			break;
 
-	} while (!atomic_try_cmpxchg_relaxed(&r->refs, &val, new));
+		val = old;
+	}
 
 	WARN_ONCE(new == UINT_MAX, "refcount_t: saturated; leaking memory.\n");
 
@@ -117,9 +120,9 @@ EXPORT_SYMBOL(refcount_add);
  */
 bool refcount_inc_not_zero(refcount_t *r)
 {
-	unsigned int new, val = atomic_read(&r->refs);
+	unsigned int old, new, val = atomic_read(&r->refs);
 
-	do {
+	for (;;) {
 		new = val + 1;
 
 		if (!val)
@@ -128,7 +131,12 @@ bool refcount_inc_not_zero(refcount_t *r)
 		if (unlikely(!new))
 			return true;
 
-	} while (!atomic_try_cmpxchg_relaxed(&r->refs, &val, new));
+		old = atomic_cmpxchg_relaxed(&r->refs, val, new);
+		if (old == val)
+			break;
+
+		val = old;
+	}
 
 	WARN_ONCE(new == UINT_MAX, "refcount_t: saturated; leaking memory.\n");
 
@@ -176,9 +184,9 @@ EXPORT_SYMBOL(refcount_inc);
  */
 bool refcount_sub_and_test(unsigned int i, refcount_t *r)
 {
-	unsigned int new, val = atomic_read(&r->refs);
+	unsigned int old, new, val = atomic_read(&r->refs);
 
-	do {
+	for (;;) {
 		if (unlikely(val == UINT_MAX))
 			return false;
 
@@ -188,7 +196,12 @@ bool refcount_sub_and_test(unsigned int i, refcount_t *r)
 			return false;
 		}
 
-	} while (!atomic_try_cmpxchg_release(&r->refs, &val, new));
+		old = atomic_cmpxchg_release(&r->refs, val, new);
+		if (old == val)
+			break;
+
+		val = old;
+	}
 
 	return !new;
 }
@@ -248,9 +261,7 @@ EXPORT_SYMBOL(refcount_dec);
  */
 bool refcount_dec_if_one(refcount_t *r)
 {
-	int val = 1;
-
-	return atomic_try_cmpxchg_release(&r->refs, &val, 0);
+	return atomic_cmpxchg_release(&r->refs, 1, 0) == 1;
 }
 EXPORT_SYMBOL(refcount_dec_if_one);
 
@@ -267,9 +278,9 @@ EXPORT_SYMBOL(refcount_dec_if_one);
  */
 bool refcount_dec_not_one(refcount_t *r)
 {
-	unsigned int new, val = atomic_read(&r->refs);
+	unsigned int old, new, val = atomic_read(&r->refs);
 
-	do {
+	for (;;) {
 		if (unlikely(val == UINT_MAX))
 			return true;
 
@@ -282,7 +293,12 @@ bool refcount_dec_not_one(refcount_t *r)
 			return true;
 		}
 
-	} while (!atomic_try_cmpxchg_release(&r->refs, &val, new));
+		old = atomic_cmpxchg_release(&r->refs, val, new);
+		if (old == val)
+			break;
+
+		val = old;
+	}
 
 	return true;
 }

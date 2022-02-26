@@ -39,7 +39,7 @@ static bool rpfilter_lookup_reverse(struct net *net, struct flowi4 *fl4,
 	bool dev_match;
 	int ret __maybe_unused;
 
-	if (fib_lookup(net, fl4, &res, FIB_LOOKUP_IGNORE_LINKSTATE))
+	if (fib_lookup(net, fl4, &res))
 		return false;
 
 	if (res.type != RTN_UNICAST) {
@@ -63,10 +63,10 @@ static bool rpfilter_lookup_reverse(struct net *net, struct flowi4 *fl4,
 	return dev_match || flags & XT_RPFILTER_LOOSE;
 }
 
-static bool
-rpfilter_is_loopback(const struct sk_buff *skb, const struct net_device *in)
+static bool rpfilter_is_local(const struct sk_buff *skb)
 {
-	return skb->pkt_type == PACKET_LOOPBACK || in->flags & IFF_LOOPBACK;
+	const struct rtable *rt = skb_rtable(skb);
+	return rt && (rt->rt_flags & RTCF_LOCAL);
 }
 
 static bool rpfilter_mt(const struct sk_buff *skb, struct xt_action_param *par)
@@ -79,7 +79,7 @@ static bool rpfilter_mt(const struct sk_buff *skb, struct xt_action_param *par)
 	info = par->matchinfo;
 	invert = info->flags & XT_RPFILTER_INVERT;
 
-	if (rpfilter_is_loopback(skb, xt_in(par)))
+	if (rpfilter_is_local(skb))
 		return true ^ invert;
 
 	iph = ip_hdr(skb);

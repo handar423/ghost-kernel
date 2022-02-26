@@ -34,7 +34,7 @@ static ssize_t iio_sysfs_trig_add(struct device *dev,
 	int ret;
 	unsigned long input;
 
-	ret = kstrtoul(buf, 10, &input);
+	ret = strict_strtoul(buf, 10, &input);
 	if (ret)
 		return ret;
 	ret = iio_sysfs_trigger_probe(input);
@@ -53,7 +53,7 @@ static ssize_t iio_sysfs_trig_remove(struct device *dev,
 	int ret;
 	unsigned long input;
 
-	ret = kstrtoul(buf, 10, &input);
+	ret = strict_strtoul(buf, 10, &input);
 	if (ret)
 		return ret;
 	ret = iio_sysfs_trigger_remove(input);
@@ -127,6 +127,7 @@ static const struct attribute_group *iio_sysfs_trigger_attr_groups[] = {
 };
 
 static const struct iio_trigger_ops iio_sysfs_trigger_ops = {
+	.owner = THIS_MODULE,
 };
 
 static int iio_sysfs_trigger_probe(int id)
@@ -173,7 +174,7 @@ static int iio_sysfs_trigger_probe(int id)
 	return 0;
 
 out2:
-	iio_trigger_free(t->trig);
+	iio_trigger_put(t->trig);
 free_t:
 	kfree(t);
 out1:

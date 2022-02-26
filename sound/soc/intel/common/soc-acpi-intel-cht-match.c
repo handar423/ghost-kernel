@@ -14,6 +14,7 @@
  * more details.
  */
 
+#include <linux/module.h>
 #include <linux/dmi.h>
 #include <sound/soc-acpi.h>
 #include <sound/soc-acpi-intel-match.h>
@@ -115,6 +116,15 @@ struct snd_soc_acpi_mach  snd_soc_acpi_intel_cherrytrail_machines[] = {
 		.board = "cht-bsw",
 		.sof_fw_filename = "intel/reef-cht.ri",
 		.sof_tplg_filename = "intel/reef-cht-max98090.tplg",
+		.asoc_plat_name = "sst-mfld-platform",
+	},
+	{
+		.id = "10508824",
+		.drv_name = "cht-bsw-nau8824",
+		.fw_filename = "intel/fw_sst_22a8.bin",
+		.board = "cht-bsw",
+		.sof_fw_filename = "intel/reef-cht.ri",
+		.sof_tplg_filename = "intel/reef-cht-nau8824.tplg",
 		.asoc_plat_name = "sst-mfld-platform",
 	},
 	{

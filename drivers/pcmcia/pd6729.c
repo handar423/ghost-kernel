@@ -234,9 +234,9 @@ static irqreturn_t pd6729_interrupt(int irq, void *dev)
 
 /* socket functions */
 
-static void pd6729_interrupt_wrapper(struct timer_list *t)
+static void pd6729_interrupt_wrapper(unsigned long data)
 {
-	struct pd6729_socket *socket = from_timer(socket, t, poll_timer);
+	struct pd6729_socket *socket = (struct pd6729_socket *) data;
 
 	pd6729_interrupt(0, (void *)socket);
 	mod_timer(&socket->poll_timer, jiffies + HZ);
@@ -644,7 +644,6 @@ static int pd6729_pci_probe(struct pci_dev *dev,
 	if (!pci_resource_start(dev, 0)) {
 		dev_warn(&dev->dev, "refusing to load the driver as the "
 			"io_base is NULL.\n");
-		ret = -ENOMEM;
 		goto err_out_disable;
 	}
 
@@ -674,7 +673,6 @@ static int pd6729_pci_probe(struct pci_dev *dev,
 	mask = pd6729_isa_scan();
 	if (irq_mode == 0 && mask == 0) {
 		dev_warn(&dev->dev, "no ISA interrupt is available.\n");
-		ret = -ENODEV;
 		goto err_out_free_res;
 	}
 
@@ -707,8 +705,11 @@ static int pd6729_pci_probe(struct pci_dev *dev,
 		}
 	} else {
 		/* poll Card status change */
-		timer_setup(&socket->poll_timer, pd6729_interrupt_wrapper, 0);
-		mod_timer(&socket->poll_timer, jiffies + HZ);
+		init_timer(&socket->poll_timer);
+		socket->poll_timer.function = pd6729_interrupt_wrapper;
+		socket->poll_timer.data = (unsigned long)socket;
+		socket->poll_timer.expires = jiffies + HZ;
+		add_timer(&socket->poll_timer);
 	}
 
 	for (i = 0; i < MAX_SOCKETS; i++) {
@@ -774,4 +775,15 @@ static struct pci_driver pd6729_pci_driver = {
 	.remove		= pd6729_pci_remove,
 };
 
-module_pci_driver(pd6729_pci_driver);
+static int pd6729_module_init(void)
+{
+	return pci_register_driver(&pd6729_pci_driver);
+}
+
+static void pd6729_module_exit(void)
+{
+	pci_unregister_driver(&pd6729_pci_driver);
+}
+
+module_init(pd6729_module_init);
+module_exit(pd6729_module_exit);

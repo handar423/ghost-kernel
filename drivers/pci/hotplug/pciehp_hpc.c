@@ -50,13 +50,14 @@ static irqreturn_t pcie_isr(int irq, void *dev_id);
 static void start_int_poll_timer(struct controller *ctrl, int sec);
 
 /* This is the interrupt polling timeout function. */
-static void int_poll_timeout(struct timer_list *t)
+static void int_poll_timeout(unsigned long data)
 {
-	struct controller *ctrl = from_timer(ctrl, t, poll_timer);
+	struct controller *ctrl = (struct controller *)data;
 
 	/* Poll for interrupt events.  regs == NULL => polling */
 	pcie_isr(0, ctrl);
 
+	init_timer(&ctrl->poll_timer);
 	if (!pciehp_poll_time)
 		pciehp_poll_time = 2; /* default polling interval is 2 sec */
 
@@ -70,6 +71,8 @@ static void start_int_poll_timer(struct controller *ctrl, int sec)
 	if ((sec <= 0) || (sec > 60))
 		sec = 2;
 
+	ctrl->poll_timer.function = &int_poll_timeout;
+	ctrl->poll_timer.data = (unsigned long)ctrl;
 	ctrl->poll_timer.expires = jiffies + sec * HZ;
 	add_timer(&ctrl->poll_timer);
 }
@@ -80,7 +83,7 @@ static inline int pciehp_request_irq(struct controller *ctrl)
 
 	/* Install interrupt polling timer. Start with 10 sec delay */
 	if (pciehp_poll_mode) {
-		timer_setup(&ctrl->poll_timer, int_poll_timeout, 0);
+		init_timer(&ctrl->poll_timer);
 		start_int_poll_timer(ctrl, 10);
 		return 0;
 	}
@@ -583,14 +586,6 @@ static irqreturn_t pciehp_isr(int irq, void *dev_id)
 	events = status & (PCI_EXP_SLTSTA_ABP | PCI_EXP_SLTSTA_PFD |
 			   PCI_EXP_SLTSTA_PDC | PCI_EXP_SLTSTA_CC |
 			   PCI_EXP_SLTSTA_DLLSC);
-
-	/*
-	 * If we've already reported a power fault, don't report it again
-	 * until we've done something to handle it.
-	 */
-	if (ctrl->power_fault_detected)
-		events &= ~PCI_EXP_SLTSTA_PFD;
-
 	if (!events)
 		return IRQ_NONE;
 
@@ -673,7 +668,7 @@ static irqreturn_t pcie_isr(int irq, void *dev_id)
 	return handled;
 }
 
-void pcie_enable_notification(struct controller *ctrl)
+static void pcie_enable_notification(struct controller *ctrl)
 {
 	u16 cmd, mask;
 
@@ -709,6 +704,17 @@ void pcie_enable_notification(struct controller *ctrl)
 	pcie_write_cmd_nowait(ctrl, cmd, mask);
 	ctrl_dbg(ctrl, "%s: SLOTCTRL %x write cmd %x\n", __func__,
 		 pci_pcie_cap(ctrl->pcie->port) + PCI_EXP_SLTCTL, cmd);
+}
+
+void pcie_reenable_notification(struct controller *ctrl)
+{
+	/*
+	 * Clear both Presence and Data Link Layer Changed to make sure
+	 * those events still fire after we have re-enabled them.
+	 */
+	pcie_capability_write_word(ctrl->pcie->port, PCI_EXP_SLTSTA,
+				   PCI_EXP_SLTSTA_PDC | PCI_EXP_SLTSTA_DLLSC);
+	pcie_enable_notification(ctrl);
 }
 
 static void pcie_disable_notification(struct controller *ctrl)
@@ -761,7 +767,8 @@ int pciehp_reset_slot(struct slot *slot, int probe)
 	ctrl_dbg(ctrl, "%s: SLOTCTRL %x write cmd %x\n", __func__,
 		 pci_pcie_cap(ctrl->pcie->port) + PCI_EXP_SLTCTL, ctrl_mask);
 	if (pciehp_poll_mode)
-		int_poll_timeout(&ctrl->poll_timer);
+		int_poll_timeout(ctrl->poll_timer.data);
+
 	return 0;
 }
 
@@ -858,16 +865,11 @@ struct controller *pcie_init(struct pcie_device *dev)
 	if (link_cap & PCI_EXP_LNKCAP_DLLLARC)
 		ctrl->link_active_reporting = 1;
 
-	/*
-	 * Clear all remaining event bits in Slot Status register except
-	 * Presence Detect Changed. We want to make sure possible
-	 * hotplug event is triggered when the interrupt is unmasked so
-	 * that we don't lose that event.
-	 */
+	/* Clear all remaining event bits in Slot Status register. */
 	pcie_capability_write_word(pdev, PCI_EXP_SLTSTA,
 		PCI_EXP_SLTSTA_ABP | PCI_EXP_SLTSTA_PFD |
 		PCI_EXP_SLTSTA_MRLSC | PCI_EXP_SLTSTA_CC |
-		PCI_EXP_SLTSTA_DLLSC);
+		PCI_EXP_SLTSTA_DLLSC | PCI_EXP_SLTSTA_PDC);
 
 	ctrl_info(ctrl, "Slot #%d AttnBtn%c PwrCtrl%c MRL%c AttnInd%c PwrInd%c HotPlug%c Surprise%c Interlock%c NoCompl%c LLActRep%c\n",
 		(slot_cap & PCI_EXP_SLTCAP_PSN) >> 19,

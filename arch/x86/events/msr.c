@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0
 #include <linux/perf_event.h>
+#include <linux/nospec.h>
 #include <asm/intel-family.h>
 
 enum perf_msr_id {
@@ -9,7 +9,6 @@ enum perf_msr_id {
 	PERF_MSR_PPERF			= 3,
 	PERF_MSR_SMI			= 4,
 	PERF_MSR_PTSC			= 5,
-	PERF_MSR_IRPERF			= 6,
 
 	PERF_MSR_EVENT_MAX,
 };
@@ -22,11 +21,6 @@ static bool test_aperfmperf(int idx)
 static bool test_ptsc(int idx)
 {
 	return boot_cpu_has(X86_FEATURE_PTSC);
-}
-
-static bool test_irperf(int idx)
-{
-	return boot_cpu_has(X86_FEATURE_IRPERF);
 }
 
 static bool test_intel(int idx)
@@ -61,14 +55,14 @@ static bool test_intel(int idx)
 	case INTEL_FAM6_BROADWELL_GT3E:
 	case INTEL_FAM6_BROADWELL_X:
 
-	case INTEL_FAM6_ATOM_SILVERMONT1:
-	case INTEL_FAM6_ATOM_SILVERMONT2:
+	case INTEL_FAM6_ATOM_SILVERMONT:
+	case INTEL_FAM6_ATOM_SILVERMONT_X:
 	case INTEL_FAM6_ATOM_AIRMONT:
 
 	case INTEL_FAM6_ATOM_GOLDMONT:
-	case INTEL_FAM6_ATOM_DENVERTON:
+	case INTEL_FAM6_ATOM_GOLDMONT_X:
 
-	case INTEL_FAM6_ATOM_GEMINI_LAKE:
+	case INTEL_FAM6_ATOM_GOLDMONT_PLUS:
 
 	case INTEL_FAM6_XEON_PHI_KNL:
 	case INTEL_FAM6_XEON_PHI_KNM:
@@ -95,22 +89,20 @@ struct perf_msr {
 	bool	(*test)(int idx);
 };
 
-PMU_EVENT_ATTR_STRING(tsc,    evattr_tsc,    "event=0x00");
-PMU_EVENT_ATTR_STRING(aperf,  evattr_aperf,  "event=0x01");
-PMU_EVENT_ATTR_STRING(mperf,  evattr_mperf,  "event=0x02");
-PMU_EVENT_ATTR_STRING(pperf,  evattr_pperf,  "event=0x03");
-PMU_EVENT_ATTR_STRING(smi,    evattr_smi,    "event=0x04");
-PMU_EVENT_ATTR_STRING(ptsc,   evattr_ptsc,   "event=0x05");
-PMU_EVENT_ATTR_STRING(irperf, evattr_irperf, "event=0x06");
+PMU_EVENT_ATTR_STRING(tsc,   evattr_tsc,   "event=0x00");
+PMU_EVENT_ATTR_STRING(aperf, evattr_aperf, "event=0x01");
+PMU_EVENT_ATTR_STRING(mperf, evattr_mperf, "event=0x02");
+PMU_EVENT_ATTR_STRING(pperf, evattr_pperf, "event=0x03");
+PMU_EVENT_ATTR_STRING(smi,   evattr_smi,   "event=0x04");
+PMU_EVENT_ATTR_STRING(ptsc,  evattr_ptsc,  "event=0x05");
 
 static struct perf_msr msr[] = {
-	[PERF_MSR_TSC]    = { 0,		&evattr_tsc,	NULL,		 },
-	[PERF_MSR_APERF]  = { MSR_IA32_APERF,	&evattr_aperf,	test_aperfmperf, },
-	[PERF_MSR_MPERF]  = { MSR_IA32_MPERF,	&evattr_mperf,	test_aperfmperf, },
-	[PERF_MSR_PPERF]  = { MSR_PPERF,	&evattr_pperf,	test_intel,	 },
-	[PERF_MSR_SMI]    = { MSR_SMI_COUNT,	&evattr_smi,	test_intel,	 },
+	[PERF_MSR_TSC]   = { 0,			&evattr_tsc,	NULL,		 },
+	[PERF_MSR_APERF] = { MSR_IA32_APERF,	&evattr_aperf,	test_aperfmperf, },
+	[PERF_MSR_MPERF] = { MSR_IA32_MPERF,	&evattr_mperf,	test_aperfmperf, },
+	[PERF_MSR_PPERF] = { MSR_PPERF,		&evattr_pperf,	test_intel,	 },
+	[PERF_MSR_SMI]   = { MSR_SMI_COUNT,	&evattr_smi,	test_intel,	 },
 	[PERF_MSR_PTSC]   = { MSR_F15H_PTSC,	&evattr_ptsc,	test_ptsc,	 },
-	[PERF_MSR_IRPERF] = { MSR_F17H_IRPERF,	&evattr_irperf,	test_irperf,	 },
 };
 
 static struct attribute *events_attrs[PERF_MSR_EVENT_MAX + 1] = {
@@ -145,9 +137,6 @@ static int msr_event_init(struct perf_event *event)
 	if (event->attr.type != event->pmu->type)
 		return -ENOENT;
 
-	if (cfg >= PERF_MSR_EVENT_MAX)
-		return -EINVAL;
-
 	/* unsupported modes and filters */
 	if (event->attr.exclude_user   ||
 	    event->attr.exclude_kernel ||
@@ -157,6 +146,11 @@ static int msr_event_init(struct perf_event *event)
 	    event->attr.exclude_guest  ||
 	    event->attr.sample_period) /* no sampling */
 		return -EINVAL;
+
+	if (cfg >= PERF_MSR_EVENT_MAX)
+		return -EINVAL;
+
+	cfg = array_index_nospec((unsigned long)cfg, PERF_MSR_EVENT_MAX);
 
 	if (!msr[cfg].attr)
 		return -EINVAL;

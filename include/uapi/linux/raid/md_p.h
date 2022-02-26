@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0+ WITH Linux-syscall-note */
 /*
    md_p.h : physical layout of Linux RAID devices
           Copyright (C) 1996-98 Ingo Molnar, Gadi Oxman
@@ -17,7 +16,6 @@
 #define _MD_P_H
 
 #include <linux/types.h>
-#include <asm/byteorder.h>
 
 /*
  * RAID superblock.
@@ -79,12 +77,6 @@
 #define MD_DISK_ACTIVE		1 /* disk is running or spare disk */
 #define MD_DISK_SYNC		2 /* disk is in sync with the raid set */
 #define MD_DISK_REMOVED		3 /* disk is in sync with the raid set */
-#define MD_DISK_CLUSTER_ADD     4 /* Initiate a disk add across the cluster
-				   * For clustered enviroments only.
-				   */
-#define MD_DISK_CANDIDATE	5 /* disk is added as spare (local) until confirmed
-				   * For clustered enviroments only.
-				   */
 #define MD_DISK_FAILFAST	10 /* Send REQ_FAILFAST if there are multiple
 				    * devices available - and don't try to
 				    * correct read errors.
@@ -118,7 +110,6 @@ typedef struct mdp_device_descriptor_s {
 #define MD_SB_CLEAN		0
 #define MD_SB_ERRORS		1
 
-#define	MD_SB_CLUSTERED		5 /* MD is clustered */
 #define	MD_SB_BITMAP_PRESENT	8 /* bitmap may be present nearby */
 
 /*
@@ -325,10 +316,9 @@ struct mdp_superblock_1 {
 #define	MD_FEATURE_RECOVERY_BITMAP	128 /* recovery that is happening
 					     * is guided by bitmap.
 					     */
-#define	MD_FEATURE_CLUSTERED		256 /* clustered MD */
 #define	MD_FEATURE_JOURNAL		512 /* support write cache */
 #define	MD_FEATURE_PPL			1024 /* support PPL */
-#define	MD_FEATURE_MULTIPLE_PPLS	2048 /* support for multiple PPLs */
+#define MD_FEATURE_MULTIPLE_PPLS        2048 /* support for multiple PPLs */
 #define	MD_FEATURE_ALL			(MD_FEATURE_BITMAP_OFFSET	\
 					|MD_FEATURE_RECOVERY_OFFSET	\
 					|MD_FEATURE_RESHAPE_ACTIVE	\
@@ -337,7 +327,6 @@ struct mdp_superblock_1 {
 					|MD_FEATURE_RESHAPE_BACKWARDS	\
 					|MD_FEATURE_NEW_OFFSET		\
 					|MD_FEATURE_RECOVERY_BITMAP	\
-					|MD_FEATURE_CLUSTERED		\
 					|MD_FEATURE_JOURNAL		\
 					|MD_FEATURE_PPL			\
 					|MD_FEATURE_MULTIPLE_PPLS	\

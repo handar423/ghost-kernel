@@ -21,6 +21,10 @@
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 #ifndef __ZORAN_CARD_H__
@@ -37,7 +41,7 @@ extern int zr36067_debug;
 /* Anybody who uses more than four? */
 #define BUZ_MAX 4
 
-extern const struct video_device zoran_template;
+extern struct video_device zoran_template;
 
 extern int zoran_check_jpg_settings(struct zoran *zr,
 				    struct zoran_jpg_settings *settings,

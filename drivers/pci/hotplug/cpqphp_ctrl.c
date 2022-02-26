@@ -47,7 +47,7 @@ static void interrupt_event_handler(struct controller *ctrl);
 
 
 static struct task_struct *cpqhp_event_thread;
-static struct timer_list *pushbutton_pending;	/* = NULL */
+static unsigned long pushbutton_pending;	/* = 0 */
 
 /* delay is in jiffies to wait for */
 static void long_delay(int delay)
@@ -1732,10 +1732,9 @@ static u32 remove_board(struct pci_func *func, u32 replace_flag, struct controll
 	return 0;
 }
 
-static void pushbutton_helper_thread(struct timer_list *t)
+static void pushbutton_helper_thread(unsigned long data)
 {
-	pushbutton_pending = t;
-
+	pushbutton_pending = data;
 	wake_up_process(cpqhp_event_thread);
 }
 
@@ -1884,13 +1883,13 @@ static void interrupt_event_handler(struct controller *ctrl)
 					wait_for_ctrl_irq(ctrl);
 
 					mutex_unlock(&ctrl->crit_sect);
-					timer_setup(&p_slot->task_event,
-						    pushbutton_helper_thread,
-						    0);
+					init_timer(&p_slot->task_event);
 					p_slot->hp_slot = hp_slot;
 					p_slot->ctrl = ctrl;
 /*					p_slot->physical_slot = physical_slot; */
 					p_slot->task_event.expires = jiffies + 5 * HZ;   /* 5 second delay */
+					p_slot->task_event.function = pushbutton_helper_thread;
+					p_slot->task_event.data = (u32) p_slot;
 
 					dbg("add_timer p_slot = %p\n", p_slot);
 					add_timer(&p_slot->task_event);
@@ -1921,15 +1920,15 @@ static void interrupt_event_handler(struct controller *ctrl)
  * Scheduled procedure to handle blocking stuff for the pushbuttons.
  * Handles all pending events and exits.
  */
-void cpqhp_pushbutton_thread(struct timer_list *t)
+void cpqhp_pushbutton_thread(unsigned long slot)
 {
 	u8 hp_slot;
 	u8 device;
 	struct pci_func *func;
-	struct slot *p_slot = from_timer(p_slot, t, task_event);
+	struct slot *p_slot = (struct slot *) slot;
 	struct controller *ctrl = (struct controller *) p_slot->ctrl;
 
-	pushbutton_pending = NULL;
+	pushbutton_pending = 0;
 	hp_slot = p_slot->hp_slot;
 
 	device = p_slot->device;

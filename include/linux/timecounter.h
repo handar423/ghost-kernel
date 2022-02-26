@@ -18,6 +18,7 @@
 #define _LINUX_TIMECOUNTER_H
 
 #include <linux/types.h>
+#include <linux/clocksource.h>
 
 /* simplify initialization of mask field */
 #define CYCLECOUNTER_MASK(bits) (u64)((bits) < 64 ? ((1ULL<<(bits))-1) : -1)

@@ -43,7 +43,6 @@
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/input/mt.h>
-#include <linux/jiffies.h>
 #include <linux/string.h>
 #include <linux/timer.h>
 
@@ -73,7 +72,6 @@ MODULE_LICENSE("GPL");
 #define MT_QUIRK_FIX_CONST_CONTACT_ID	BIT(14)
 #define MT_QUIRK_TOUCH_SIZE_SCALING	BIT(15)
 #define MT_QUIRK_STICKY_FINGERS		BIT(16)
-#define MT_QUIRK_ASUS_CUSTOM_UP		BIT(17)
 
 #define MT_INPUTMODE_TOUCHSCREEN	0x02
 #define MT_INPUTMODE_TOUCHPAD		0x03
@@ -113,7 +111,6 @@ struct mt_device {
 	struct mt_slot curdata;	/* placeholder of incoming data */
 	struct mt_class mtclass;	/* our mt device class */
 	struct timer_list release_timer;	/* to release sticky fingers */
-	struct hid_device *hdev;	/* hid_device we're attached to */
 	struct mt_fields *fields;	/* temporary placeholder for storing the
 					   multitouch fields */
 	unsigned long mt_io_flags;	/* mt flags (MT_IO_FLAGS_*) */
@@ -138,9 +135,6 @@ struct mt_device {
 	bool serial_maybe;	/* need to check for serial protocol */
 	bool curvalid;		/* is the current contact valid? */
 	unsigned mt_flags;	/* flags to pass to input-mt */
-	__s32 dev_time;		/* the scan time provided by the device */
-	unsigned long jiffies;	/* the frame's jiffies */
-	int timestamp;		/* the timestamp to be sent */
 };
 
 static void mt_post_parse_default_settings(struct mt_device *td);
@@ -175,18 +169,10 @@ static void mt_post_parse(struct mt_device *td);
 #define MT_CLS_GENERALTOUCH_TWOFINGERS		0x0108
 #define MT_CLS_GENERALTOUCH_PWT_TENFINGERS	0x0109
 #define MT_CLS_LG				0x010a
-#define MT_CLS_ASUS				0x010b
 #define MT_CLS_VTL				0x0110
-#define MT_CLS_GOOGLE				0x0111
 
 #define MT_DEFAULT_MAXCONTACT	10
 #define MT_MAX_MAXCONTACT	250
-
-/*
- * Resync device and local timestamps after that many microseconds without
- * receiving data.
- */
-#define MAX_TIMESTAMP_INTERVAL	1000000
 
 #define MT_USB_DEVICE(v, p)	HID_DEVICE(BUS_USB, HID_GROUP_MULTITOUCH, v, p)
 #define MT_BT_DEVICE(v, p)	HID_DEVICE(BUS_BLUETOOTH, HID_GROUP_MULTITOUCH, v, p)
@@ -303,20 +289,10 @@ static struct mt_class mt_classes[] = {
 			MT_QUIRK_IGNORE_DUPLICATES |
 			MT_QUIRK_HOVERING |
 			MT_QUIRK_CONTACT_CNT_ACCURATE },
-	{ .name = MT_CLS_ASUS,
-		.quirks = MT_QUIRK_ALWAYS_VALID |
-			MT_QUIRK_CONTACT_CNT_ACCURATE |
-			MT_QUIRK_ASUS_CUSTOM_UP },
 	{ .name = MT_CLS_VTL,
 		.quirks = MT_QUIRK_ALWAYS_VALID |
 			MT_QUIRK_CONTACT_CNT_ACCURATE |
 			MT_QUIRK_FORCE_GET_FEATURE,
-	},
-	{ .name = MT_CLS_GOOGLE,
-		.quirks = MT_QUIRK_ALWAYS_VALID |
-			MT_QUIRK_CONTACT_CNT_ACCURATE |
-			MT_QUIRK_SLOT_IS_CONTACTID |
-			MT_QUIRK_HOVERING
 	},
 	{ }
 };
@@ -358,14 +334,15 @@ static struct attribute *sysfs_attrs[] = {
 	NULL
 };
 
-static const struct attribute_group mt_attribute_group = {
+static struct attribute_group mt_attribute_group = {
 	.attrs = sysfs_attrs
 };
 
 static void mt_get_feature(struct hid_device *hdev, struct hid_report *report)
 {
 	struct mt_device *td = hid_get_drvdata(hdev);
-	int ret, size = hid_report_len(report);
+	int ret;
+	u32 size = hid_report_len(report);
 	u8 *buf;
 
 	/*
@@ -594,12 +571,6 @@ static int mt_touch_input_mapping(struct hid_device *hdev, struct hid_input *hi,
 				cls->sn_pressure);
 			mt_store_field(usage, td, hi);
 			return 1;
-		case HID_DG_SCANTIME:
-			hid_map_usage(hi, usage, bit, max,
-				EV_MSC, MSC_TIMESTAMP);
-			input_set_capability(hi->input, EV_MSC, MSC_TIMESTAMP);
-			mt_store_field(usage, td, hi);
-			return 1;
 		case HID_DG_CONTACTCOUNT:
 			/* Ignore if indexes are out of bounds. */
 			if (field->index >= field->report->maxfield ||
@@ -735,7 +706,6 @@ static void mt_complete_slot(struct mt_device *td, struct input_dev *input)
 static void mt_sync_frame(struct mt_device *td, struct input_dev *input)
 {
 	input_mt_sync_frame(input);
-	input_event(input, EV_MSC, MSC_TIMESTAMP, td->timestamp);
 	input_sync(input);
 	td->num_received = 0;
 	if (test_bit(MT_IO_FLAGS_ACTIVE_SLOTS, &td->mt_io_flags))
@@ -743,28 +713,6 @@ static void mt_sync_frame(struct mt_device *td, struct input_dev *input)
 	else
 		clear_bit(MT_IO_FLAGS_PENDING_SLOTS, &td->mt_io_flags);
 	clear_bit(MT_IO_FLAGS_ACTIVE_SLOTS, &td->mt_io_flags);
-}
-
-static int mt_compute_timestamp(struct mt_device *td, struct hid_field *field,
-		__s32 value)
-{
-	long delta = value - td->dev_time;
-	unsigned long jdelta = jiffies_to_usecs(jiffies - td->jiffies);
-
-	td->jiffies = jiffies;
-	td->dev_time = value;
-
-	if (delta < 0)
-		delta += field->logical_maximum;
-
-	/* HID_DG_SCANTIME is expressed in 100us, we want it in us. */
-	delta *= 100;
-
-	if (jdelta > MAX_TIMESTAMP_INTERVAL)
-		/* No data received for a while, resync the timestamp. */
-		return 0;
-	else
-		return td->timestamp + delta;
 }
 
 static int mt_touch_event(struct hid_device *hid, struct hid_field *field,
@@ -826,9 +774,6 @@ static void mt_process_mt_event(struct hid_device *hid, struct hid_field *field,
 			break;
 		case HID_DG_HEIGHT:
 			td->curdata.h = value;
-			break;
-		case HID_DG_SCANTIME:
-			td->timestamp = mt_compute_timestamp(td, field, value);
 			break;
 		case HID_DG_CONTACTCOUNT:
 			break;
@@ -954,8 +899,6 @@ static int mt_touch_input_configured(struct hid_device *hdev,
 	return 0;
 }
 
-#define mt_map_key_clear(c)	hid_map_usage_clear(hi, usage, bit, \
-						    max, EV_KEY, (c))
 static int mt_input_mapping(struct hid_device *hdev, struct hid_input *hi,
 		struct hid_field *field, struct hid_usage *usage,
 		unsigned long **bit, int *max)
@@ -971,37 +914,8 @@ static int mt_input_mapping(struct hid_device *hdev, struct hid_input *hi,
 	if (!td->mtclass.export_all_inputs &&
 	    field->application != HID_DG_TOUCHSCREEN &&
 	    field->application != HID_DG_PEN &&
-	    field->application != HID_DG_TOUCHPAD &&
-	    field->application != HID_GD_KEYBOARD &&
-	    field->application != HID_GD_SYSTEM_CONTROL &&
-	    field->application != HID_CP_CONSUMER_CONTROL &&
-	    field->application != HID_GD_WIRELESS_RADIO_CTLS &&
-	    !(field->application == HID_VD_ASUS_CUSTOM_MEDIA_KEYS &&
-	      td->mtclass.quirks & MT_QUIRK_ASUS_CUSTOM_UP))
+	    field->application != HID_DG_TOUCHPAD)
 		return -1;
-
-	/*
-	 * Some Asus keyboard+touchpad devices have the hotkeys defined in the
-	 * touchpad report descriptor. We need to treat these as an array to
-	 * map usages to input keys.
-	 */
-	if (field->application == HID_VD_ASUS_CUSTOM_MEDIA_KEYS &&
-	    td->mtclass.quirks & MT_QUIRK_ASUS_CUSTOM_UP &&
-	    (usage->hid & HID_USAGE_PAGE) == HID_UP_CUSTOM) {
-		set_bit(EV_REP, hi->input->evbit);
-		if (field->flags & HID_MAIN_ITEM_VARIABLE)
-			field->flags &= ~HID_MAIN_ITEM_VARIABLE;
-		switch (usage->hid & HID_USAGE) {
-		case 0x10: mt_map_key_clear(KEY_BRIGHTNESSDOWN);	break;
-		case 0x20: mt_map_key_clear(KEY_BRIGHTNESSUP);		break;
-		case 0x35: mt_map_key_clear(KEY_DISPLAY_OFF);		break;
-		case 0x6b: mt_map_key_clear(KEY_F21);			break;
-		case 0x6c: mt_map_key_clear(KEY_SLEEP);			break;
-		default:
-			return -1;
-		}
-		return 1;
-	}
 
 	/*
 	 * some egalax touchscreens have "application == HID_DG_TOUCHSCREEN"
@@ -1079,7 +993,7 @@ static void mt_set_input_mode(struct hid_device *hdev)
 	struct hid_report_enum *re;
 	struct mt_class *cls = &td->mtclass;
 	char *buf;
-	int report_len;
+	u32 report_len;
 
 	if (td->inputmode < 0)
 		return;
@@ -1211,12 +1125,6 @@ static int mt_input_configured(struct hid_device *hdev, struct hid_input *hi)
 		case HID_CP_CONSUMER_CONTROL:
 			suffix = "Consumer Control";
 			break;
-		case HID_GD_WIRELESS_RADIO_CTLS:
-			suffix = "Wireless Radio Control";
-			break;
-		case HID_VD_ASUS_CUSTOM_MEDIA_KEYS:
-			suffix = "Custom Media Keys";
-			break;
 		default:
 			suffix = "UNKNOWN";
 			break;
@@ -1289,10 +1197,10 @@ static void mt_release_contacts(struct hid_device *hid)
 	td->num_received = 0;
 }
 
-static void mt_expired_timeout(struct timer_list *t)
+static void mt_expired_timeout(unsigned long arg)
 {
-	struct mt_device *td = from_timer(td, t, release_timer);
-	struct hid_device *hdev = td->hdev;
+	struct hid_device *hdev = (void *)arg;
+	struct mt_device *td = hid_get_drvdata(hdev);
 
 	/*
 	 * An input report came in just before we release the sticky fingers,
@@ -1323,7 +1231,6 @@ static int mt_probe(struct hid_device *hdev, const struct hid_device_id *id)
 		dev_err(&hdev->dev, "cannot allocate multitouch data\n");
 		return -ENOMEM;
 	}
-	td->hdev = hdev;
 	td->mtclass = *mtclass;
 	td->inputmode = -1;
 	td->maxcontact_report_id = -1;
@@ -1375,7 +1282,7 @@ static int mt_probe(struct hid_device *hdev, const struct hid_device_id *id)
 	 */
 	hdev->quirks |= HID_QUIRK_NO_INIT_REPORTS;
 
-	timer_setup(&td->release_timer, mt_expired_timeout, 0);
+	setup_timer(&td->release_timer, mt_expired_timeout, (long)hdev);
 
 	ret = hid_parse(hdev);
 	if (ret != 0)
@@ -1463,23 +1370,15 @@ static const struct hid_device_id mt_devices[] = {
 		HID_DEVICE(BUS_I2C, HID_GROUP_MULTITOUCH_WIN_8,
 			USB_VENDOR_ID_ALPS_JP,
 			HID_DEVICE_ID_ALPS_U1_DUAL_3BTN_PTP) },
-
-	/* Lenovo X1 TAB Gen 2 */
 	{ .driver_data = MT_CLS_WIN_8_DUAL,
-		HID_DEVICE(BUS_USB, HID_GROUP_MULTITOUCH_WIN_8,
-			   USB_VENDOR_ID_LENOVO,
-			   USB_DEVICE_ID_LENOVO_X1_TAB) },
+		HID_DEVICE(BUS_I2C, HID_GROUP_MULTITOUCH_WIN_8,
+			USB_VENDOR_ID_ALPS_JP,
+			HID_DEVICE_ID_ALPS_1222) },
 
 	/* Anton devices */
 	{ .driver_data = MT_CLS_EXPORT_ALL_INPUTS,
 		MT_USB_DEVICE(USB_VENDOR_ID_ANTON,
 			USB_DEVICE_ID_ANTON_TOUCH_PAD) },
-
-	/* Asus T304UA */
-	{ .driver_data = MT_CLS_ASUS,
-		HID_DEVICE(BUS_USB, HID_GROUP_MULTITOUCH_WIN_8,
-			USB_VENDOR_ID_ASUSTEK,
-			USB_DEVICE_ID_ASUSTEK_T304_KEYBOARD) },
 
 	/* Atmel panels */
 	{ .driver_data = MT_CLS_SERIAL,
@@ -1754,11 +1653,6 @@ static const struct hid_device_id mt_devices[] = {
 	{ .driver_data = MT_CLS_NSMU,
 		MT_USB_DEVICE(USB_VENDOR_ID_XIROKU,
 			USB_DEVICE_ID_XIROKU_CSR2) },
-
-	/* Google MT devices */
-	{ .driver_data = MT_CLS_GOOGLE,
-		HID_DEVICE(HID_BUS_ANY, HID_GROUP_ANY, USB_VENDOR_ID_GOOGLE,
-			USB_DEVICE_ID_GOOGLE_TOUCH_ROSE) },
 
 	/* Generic MT device */
 	{ HID_DEVICE(HID_BUS_ANY, HID_GROUP_MULTITOUCH, HID_ANY_ID, HID_ANY_ID) },

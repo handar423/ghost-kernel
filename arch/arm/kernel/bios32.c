@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  *  linux/arch/arm/kernel/bios32.c
  *
@@ -58,10 +57,13 @@ static void pcibios_bus_report_status(struct pci_bus *bus, u_int status_mask, in
 
 void pcibios_report_status(u_int status_mask, int warn)
 {
-	struct pci_bus *bus;
+	struct list_head *l;
 
-	list_for_each_entry(bus, &pci_root_buses, node)
+	list_for_each(l, &pci_root_buses) {
+		struct pci_bus *bus = pci_bus_b(l);
+
 		pcibios_bus_report_status(bus, status_mask, warn);
+	}
 }
 
 /*
@@ -356,7 +358,7 @@ void pcibios_fixup_bus(struct pci_bus *bus)
 	/*
 	 * Report what we did for this bus
 	 */
-	pr_info("PCI: bus%d: Fast back to back transfers %sabled\n",
+	printk(KERN_INFO "PCI: bus%d: Fast back to back transfers %sabled\n",
 		bus->number, (features & PCI_COMMAND_FAST_BACK) ? "en" : "dis");
 }
 EXPORT_SYMBOL(pcibios_fixup_bus);
@@ -411,28 +413,20 @@ static int pcibios_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
 	return irq;
 }
 
-static int pcibios_init_resource(int busnr, struct pci_sys_data *sys,
-				 int io_optional)
+static int pcibios_init_resources(int busnr, struct pci_sys_data *sys)
 {
 	int ret;
-	struct resource_entry *window;
+	struct pci_host_bridge_window *window;
 
 	if (list_empty(&sys->resources)) {
 		pci_add_resource_offset(&sys->resources,
 			 &iomem_resource, sys->mem_offset);
 	}
 
-	/*
-	 * If a platform says I/O port support is optional, we don't add
-	 * the default I/O space.  The platform is responsible for adding
-	 * any I/O space it needs.
-	 */
-	if (io_optional)
-		return 0;
-
-	resource_list_for_each_entry(window, &sys->resources)
+	list_for_each_entry(window, &sys->resources, list) {
 		if (resource_type(window->res) == IORESOURCE_IO)
 			return 0;
+	}
 
 	sys->io_res.start = (busnr * SZ_64K) ?  : pcibios_min_io;
 	sys->io_res.end = (busnr + 1) * SZ_64K - 1;
@@ -451,25 +445,24 @@ static int pcibios_init_resource(int busnr, struct pci_sys_data *sys,
 	return 0;
 }
 
-static void pcibios_init_hw(struct device *parent, struct hw_pci *hw,
-			    struct list_head *head)
+static void pcibios_init_hw(struct hw_pci *hw, struct list_head *head)
 {
 	struct pci_sys_data *sys = NULL;
 	int ret;
 	int nr, busnr;
 
 	for (nr = busnr = 0; nr < hw->nr_controllers; nr++) {
-		struct pci_host_bridge *bridge;
+		sys = kzalloc(sizeof(struct pci_sys_data), GFP_KERNEL);
+		if (!sys)
+			panic("PCI: unable to allocate sys data!");
 
-		bridge = pci_alloc_host_bridge(sizeof(struct pci_sys_data));
-		if (WARN(!bridge, "PCI: unable to allocate bridge!"))
-			break;
-
-		sys = pci_host_bridge_priv(bridge);
-
+#ifdef CONFIG_PCI_DOMAINS
+		sys->domain  = hw->domain;
+#endif
 		sys->busnr   = busnr;
 		sys->swizzle = hw->swizzle;
 		sys->map_irq = hw->map_irq;
+		sys->align_resource = hw->align_resource;
 		INIT_LIST_HEAD(&sys->resources);
 
 		if (hw->private_data)
@@ -478,51 +471,33 @@ static void pcibios_init_hw(struct device *parent, struct hw_pci *hw,
 		ret = hw->setup(nr, sys);
 
 		if (ret > 0) {
-
-			ret = pcibios_init_resource(nr, sys, hw->io_optional);
+			ret = pcibios_init_resources(nr, sys);
 			if (ret)  {
-				pci_free_host_bridge(bridge);
+				kfree(sys);
 				break;
 			}
-
-			bridge->map_irq = pcibios_map_irq;
-			bridge->swizzle_irq = pcibios_swizzle;
 
 			if (hw->scan)
-				ret = hw->scan(nr, bridge);
-			else {
-				list_splice_init(&sys->resources,
-						 &bridge->windows);
-				bridge->dev.parent = parent;
-				bridge->sysdata = sys;
-				bridge->busnr = sys->busnr;
-				bridge->ops = hw->ops;
-				bridge->msi = hw->msi_ctrl;
-				bridge->align_resource =
-						hw->align_resource;
+				sys->bus = hw->scan(nr, sys);
+			else
+				sys->bus = pci_scan_root_bus(NULL, sys->busnr,
+						hw->ops, sys, &sys->resources);
 
-				ret = pci_scan_root_bus_bridge(bridge);
-			}
-
-			if (WARN(ret < 0, "PCI: unable to scan bus!")) {
-				pci_free_host_bridge(bridge);
-				break;
-			}
-
-			sys->bus = bridge->bus;
+			if (!sys->bus)
+				panic("PCI: unable to scan bus!");
 
 			busnr = sys->bus->busn_res.end + 1;
 
 			list_add(&sys->node, head);
 		} else {
-			pci_free_host_bridge(bridge);
+			kfree(sys);
 			if (ret < 0)
 				break;
 		}
 	}
 }
 
-void pci_common_init_dev(struct device *parent, struct hw_pci *hw)
+void pci_common_init(struct hw_pci *hw)
 {
 	struct pci_sys_data *sys;
 	LIST_HEAD(head);
@@ -530,30 +505,35 @@ void pci_common_init_dev(struct device *parent, struct hw_pci *hw)
 	pci_add_flags(PCI_REASSIGN_ALL_RSRC);
 	if (hw->preinit)
 		hw->preinit();
-	pcibios_init_hw(parent, hw, &head);
+	pcibios_init_hw(hw, &head);
 	if (hw->postinit)
 		hw->postinit();
+
+	pci_fixup_irqs(pcibios_swizzle, pcibios_map_irq);
 
 	list_for_each_entry(sys, &head, node) {
 		struct pci_bus *bus = sys->bus;
 
-		/*
-		 * We insert PCI resources into the iomem_resource and
-		 * ioport_resource trees in either pci_bus_claim_resources()
-		 * or pci_bus_assign_resources().
-		 */
-		if (pci_has_flag(PCI_PROBE_ONLY)) {
-			pci_bus_claim_resources(bus);
-		} else {
-			struct pci_bus *child;
-
+		if (!pci_has_flag(PCI_PROBE_ONLY)) {
+			/*
+			 * Size the bridge windows.
+			 */
 			pci_bus_size_bridges(bus);
+
+			/*
+			 * Assign resources.
+			 */
 			pci_bus_assign_resources(bus);
 
-			list_for_each_entry(child, &bus->children, node)
-				pcie_bus_configure_settings(child);
+			/*
+			 * Enable bridges
+			 */
+			pci_enable_bridges(bus);
 		}
 
+		/*
+		 * Tell drivers about devices found.
+		 */
 		pci_bus_add_devices(bus);
 	}
 }
@@ -569,6 +549,9 @@ char * __init pcibios_setup(char *str)
 {
 	if (!strcmp(str, "debug")) {
 		debug_pci = 1;
+		return NULL;
+	} else if (!strcmp(str, "firmware")) {
+		pci_add_flags(PCI_PROBE_ONLY);
 		return NULL;
 	}
 	return str;
@@ -593,21 +576,86 @@ resource_size_t pcibios_align_resource(void *data, const struct resource *res,
 				resource_size_t size, resource_size_t align)
 {
 	struct pci_dev *dev = data;
+	struct pci_sys_data *sys = dev->sysdata;
 	resource_size_t start = res->start;
-	struct pci_host_bridge *host_bridge;
 
 	if (res->flags & IORESOURCE_IO && start & 0x300)
 		start = (start + 0x3ff) & ~0x3ff;
 
 	start = (start + align - 1) & ~(align - 1);
 
-	host_bridge = pci_find_host_bridge(dev->bus);
-
-	if (host_bridge->align_resource)
-		return host_bridge->align_resource(dev, res,
-				start, size, align);
+	if (sys->align_resource)
+		return sys->align_resource(dev, res, start, size, align);
 
 	return start;
+}
+
+/**
+ * pcibios_enable_device - Enable I/O and memory.
+ * @dev: PCI device to be enabled
+ */
+int pcibios_enable_device(struct pci_dev *dev, int mask)
+{
+	u16 cmd, old_cmd;
+	int idx;
+	struct resource *r;
+
+	pci_read_config_word(dev, PCI_COMMAND, &cmd);
+	old_cmd = cmd;
+	for (idx = 0; idx < 6; idx++) {
+		/* Only set up the requested stuff */
+		if (!(mask & (1 << idx)))
+			continue;
+
+		r = dev->resource + idx;
+		if (!r->start && r->end) {
+			printk(KERN_ERR "PCI: Device %s not available because"
+			       " of resource collisions\n", pci_name(dev));
+			return -EINVAL;
+		}
+		if (r->flags & IORESOURCE_IO)
+			cmd |= PCI_COMMAND_IO;
+		if (r->flags & IORESOURCE_MEM)
+			cmd |= PCI_COMMAND_MEMORY;
+	}
+
+	/*
+	 * Bridges (eg, cardbus bridges) need to be fully enabled
+	 */
+	if ((dev->class >> 16) == PCI_BASE_CLASS_BRIDGE)
+		cmd |= PCI_COMMAND_IO | PCI_COMMAND_MEMORY;
+
+	if (cmd != old_cmd) {
+		printk("PCI: enabling device %s (%04x -> %04x)\n",
+		       pci_name(dev), old_cmd, cmd);
+		pci_write_config_word(dev, PCI_COMMAND, cmd);
+	}
+	return 0;
+}
+
+int pci_mmap_page_range(struct pci_dev *dev, struct vm_area_struct *vma,
+			enum pci_mmap_state mmap_state, int write_combine)
+{
+	struct pci_sys_data *root = dev->sysdata;
+	unsigned long phys;
+
+	if (mmap_state == pci_mmap_io) {
+		return -EINVAL;
+	} else {
+		phys = vma->vm_pgoff + (root->mem_offset >> PAGE_SHIFT);
+	}
+
+	/*
+	 * Mark this as IO
+	 */
+	vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
+
+	if (remap_pfn_range(vma, vma->vm_start, phys,
+			     vma->vm_end - vma->vm_start,
+			     vma->vm_page_prot))
+		return -EAGAIN;
+
+	return 0;
 }
 
 void __init pci_map_io_early(unsigned long pfn)

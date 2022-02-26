@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0+
 /*
  * EHCI HCD (Host Controller Driver) for USB.
  *
@@ -9,6 +8,21 @@
  * Based on "ehci-ppc-of.c" by Valentine Barshak <vbarshak@ru.mvista.com>
  * and "ehci-ppc-soc.c" by Stefan Roese <sr@denx.de>
  * and "ohci-ppc-of.c" by Sylvain Munaut <tnt@246tNt.com>
+ *
+ * This program is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License as published by the
+ * Free Software Foundation; either version 2 of the License, or (at your
+ * option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+ * or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+ * for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software Foundation,
+ * Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ *
  */
 
 #include <linux/err.h>
@@ -17,7 +31,6 @@
 #include <linux/of.h>
 #include <linux/of_platform.h>
 #include <linux/of_address.h>
-#include <linux/of_irq.h>
 
 /**
  * ehci_xilinx_port_handed_over - hand the port out if failed to enable it
@@ -142,8 +155,7 @@ static int ehci_hcd_xilinx_of_probe(struct platform_device *op)
 
 	irq = irq_of_parse_and_map(dn, 0);
 	if (!irq) {
-		dev_err(&op->dev, "%s: irq_of_parse_and_map failed\n",
-			__FILE__);
+		printk(KERN_ERR "%s: irq_of_parse_and_map failed\n", __FILE__);
 		rv = -EBUSY;
 		goto err_irq;
 	}
@@ -179,10 +191,8 @@ static int ehci_hcd_xilinx_of_probe(struct platform_device *op)
 	ehci->caps = hcd->regs + 0x100;
 
 	rv = usb_add_hcd(hcd, irq, 0);
-	if (rv == 0) {
-		device_wakeup_enable(hcd->self.controller);
+	if (rv == 0)
 		return 0;
-	}
 
 err_irq:
 	usb_put_hcd(hcd);
@@ -199,7 +209,8 @@ err_irq:
  */
 static int ehci_hcd_xilinx_of_remove(struct platform_device *op)
 {
-	struct usb_hcd *hcd = platform_get_drvdata(op);
+	struct usb_hcd *hcd = dev_get_drvdata(&op->dev);
+	dev_set_drvdata(&op->dev, NULL);
 
 	dev_dbg(&op->dev, "stopping XILINX-OF USB Controller\n");
 
@@ -210,6 +221,21 @@ static int ehci_hcd_xilinx_of_remove(struct platform_device *op)
 	return 0;
 }
 
+/**
+ * ehci_hcd_xilinx_of_shutdown - shutdown the hcd
+ * @op:		pointer to platform_device structure that is to be removed
+ *
+ * Properly shutdown the hcd, call driver's shutdown routine.
+ */
+static void ehci_hcd_xilinx_of_shutdown(struct platform_device *op)
+{
+	struct usb_hcd *hcd = dev_get_drvdata(&op->dev);
+
+	if (hcd->driver->shutdown)
+		hcd->driver->shutdown(hcd);
+}
+
+
 static const struct of_device_id ehci_hcd_xilinx_of_match[] = {
 		{.compatible = "xlnx,xps-usb-host-1.00.a",},
 	{},
@@ -219,9 +245,10 @@ MODULE_DEVICE_TABLE(of, ehci_hcd_xilinx_of_match);
 static struct platform_driver ehci_hcd_xilinx_of_driver = {
 	.probe		= ehci_hcd_xilinx_of_probe,
 	.remove		= ehci_hcd_xilinx_of_remove,
-	.shutdown	= usb_hcd_platform_shutdown,
+	.shutdown	= ehci_hcd_xilinx_of_shutdown,
 	.driver = {
 		.name = "xilinx-of-ehci",
+		.owner = THIS_MODULE,
 		.of_match_table = ehci_hcd_xilinx_of_match,
 	},
 };

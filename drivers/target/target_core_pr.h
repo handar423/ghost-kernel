@@ -1,10 +1,5 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef TARGET_CORE_PR_H
 #define TARGET_CORE_PR_H
-
-#include <linux/types.h>
-#include <target/target_core_base.h>
-
 /*
  * PERSISTENT_RESERVE_OUT service action codes
  *

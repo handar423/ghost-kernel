@@ -17,7 +17,6 @@
 #include <asm/cache.h>
 #include <asm/errno.h>
 #include <asm/ppc_asm.h>
-#include <asm/export.h>
 
 	.text
 
@@ -25,9 +24,9 @@
  * computes the checksum of a memory block at buff, length len,
  * and adds in "sum" (32-bit)
  *
- * __csum_partial(buff, len, sum)
+ * csum_partial(buff, len, sum)
  */
-_GLOBAL(__csum_partial)
+_GLOBAL(csum_partial)
 	subi	r3,r3,4
 	srawi.	r6,r4,2		/* Divide len by 4 and also clear carry */
 	beq	3f		/* if we're doing < 4 bytes */
@@ -69,7 +68,6 @@ _GLOBAL(__csum_partial)
 	adde	r5,r5,r0
 5:	addze	r3,r5		/* add in final carry */
 	blr
-EXPORT_SYMBOL(__csum_partial)
 
 /*
  * Computes the checksum of a memory block at src, length len,
@@ -103,14 +101,17 @@ EXPORT_SYMBOL(__csum_partial)
 	adde	r12,r12,r10
 
 #define CSUM_COPY_16_BYTES_EXCODE(n)		\
-	EX_TABLE(8 ## n ## 0b, src_error);	\
-	EX_TABLE(8 ## n ## 1b, src_error);	\
-	EX_TABLE(8 ## n ## 2b, src_error);	\
-	EX_TABLE(8 ## n ## 3b, src_error);	\
-	EX_TABLE(8 ## n ## 4b, dst_error);	\
-	EX_TABLE(8 ## n ## 5b, dst_error);	\
-	EX_TABLE(8 ## n ## 6b, dst_error);	\
-	EX_TABLE(8 ## n ## 7b, dst_error);
+.section __ex_table,"a";		\
+	.align	2;			\
+	.long	8 ## n ## 0b,src_error;	\
+	.long	8 ## n ## 1b,src_error;	\
+	.long	8 ## n ## 2b,src_error;	\
+	.long	8 ## n ## 3b,src_error;	\
+	.long	8 ## n ## 4b,dst_error;	\
+	.long	8 ## n ## 5b,dst_error;	\
+	.long	8 ## n ## 6b,dst_error;	\
+	.long	8 ## n ## 7b,dst_error;	\
+	.text
 
 	.text
 	.stabs	"arch/powerpc/lib/",N_SO,0,0,0f
@@ -260,11 +261,14 @@ dst_error:
 	stw	r0,0(r8)
 	blr
 
-	EX_TABLE(70b, src_error);
-	EX_TABLE(71b, dst_error);
-	EX_TABLE(72b, src_error);
-	EX_TABLE(73b, dst_error);
-	EX_TABLE(54b, dst_error);
+	.section __ex_table,"a"
+	.align	2
+	.long	70b,src_error
+	.long	71b,dst_error
+	.long	72b,src_error
+	.long	73b,dst_error
+	.long	54b,dst_error
+	.text
 
 /*
  * this stuff handles faults in the cacheline loop and branches to either
@@ -285,11 +289,11 @@ dst_error:
 #endif
 #endif
 
-	EX_TABLE(30b, src_error);
-	EX_TABLE(31b, dst_error);
-	EX_TABLE(40b, src_error);
-	EX_TABLE(41b, dst_error);
-	EX_TABLE(50b, src_error);
-	EX_TABLE(51b, dst_error);
-
-EXPORT_SYMBOL(csum_partial_copy_generic)
+	.section __ex_table,"a"
+	.align	2
+	.long	30b,src_error
+	.long	31b,dst_error
+	.long	40b,src_error
+	.long	41b,dst_error
+	.long	50b,src_error
+	.long	51b,dst_error

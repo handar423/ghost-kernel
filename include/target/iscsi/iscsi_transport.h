@@ -1,7 +1,6 @@
-/* SPDX-License-Identifier: GPL-2.0 */
-#include "iscsi_target_core.h" /* struct iscsi_cmd */
-
-struct sockaddr_storage;
+#include <linux/module.h>
+#include <linux/list.h>
+#include "iscsi_target_core.h"
 
 struct iscsit_transport {
 #define ISCSIT_TRANSPORT_NAME	16

@@ -161,10 +161,10 @@ void opa_vnic_process_vema_config(struct opa_vnic_adapter *adapter)
 
 	/* Handle MTU limit change */
 	rtnl_lock();
-	netdev->max_mtu = max_t(unsigned int, info->vesw.eth_mtu,
-				netdev->min_mtu);
-	if (netdev->mtu > netdev->max_mtu)
-		dev_set_mtu(netdev, netdev->max_mtu);
+	netdev->extended->max_mtu = max_t(unsigned int, info->vesw.eth_mtu,
+				netdev->extended->min_mtu);
+	if (netdev->mtu > netdev->extended->max_mtu)
+		dev_set_mtu(netdev, netdev->extended->max_mtu);
 	rtnl_unlock();
 
 	/* Update flow to default port redirection table */
@@ -332,7 +332,7 @@ struct opa_vnic_adapter *opa_vnic_add_netdev(struct ib_device *ibdev,
 
 	netdev = ibdev->alloc_rdma_netdev(ibdev, port_num,
 					  RDMA_NETDEV_OPA_VNIC,
-					  "veth%d", NET_NAME_UNKNOWN,
+					  "veth%d", 0,	/* NET_NAME_UNKNOWN, */
 					  ether_setup);
 	if (!netdev)
 		return ERR_PTR(-ENOMEM);

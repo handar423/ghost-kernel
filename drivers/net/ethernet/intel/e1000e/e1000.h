@@ -1,23 +1,5 @@
-/* Intel PRO/1000 Linux driver
- * Copyright(c) 1999 - 2015 Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * The full GNU General Public License is included in this distribution in
- * the file called "COPYING".
- *
- * Contact Information:
- * Linux NICS <linux.nics@intel.com>
- * e1000-devel Mailing List <e1000-devel@lists.sourceforge.net>
- * Intel Corporation, 5200 N.E. Elam Young Parkway, Hillsboro, OR 97124-6497
- */
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright(c) 1999 - 2018 Intel Corporation. */
 
 /* Linux PRO/1000 Ethernet Driver main header file */
 
@@ -267,10 +249,10 @@ struct e1000_adapter {
 	u32 tx_hwtstamp_skipped;
 
 	/* Rx */
-	bool (*clean_rx)(struct e1000_ring *ring, int *work_done,
-			 int work_to_do) ____cacheline_aligned_in_smp;
-	void (*alloc_rx_buf)(struct e1000_ring *ring, int cleaned_count,
-			     gfp_t gfp);
+	bool (*clean_rx) (struct e1000_ring *ring, int *work_done,
+			  int work_to_do) ____cacheline_aligned_in_smp;
+	void (*alloc_rx_buf) (struct e1000_ring *ring, int cleaned_count,
+			      gfp_t gfp);
 	struct e1000_ring *rx_ring;
 
 	u32 rx_int_delay;
@@ -411,7 +393,7 @@ s32 e1000e_get_base_timinca(struct e1000_adapter *adapter, u32 *timinca);
 #define FLAG_HAS_FLASH                    BIT(1)
 #define FLAG_HAS_HW_VLAN_FILTER           BIT(2)
 #define FLAG_HAS_WOL                      BIT(3)
-/* reserved BIT(4) */
+/* reserved bit4 */
 #define FLAG_HAS_CTRLEXT_ON_LOAD          BIT(5)
 #define FLAG_HAS_SWSM_ON_LOAD             BIT(6)
 #define FLAG_HAS_JUMBO_FRAMES             BIT(7)

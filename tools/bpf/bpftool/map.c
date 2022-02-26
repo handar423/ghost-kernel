@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017 Netronome Systems, Inc.
+ * Copyright (C) 2017-2018 Netronome Systems, Inc.
  *
  * This software is dual licensed under the GNU General License Version 2,
  * June 1991 as shown in the file COPYING in the top-level directory of this
@@ -66,6 +66,7 @@ static const char * const map_type_name[] = {
 	[BPF_MAP_TYPE_HASH_OF_MAPS]	= "hash_of_maps",
 	[BPF_MAP_TYPE_DEVMAP]		= "devmap",
 	[BPF_MAP_TYPE_SOCKMAP]		= "sockmap",
+	[BPF_MAP_TYPE_CPUMAP]		= "cpumap",
 };
 
 static unsigned int get_possible_cpus(void)
@@ -282,11 +283,16 @@ static void print_entry_plain(struct bpf_map_info *info, unsigned char *key,
 static char **parse_bytes(char **argv, const char *name, unsigned char *val,
 			  unsigned int n)
 {
-	unsigned int i = 0;
+	unsigned int i = 0, base = 0;
 	char *endptr;
 
+	if (is_prefix(*argv, "hex")) {
+		base = 16;
+		argv++;
+	}
+
 	while (i < n && argv[i]) {
-		val[i] = strtoul(argv[i], &endptr, 0);
+		val[i] = strtoul(argv[i], &endptr, base);
 		if (*endptr) {
 			p_err("error parsing byte: %s", argv[i]);
 			return NULL;
@@ -427,7 +433,10 @@ static int show_map_close_json(int fd, struct bpf_map_info *info)
 		jsonw_string_field(json_wtr, "name", info->name);
 
 	jsonw_name(json_wtr, "flags");
-	jsonw_printf(json_wtr, "%#x", info->map_flags);
+	jsonw_printf(json_wtr, "%d", info->map_flags);
+
+	print_dev_json(info->ifindex, info->netns_dev, info->netns_ino);
+
 	jsonw_uint_field(json_wtr, "bytes_key", info->key_size);
 	jsonw_uint_field(json_wtr, "bytes_value", info->value_size);
 	jsonw_uint_field(json_wtr, "max_entries", info->max_entries);
@@ -469,7 +478,9 @@ static int show_map_close_plain(int fd, struct bpf_map_info *info)
 	if (*info->name)
 		printf("name %s  ", info->name);
 
-	printf("flags 0x%x\n", info->map_flags);
+	printf("flags 0x%x", info->map_flags);
+	print_dev_plain(info->ifindex, info->netns_dev, info->netns_ino);
+	printf("\n");
 	printf("\tkey %uB  value %uB  max_entries %u",
 	       info->key_size, info->value_size, info->max_entries);
 
@@ -861,18 +872,19 @@ static int do_help(int argc, char **argv)
 	}
 
 	fprintf(stderr,
-		"Usage: %s %s show   [MAP]\n"
+		"Usage: %s %s { show | list }   [MAP]\n"
 		"       %s %s dump    MAP\n"
-		"       %s %s update  MAP  key BYTES value VALUE [UPDATE_FLAGS]\n"
-		"       %s %s lookup  MAP  key BYTES\n"
-		"       %s %s getnext MAP [key BYTES]\n"
-		"       %s %s delete  MAP  key BYTES\n"
+		"       %s %s update  MAP  key DATA value VALUE [UPDATE_FLAGS]\n"
+		"       %s %s lookup  MAP  key DATA\n"
+		"       %s %s getnext MAP [key DATA]\n"
+		"       %s %s delete  MAP  key DATA\n"
 		"       %s %s pin     MAP  FILE\n"
 		"       %s %s help\n"
 		"\n"
 		"       MAP := { id MAP_ID | pinned FILE }\n"
+		"       DATA := { [hex] BYTES }\n"
 		"       " HELP_SPEC_PROGRAM "\n"
-		"       VALUE := { BYTES | MAP | PROG }\n"
+		"       VALUE := { DATA | MAP | PROG }\n"
 		"       UPDATE_FLAGS := { any | exist | noexist }\n"
 		"       " HELP_SPEC_OPTIONS "\n"
 		"",
@@ -885,6 +897,7 @@ static int do_help(int argc, char **argv)
 
 static const struct cmd cmds[] = {
 	{ "show",	do_show },
+	{ "list",	do_show },
 	{ "help",	do_help },
 	{ "dump",	do_dump },
 	{ "update",	do_update },

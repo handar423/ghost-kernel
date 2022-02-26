@@ -1,8 +1,6 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __OF_IOMMU_H
 #define __OF_IOMMU_H
 
-#include <linux/device.h>
 #include <linux/iommu.h>
 #include <linux/of.h>
 
@@ -12,8 +10,7 @@ extern int of_get_dma_window(struct device_node *dn, const char *prefix,
 			     int index, unsigned long *busno, dma_addr_t *addr,
 			     size_t *size);
 
-extern const struct iommu_ops *of_iommu_configure(struct device *dev,
-					struct device_node *master_np);
+extern void of_iommu_init(void);
 
 #else
 
@@ -24,13 +21,20 @@ static inline int of_get_dma_window(struct device_node *dn, const char *prefix,
 	return -EINVAL;
 }
 
-static inline const struct iommu_ops *of_iommu_configure(struct device *dev,
-					 struct device_node *master_np)
-{
-	return NULL;
-}
+static inline void of_iommu_init(void) { }
 
 #endif	/* CONFIG_OF_IOMMU */
+
+static inline void of_iommu_set_ops(struct device_node *np,
+				    const struct iommu_ops *ops)
+{
+	np->data = (struct iommu_ops *)ops;
+}
+
+static inline struct iommu_ops *of_iommu_get_ops(struct device_node *np)
+{
+	return np->data;
+}
 
 extern struct of_device_id __iommu_of_table;
 

@@ -340,14 +340,15 @@ static void async_complete(struct urb *urb)
 {
 	struct urbtracker *urbtrack = urb->context;
 	int status = urb->status;
+	unsigned long flags;
 
 	if (unlikely(status))
 		dev_dbg(&urb->dev->dev, "%s - nonzero urb status received: %d\n", __func__, status);
 
 	/* remove the urbtracker from the active_urbs list */
-	spin_lock(&urbtrack->mos_parport->listlock);
+	spin_lock_irqsave(&urbtrack->mos_parport->listlock, flags);
 	list_del(&urbtrack->urblist_entry);
-	spin_unlock(&urbtrack->mos_parport->listlock);
+	spin_unlock_irqrestore(&urbtrack->mos_parport->listlock, flags);
 	kref_put(&urbtrack->ref_count, destroy_urbtracker);
 }
 
@@ -518,7 +519,7 @@ static void parport_mos7715_write_control(struct parport *pp, unsigned char d)
 
 static unsigned char parport_mos7715_read_control(struct parport *pp)
 {
-	struct mos7715_parport *mos_parport = pp->private_data;
+	struct mos7715_parport *mos_parport;
 	__u8 dcr;
 
 	spin_lock(&release_lock);
@@ -554,7 +555,7 @@ static unsigned char parport_mos7715_frob_control(struct parport *pp,
 static unsigned char parport_mos7715_read_status(struct parport *pp)
 {
 	unsigned char status;
-	struct mos7715_parport *mos_parport = pp->private_data;
+	struct mos7715_parport *mos_parport;
 
 	spin_lock(&release_lock);
 	mos_parport = pp->private_data;
@@ -1302,7 +1303,7 @@ static void mos7720_throttle(struct tty_struct *tty)
 	}
 
 	/* if we are implementing RTS/CTS, toggle that line */
-	if (C_CRTSCTS(tty)) {
+	if (tty->termios.c_cflag & CRTSCTS) {
 		mos7720_port->shadowMCR &= ~UART_MCR_RTS;
 		write_mos_reg(port->serial, port->port_number, MOS7720_MCR,
 			      mos7720_port->shadowMCR);
@@ -1332,7 +1333,7 @@ static void mos7720_unthrottle(struct tty_struct *tty)
 	}
 
 	/* if we are implementing RTS/CTS, toggle that line */
-	if (C_CRTSCTS(tty)) {
+	if (tty->termios.c_cflag & CRTSCTS) {
 		mos7720_port->shadowMCR |= UART_MCR_RTS;
 		write_mos_reg(port->serial, port->port_number, MOS7720_MCR,
 			      mos7720_port->shadowMCR);
@@ -1526,8 +1527,6 @@ static void change_port_settings(struct tty_struct *tty,
 	struct usb_serial *serial;
 	int baud;
 	unsigned cflag;
-	unsigned iflag;
-	__u8 mask = 0xff;
 	__u8 lData;
 	__u8 lParity;
 	__u8 lStop;
@@ -1551,23 +1550,19 @@ static void change_port_settings(struct tty_struct *tty,
 	lParity = 0x00;	/* No parity */
 
 	cflag = tty->termios.c_cflag;
-	iflag = tty->termios.c_iflag;
 
 	/* Change the number of bits */
 	switch (cflag & CSIZE) {
 	case CS5:
 		lData = UART_LCR_WLEN5;
-		mask = 0x1f;
 		break;
 
 	case CS6:
 		lData = UART_LCR_WLEN6;
-		mask = 0x3f;
 		break;
 
 	case CS7:
 		lData = UART_LCR_WLEN7;
-		mask = 0x7f;
 		break;
 	default:
 	case CS8:
@@ -1685,10 +1680,7 @@ static void mos7720_set_termios(struct tty_struct *tty,
 		struct usb_serial_port *port, struct ktermios *old_termios)
 {
 	int status;
-	struct usb_serial *serial;
 	struct moschip_port *mos7720_port;
-
-	serial = port->serial;
 
 	mos7720_port = usb_get_serial_port_data(port);
 
@@ -1969,7 +1961,6 @@ static void mos7720_release(struct usb_serial *serial)
 				    urblist_entry)
 			usb_unlink_urb(urbtrack->urb);
 		spin_unlock_irqrestore(&mos_parport->listlock, flags);
-		parport_del_port(mos_parport->pp);
 
 		kref_put(&mos_parport->ref_count, destroy_mos_parport);
 	}

@@ -21,6 +21,10 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ *
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -1315,7 +1319,7 @@ static int cit_set_sharpness(struct gspca_dev *gspca_dev, s32 val)
 		break;
 	case CIT_MODEL1: {
 		int i;
-		static const unsigned short sa[] = {
+		const unsigned short sa[] = {
 			0x11, 0x13, 0x16, 0x18, 0x1a, 0x8, 0x0a };
 
 		for (i = 0; i < cit_model1_ntries; i++)
@@ -1451,6 +1455,9 @@ static int cit_get_packet_size(struct gspca_dev *gspca_dev)
 		return -EIO;
 	}
 
+	if (alt->desc.bNumEndpoints < 1)
+		return -ENODEV;
+
 	return le16_to_cpu(alt->endpoint[0].desc.wMaxPacketSize);
 }
 
@@ -1467,14 +1474,14 @@ static int cit_get_clock_div(struct gspca_dev *gspca_dev)
 
 	while (clock_div > 3 &&
 			1000 * packet_size >
-			gspca_dev->pixfmt.width * gspca_dev->pixfmt.height *
+			gspca_dev->width * gspca_dev->height *
 			fps[clock_div - 1] * 3 / 2)
 		clock_div--;
 
 	PDEBUG(D_PROBE,
 	       "PacketSize: %d, res: %dx%d -> using clockdiv: %d (%d fps)",
-	       packet_size, gspca_dev->pixfmt.width, gspca_dev->pixfmt.height,
-	       clock_div, fps[clock_div]);
+	       packet_size, gspca_dev->width, gspca_dev->height, clock_div,
+	       fps[clock_div]);
 
 	return clock_div;
 }
@@ -1498,7 +1505,7 @@ static int cit_start_model0(struct gspca_dev *gspca_dev)
 	cit_write_reg(gspca_dev, 0x0002, 0x0426);
 	cit_write_reg(gspca_dev, 0x0014, 0x0427);
 
-	switch (gspca_dev->pixfmt.width) {
+	switch (gspca_dev->width) {
 	case 160: /* 160x120 */
 		cit_write_reg(gspca_dev, 0x0004, 0x010b);
 		cit_write_reg(gspca_dev, 0x0001, 0x010a);
@@ -1639,7 +1646,7 @@ static int cit_start_model1(struct gspca_dev *gspca_dev)
 	cit_write_reg(gspca_dev, 0x00, 0x0101);
 	cit_write_reg(gspca_dev, 0x00, 0x010a);
 
-	switch (gspca_dev->pixfmt.width) {
+	switch (gspca_dev->width) {
 	case 128: /* 128x96 */
 		cit_write_reg(gspca_dev, 0x80, 0x0103);
 		cit_write_reg(gspca_dev, 0x60, 0x0105);
@@ -1696,7 +1703,7 @@ static int cit_start_model1(struct gspca_dev *gspca_dev)
 	}
 
 	/* Assorted init */
-	switch (gspca_dev->pixfmt.width) {
+	switch (gspca_dev->width) {
 	case 128: /* 128x96 */
 		cit_Packet_Format1(gspca_dev, 0x2b, 0x1e);
 		cit_write_reg(gspca_dev, 0xc9, 0x0119);	/* Same everywhere */
@@ -1749,7 +1756,7 @@ static int cit_start_model2(struct gspca_dev *gspca_dev)
 	cit_write_reg(gspca_dev, 0x0000, 0x0108);
 	cit_write_reg(gspca_dev, 0x0001, 0x0133);
 	cit_write_reg(gspca_dev, 0x0001, 0x0102);
-	switch (gspca_dev->pixfmt.width) {
+	switch (gspca_dev->width) {
 	case 176: /* 176x144 */
 		cit_write_reg(gspca_dev, 0x002c, 0x0103);	/* All except 320x240 */
 		cit_write_reg(gspca_dev, 0x0000, 0x0104);	/* Same */
@@ -1768,8 +1775,7 @@ static int cit_start_model2(struct gspca_dev *gspca_dev)
 		cit_write_reg(gspca_dev, 0x0070, 0x0119);	/* All except 176x144 */
 		sd->sof_len = 2;
 		break;
-#if 0
-	case VIDEOSIZE_352x240:
+	/* case VIDEOSIZE_352x240: */
 		cit_write_reg(gspca_dev, 0x002c, 0x0103);	/* All except 320x240 */
 		cit_write_reg(gspca_dev, 0x0000, 0x0104);	/* Same */
 		cit_write_reg(gspca_dev, 0x001e, 0x0105);	/* 320x240, 352x240 */
@@ -1777,7 +1783,6 @@ static int cit_start_model2(struct gspca_dev *gspca_dev)
 		cit_write_reg(gspca_dev, 0x0070, 0x0119);	/* All except 176x144 */
 		sd->sof_len = 2;
 		break;
-#endif
 	case 352: /* 352x288 */
 		cit_write_reg(gspca_dev, 0x002c, 0x0103);	/* All except 320x240 */
 		cit_write_reg(gspca_dev, 0x0000, 0x0104);	/* Same */
@@ -1790,7 +1795,7 @@ static int cit_start_model2(struct gspca_dev *gspca_dev)
 
 	cit_write_reg(gspca_dev, 0x0000, 0x0100);	/* LED on */
 
-	switch (gspca_dev->pixfmt.width) {
+	switch (gspca_dev->width) {
 	case 176: /* 176x144 */
 		cit_write_reg(gspca_dev, 0x0050, 0x0111);
 		cit_write_reg(gspca_dev, 0x00d0, 0x0111);
@@ -1838,7 +1843,7 @@ static int cit_start_model2(struct gspca_dev *gspca_dev)
 	 * Magic control of CMOS sensor. Only lower values like
 	 * 0-3 work, and picture shifts left or right. Don't change.
 	 */
-	switch (gspca_dev->pixfmt.width) {
+	switch (gspca_dev->width) {
 	case 176: /* 176x144 */
 		cit_model2_Packet1(gspca_dev, 0x0014, 0x0002);
 		cit_model2_Packet1(gspca_dev, 0x0016, 0x0002); /* Horizontal shift */
@@ -1851,15 +1856,13 @@ static int cit_start_model2(struct gspca_dev *gspca_dev)
 		cit_model2_Packet1(gspca_dev, 0x0018, 0x0044); /* Another hardware setting */
 		clock_div = 8;
 		break;
-#if 0
-	case VIDEOSIZE_352x240:
+	/* case VIDEOSIZE_352x240: */
 		/* This mode doesn't work as Windows programs it; changed to work */
 		cit_model2_Packet1(gspca_dev, 0x0014, 0x0009); /* Windows sets this to 8 */
 		cit_model2_Packet1(gspca_dev, 0x0016, 0x0003); /* Horizontal shift */
 		cit_model2_Packet1(gspca_dev, 0x0018, 0x0044); /* Windows sets this to 0x0045 */
 		clock_div = 10;
 		break;
-#endif
 	case 352: /* 352x288 */
 		cit_model2_Packet1(gspca_dev, 0x0014, 0x0003);
 		cit_model2_Packet1(gspca_dev, 0x0016, 0x0002); /* Horizontal shift */
@@ -1899,18 +1902,16 @@ static int cit_start_model2(struct gspca_dev *gspca_dev)
 	 * does not allow arbitrary values and apparently is a bit mask, to
 	 * be activated only at appropriate time. Don't change it randomly!
 	 */
-	switch (gspca_dev->pixfmt.width) {
+	switch (gspca_dev->width) {
 	case 176: /* 176x144 */
 		cit_model2_Packet1(gspca_dev, 0x0026, 0x00c2);
 		break;
 	case 320: /* 320x240 */
 		cit_model2_Packet1(gspca_dev, 0x0026, 0x0044);
 		break;
-#if 0
-	case VIDEOSIZE_352x240:
+	/* case VIDEOSIZE_352x240: */
 		cit_model2_Packet1(gspca_dev, 0x0026, 0x0046);
 		break;
-#endif
 	case 352: /* 352x288 */
 		cit_model2_Packet1(gspca_dev, 0x0026, 0x0048);
 		break;
@@ -2025,7 +2026,7 @@ static int cit_start_model3(struct gspca_dev *gspca_dev)
 	cit_model3_Packet1(gspca_dev, 0x009e, 0x0096);
 	cit_model3_Packet1(gspca_dev, 0x009f, 0x000a);
 
-	switch (gspca_dev->pixfmt.width) {
+	switch (gspca_dev->width) {
 	case 160:
 		cit_write_reg(gspca_dev, 0x0000, 0x0101); /* Same on 160x120, 320x240 */
 		cit_write_reg(gspca_dev, 0x00a0, 0x0103); /* Same on 160x120, 320x240 */
@@ -2136,7 +2137,7 @@ static int cit_start_model3(struct gspca_dev *gspca_dev)
 	   like with the IBM netcam pro). */
 	cit_write_reg(gspca_dev, clock_div, 0x0111); /* Clock Divider */
 
-	switch (gspca_dev->pixfmt.width) {
+	switch (gspca_dev->width) {
 	case 160:
 		cit_model3_Packet1(gspca_dev, 0x001f, 0x0000); /* Same */
 		cit_model3_Packet1(gspca_dev, 0x0039, 0x001f); /* Same */
@@ -2213,7 +2214,7 @@ static int cit_start_model4(struct gspca_dev *gspca_dev)
 	cit_write_reg(gspca_dev, 0xfffa, 0x0124);
 	cit_model4_Packet1(gspca_dev, 0x0034, 0x0000);
 
-	switch (gspca_dev->pixfmt.width) {
+	switch (gspca_dev->width) {
 	case 128: /* 128x96 */
 		cit_write_reg(gspca_dev, 0x0070, 0x0119);
 		cit_write_reg(gspca_dev, 0x00d0, 0x0111);
@@ -2533,7 +2534,7 @@ static int cit_start_ibm_netcam_pro(struct gspca_dev *gspca_dev)
 	cit_write_reg(gspca_dev, 0x00fc, 0x012b); /* Same */
 	cit_write_reg(gspca_dev, 0x0022, 0x012a); /* Same */
 
-	switch (gspca_dev->pixfmt.width) {
+	switch (gspca_dev->width) {
 	case 160: /* 160x120 */
 		cit_write_reg(gspca_dev, 0x0024, 0x010b);
 		cit_write_reg(gspca_dev, 0x0089, 0x0119);
@@ -2634,10 +2635,11 @@ static int sd_start(struct gspca_dev *gspca_dev)
 
 static int sd_isoc_init(struct gspca_dev *gspca_dev)
 {
+	struct usb_interface_cache *intfc;
 	struct usb_host_interface *alt;
 	int max_packet_size;
 
-	switch (gspca_dev->pixfmt.width) {
+	switch (gspca_dev->width) {
 	case 160:
 		max_packet_size = 450;
 		break;
@@ -2649,8 +2651,17 @@ static int sd_isoc_init(struct gspca_dev *gspca_dev)
 		break;
 	}
 
+	intfc = gspca_dev->dev->actconfig->intf_cache[0];
+
+	if (intfc->num_altsetting < 2)
+		return -ENODEV;
+
+	alt = &intfc->altsetting[1];
+
+	if (alt->desc.bNumEndpoints < 1)
+		return -ENODEV;
+
 	/* Start isoc bandwidth "negotiation" at max isoc bandwidth */
-	alt = &gspca_dev->dev->actconfig->intf_cache[0]->altsetting[1];
 	alt->endpoint[0].desc.wMaxPacketSize = cpu_to_le16(max_packet_size);
 
 	return 0;
@@ -2661,7 +2672,7 @@ static int sd_isoc_nego(struct gspca_dev *gspca_dev)
 	int ret, packet_size, min_packet_size;
 	struct usb_host_interface *alt;
 
-	switch (gspca_dev->pixfmt.width) {
+	switch (gspca_dev->width) {
 	case 160:
 		min_packet_size = 200;
 		break;
@@ -2673,6 +2684,9 @@ static int sd_isoc_nego(struct gspca_dev *gspca_dev)
 		break;
 	}
 
+	/*
+	 * Existence of altsetting and endpoint was verified in sd_isoc_init()
+	 */
 	alt = &gspca_dev->dev->actconfig->intf_cache[0]->altsetting[1];
 	packet_size = le16_to_cpu(alt->endpoint[0].desc.wMaxPacketSize);
 	if (packet_size <= min_packet_size)
@@ -2782,7 +2796,7 @@ static u8 *cit_find_sof(struct gspca_dev *gspca_dev, u8 *data, int len)
 	case CIT_MODEL1:
 	case CIT_MODEL3:
 	case CIT_IBM_NETCAM_PRO:
-		switch (gspca_dev->pixfmt.width) {
+		switch (gspca_dev->width) {
 		case 160: /* 160x120 */
 			byte3 = 0x02;
 			byte4 = 0x0a;
@@ -2866,16 +2880,20 @@ static u8 *cit_find_sof(struct gspca_dev *gspca_dev, u8 *data, int len)
 				if (data[i] == 0xff) {
 					if (i >= 4)
 						PDEBUG(D_FRAM,
-						       "header found at offset: %d: %02x %02x 00 %3ph\n",
+						       "header found at offset: %d: %02x %02x 00 %02x %02x %02x\n",
 						       i - 1,
 						       data[i - 4],
 						       data[i - 3],
-						       &data[i]);
+						       data[i],
+						       data[i + 1],
+						       data[i + 2]);
 					else
 						PDEBUG(D_FRAM,
-						       "header found at offset: %d: 00 %3ph\n",
+						       "header found at offset: %d: 00 %02x %02x %02x\n",
 						       i - 1,
-						       &data[i]);
+						       data[i],
+						       data[i + 1],
+						       data[i + 2]);
 					return data + i + (sd->sof_len - 1);
 				}
 				break;
@@ -2898,10 +2916,12 @@ static void sd_pkt_scan(struct gspca_dev *gspca_dev,
 
 		/* finish decoding current frame */
 		n = sof - data;
-		if (n > sd->sof_len)
+		if (n > sd->sof_len) {
+			gmb();
 			n -= sd->sof_len;
-		else
+		} else {
 			n = 0;
+		}
 		gspca_frame_add(gspca_dev, LAST_PACKET,
 				data, n);
 		gspca_frame_add(gspca_dev, FIRST_PACKET, NULL, 0);

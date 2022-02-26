@@ -26,7 +26,6 @@
 #include <linux/mm.h>
 #include <linux/slab.h>
 #include <linux/audit.h>
-#include <linux/user_namespace.h>
 #include <net/net_namespace.h>
 
 #include <linux/netfilter/x_tables.h>
@@ -68,6 +67,9 @@ static const char *const xt_prefix[NFPROTO_NUMPROTO] = {
 	[NFPROTO_BRIDGE] = "eb",
 	[NFPROTO_IPV6]   = "ip6",
 };
+
+/* Allow this many total (re)entries. */
+static const unsigned int xt_jumpstack_multiplier = 2;
 
 /* Registration hooks for targets. */
 int xt_register_target(struct xt_target *target)
@@ -262,62 +264,6 @@ struct xt_target *xt_request_find_target(u8 af, const char *name, u8 revision)
 }
 EXPORT_SYMBOL_GPL(xt_request_find_target);
 
-
-static int xt_obj_to_user(u16 __user *psize, u16 size,
-			  void __user *pname, const char *name,
-			  u8 __user *prev, u8 rev)
-{
-	if (put_user(size, psize))
-		return -EFAULT;
-	if (copy_to_user(pname, name, strlen(name) + 1))
-		return -EFAULT;
-	if (put_user(rev, prev))
-		return -EFAULT;
-
-	return 0;
-}
-
-#define XT_OBJ_TO_USER(U, K, TYPE, C_SIZE)				\
-	xt_obj_to_user(&U->u.TYPE##_size, C_SIZE ? : K->u.TYPE##_size,	\
-		       U->u.user.name, K->u.kernel.TYPE->name,		\
-		       &U->u.user.revision, K->u.kernel.TYPE->revision)
-
-int xt_data_to_user(void __user *dst, const void *src,
-		    int usersize, int size, int aligned_size)
-{
-	usersize = usersize ? : size;
-	if (copy_to_user(dst, src, usersize))
-		return -EFAULT;
-	if (usersize != aligned_size &&
-	    clear_user(dst + usersize, aligned_size - usersize))
-		return -EFAULT;
-
-	return 0;
-}
-EXPORT_SYMBOL_GPL(xt_data_to_user);
-
-#define XT_DATA_TO_USER(U, K, TYPE)					\
-	xt_data_to_user(U->data, K->data,				\
-			K->u.kernel.TYPE->usersize,			\
-			K->u.kernel.TYPE->TYPE##size,			\
-			XT_ALIGN(K->u.kernel.TYPE->TYPE##size))
-
-int xt_match_to_user(const struct xt_entry_match *m,
-		     struct xt_entry_match __user *u)
-{
-	return XT_OBJ_TO_USER(u, m, match, 0) ||
-	       XT_DATA_TO_USER(u, m, match);
-}
-EXPORT_SYMBOL_GPL(xt_match_to_user);
-
-int xt_target_to_user(const struct xt_entry_target *t,
-		      struct xt_entry_target __user *u)
-{
-	return XT_OBJ_TO_USER(u, t, target, 0) ||
-	       XT_DATA_TO_USER(u, t, target);
-}
-EXPORT_SYMBOL_GPL(xt_target_to_user);
-
 static int match_revfn(u8 af, const char *name, u8 revision, int *bestp)
 {
 	const struct xt_match *m;
@@ -417,6 +363,36 @@ textify_hooks(char *buf, size_t size, unsigned int mask, uint8_t nfproto)
 
 	return buf;
 }
+
+/**
+ * xt_check_proc_name - check that name is suitable for /proc file creation
+ *
+ * @name: file name candidate
+ * @size: length of buffer
+ *
+ * some x_tables modules wish to create a file in /proc.
+ * This function makes sure that the name is suitable for this
+ * purpose, it checks that name is NUL terminated and isn't a 'special'
+ * name, like "..".
+ *
+ * returns negative number on error or 0 if name is useable.
+ */
+int xt_check_proc_name(const char *name, unsigned int size)
+{
+	if (name[0] == '\0')
+		return -EINVAL;
+
+	if (strnlen(name, size) == size)
+		return -ENAMETOOLONG;
+
+	if (strcmp(name, ".") == 0 ||
+	    strcmp(name, "..") == 0 ||
+	    strchr(name, '/'))
+		return -EINVAL;
+
+	return 0;
+}
+EXPORT_SYMBOL(xt_check_proc_name);
 
 int xt_check_match(struct xt_mtchk_param *par,
 		   unsigned int size, u_int8_t proto, bool inv_proto)
@@ -588,7 +564,7 @@ void xt_compat_match_from_user(struct xt_entry_match *m, void **dstptr,
 {
 	const struct xt_match *match = m->u.kernel.match;
 	struct compat_xt_entry_match *cm = (struct compat_xt_entry_match *)m;
-	int pad, off = xt_compat_match_offset(match);
+	int off = xt_compat_match_offset(match);
 	u_int16_t msize = cm->u.user.match_size;
 	char name[sizeof(m->u.user.name)];
 
@@ -598,9 +574,6 @@ void xt_compat_match_from_user(struct xt_entry_match *m, void **dstptr,
 		match->compat_from_user(m->data, cm->data);
 	else
 		memcpy(m->data, cm->data, msize - sizeof(*cm));
-	pad = XT_ALIGN(match->matchsize) - match->matchsize;
-	if (pad > 0)
-		memset(m->data + match->matchsize, 0, pad);
 
 	msize += off;
 	m->u.user.match_size = msize;
@@ -613,12 +586,6 @@ void xt_compat_match_from_user(struct xt_entry_match *m, void **dstptr,
 }
 EXPORT_SYMBOL_GPL(xt_compat_match_from_user);
 
-#define COMPAT_XT_DATA_TO_USER(U, K, TYPE, C_SIZE)			\
-	xt_data_to_user(U->data, K->data,				\
-			K->u.kernel.TYPE->usersize,			\
-			C_SIZE,						\
-			COMPAT_XT_ALIGN(C_SIZE))
-
 int xt_compat_match_to_user(const struct xt_entry_match *m,
 			    void __user **dstptr, unsigned int *size)
 {
@@ -627,14 +594,17 @@ int xt_compat_match_to_user(const struct xt_entry_match *m,
 	int off = xt_compat_match_offset(match);
 	u_int16_t msize = m->u.user.match_size - off;
 
-	if (XT_OBJ_TO_USER(cm, m, match, msize))
+	if (copy_to_user(cm, m, sizeof(*cm)) ||
+	    put_user(msize, &cm->u.user.match_size) ||
+	    copy_to_user(cm->u.user.name, m->u.kernel.match->name,
+			 strlen(m->u.kernel.match->name) + 1))
 		return -EFAULT;
 
 	if (match->compat_to_user) {
 		if (match->compat_to_user((void __user *)cm->data, m->data))
 			return -EFAULT;
 	} else {
-		if (COMPAT_XT_DATA_TO_USER(cm, m, match, msize - sizeof(*cm)))
+		if (copy_to_user(cm->data, m->data, msize - sizeof(*cm)))
 			return -EFAULT;
 	}
 
@@ -675,7 +645,7 @@ int xt_compat_check_entry_offsets(const void *base, const char *elems,
 	    COMPAT_XT_ALIGN(target_offset + sizeof(struct compat_xt_standard_target)) != next_offset)
 		return -EINVAL;
 
-	/* compat_xt_entry match has less strict alignment requirements,
+	/* compat_xt_entry match has less strict aligment requirements,
 	 * otherwise they are identical.  In case of padding differences
 	 * we need to add compat version of xt_check_entry_match.
 	 */
@@ -940,7 +910,7 @@ void xt_compat_target_from_user(struct xt_entry_target *t, void **dstptr,
 {
 	const struct xt_target *target = t->u.kernel.target;
 	struct compat_xt_entry_target *ct = (struct compat_xt_entry_target *)t;
-	int pad, off = xt_compat_target_offset(target);
+	int off = xt_compat_target_offset(target);
 	u_int16_t tsize = ct->u.user.target_size;
 	char name[sizeof(t->u.user.name)];
 
@@ -950,9 +920,6 @@ void xt_compat_target_from_user(struct xt_entry_target *t, void **dstptr,
 		target->compat_from_user(t->data, ct->data);
 	else
 		memcpy(t->data, ct->data, tsize - sizeof(*ct));
-	pad = XT_ALIGN(target->targetsize) - target->targetsize;
-	if (pad > 0)
-		memset(t->data + target->targetsize, 0, pad);
 
 	tsize += off;
 	t->u.user.target_size = tsize;
@@ -973,14 +940,17 @@ int xt_compat_target_to_user(const struct xt_entry_target *t,
 	int off = xt_compat_target_offset(target);
 	u_int16_t tsize = t->u.user.target_size - off;
 
-	if (XT_OBJ_TO_USER(ct, t, target, tsize))
+	if (copy_to_user(ct, t, sizeof(*ct)) ||
+	    put_user(tsize, &ct->u.user.target_size) ||
+	    copy_to_user(ct->u.user.name, t->u.kernel.target->name,
+			 strlen(t->u.kernel.target->name) + 1))
 		return -EFAULT;
 
 	if (target->compat_to_user) {
 		if (target->compat_to_user((void __user *)ct->data, t->data))
 			return -EFAULT;
 	} else {
-		if (COMPAT_XT_DATA_TO_USER(ct, t, target, tsize - sizeof(*ct)))
+		if (copy_to_user(ct->data, t->data, tsize - sizeof(*ct)))
 			return -EFAULT;
 	}
 
@@ -1003,10 +973,13 @@ struct xt_table_info *xt_alloc_table_info(unsigned int size)
 	if ((SMP_ALIGN(size) >> PAGE_SHIFT) + 2 > totalram_pages)
 		return NULL;
 
-	info = kvmalloc(sz, GFP_KERNEL);
-	if (!info)
-		return NULL;
-
+	if (sz <= (PAGE_SIZE << PAGE_ALLOC_COSTLY_ORDER))
+		info = kmalloc(sz, GFP_KERNEL | __GFP_NOWARN | __GFP_NORETRY);
+	if (!info) {
+		info = vmalloc(sz);
+		if (!info)
+			return NULL;
+	}
 	memset(info, 0, sizeof(*info));
 	info->size = size;
 	return info;
@@ -1023,55 +996,22 @@ void xt_free_table_info(struct xt_table_info *info)
 		kvfree(info->jumpstack);
 	}
 
+	free_percpu(info->stackptr);
+
 	kvfree(info);
 }
 EXPORT_SYMBOL(xt_free_table_info);
 
-/* Find table by name, grabs mutex & ref.  Returns NULL on error. */
+/* Find table by name, grabs mutex & ref.  Returns ERR_PTR() on error. */
 struct xt_table *xt_find_table_lock(struct net *net, u_int8_t af,
 				    const char *name)
 {
-	struct xt_table *t, *found = NULL;
+	struct xt_table *t;
 
 	mutex_lock(&xt[af].mutex);
 	list_for_each_entry(t, &net->xt.tables[af], list)
 		if (strcmp(t->name, name) == 0 && try_module_get(t->me))
 			return t;
-
-	if (net == &init_net)
-		goto out;
-
-	/* Table doesn't exist in this netns, re-try init */
-	list_for_each_entry(t, &init_net.xt.tables[af], list) {
-		if (strcmp(t->name, name))
-			continue;
-		if (!try_module_get(t->me)) {
-			mutex_unlock(&xt[af].mutex);
-			return NULL;
-		}
-
-		mutex_unlock(&xt[af].mutex);
-		if (t->table_init(net) != 0) {
-			module_put(t->me);
-			return NULL;
-		}
-
-		found = t;
-
-		mutex_lock(&xt[af].mutex);
-		break;
-	}
-
-	if (!found)
-		goto out;
-
-	/* and once again: */
-	list_for_each_entry(t, &net->xt.tables[af], list)
-		if (strcmp(t->name, name) == 0)
-			return t;
-
-	module_put(found->me);
- out:
 	mutex_unlock(&xt[af].mutex);
 	return NULL;
 }
@@ -1100,13 +1040,14 @@ EXPORT_SYMBOL_GPL(xt_compat_unlock);
 DEFINE_PER_CPU(seqcount_t, xt_recseq);
 EXPORT_PER_CPU_SYMBOL_GPL(xt_recseq);
 
-struct static_key xt_tee_enabled __read_mostly;
-EXPORT_SYMBOL_GPL(xt_tee_enabled);
-
 static int xt_jumpstack_alloc(struct xt_table_info *i)
 {
 	unsigned int size;
 	int cpu;
+
+	i->stackptr = alloc_percpu(unsigned int);
+	if (i->stackptr == NULL)
+		return -ENOMEM;
 
 	size = sizeof(void **) * nr_cpu_ids;
 	if (size > PAGE_SIZE)
@@ -1116,21 +1057,8 @@ static int xt_jumpstack_alloc(struct xt_table_info *i)
 	if (i->jumpstack == NULL)
 		return -ENOMEM;
 
-	/* ruleset without jumps -- no stack needed */
-	if (i->stacksize == 0)
-		return 0;
-
-	/* Jumpstack needs to be able to record two full callchains, one
-	 * from the first rule set traversal, plus one table reentrancy
-	 * via -j TEE without clobbering the callchain that brought us to
-	 * TEE target.
-	 *
-	 * This is done by allocating two jumpstacks per cpu, on reentry
-	 * the upper half of the stack is used.
-	 *
-	 * see the jumpstack setup in ipt_do_table() for more details.
-	 */
-	size = sizeof(void *) * i->stacksize * 2u;
+	i->stacksize *= xt_jumpstack_multiplier;
+	size = sizeof(void *) * i->stacksize;
 	for_each_possible_cpu(cpu) {
 		i->jumpstack[cpu] = kvmalloc_node(size, GFP_KERNEL,
 			cpu_to_node(cpu));
@@ -1184,7 +1112,7 @@ xt_replace_table(struct xt_table *table,
 	table->private = newinfo;
 
 	/* make sure all cpus see new ->private value */
-	smp_wmb();
+	smp_mb();
 
 	/*
 	 * Even though table entries have now been swapped, other CPU's
@@ -1207,10 +1135,16 @@ xt_replace_table(struct xt_table *table,
 
 #ifdef CONFIG_AUDIT
 	if (audit_enabled) {
-		audit_log(current->audit_context, GFP_KERNEL,
-			  AUDIT_NETFILTER_CFG,
-			  "table=%s family=%u entries=%u",
-			  table->name, table->af, private->number);
+		struct audit_buffer *ab;
+
+		ab = audit_log_start(current->audit_context, GFP_KERNEL,
+				     AUDIT_NETFILTER_CFG);
+		if (ab) {
+			audit_log_format(ab, "table=%s family=%u entries=%u",
+					 table->name, table->af,
+					 private->number);
+			audit_log_end(ab);
+		}
 	}
 #endif
 
@@ -1317,9 +1251,10 @@ static int xt_table_seq_show(struct seq_file *seq, void *v)
 {
 	struct xt_table *table = list_entry(v, struct xt_table, list);
 
-	if (*table->name)
-		seq_printf(seq, "%s\n", table->name);
-	return 0;
+	if (strlen(table->name))
+		return seq_printf(seq, "%s\n", table->name);
+	else
+		return 0;
 }
 
 static const struct seq_operations xt_table_seq_ops = {
@@ -1455,8 +1390,8 @@ static int xt_match_seq_show(struct seq_file *seq, void *v)
 		if (trav->curr == trav->head)
 			return 0;
 		match = list_entry(trav->curr, struct xt_match, list);
-		if (*match->name)
-			seq_printf(seq, "%s\n", match->name);
+		return (*match->name == '\0') ? 0 :
+		       seq_printf(seq, "%s\n", match->name);
 	}
 	return 0;
 }
@@ -1470,11 +1405,22 @@ static const struct seq_operations xt_match_seq_ops = {
 
 static int xt_match_open(struct inode *inode, struct file *file)
 {
+	struct seq_file *seq;
 	struct nf_mttg_trav *trav;
-	trav = __seq_open_private(file, &xt_match_seq_ops, sizeof(*trav));
-	if (!trav)
+	int ret;
+
+	trav = kmalloc(sizeof(*trav), GFP_KERNEL);
+	if (trav == NULL)
 		return -ENOMEM;
 
+	ret = seq_open(file, &xt_match_seq_ops);
+	if (ret < 0) {
+		kfree(trav);
+		return ret;
+	}
+
+	seq = file->private_data;
+	seq->private = trav;
 	trav->nfproto = (unsigned long)PDE_DATA(inode);
 	return 0;
 }
@@ -1508,8 +1454,8 @@ static int xt_target_seq_show(struct seq_file *seq, void *v)
 		if (trav->curr == trav->head)
 			return 0;
 		target = list_entry(trav->curr, struct xt_target, list);
-		if (*target->name)
-			seq_printf(seq, "%s\n", target->name);
+		return (*target->name == '\0') ? 0 :
+		       seq_printf(seq, "%s\n", target->name);
 	}
 	return 0;
 }
@@ -1523,11 +1469,22 @@ static const struct seq_operations xt_target_seq_ops = {
 
 static int xt_target_open(struct inode *inode, struct file *file)
 {
+	struct seq_file *seq;
 	struct nf_mttg_trav *trav;
-	trav = __seq_open_private(file, &xt_target_seq_ops, sizeof(*trav));
-	if (!trav)
+	int ret;
+
+	trav = kmalloc(sizeof(*trav), GFP_KERNEL);
+	if (trav == NULL)
 		return -ENOMEM;
 
+	ret = seq_open(file, &xt_target_seq_ops);
+	if (ret < 0) {
+		kfree(trav);
+		return ret;
+	}
+
+	seq = file->private_data;
+	seq->private = trav;
 	trav->nfproto = (unsigned long)PDE_DATA(inode);
 	return 0;
 }
@@ -1547,25 +1504,22 @@ static const struct file_operations xt_target_ops = {
 #endif /* CONFIG_PROC_FS */
 
 /**
- * xt_hook_ops_alloc - set up hooks for a new table
+ * xt_hook_link - set up hooks for a new table
  * @table:	table with metadata needed to set up hooks
  * @fn:		Hook function
  *
- * This function will create the nf_hook_ops that the x_table needs
- * to hand to xt_hook_link_net().
+ * This function will take care of creating and registering the necessary
+ * Netfilter hooks for XT tables.
  */
-struct nf_hook_ops *
-xt_hook_ops_alloc(const struct xt_table *table, nf_hookfn *fn)
+struct nf_hook_ops *xt_hook_link(const struct xt_table *table, nf_hookfn *fn)
 {
 	unsigned int hook_mask = table->valid_hooks;
 	uint8_t i, num_hooks = hweight32(hook_mask);
 	uint8_t hooknum;
 	struct nf_hook_ops *ops;
+	int ret;
 
-	if (!num_hooks)
-		return ERR_PTR(-EINVAL);
-
-	ops = kcalloc(num_hooks, sizeof(*ops), GFP_KERNEL);
+	ops = kmalloc(sizeof(*ops) * num_hooks, GFP_KERNEL);
 	if (ops == NULL)
 		return ERR_PTR(-ENOMEM);
 
@@ -1574,23 +1528,40 @@ xt_hook_ops_alloc(const struct xt_table *table, nf_hookfn *fn)
 		if (!(hook_mask & 1))
 			continue;
 		ops[i].hook     = fn;
+		ops[i].owner    = table->me;
 		ops[i].pf       = table->af;
 		ops[i].hooknum  = hooknum;
 		ops[i].priority = table->priority;
 		++i;
 	}
 
+	ret = nf_register_hooks(ops, num_hooks);
+	if (ret < 0) {
+		kfree(ops);
+		return ERR_PTR(ret);
+	}
+
 	return ops;
 }
-EXPORT_SYMBOL_GPL(xt_hook_ops_alloc);
+EXPORT_SYMBOL_GPL(xt_hook_link);
+
+/**
+ * xt_hook_unlink - remove hooks for a table
+ * @ops:	nf_hook_ops array as returned by nf_hook_link
+ * @hook_mask:	the very same mask that was passed to nf_hook_link
+ */
+void xt_hook_unlink(const struct xt_table *table, struct nf_hook_ops *ops)
+{
+	nf_unregister_hooks(ops, hweight32(table->valid_hooks));
+	kfree(ops);
+}
+EXPORT_SYMBOL_GPL(xt_hook_unlink);
 
 int xt_proto_init(struct net *net, u_int8_t af)
 {
 #ifdef CONFIG_PROC_FS
 	char buf[XT_FUNCTION_MAXNAMELEN];
 	struct proc_dir_entry *proc;
-	kuid_t root_uid;
-	kgid_t root_gid;
 #endif
 
 	if (af >= ARRAY_SIZE(xt_prefix))
@@ -1598,17 +1569,12 @@ int xt_proto_init(struct net *net, u_int8_t af)
 
 
 #ifdef CONFIG_PROC_FS
-	root_uid = make_kuid(net->user_ns, 0);
-	root_gid = make_kgid(net->user_ns, 0);
-
 	strlcpy(buf, xt_prefix[af], sizeof(buf));
 	strlcat(buf, FORMAT_TABLES, sizeof(buf));
 	proc = proc_create_data(buf, 0440, net->proc_net, &xt_table_ops,
 				(void *)(unsigned long)af);
 	if (!proc)
 		goto out;
-	if (uid_valid(root_uid) && gid_valid(root_gid))
-		proc_set_user(proc, root_uid, root_gid);
 
 	strlcpy(buf, xt_prefix[af], sizeof(buf));
 	strlcat(buf, FORMAT_MATCHES, sizeof(buf));
@@ -1616,8 +1582,6 @@ int xt_proto_init(struct net *net, u_int8_t af)
 				(void *)(unsigned long)af);
 	if (!proc)
 		goto out_remove_tables;
-	if (uid_valid(root_uid) && gid_valid(root_gid))
-		proc_set_user(proc, root_uid, root_gid);
 
 	strlcpy(buf, xt_prefix[af], sizeof(buf));
 	strlcat(buf, FORMAT_TARGETS, sizeof(buf));
@@ -1625,8 +1589,6 @@ int xt_proto_init(struct net *net, u_int8_t af)
 				(void *)(unsigned long)af);
 	if (!proc)
 		goto out_remove_matches;
-	if (uid_valid(root_uid) && gid_valid(root_gid))
-		proc_set_user(proc, root_uid, root_gid);
 #endif
 
 	return 0;
@@ -1729,17 +1691,8 @@ static int __net_init xt_net_init(struct net *net)
 	return 0;
 }
 
-static void __net_exit xt_net_exit(struct net *net)
-{
-	int i;
-
-	for (i = 0; i < NFPROTO_NUMPROTO; i++)
-		WARN_ON_ONCE(!list_empty(&net->xt.tables[i]));
-}
-
 static struct pernet_operations xt_net_ops = {
 	.init = xt_net_init,
-	.exit = xt_net_exit,
 };
 
 static int __init xt_init(void)

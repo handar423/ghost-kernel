@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2011
- * Boaz Harrosh <ooo@electrozaur.com>
+ * Boaz Harrosh <bharrosh@panasas.com>
  *
  * Public Declarations of the ORE API
  *
@@ -102,7 +102,6 @@ struct ore_striping_info {
 	unsigned unit_off;
 	unsigned cur_pg;
 	unsigned cur_comp;
-	unsigned maxdevUnits;
 };
 
 struct ore_io_state;

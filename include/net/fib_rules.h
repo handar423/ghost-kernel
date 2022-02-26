@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __NET_FIB_RULES_H
 #define __NET_FIB_RULES_H
 
@@ -6,50 +5,41 @@
 #include <linux/slab.h>
 #include <linux/netdevice.h>
 #include <linux/fib_rules.h>
-#include <linux/refcount.h>
 #include <net/flow.h>
 #include <net/rtnetlink.h>
 #include <net/fib_notifier.h>
 
-struct fib_kuid_range {
-	kuid_t start;
-	kuid_t end;
-};
-
 struct fib_rule {
 	struct list_head	list;
+	atomic_t		refcnt;
 	int			iifindex;
 	int			oifindex;
 	u32			mark;
 	u32			mark_mask;
+	u32			pref;
 	u32			flags;
 	u32			table;
 	u8			action;
-	u8			l3mdev;
-	/* 2 bytes hole, try to use */
 	u32			target;
-	__be64			tun_id;
 	struct fib_rule __rcu	*ctarget;
-	struct net		*fr_net;
-
-	refcount_t		refcnt;
-	u32			pref;
-	int			suppress_ifgroup;
-	int			suppress_prefixlen;
 	char			iifname[IFNAMSIZ];
 	char			oifname[IFNAMSIZ];
-	struct fib_kuid_range	uid_range;
 	struct rcu_head		rcu;
+	struct net *		fr_net;
+	RH_KABI_EXTEND(__be64	tun_id)
+	RH_KABI_EXTEND(int	suppress_prefixlen)
+	/* kABI: use these reserved fields to add new items; the structure
+	 * can't be further extended after we whitelist fib_rules_register.
+	 */
+	RH_KABI_EXTEND(u8	rh_reserved[12])
 };
 
 struct fib_lookup_arg {
 	void			*lookup_ptr;
 	void			*result;
 	struct fib_rule		*rule;
-	u32			table;
 	int			flags;
-#define FIB_LOOKUP_NOREF		1
-#define FIB_LOOKUP_IGNORE_LINKSTATE	2
+#define FIB_LOOKUP_NOREF	1
 };
 
 struct fib_rules_ops {
@@ -59,25 +49,25 @@ struct fib_rules_ops {
 	int			addr_size;
 	int			unresolved_rules;
 	int			nr_goto_rules;
-	unsigned int		fib_rules_seq;
 
 	int			(*action)(struct fib_rule *,
 					  struct flowi *, int,
 					  struct fib_lookup_arg *);
-	bool			(*suppress)(struct fib_rule *,
-					    struct fib_lookup_arg *);
 	int			(*match)(struct fib_rule *,
 					 struct flowi *, int);
 	int			(*configure)(struct fib_rule *,
 					     struct sk_buff *,
 					     struct fib_rule_hdr *,
 					     struct nlattr **);
-	int			(*delete)(struct fib_rule *);
+	RH_KABI_REPLACE(void	(*delete)(struct fib_rule *),
+			int	(*delete)(struct fib_rule *))
 	int			(*compare)(struct fib_rule *,
 					   struct fib_rule_hdr *,
 					   struct nlattr **);
 	int			(*fill)(struct fib_rule *, struct sk_buff *,
 					struct fib_rule_hdr *);
+	RH_KABI_REPLACE(u32     (*default_pref)(struct fib_rules_ops *ops),
+	                void    *rh_reserved_default_pref)
 	size_t			(*nlmsg_payload)(struct fib_rule *);
 
 	/* Called after modifications to the rules set, must flush
@@ -90,6 +80,9 @@ struct fib_rules_ops {
 	struct module		*owner;
 	struct net		*fro_net;
 	struct rcu_head		rcu;
+	RH_KABI_EXTEND(unsigned int	fib_rules_seq)
+	RH_KABI_EXTEND(bool	(*suppress)(struct fib_rule *,
+					    struct fib_lookup_arg *))
 };
 
 struct fib_rule_notifier_info {
@@ -105,35 +98,18 @@ struct fib_rule_notifier_info {
 	[FRA_FWMASK]	= { .type = NLA_U32 }, \
 	[FRA_TABLE]     = { .type = NLA_U32 }, \
 	[FRA_SUPPRESS_PREFIXLEN] = { .type = NLA_U32 }, \
-	[FRA_SUPPRESS_IFGROUP] = { .type = NLA_U32 }, \
-	[FRA_GOTO]	= { .type = NLA_U32 }, \
-	[FRA_L3MDEV]	= { .type = NLA_U8 }, \
-	[FRA_UID_RANGE]	= { .len = sizeof(struct fib_rule_uid_range) }
+	[FRA_GOTO]	= { .type = NLA_U32 }
 
 static inline void fib_rule_get(struct fib_rule *rule)
 {
-	refcount_inc(&rule->refcnt);
+	atomic_inc(&rule->refcnt);
 }
 
 static inline void fib_rule_put(struct fib_rule *rule)
 {
-	if (refcount_dec_and_test(&rule->refcnt))
+	if (atomic_dec_and_test(&rule->refcnt))
 		kfree_rcu(rule, rcu);
 }
-
-#ifdef CONFIG_NET_L3_MASTER_DEV
-static inline u32 fib_rule_get_table(struct fib_rule *rule,
-				     struct fib_lookup_arg *arg)
-{
-	return rule->l3mdev ? arg->table : rule->table;
-}
-#else
-static inline u32 fib_rule_get_table(struct fib_rule *rule,
-				     struct fib_lookup_arg *arg)
-{
-	return rule->table;
-}
-#endif
 
 static inline u32 frh_get_table(struct fib_rule_hdr *frh, struct nlattr **nla)
 {
@@ -142,20 +118,16 @@ static inline u32 frh_get_table(struct fib_rule_hdr *frh, struct nlattr **nla)
 	return frh->table;
 }
 
-struct fib_rules_ops *fib_rules_register(const struct fib_rules_ops *,
-					 struct net *);
-void fib_rules_unregister(struct fib_rules_ops *);
+extern struct fib_rules_ops *fib_rules_register(const struct fib_rules_ops *, struct net *);
+extern void fib_rules_unregister(struct fib_rules_ops *);
 
-int fib_rules_lookup(struct fib_rules_ops *, struct flowi *, int flags,
-		     struct fib_lookup_arg *);
-int fib_default_rule_add(struct fib_rules_ops *, u32 pref, u32 table,
-			 u32 flags);
+extern int			fib_rules_lookup(struct fib_rules_ops *,
+						 struct flowi *, int flags,
+						 struct fib_lookup_arg *);
+extern int			fib_default_rule_add(struct fib_rules_ops *,
+						     u32 pref, u32 table,
+						     u32 flags);
 bool fib_rule_matchall(const struct fib_rule *rule);
 int fib_rules_dump(struct net *net, struct notifier_block *nb, int family);
 unsigned int fib_rules_seq_read(struct net *net, int family);
-
-int fib_nl_newrule(struct sk_buff *skb, struct nlmsghdr *nlh,
-		   struct netlink_ext_ack *extack);
-int fib_nl_delrule(struct sk_buff *skb, struct nlmsghdr *nlh,
-		   struct netlink_ext_ack *extack);
 #endif

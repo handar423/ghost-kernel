@@ -27,7 +27,6 @@
 #include "mmc_ops.h"
 #include "quirks.h"
 #include "sd_ops.h"
-#include "pwrseq.h"
 
 #define DEFAULT_CMD6_TIMEOUT_MS	500
 
@@ -966,12 +965,16 @@ static void mmc_set_bus_speed(struct mmc_card *card)
 	unsigned int max_dtr = (unsigned int)-1;
 
 	if ((mmc_card_hs200(card) || mmc_card_hs400(card)) &&
-	     max_dtr > card->ext_csd.hs200_max_dtr)
+	     max_dtr > card->ext_csd.hs200_max_dtr) {
+		gmb();
 		max_dtr = card->ext_csd.hs200_max_dtr;
-	else if (mmc_card_hs(card) && max_dtr > card->ext_csd.hs_max_dtr)
+	} else if (mmc_card_hs(card) && max_dtr > card->ext_csd.hs_max_dtr) {
+		gmb();
 		max_dtr = card->ext_csd.hs_max_dtr;
-	else if (max_dtr > card->csd.max_dtr)
+	} else if (max_dtr > card->csd.max_dtr) {
+		gmb();
 		max_dtr = card->csd.max_dtr;
+	}
 
 	mmc_set_clock(card->host, max_dtr);
 }
@@ -1291,18 +1294,13 @@ out_err:
 static void mmc_select_driver_type(struct mmc_card *card)
 {
 	int card_drv_type, drive_strength, drv_type = 0;
-	int fixed_drv_type = card->host->fixed_drv_type;
 
 	card_drv_type = card->ext_csd.raw_driver_strength |
 			mmc_driver_type_mask(0);
 
-	if (fixed_drv_type >= 0)
-		drive_strength = card_drv_type & mmc_driver_type_mask(fixed_drv_type)
-				 ? fixed_drv_type : 0;
-	else
-		drive_strength = mmc_select_drive_strength(card,
-							   card->ext_csd.hs200_max_dtr,
-							   card_drv_type, &drv_type);
+	drive_strength = mmc_select_drive_strength(card,
+						   card->ext_csd.hs200_max_dtr,
+						   card_drv_type, &drv_type);
 
 	card->drive_strength = drive_strength;
 
@@ -2135,7 +2133,6 @@ static int mmc_reset(struct mmc_host *host)
 	} else {
 		/* Do a brute force power cycle */
 		mmc_power_cycle(host, card->ocr);
-		mmc_pwrseq_reset(host);
 	}
 	return mmc_init_card(host, card->ocr, card);
 }

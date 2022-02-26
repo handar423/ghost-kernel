@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Percpu refcounts:
  * (C) 2012 Google, Inc.
@@ -30,10 +29,14 @@
  * calls io_destroy() or the process exits.
  *
  * In the aio code, kill_ioctx() is called when we wish to destroy a kioctx; it
- * calls percpu_ref_kill(), then hlist_del_rcu() and synchronize_rcu() to remove
- * the kioctx from the proccess's list of kioctxs - after that, there can't be
- * any new users of the kioctx (from lookup_ioctx()) and it's then safe to drop
- * the initial ref with percpu_ref_put().
+ * removes the kioctx from the proccess's table of kioctxs and kills percpu_ref.
+ * After that, there can't be any new users of the kioctx (from lookup_ioctx())
+ * and it's then safe to drop the initial ref with percpu_ref_put().
+ *
+ * Note that the free path, free_ioctx(), needs to go through explicit call_rcu()
+ * to synchronize with RCU protected lookup_ioctx().  percpu_ref operations don't
+ * imply RCU grace periods of any kind and if a user wants to combine percpu_ref
+ * with RCU protection, it must be done explicitly.
  *
  * Code that does a two stage shutdown like this often needs some kind of
  * explicit synchronization to ensure the initial refcount can only be dropped
@@ -113,12 +116,14 @@ void percpu_ref_reinit(struct percpu_ref *ref);
  * Must be used to drop the initial ref on a percpu refcount; must be called
  * precisely once before shutdown.
  *
- * Puts @ref in non percpu mode, then does a call_rcu() before gathering up the
- * percpu counters and dropping the initial ref.
+ * Switches @ref into atomic mode before gathering up the percpu counters
+ * and dropping the initial ref.
+ *
+ * There are no implied RCU grace periods between kill and release.
  */
 static inline void percpu_ref_kill(struct percpu_ref *ref)
 {
-	percpu_ref_kill_and_confirm(ref, NULL);
+	return percpu_ref_kill_and_confirm(ref, NULL);
 }
 
 /*
@@ -139,11 +144,11 @@ static inline bool __ref_is_percpu(struct percpu_ref *ref,
 	 * when using it as a pointer, __PERCPU_REF_ATOMIC may be set in
 	 * between contaminating the pointer value, meaning that
 	 * READ_ONCE() is required when fetching it.
+	 *
+	 * The smp_read_barrier_depends() implied by READ_ONCE() pairs
+	 * with smp_store_release() in __percpu_ref_switch_to_percpu().
 	 */
 	percpu_ptr = READ_ONCE(ref->percpu_count_ptr);
-
-	/* paired with smp_store_release() in __percpu_ref_switch_to_percpu() */
-	smp_read_barrier_depends();
 
 	/*
 	 * Theoretically, the following could test just ATOMIC; however,
@@ -159,29 +164,6 @@ static inline bool __ref_is_percpu(struct percpu_ref *ref,
 }
 
 /**
- * percpu_ref_get_many - increment a percpu refcount
- * @ref: percpu_ref to get
- * @nr: number of references to get
- *
- * Analogous to atomic_long_add().
- *
- * This function is safe to call as long as @ref is between init and exit.
- */
-static inline void percpu_ref_get_many(struct percpu_ref *ref, unsigned long nr)
-{
-	unsigned long __percpu *percpu_count;
-
-	rcu_read_lock_sched();
-
-	if (__ref_is_percpu(ref, &percpu_count))
-		this_cpu_add(*percpu_count, nr);
-	else
-		atomic_long_add(nr, &ref->count);
-
-	rcu_read_unlock_sched();
-}
-
-/**
  * percpu_ref_get - increment a percpu refcount
  * @ref: percpu_ref to get
  *
@@ -191,7 +173,16 @@ static inline void percpu_ref_get_many(struct percpu_ref *ref, unsigned long nr)
  */
 static inline void percpu_ref_get(struct percpu_ref *ref)
 {
-	percpu_ref_get_many(ref, 1);
+	unsigned long __percpu *percpu_count;
+
+	rcu_read_lock_sched();
+
+	if (__ref_is_percpu(ref, &percpu_count))
+		this_cpu_inc(*percpu_count);
+	else
+		atomic_long_inc(&ref->count);
+
+	rcu_read_unlock_sched();
 }
 
 /**
@@ -257,30 +248,6 @@ static inline bool percpu_ref_tryget_live(struct percpu_ref *ref)
 }
 
 /**
- * percpu_ref_put_many - decrement a percpu refcount
- * @ref: percpu_ref to put
- * @nr: number of references to put
- *
- * Decrement the refcount, and if 0, call the release function (which was passed
- * to percpu_ref_init())
- *
- * This function is safe to call as long as @ref is between init and exit.
- */
-static inline void percpu_ref_put_many(struct percpu_ref *ref, unsigned long nr)
-{
-	unsigned long __percpu *percpu_count;
-
-	rcu_read_lock_sched();
-
-	if (__ref_is_percpu(ref, &percpu_count))
-		this_cpu_sub(*percpu_count, nr);
-	else if (unlikely(atomic_long_sub_and_test(nr, &ref->count)))
-		ref->release(ref);
-
-	rcu_read_unlock_sched();
-}
-
-/**
  * percpu_ref_put - decrement a percpu refcount
  * @ref: percpu_ref to put
  *
@@ -291,7 +258,16 @@ static inline void percpu_ref_put_many(struct percpu_ref *ref, unsigned long nr)
  */
 static inline void percpu_ref_put(struct percpu_ref *ref)
 {
-	percpu_ref_put_many(ref, 1);
+	unsigned long __percpu *percpu_count;
+
+	rcu_read_lock_sched();
+
+	if (__ref_is_percpu(ref, &percpu_count))
+		this_cpu_dec(*percpu_count);
+	else if (unlikely(atomic_long_dec_and_test(&ref->count)))
+		ref->release(ref);
+
+	rcu_read_unlock_sched();
 }
 
 /**

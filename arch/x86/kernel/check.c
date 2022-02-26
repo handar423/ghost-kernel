@@ -1,5 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
-#include <linux/init.h>
+#include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/kthread.h>
 #include <linux/workqueue.h>
@@ -164,5 +163,6 @@ static int start_periodic_check_for_corruption(void)
 	schedule_delayed_work(&bios_check_work, 0);
 	return 0;
 }
-device_initcall(start_periodic_check_for_corruption);
+
+module_init(start_periodic_check_for_corruption);
 

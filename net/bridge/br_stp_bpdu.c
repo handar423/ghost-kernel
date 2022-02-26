@@ -30,8 +30,7 @@
 
 #define LLC_RESERVE sizeof(struct llc_pdu_un)
 
-static int br_send_bpdu_finish(struct net *net, struct sock *sk,
-			       struct sk_buff *skb)
+static int br_send_bpdu_finish(struct sock *sk, struct sk_buff *skb)
 {
 	return dev_queue_xmit(skb);
 }
@@ -60,8 +59,8 @@ static void br_send_bpdu(struct net_bridge_port *p,
 
 	skb_reset_mac_header(skb);
 
-	NF_HOOK(NFPROTO_BRIDGE, NF_BR_LOCAL_OUT,
-		dev_net(p->dev), NULL, skb, NULL, skb->dev,
+	NF_HOOK(NFPROTO_BRIDGE, NF_BR_LOCAL_OUT, NULL, skb,
+		NULL, skb->dev,
 		br_send_bpdu_finish);
 }
 
@@ -147,7 +146,6 @@ void br_send_tcn_bpdu(struct net_bridge_port *p)
 void br_stp_rcv(const struct stp_proto *proto, struct sk_buff *skb,
 		struct net_device *dev)
 {
-	const unsigned char *dest = eth_hdr(skb)->h_dest;
 	struct net_bridge_port *p;
 	struct net_bridge *br;
 	const unsigned char *buf;
@@ -176,7 +174,7 @@ void br_stp_rcv(const struct stp_proto *proto, struct sk_buff *skb,
 	if (p->state == BR_STATE_DISABLED)
 		goto out;
 
-	if (!ether_addr_equal(dest, br->group_addr))
+	if (!ether_addr_equal(eth_hdr(skb)->h_dest, br->group_addr))
 		goto out;
 
 	if (p->flags & BR_BPDU_GUARD) {

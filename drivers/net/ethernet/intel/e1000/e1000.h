@@ -338,7 +338,7 @@ enum e1000_state_t {
 #undef pr_fmt
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
-struct net_device *e1000_get_hw_dev(struct e1000_hw *hw);
+extern struct net_device *e1000_get_hw_dev(struct e1000_hw *hw);
 #define e_dbg(format, arg...) \
 	netdev_dbg(e1000_get_hw_dev(hw), format, ## arg)
 #define e_err(msglvl, format, arg...) \
@@ -361,20 +361,20 @@ extern const char e1000_driver_version[];
 
 int e1000_open(struct net_device *netdev);
 int e1000_close(struct net_device *netdev);
-int e1000_up(struct e1000_adapter *adapter);
-void e1000_down(struct e1000_adapter *adapter);
-void e1000_reinit_locked(struct e1000_adapter *adapter);
-void e1000_reset(struct e1000_adapter *adapter);
-int e1000_set_spd_dplx(struct e1000_adapter *adapter, u32 spd, u8 dplx);
-int e1000_setup_all_rx_resources(struct e1000_adapter *adapter);
-int e1000_setup_all_tx_resources(struct e1000_adapter *adapter);
-void e1000_free_all_rx_resources(struct e1000_adapter *adapter);
-void e1000_free_all_tx_resources(struct e1000_adapter *adapter);
-void e1000_update_stats(struct e1000_adapter *adapter);
-bool e1000_has_link(struct e1000_adapter *adapter);
-void e1000_power_up_phy(struct e1000_adapter *);
-void e1000_set_ethtool_ops(struct net_device *netdev);
-void e1000_check_options(struct e1000_adapter *adapter);
-char *e1000_get_hw_dev_name(struct e1000_hw *hw);
+extern int e1000_up(struct e1000_adapter *adapter);
+extern void e1000_down(struct e1000_adapter *adapter);
+extern void e1000_reinit_locked(struct e1000_adapter *adapter);
+extern void e1000_reset(struct e1000_adapter *adapter);
+extern int e1000_set_spd_dplx(struct e1000_adapter *adapter, u32 spd, u8 dplx);
+extern int e1000_setup_all_rx_resources(struct e1000_adapter *adapter);
+extern int e1000_setup_all_tx_resources(struct e1000_adapter *adapter);
+extern void e1000_free_all_rx_resources(struct e1000_adapter *adapter);
+extern void e1000_free_all_tx_resources(struct e1000_adapter *adapter);
+extern void e1000_update_stats(struct e1000_adapter *adapter);
+extern bool e1000_has_link(struct e1000_adapter *adapter);
+extern void e1000_power_up_phy(struct e1000_adapter *);
+extern void e1000_set_ethtool_ops(struct net_device *netdev);
+extern void e1000_check_options(struct e1000_adapter *adapter);
+extern char *e1000_get_hw_dev_name(struct e1000_hw *hw);
 
 #endif /* _E1000_H_ */

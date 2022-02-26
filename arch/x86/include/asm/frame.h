@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_X86_FRAME_H
 #define _ASM_X86_FRAME_H
 
@@ -12,6 +11,8 @@
 #ifdef CONFIG_FRAME_POINTER
 
 #ifdef __ASSEMBLY__
+
+#include <asm/dwarf2.h>
 
 .macro FRAME_BEGIN
 	push %_ASM_BP

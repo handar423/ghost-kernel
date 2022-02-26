@@ -14,7 +14,9 @@
 
 #include <linux/err.h>
 #include <linux/list.h>
+#ifndef __GENKSYMS__
 #include <linux/seq_file.h>
+#endif
 #include <linux/pinctrl/pinctrl-state.h>
 
 /* This struct is private to the core and should be regarded as a cookie */
@@ -25,8 +27,8 @@ struct device;
 #ifdef CONFIG_PINCTRL
 
 /* External interface to pin control */
-extern int pinctrl_gpio_request(unsigned gpio);
-extern void pinctrl_gpio_free(unsigned gpio);
+extern int pinctrl_request_gpio(unsigned gpio);
+extern void pinctrl_free_gpio(unsigned gpio);
 extern int pinctrl_gpio_direction_input(unsigned gpio);
 extern int pinctrl_gpio_direction_output(unsigned gpio);
 extern int pinctrl_gpio_set_config(unsigned gpio, unsigned long config);
@@ -62,12 +64,12 @@ static inline int pinctrl_pm_select_idle_state(struct device *dev)
 
 #else /* !CONFIG_PINCTRL */
 
-static inline int pinctrl_gpio_request(unsigned gpio)
+static inline int pinctrl_request_gpio(unsigned gpio)
 {
 	return 0;
 }
 
-static inline void pinctrl_gpio_free(unsigned gpio)
+static inline void pinctrl_free_gpio(unsigned gpio)
 {
 }
 
@@ -148,7 +150,7 @@ static inline struct pinctrl * __must_check pinctrl_get_select(
 	s = pinctrl_lookup_state(p, name);
 	if (IS_ERR(s)) {
 		pinctrl_put(p);
-		return ERR_CAST(s);
+		return ERR_PTR(PTR_ERR(s));
 	}
 
 	ret = pinctrl_select_state(p, s);

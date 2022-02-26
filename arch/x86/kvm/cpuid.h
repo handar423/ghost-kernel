@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef ARCH_X86_KVM_CPUID_H
 #define ARCH_X86_KVM_CPUID_H
 
@@ -22,8 +21,7 @@ int kvm_vcpu_ioctl_set_cpuid2(struct kvm_vcpu *vcpu,
 int kvm_vcpu_ioctl_get_cpuid2(struct kvm_vcpu *vcpu,
 			      struct kvm_cpuid2 *cpuid,
 			      struct kvm_cpuid_entry2 __user *entries);
-bool kvm_cpuid(struct kvm_vcpu *vcpu, u32 *eax, u32 *ebx,
-	       u32 *ecx, u32 *edx, bool check_limit);
+void kvm_cpuid(struct kvm_vcpu *vcpu, u32 *eax, u32 *ebx, u32 *ecx, u32 *edx);
 
 int cpuid_query_maxphyaddr(struct kvm_vcpu *vcpu);
 
@@ -54,12 +52,14 @@ static const struct cpuid_reg reverse_cpuid[] = {
 	[CPUID_8000_000A_EDX] = {0x8000000a, 0, CPUID_EDX},
 	[CPUID_7_ECX]         = {         7, 0, CPUID_ECX},
 	[CPUID_8000_0007_EBX] = {0x80000007, 0, CPUID_EBX},
+	[CPUID_7_EDX]         = {         7, 0, CPUID_EDX},
 };
 
 static __always_inline struct cpuid_reg x86_feature_cpuid(unsigned x86_feature)
 {
 	unsigned x86_leaf = x86_feature / 32;
 
+	BUILD_BUG_ON(!__builtin_constant_p(x86_leaf));
 	BUILD_BUG_ON(x86_leaf >= ARRAY_SIZE(reverse_cpuid));
 	BUILD_BUG_ON(reverse_cpuid[x86_leaf].function == 0);
 
@@ -122,48 +122,17 @@ static inline bool guest_cpuid_is_amd(struct kvm_vcpu *vcpu)
 	return best && best->ebx == X86EMUL_CPUID_VENDOR_AuthenticAMD_ebx;
 }
 
-static inline int guest_cpuid_family(struct kvm_vcpu *vcpu)
+static inline bool guest_has_spec_ctrl_msr(struct kvm_vcpu *vcpu)
 {
-	struct kvm_cpuid_entry2 *best;
-
-	best = kvm_find_cpuid_entry(vcpu, 0x1, 0);
-	if (!best)
-		return -1;
-
-	return x86_family(best->eax);
+	return (guest_cpuid_has(vcpu, X86_FEATURE_SPEC_CTRL) ||
+		guest_cpuid_has(vcpu, X86_FEATURE_AMD_STIBP) ||
+		guest_cpuid_has(vcpu, X86_FEATURE_AMD_IBRS) ||
+		guest_cpuid_has(vcpu, X86_FEATURE_AMD_SSBD));
 }
 
-static inline int guest_cpuid_model(struct kvm_vcpu *vcpu)
+static inline bool guest_has_pred_cmd_msr(struct kvm_vcpu *vcpu)
 {
-	struct kvm_cpuid_entry2 *best;
-
-	best = kvm_find_cpuid_entry(vcpu, 0x1, 0);
-	if (!best)
-		return -1;
-
-	return x86_model(best->eax);
+	return (guest_cpuid_has(vcpu, X86_FEATURE_SPEC_CTRL) ||
+		guest_cpuid_has(vcpu, X86_FEATURE_AMD_IBPB));
 }
-
-static inline int guest_cpuid_stepping(struct kvm_vcpu *vcpu)
-{
-	struct kvm_cpuid_entry2 *best;
-
-	best = kvm_find_cpuid_entry(vcpu, 0x1, 0);
-	if (!best)
-		return -1;
-
-	return x86_stepping(best->eax);
-}
-
-static inline bool supports_cpuid_fault(struct kvm_vcpu *vcpu)
-{
-	return vcpu->arch.msr_platform_info & MSR_PLATFORM_INFO_CPUID_FAULT;
-}
-
-static inline bool cpuid_fault_enabled(struct kvm_vcpu *vcpu)
-{
-	return vcpu->arch.msr_misc_features_enables &
-		  MSR_MISC_FEATURES_ENABLES_CPUID_FAULT;
-}
-
 #endif

@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _RAID5_H
 #define _RAID5_H
 
@@ -226,15 +225,14 @@ struct stripe_head {
 	struct list_head	batch_list; /* protected by head's batch lock*/
 
 	union {
-		struct r5l_io_unit	*log_io;
-		struct ppl_io_unit	*ppl_io;
+		struct r5l_io_unit      *log_io;
+		struct ppl_io_unit      *ppl_io;
 	};
+	struct page             *ppl_page; /* partial parity of this stripe */
 
 	struct list_head	log_list;
 	sector_t		log_start; /* first meta block on the journal */
 	struct list_head	r5c; /* for r5c_cache->stripe_in_journal */
-
-	struct page		*ppl_page; /* partial parity of this stripe */
 	/**
 	 * struct stripe_operations
 	 * @target - STRIPE_OP_COMPUTE_BLK target
@@ -450,6 +448,18 @@ enum {
  * HANDLE gets cleared if stripe_handle leaves nothing locked.
  */
 
+/* Note: disk_info.rdev can be set to NULL asynchronously by raid5_remove_disk.
+ * There are three safe ways to access disk_info.rdev.
+ * 1/ when holding mddev->reconfig_mutex
+ * 2/ when resync/recovery/reshape is known to be happening - i.e. in code that
+ *    is called as part of performing resync/recovery/reshape.
+ * 3/ while holding rcu_read_lock(), use rcu_dereference to get the pointer
+ *    and if it is non-NULL, increment rdev->nr_pending before dropping the RCU
+ *    lock.
+ * When .rdev is set to NULL, the nr_pending count checked again and if
+ * it has been incremented, the pointer is put back in .rdev.
+ */
+
 struct disk_info {
 	struct md_rdev	*rdev, *replacement;
 	struct page	*extra_page; /* extra page to use in prexor */
@@ -482,7 +492,7 @@ static inline struct bio *r5_next_bio(struct bio *bio, sector_t sector)
 {
 	int sectors = bio_sectors(bio);
 
-	if (bio->bi_iter.bi_sector + sectors < sector + STRIPE_SECTORS)
+	if (bio->bi_sector + sectors < sector + STRIPE_SECTORS)
 		return bio->bi_next;
 	else
 		return NULL;
@@ -624,6 +634,7 @@ struct r5conf {
 	int			recovery_disabled;
 	/* per cpu variables */
 	struct raid5_percpu {
+		spinlock_t	lock;	     /* Protection for -RT */
 		struct page	*spare_page; /* Used when checking P/Q in raid6 */
 		struct flex_array *scribble;   /* space for constructing buffer
 					      * lists and performing address
@@ -632,7 +643,9 @@ struct r5conf {
 	} __percpu *percpu;
 	int scribble_disks;
 	int scribble_sectors;
-	struct hlist_node node;
+#ifdef CONFIG_HOTPLUG_CPU
+	struct notifier_block	cpu_notify;
+#endif
 
 	/*
 	 * Free stripes pool
@@ -657,7 +670,6 @@ struct r5conf {
 	int			pool_size; /* number of disks in stripeheads in pool */
 	spinlock_t		device_lock;
 	struct disk_info	*disks;
-	struct bio_set		*bio_split;
 
 	/* When taking over an array from a different personality, we store
 	 * the new thread here until we fully activate the array.

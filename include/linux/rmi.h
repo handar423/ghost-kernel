@@ -109,7 +109,7 @@ struct rmi_2d_sensor_platform_data {
  * @buttonpad - the touchpad is a buttonpad, so enable only the first actual
  * button that is found.
  * @trackstick_buttons - Set when the function 30 is handling the physical
- * buttons of the trackstick (as a PS/2 passthrough device).
+ * buttons of the trackstick (as a PD/2 passthrough device.
  * @disable - the touchpad incorrectly reports F30 and it should be ignored.
  * This is a special case which is due to misconfigured firmware.
  */
@@ -156,55 +156,6 @@ struct rmi_f01_power_management {
 };
 
 /**
- * struct rmi_device_platform_data_spi - provides parameters used in SPI
- * communications.  All Synaptics SPI products support a standard SPI
- * interface; some also support what is called SPI V2 mode, depending on
- * firmware and/or ASIC limitations.  In V2 mode, the touch sensor can
- * support shorter delays during certain operations, and these are specified
- * separately from the standard mode delays.
- *
- * @block_delay - for standard SPI transactions consisting of both a read and
- * write operation, the delay (in microseconds) between the read and write
- * operations.
- * @split_read_block_delay_us - for V2 SPI transactions consisting of both a
- * read and write operation, the delay (in microseconds) between the read and
- * write operations.
- * @read_delay_us - the delay between each byte of a read operation in normal
- * SPI mode.
- * @write_delay_us - the delay between each byte of a write operation in normal
- * SPI mode.
- * @split_read_byte_delay_us - the delay between each byte of a read operation
- * in V2 mode.
- * @pre_delay_us - the delay before the start of a SPI transaction.  This is
- * typically useful in conjunction with custom chip select assertions (see
- * below).
- * @post_delay_us - the delay after the completion of an SPI transaction.  This
- * is typically useful in conjunction with custom chip select assertions (see
- * below).
- * @cs_assert - For systems where the SPI subsystem does not control the CS/SSB
- * line, or where such control is broken, you can provide a custom routine to
- * handle a GPIO as CS/SSB.  This routine will be called at the beginning and
- * end of each SPI transaction.  The RMI SPI implementation will wait
- * pre_delay_us after this routine returns before starting the SPI transfer;
- * and post_delay_us after completion of the SPI transfer(s) before calling it
- * with assert==FALSE.
- */
-struct rmi_device_platform_data_spi {
-	u32 block_delay_us;
-	u32 split_read_block_delay_us;
-	u32 read_delay_us;
-	u32 write_delay_us;
-	u32 split_read_byte_delay_us;
-	u32 pre_delay_us;
-	u32 post_delay_us;
-	u8 bits_per_word;
-	u16 mode;
-
-	void *cs_assert_data;
-	int (*cs_assert)(const void *cs_assert_data, const bool assert);
-};
-
-/**
  * struct rmi_device_platform_data - system specific configuration info.
  *
  * @reset_delay_ms - after issuing a reset command to the touch sensor, the
@@ -215,8 +166,6 @@ struct rmi_device_platform_data_spi {
 struct rmi_device_platform_data {
 	int reset_delay_ms;
 	int irq;
-
-	struct rmi_device_platform_data_spi spi_data;
 
 	/* function handler pdata */
 	struct rmi_2d_sensor_platform_data sensor_pdata;
@@ -341,12 +290,10 @@ struct rmi_driver_data {
 	struct rmi_device *rmi_dev;
 
 	struct rmi_function *f01_container;
-	struct rmi_function *f34_container;
-	bool bootloader_mode;
+	bool f01_bootloader_mode;
 
 	int num_of_irq_regs;
 	int irq_count;
-	void *irq_memory;
 	unsigned long *irq_status;
 	unsigned long *fn_irq_bits;
 	unsigned long *current_irq_mask;
@@ -356,21 +303,14 @@ struct rmi_driver_data {
 
 	u8 pdt_props;
 
-	u8 num_rx_electrodes;
-	u8 num_tx_electrodes;
-
 	bool enabled;
 	struct mutex enabled_mutex;
 
 	struct rmi4_attn_data attn_data;
-	DECLARE_KFIFO(attn_fifo, struct rmi4_attn_data, 16);
 };
 
 int rmi_register_transport_device(struct rmi_transport_dev *xport);
 void rmi_unregister_transport_device(struct rmi_transport_dev *xport);
-
-void rmi_set_attn_data(struct rmi_device *rmi_dev, unsigned long irq_status,
-		       void *data, size_t size);
 
 int rmi_driver_suspend(struct rmi_device *rmi_dev, bool enable_wake);
 int rmi_driver_resume(struct rmi_device *rmi_dev, bool clear_wake);

@@ -66,7 +66,7 @@
 #include <crypto/crypto_wq.h>
 #include <asm/byteorder.h>
 #include <linux/hardirq.h>
-#include <asm/fpu/api.h>
+#include <asm/i387.h>
 #include "sha256_mb_ctx.h"
 
 #define FLUSH_INTERVAL 1000 /* in usec */
@@ -115,7 +115,7 @@ inline void sha256_init_digest(uint32_t *digest)
 }
 
 inline uint32_t sha256_pad(uint8_t padblock[SHA256_BLOCK_SIZE * 2],
-			 uint64_t total_len)
+			 uint32_t total_len)
 {
 	uint32_t i = total_len & (SHA256_BLOCK_SIZE - 1);
 
@@ -283,8 +283,7 @@ static struct sha256_hash_ctx *sha256_ctx_mgr_submit(struct sha256_ctx_mgr *mgr,
 	ctx->incoming_buffer = buffer;
 	ctx->incoming_buffer_length = len;
 
-	/*
-	 * Store the user's request flags and mark this ctx as currently
+	/* Store the user's request flags and mark this ctx as currently
 	 * being processed.
 	 */
 	ctx->status = (flags & HASH_LAST) ?
@@ -300,9 +299,8 @@ static struct sha256_hash_ctx *sha256_ctx_mgr_submit(struct sha256_ctx_mgr *mgr,
 	 * Or if the user's buffer contains less than a whole block,
 	 * append as much as possible to the extra block.
 	 */
-	if (ctx->partial_block_buffer_length || len < SHA256_BLOCK_SIZE) {
-		/*
-		 * Compute how many bytes to copy from user buffer into
+	if ((ctx->partial_block_buffer_length) | (len < SHA256_BLOCK_SIZE)) {
+		/* Compute how many bytes to copy from user buffer into
 		 * extra block
 		 */
 		uint32_t copy_len = SHA256_BLOCK_SIZE -
@@ -325,8 +323,7 @@ static struct sha256_hash_ctx *sha256_ctx_mgr_submit(struct sha256_ctx_mgr *mgr,
 		/* The extra block should never contain more than 1 block */
 		assert(ctx->partial_block_buffer_length <= SHA256_BLOCK_SIZE);
 
-		/*
-		 * If the extra block buffer contains exactly 1 block,
+		/* If the extra block buffer contains exactly 1 block,
 		 * it can be hashed.
 		 */
 		if (ctx->partial_block_buffer_length >= SHA256_BLOCK_SIZE) {
@@ -485,10 +482,10 @@ static int sha_complete_job(struct mcryptd_hash_request_ctx *rctx,
 
 			req = cast_mcryptd_ctx_to_req(req_ctx);
 			if (irqs_disabled())
-				req_ctx->complete(&req->base, ret);
+				rctx->complete(&req->base, ret);
 			else {
 				local_bh_disable();
-				req_ctx->complete(&req->base, ret);
+				rctx->complete(&req->base, ret);
 				local_bh_enable();
 			}
 		}

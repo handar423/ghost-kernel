@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  *    Support for adapter interruptions
  *
@@ -16,9 +15,11 @@
 #include <linux/mutex.h>
 #include <linux/rculist.h>
 #include <linux/slab.h>
+#include <linux/dma-mapping.h>
 
 #include <asm/airq.h>
 #include <asm/isc.h>
+#include <asm/cio.h>
 
 #include "cio.h"
 #include "cio_debug.h"
@@ -82,35 +83,22 @@ void unregister_adapter_interrupt(struct airq_struct *airq)
 }
 EXPORT_SYMBOL(unregister_adapter_interrupt);
 
-static irqreturn_t do_airq_interrupt(int irq, void *dummy)
+void do_adapter_IO(u8 isc)
 {
-	struct tpi_info *tpi_info;
 	struct airq_struct *airq;
 	struct hlist_head *head;
 
-	set_cpu_flag(CIF_NOHZ_DELAY);
-	tpi_info = (struct tpi_info *) &get_irq_regs()->int_code;
-	trace_s390_cio_adapter_int(tpi_info);
-	head = &airq_lists[tpi_info->isc];
+	head = &airq_lists[isc];
 	rcu_read_lock();
 	hlist_for_each_entry_rcu(airq, head, list)
 		if ((*airq->lsi_ptr & airq->lsi_mask) != 0)
 			airq->handler(airq);
 	rcu_read_unlock();
-
-	return IRQ_HANDLED;
 }
 
-static struct irqaction airq_interrupt = {
-	.name	 = "AIO",
-	.handler = do_airq_interrupt,
-};
-
-void __init init_airq_interrupts(void)
+static inline unsigned long iv_size(unsigned long bits)
 {
-	irq_set_chip_and_handler(THIN_INTERRUPT,
-				 &dummy_irq_chip, handle_percpu_irq);
-	setup_irq(THIN_INTERRUPT, &airq_interrupt);
+	return BITS_TO_LONGS(bits) * sizeof(unsigned long);
 }
 
 /**
@@ -129,8 +117,8 @@ struct airq_iv *airq_iv_create(unsigned long bits, unsigned long flags)
 	if (!iv)
 		goto out;
 	iv->bits = bits;
-	size = BITS_TO_LONGS(bits) * sizeof(unsigned long);
-	iv->vector = kzalloc(size, GFP_KERNEL);
+	size = iv_size(bits);
+	iv->vector = cio_dma_zalloc(size);
 	if (!iv->vector)
 		goto out_free;
 	if (flags & AIRQ_IV_ALLOC) {
@@ -165,7 +153,7 @@ out_free:
 	kfree(iv->ptr);
 	kfree(iv->bitlock);
 	kfree(iv->avail);
-	kfree(iv->vector);
+	cio_dma_free(iv->vector, size);
 	kfree(iv);
 out:
 	return NULL;
@@ -181,7 +169,7 @@ void airq_iv_release(struct airq_iv *iv)
 	kfree(iv->data);
 	kfree(iv->ptr);
 	kfree(iv->bitlock);
-	kfree(iv->vector);
+	cio_dma_free(iv->vector, iv_size(iv->bits));
 	kfree(iv->avail);
 	kfree(iv);
 }

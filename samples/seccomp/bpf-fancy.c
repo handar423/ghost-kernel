@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * Seccomp BPF example using a macro-based generator.
  *
@@ -26,9 +25,7 @@
 
 int main(int argc, char **argv)
 {
-	struct bpf_labels l = {
-		.count = 0,
-	};
+	struct bpf_labels l;
 	static const char msg1[] = "Please type something: ";
 	static const char msg2[] = "You typed: ";
 	char buf[256];

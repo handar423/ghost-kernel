@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __CFG802154_RDEV_OPS
 #define __CFG802154_RDEV_OPS
 
@@ -9,12 +8,10 @@
 
 static inline struct net_device *
 rdev_add_virtual_intf_deprecated(struct cfg802154_registered_device *rdev,
-				 const char *name,
-				 unsigned char name_assign_type,
-				 int type)
+				 const char *name, int type)
 {
 	return rdev->ops->add_virtual_intf_deprecated(&rdev->wpan_phy, name,
-						      name_assign_type, type);
+						      type);
 }
 
 static inline void
@@ -46,15 +43,13 @@ rdev_resume(struct cfg802154_registered_device *rdev)
 
 static inline int
 rdev_add_virtual_intf(struct cfg802154_registered_device *rdev, char *name,
-		      unsigned char name_assign_type,
 		      enum nl802154_iftype type, __le64 extended_addr)
 {
 	int ret;
 
 	trace_802154_rdev_add_virtual_intf(&rdev->wpan_phy, name, type,
 					   extended_addr);
-	ret = rdev->ops->add_virtual_intf(&rdev->wpan_phy, name,
-					  name_assign_type, type,
+	ret = rdev->ops->add_virtual_intf(&rdev->wpan_phy, name, type,
 					  extended_addr);
 	trace_802154_rdev_return_int(&rdev->wpan_phy, ret);
 	return ret;

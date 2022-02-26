@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 #include <linux/rtnetlink.h>
 #include <linux/notifier.h>
 #include <linux/socket.h>
@@ -63,12 +62,12 @@ int __net_init fib4_notifier_init(struct net *net)
 	ops = fib_notifier_ops_register(&fib4_notifier_ops_template, net);
 	if (IS_ERR(ops))
 		return PTR_ERR(ops);
-	net->ipv4.notifier_ops = ops;
+	net->ipv4_notifier_ops = ops;
 
 	return 0;
 }
 
 void __net_exit fib4_notifier_exit(struct net *net)
 {
-	fib_notifier_ops_unregister(net->ipv4.notifier_ops);
+	fib_notifier_ops_unregister(net->ipv4_notifier_ops);
 }

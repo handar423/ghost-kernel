@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * Driver for s390 chsc subchannels
  *
@@ -44,7 +43,11 @@ static DEFINE_MUTEX(on_close_mutex);
 
 static void CHSC_LOG_HEX(int level, void *data, int length)
 {
-	debug_event(chsc_debug_log_id, level, data, length);
+	while (length > 0) {
+		debug_event(chsc_debug_log_id, level, data, length);
+		length -= chsc_debug_log_id->buf_size;
+		data += chsc_debug_log_id->buf_size;
+	}
 }
 
 MODULE_AUTHOR("IBM Corporation");
@@ -55,7 +58,7 @@ static void chsc_subchannel_irq(struct subchannel *sch)
 {
 	struct chsc_private *private = dev_get_drvdata(&sch->dev);
 	struct chsc_request *request = private->request;
-	struct irb *irb = this_cpu_ptr(&cio_irb);
+	struct irb *irb = (struct irb *)&S390_lowcore.irb;
 
 	CHSC_LOG(4, "irb");
 	CHSC_LOG_HEX(4, irb, sizeof(*irb));
@@ -130,7 +133,7 @@ static int chsc_subchannel_prepare(struct subchannel *sch)
 	 * since we don't have a way to clear the subchannel and
 	 * cannot disable it with a request running.
 	 */
-	cc = stsch(sch->schid, &schib);
+	cc = stsch_err(sch->schid, &schib);
 	if (!cc && scsw_stctl(&schib.scsw))
 		return -EAGAIN;
 	return 0;
@@ -170,7 +173,8 @@ static struct css_driver chsc_subchannel_driver = {
 
 static int __init chsc_init_dbfs(void)
 {
-	chsc_debug_msg_id = debug_register("chsc_msg", 8, 1, 4 * sizeof(long));
+	chsc_debug_msg_id = debug_register("chsc_msg", 16, 1,
+					   16 * sizeof(long));
 	if (!chsc_debug_msg_id)
 		goto out;
 	debug_register_view(chsc_debug_msg_id, &debug_sprintf_view);
@@ -182,7 +186,8 @@ static int __init chsc_init_dbfs(void)
 	debug_set_level(chsc_debug_log_id, 2);
 	return 0;
 out:
-	debug_unregister(chsc_debug_msg_id);
+	if (chsc_debug_msg_id)
+		debug_unregister(chsc_debug_msg_id);
 	return -ENOMEM;
 }
 
@@ -257,7 +262,7 @@ static int chsc_async(struct chsc_async_area *chsc_area,
 		CHSC_LOG(2, "schid");
 		CHSC_LOG_HEX(2, &sch->schid, sizeof(sch->schid));
 		cc = chsc(chsc_area);
-		snprintf(dbf, sizeof(dbf), "cc:%d", cc);
+		sprintf(dbf, "cc:%d", cc);
 		CHSC_LOG(2, dbf);
 		switch (cc) {
 		case 0:
@@ -290,7 +295,7 @@ static void chsc_log_command(void *chsc_area)
 {
 	char dbf[10];
 
-	snprintf(dbf, sizeof(dbf), "CHSC:%x", ((uint16_t *)chsc_area)[1]);
+	sprintf(dbf, "CHSC:%x", ((uint16_t *)chsc_area)[1]);
 	CHSC_LOG(0, dbf);
 	CHSC_LOG_HEX(0, chsc_area, 32);
 }
@@ -354,7 +359,7 @@ static int chsc_ioctl_start(void __user *user_area)
 		if (copy_to_user(user_area, chsc_area, PAGE_SIZE))
 			ret = -EFAULT;
 out_free:
-	snprintf(dbf, sizeof(dbf), "ret:%d", ret);
+	sprintf(dbf, "ret:%d", ret);
 	CHSC_LOG(0, dbf);
 	kfree(request);
 	free_page((unsigned long)chsc_area);
@@ -396,7 +401,7 @@ out_free_request:
 	on_close_request = NULL;
 out_unlock:
 	mutex_unlock(&on_close_mutex);
-	snprintf(dbf, sizeof(dbf), "ocsret:%d", ret);
+	sprintf(dbf, "ocsret:%d", ret);
 	CHSC_LOG(0, dbf);
 	return ret;
 }
@@ -418,7 +423,7 @@ static int chsc_ioctl_on_close_remove(void)
 	ret = 0;
 out_unlock:
 	mutex_unlock(&on_close_mutex);
-	snprintf(dbf, sizeof(dbf), "ocrret:%d", ret);
+	sprintf(dbf, "ocrret:%d", ret);
 	CHSC_LOG(0, dbf);
 	return ret;
 }
@@ -549,7 +554,7 @@ static int chsc_ioctl_info_cu(void __user *user_cd)
 		goto out_free;
 	}
 	scucd_area->request.length = 0x0010;
-	scucd_area->request.code = 0x0026;
+	scucd_area->request.code = 0x0028;
 	scucd_area->m = cd->m;
 	scucd_area->fmt1 = cd->fmt;
 	scucd_area->cssid = cd->cssid;
@@ -941,7 +946,7 @@ static int chsc_release(struct inode *inode, struct file *filp)
 		wait_for_completion(&on_close_request->completion);
 		ret = chsc_examine_irb(on_close_request);
 	}
-	snprintf(dbf, sizeof(dbf), "relret:%d", ret);
+	sprintf(dbf, "relret:%d", ret);
 	CHSC_LOG(0, dbf);
 	free_page((unsigned long)on_close_chsc_area);
 	on_close_chsc_area = NULL;

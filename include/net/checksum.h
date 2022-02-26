@@ -22,7 +22,7 @@
 #include <linux/errno.h>
 #include <asm/types.h>
 #include <asm/byteorder.h>
-#include <linux/uaccess.h>
+#include <asm/uaccess.h>
 #include <asm/checksum.h>
 
 #ifndef _HAVE_ARCH_COPY_AND_CSUM_FROM_USER
@@ -71,19 +71,6 @@ static inline __wsum csum_sub(__wsum csum, __wsum addend)
 	return csum_add(csum, ~addend);
 }
 
-static inline __sum16 csum16_add(__sum16 csum, __be16 addend)
-{
-	u16 res = (__force u16)csum;
-
-	res += (__force u16)addend;
-	return (__force __sum16)(res + (res < (__force u16)addend));
-}
-
-static inline __sum16 csum16_sub(__sum16 csum, __be16 addend)
-{
-	return csum16_add(csum, ~addend);
-}
-
 static inline __wsum
 csum_block_add(__wsum csum, __wsum csum2, int offset)
 {
@@ -127,34 +114,26 @@ static inline void csum_replace_by_diff(__sum16 *sum, __wsum diff)
 
 static inline void csum_replace4(__sum16 *sum, __be32 from, __be32 to)
 {
-	__wsum tmp = csum_sub(~csum_unfold(*sum), (__force __wsum)from);
+	__be32 diff[] = { ~from, to };
 
-	*sum = csum_fold(csum_add(tmp, (__force __wsum)to));
+	*sum = csum_fold(csum_partial(diff, sizeof(diff), ~csum_unfold(*sum)));
 }
 
-/* Implements RFC 1624 (Incremental Internet Checksum)
- * 3. Discussion states :
- *     HC' = ~(~HC + ~m + m')
- *  m : old value of a 16bit field
- *  m' : new value of a 16bit field
- */
-static inline void csum_replace2(__sum16 *sum, __be16 old, __be16 new)
+static inline void csum_replace2(__sum16 *sum, __be16 from, __be16 to)
 {
-	*sum = ~csum16_add(csum16_sub(~(*sum), old), new);
+	csum_replace4(sum, (__force __be32)from, (__force __be32)to);
 }
 
 struct sk_buff;
-void inet_proto_csum_replace4(__sum16 *sum, struct sk_buff *skb,
-			      __be32 from, __be32 to, bool pseudohdr);
-void inet_proto_csum_replace16(__sum16 *sum, struct sk_buff *skb,
-			       const __be32 *from, const __be32 *to,
-			       bool pseudohdr);
-void inet_proto_csum_replace_by_diff(__sum16 *sum, struct sk_buff *skb,
-				     __wsum diff, bool pseudohdr);
+extern void inet_proto_csum_replace4(__sum16 *sum, struct sk_buff *skb,
+				     __be32 from, __be32 to, int pseudohdr);
+extern void inet_proto_csum_replace16(__sum16 *sum, struct sk_buff *skb,
+				      const __be32 *from, const __be32 *to,
+				      int pseudohdr);
 
 static inline void inet_proto_csum_replace2(__sum16 *sum, struct sk_buff *skb,
 					    __be16 from, __be16 to,
-					    bool pseudohdr)
+					    int pseudohdr)
 {
 	inet_proto_csum_replace4(sum, skb, (__force __be32)from,
 				 (__force __be32)to, pseudohdr);
@@ -170,8 +149,7 @@ static inline __wsum remcsum_adjust(void *ptr, __wsum csum,
 	csum = csum_sub(csum, csum_partial(ptr, start, 0));
 
 	/* Set derived checksum in packet */
-	delta = csum_sub((__force __wsum)csum_fold(csum),
-			 (__force __wsum)*psum);
+	delta = csum_sub(csum_fold(csum), *psum);
 	*psum = csum_fold(csum);
 
 	return delta;
@@ -179,7 +157,7 @@ static inline __wsum remcsum_adjust(void *ptr, __wsum csum,
 
 static inline void remcsum_unadjust(__sum16 *psum, __wsum delta)
 {
-	*psum = csum_fold(csum_sub(delta, (__force __wsum)*psum));
+	*psum = csum_fold(csum_sub(delta, *psum));
 }
 
 #endif

@@ -32,14 +32,6 @@ struct xfs_mount;
 struct xfs_trans;
 struct xfs_trans_res;
 struct xfs_dquot_acct;
-struct xfs_rud_log_item;
-struct xfs_rui_log_item;
-struct xfs_btree_cur;
-struct xfs_cui_log_item;
-struct xfs_cud_log_item;
-struct xfs_defer_ops;
-struct xfs_bui_log_item;
-struct xfs_bud_log_item;
 
 typedef struct xfs_log_item {
 	struct list_head		li_ail;		/* AIL pointers */
@@ -48,7 +40,7 @@ typedef struct xfs_log_item {
 	struct xfs_mount		*li_mountp;	/* ptr to fs mount */
 	struct xfs_ail			*li_ailp;	/* ptr to AIL */
 	uint				li_type;	/* item type */
-	uint				li_flags;	/* misc flags */
+	unsigned long			li_flags;	/* misc flags */
 	struct xfs_buf			*li_buf;	/* real buffer pointer */
 	struct xfs_log_item		*li_bio_list;	/* buffer item list */
 	void				(*li_cb)(struct xfs_buf *,
@@ -64,14 +56,19 @@ typedef struct xfs_log_item {
 	xfs_lsn_t			li_seq;		/* CIL commit seq */
 } xfs_log_item_t;
 
-#define	XFS_LI_IN_AIL	0x1
-#define	XFS_LI_ABORTED	0x2
-#define	XFS_LI_FAILED	0x4
+/*
+ * li_flags use the (set/test/clear)_bit atomic interfaces because updates can
+ * race with each other and we don't want to have to use the AIL lock to
+ * serialise all updates.
+ */
+#define	XFS_LI_IN_AIL	0
+#define	XFS_LI_ABORTED	1
+#define	XFS_LI_FAILED	2
 
 #define XFS_LI_FLAGS \
-	{ XFS_LI_IN_AIL,	"IN_AIL" }, \
-	{ XFS_LI_ABORTED,	"ABORTED" }, \
-	{ XFS_LI_FAILED,	"FAILED" }
+	{ (1 << XFS_LI_IN_AIL),		"IN_AIL" }, \
+	{ (1 << XFS_LI_ABORTED),	"ABORTED" }, \
+	{ (1 << XFS_LI_FAILED),		"FAILED" }
 
 struct xfs_item_ops {
 	void (*iop_size)(xfs_log_item_t *, int *, int *);
@@ -158,8 +155,6 @@ typedef struct xfs_trans {
 int		xfs_trans_alloc(struct xfs_mount *mp, struct xfs_trans_res *resp,
 			uint blocks, uint rtextents, uint flags,
 			struct xfs_trans **tpp);
-int		xfs_trans_alloc_empty(struct xfs_mount *mp,
-			struct xfs_trans **tpp);
 void		xfs_trans_mod_sb(xfs_trans_t *, uint, int64_t);
 
 struct xfs_buf	*xfs_trans_get_buf_map(struct xfs_trans *tp,
@@ -228,7 +223,7 @@ struct xfs_efd_log_item	*xfs_trans_get_efd(struct xfs_trans *,
 				  uint);
 int		xfs_trans_free_extent(struct xfs_trans *,
 				      struct xfs_efd_log_item *, xfs_fsblock_t,
-				      xfs_extlen_t, struct xfs_owner_info *);
+				      xfs_extlen_t);
 int		xfs_trans_commit(struct xfs_trans *);
 int		xfs_trans_roll(struct xfs_trans **);
 int		xfs_trans_roll_inode(struct xfs_trans **, struct xfs_inode *);
@@ -243,41 +238,5 @@ void		xfs_trans_buf_copy_type(struct xfs_buf *dst_bp,
 
 extern kmem_zone_t	*xfs_trans_zone;
 extern kmem_zone_t	*xfs_log_item_desc_zone;
-
-/* rmap updates */
-enum xfs_rmap_intent_type;
-
-void xfs_rmap_update_init_defer_op(void);
-struct xfs_rud_log_item *xfs_trans_get_rud(struct xfs_trans *tp,
-		struct xfs_rui_log_item *ruip);
-int xfs_trans_log_finish_rmap_update(struct xfs_trans *tp,
-		struct xfs_rud_log_item *rudp, enum xfs_rmap_intent_type type,
-		uint64_t owner, int whichfork, xfs_fileoff_t startoff,
-		xfs_fsblock_t startblock, xfs_filblks_t blockcount,
-		xfs_exntst_t state, struct xfs_btree_cur **pcur);
-
-/* refcount updates */
-enum xfs_refcount_intent_type;
-
-void xfs_refcount_update_init_defer_op(void);
-struct xfs_cud_log_item *xfs_trans_get_cud(struct xfs_trans *tp,
-		struct xfs_cui_log_item *cuip);
-int xfs_trans_log_finish_refcount_update(struct xfs_trans *tp,
-		struct xfs_cud_log_item *cudp, struct xfs_defer_ops *dfops,
-		enum xfs_refcount_intent_type type, xfs_fsblock_t startblock,
-		xfs_extlen_t blockcount, xfs_fsblock_t *new_fsb,
-		xfs_extlen_t *new_len, struct xfs_btree_cur **pcur);
-
-/* mapping updates */
-enum xfs_bmap_intent_type;
-
-void xfs_bmap_update_init_defer_op(void);
-struct xfs_bud_log_item *xfs_trans_get_bud(struct xfs_trans *tp,
-		struct xfs_bui_log_item *buip);
-int xfs_trans_log_finish_bmap_update(struct xfs_trans *tp,
-		struct xfs_bud_log_item *rudp, struct xfs_defer_ops *dfops,
-		enum xfs_bmap_intent_type type, struct xfs_inode *ip,
-		int whichfork, xfs_fileoff_t startoff, xfs_fsblock_t startblock,
-		xfs_filblks_t *blockcount, xfs_exntst_t state);
 
 #endif	/* __XFS_TRANS_H__ */

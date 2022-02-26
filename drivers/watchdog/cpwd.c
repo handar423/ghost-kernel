@@ -21,6 +21,7 @@
 #include <linux/fs.h>
 #include <linux/errno.h>
 #include <linux/major.h>
+#include <linux/init.h>
 #include <linux/miscdevice.h>
 #include <linux/interrupt.h>
 #include <linux/ioport.h>
@@ -230,9 +231,9 @@ static void cpwd_resetbrokentimer(struct cpwd *p, int index)
  * interrupts within the PLD so me must continually
  * reset the timers ad infinitum.
  */
-static void cpwd_brokentimer(struct timer_list *unused)
+static void cpwd_brokentimer(unsigned long data)
 {
-	struct cpwd *p = cpwd_device;
+	struct cpwd *p = (struct cpwd *) data;
 	int id, tripped = 0;
 
 	/* kill a running timer instance, in case we
@@ -275,7 +276,7 @@ static void cpwd_stoptimer(struct cpwd *p, int index)
 
 		if (p->broken) {
 			p->devs[index].runstatus |= WD_STAT_BSTOP;
-			cpwd_brokentimer(NULL);
+			cpwd_brokentimer((unsigned long) p);
 		}
 	}
 }
@@ -538,9 +539,12 @@ static int cpwd_probe(struct platform_device *op)
 	if (cpwd_device)
 		return -EINVAL;
 
-	p = devm_kzalloc(&op->dev, sizeof(*p), GFP_KERNEL);
-	if (!p)
-		return -ENOMEM;
+	p = kzalloc(sizeof(*p), GFP_KERNEL);
+	err = -ENOMEM;
+	if (!p) {
+		pr_err("Unable to allocate struct cpwd\n");
+		goto out;
+	}
 
 	p->irq = op->archdata.irqs[0];
 
@@ -550,12 +554,12 @@ static int cpwd_probe(struct platform_device *op)
 			     4 * WD_TIMER_REGSZ, DRIVER_NAME);
 	if (!p->regs) {
 		pr_err("Unable to map registers\n");
-		return -ENOMEM;
+		goto out_free;
 	}
 
 	options = of_find_node_by_path("/options");
+	err = -ENODEV;
 	if (!options) {
-		err = -ENODEV;
 		pr_err("Unable to find /options node\n");
 		goto out_iounmap;
 	}
@@ -608,16 +612,21 @@ static int cpwd_probe(struct platform_device *op)
 	}
 
 	if (p->broken) {
-		timer_setup(&cpwd_timer, cpwd_brokentimer, 0);
+		init_timer(&cpwd_timer);
+		cpwd_timer.function	= cpwd_brokentimer;
+		cpwd_timer.data		= (unsigned long) p;
 		cpwd_timer.expires	= WD_BTIMEOUT;
 
 		pr_info("PLD defect workaround enabled for model %s\n",
 			WD_BADMODEL);
 	}
 
-	platform_set_drvdata(op, p);
+	dev_set_drvdata(&op->dev, p);
 	cpwd_device = p;
-	return 0;
+	err = 0;
+
+out:
+	return err;
 
 out_unregister:
 	for (i--; i >= 0; i--)
@@ -626,12 +635,14 @@ out_unregister:
 out_iounmap:
 	of_iounmap(&op->resource[0], p->regs, 4 * WD_TIMER_REGSZ);
 
-	return err;
+out_free:
+	kfree(p);
+	goto out;
 }
 
 static int cpwd_remove(struct platform_device *op)
 {
-	struct cpwd *p = platform_get_drvdata(op);
+	struct cpwd *p = dev_get_drvdata(&op->dev);
 	int i;
 
 	for (i = 0; i < WD_NUMDEVS; i++) {
@@ -651,6 +662,7 @@ static int cpwd_remove(struct platform_device *op)
 		free_irq(p->irq, p);
 
 	of_iounmap(&op->resource[0], p->regs, 4 * WD_TIMER_REGSZ);
+	kfree(p);
 
 	cpwd_device = NULL;
 
@@ -668,6 +680,7 @@ MODULE_DEVICE_TABLE(of, cpwd_match);
 static struct platform_driver cpwd_driver = {
 	.driver = {
 		.name = DRIVER_NAME,
+		.owner = THIS_MODULE,
 		.of_match_table = cpwd_match,
 	},
 	.probe		= cpwd_probe,

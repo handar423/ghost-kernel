@@ -18,11 +18,13 @@
 
 #include <asm/cpufeature.h>             /* boot_cpu_has, ...            */
 #include <asm/mmu_context.h>            /* vma_pkey()                   */
+#include <asm/i387.h>
+#include <asm/fpu-internal.h>           /* user_has_fpu()              */
 
 int __execute_only_pkey(struct mm_struct *mm)
 {
 	bool need_to_set_mm_pkey = false;
-	int execute_only_pkey = mm->context.execute_only_pkey;
+	int execute_only_pkey = mm->execute_only_pkey;
 	int ret;
 
 	/* Do we need to assign a pkey for mm's execute-only maps? */
@@ -44,7 +46,7 @@ int __execute_only_pkey(struct mm_struct *mm)
 	 */
 	preempt_disable();
 	if (!need_to_set_mm_pkey &&
-	    current->thread.fpu.initialized &&
+	    user_has_fpu() &&
 	    !__pkru_allows_read(read_pkru(), execute_only_pkey)) {
 		preempt_enable();
 		return execute_only_pkey;
@@ -68,7 +70,7 @@ int __execute_only_pkey(struct mm_struct *mm)
 
 	/* We got one, store it and use it from here on out */
 	if (need_to_set_mm_pkey)
-		mm->context.execute_only_pkey = execute_only_pkey;
+		mm->execute_only_pkey = execute_only_pkey;
 	return execute_only_pkey;
 }
 
@@ -77,7 +79,7 @@ static inline bool vma_is_pkey_exec_only(struct vm_area_struct *vma)
 	/* Do this check first since the vm_flags should be hot */
 	if ((vma->vm_flags & (VM_READ | VM_WRITE | VM_EXEC)) != VM_EXEC)
 		return false;
-	if (vma_pkey(vma) != vma->vm_mm->context.execute_only_pkey)
+	if (vma_pkey(vma) != vma->vm_mm->execute_only_pkey)
 		return false;
 
 	return true;
@@ -94,26 +96,27 @@ int __arch_override_mprotect_pkey(struct vm_area_struct *vma, int prot, int pkey
 	 */
 	if (pkey != -1)
 		return pkey;
-	/*
-	 * Look for a protection-key-drive execute-only mapping
-	 * which is now being given permissions that are not
-	 * execute-only.  Move it back to the default pkey.
-	 */
-	if (vma_is_pkey_exec_only(vma) &&
-	    (prot & (PROT_READ|PROT_WRITE))) {
-		return 0;
-	}
+
 	/*
 	 * The mapping is execute-only.  Go try to get the
 	 * execute-only protection key.  If we fail to do that,
 	 * fall through as if we do not have execute-only
-	 * support.
+	 * support in this mm.
 	 */
 	if (prot == PROT_EXEC) {
 		pkey = execute_only_pkey(vma->vm_mm);
 		if (pkey > 0)
 			return pkey;
+	} else if (vma_is_pkey_exec_only(vma)) {
+		/*
+		 * Protections are *not* PROT_EXEC, but the mapping
+		 * is using the exec-only pkey.  This mapping was
+		 * PROT_EXEC and will no longer be.  Move back to
+		 * the default pkey.
+		 */
+		return ARCH_DEFAULT_PKEY;
 	}
+
 	/*
 	 * This is a vanilla, non-pkey mprotect (or we failed to
 	 * setup execute-only), inherit the pkey from the VMA we
@@ -140,7 +143,8 @@ u32 init_pkru_value = PKRU_AD_KEY( 1) | PKRU_AD_KEY( 2) | PKRU_AD_KEY( 3) |
  * Called from the FPU code when creating a fresh set of FPU
  * registers.  This is called from a very specific context where
  * we know the FPU regstiers are safe for use and we can use PKRU
- * directly.
+ * directly.  The fact that PKRU is only available when we are
+ * using eagerfpu mode makes this possible.
  */
 void copy_init_pkru_to_fpregs(void)
 {

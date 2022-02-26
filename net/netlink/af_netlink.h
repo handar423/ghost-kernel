@@ -1,23 +1,26 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _AF_NETLINK_H
 #define _AF_NETLINK_H
 
 #include <linux/rhashtable.h>
 #include <linux/atomic.h>
-#include <linux/workqueue.h>
 #include <net/sock.h>
-
-/* flags */
-#define NETLINK_F_KERNEL_SOCKET		0x1
-#define NETLINK_F_RECV_PKTINFO		0x2
-#define NETLINK_F_BROADCAST_SEND_ERROR	0x4
-#define NETLINK_F_RECV_NO_ENOBUFS	0x8
-#define NETLINK_F_LISTEN_ALL_NSID	0x10
-#define NETLINK_F_CAP_ACK		0x20
-#define NETLINK_F_EXT_ACK		0x40
 
 #define NLGRPSZ(x)	(ALIGN(x, sizeof(unsigned long) * 8) / 8)
 #define NLGRPLONGS(x)	(NLGRPSZ(x)/sizeof(unsigned long))
+
+struct netlink_ring {
+	void			**pg_vec;
+	unsigned int		head;
+	unsigned int		frames_per_block;
+	unsigned int		frame_size;
+	unsigned int		frame_max;
+
+	unsigned int		pg_vec_order;
+	unsigned int		pg_vec_pages;
+	unsigned int		pg_vec_len;
+
+	atomic_t		pending;
+};
 
 struct netlink_sock {
 	/* struct sock has to be the first member of netlink_sock */
@@ -34,18 +37,16 @@ struct netlink_sock {
 	wait_queue_head_t	wait;
 	bool			bound;
 	bool			cb_running;
-	int			dump_done_errno;
 	struct netlink_callback	cb;
 	struct mutex		*cb_mutex;
 	struct mutex		cb_def_mutex;
 	void			(*netlink_rcv)(struct sk_buff *skb);
-	int			(*netlink_bind)(struct net *net, int group);
-	void			(*netlink_unbind)(struct net *net, int group);
+	int			(*netlink_bind)(int group);
+	void			(*netlink_unbind)(int group);
 	struct module		*module;
 
 	struct rhash_head	node;
 	struct rcu_head		rcu;
-	struct work_struct	work;
 };
 
 static inline struct netlink_sock *nlk_sk(struct sock *sk)
@@ -61,8 +62,8 @@ struct netlink_table {
 	unsigned int		groups;
 	struct mutex		*cb_mutex;
 	struct module		*module;
-	int			(*bind)(struct net *net, int group);
-	void			(*unbind)(struct net *net, int group);
+	int			(*bind)(int group);
+	void			(*unbind)(int group);
 	bool			(*compare)(struct net *net, struct sock *sock);
 	int			registered;
 };

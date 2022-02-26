@@ -64,17 +64,17 @@ module_param_array(id, charp, NULL, 0444);
 MODULE_PARM_DESC(id, "ID string for sc-6000 based soundcard.");
 module_param_array(enable, bool, NULL, 0444);
 MODULE_PARM_DESC(enable, "Enable sc-6000 based soundcard.");
-module_param_hw_array(port, long, ioport, NULL, 0444);
+module_param_array(port, long, NULL, 0444);
 MODULE_PARM_DESC(port, "Port # for sc-6000 driver.");
-module_param_hw_array(mss_port, long, ioport, NULL, 0444);
+module_param_array(mss_port, long, NULL, 0444);
 MODULE_PARM_DESC(mss_port, "MSS Port # for sc-6000 driver.");
-module_param_hw_array(mpu_port, long, ioport, NULL, 0444);
+module_param_array(mpu_port, long, NULL, 0444);
 MODULE_PARM_DESC(mpu_port, "MPU-401 port # for sc-6000 driver.");
-module_param_hw_array(irq, int, irq, NULL, 0444);
+module_param_array(irq, int, NULL, 0444);
 MODULE_PARM_DESC(irq, "IRQ # for sc-6000 driver.");
-module_param_hw_array(mpu_irq, int, irq, NULL, 0444);
+module_param_array(mpu_irq, int, NULL, 0444);
 MODULE_PARM_DESC(mpu_irq, "MPU-401 IRQ # for sc-6000 driver.");
-module_param_hw_array(dma, int, dma, NULL, 0444);
+module_param_array(dma, int, NULL, 0444);
 MODULE_PARM_DESC(dma, "DMA # for sc-6000 driver.");
 module_param_array(joystick, bool, NULL, 0444);
 MODULE_PARM_DESC(joystick, "Enable gameport.");
@@ -625,7 +625,7 @@ static int snd_sc6000_probe(struct device *devptr, unsigned int dev)
 	if (err < 0)
 		goto err_unmap2;
 
-	err = snd_wss_pcm(chip, 0);
+	err = snd_wss_pcm(chip, 0, NULL);
 	if (err < 0) {
 		snd_printk(KERN_ERR PFX
 			   "error creating new WSS PCM device\n");
@@ -696,6 +696,7 @@ static int snd_sc6000_remove(struct device *devptr, unsigned int dev)
 	release_region(port[dev], 0x10);
 	release_region(mss_port[dev], 4);
 
+	dev_set_drvdata(devptr, NULL);
 	snd_card_free(card);
 	return 0;
 }
@@ -711,4 +712,15 @@ static struct isa_driver snd_sc6000_driver = {
 };
 
 
-module_isa_driver(snd_sc6000_driver, SNDRV_CARDS);
+static int __init alsa_card_sc6000_init(void)
+{
+	return isa_register_driver(&snd_sc6000_driver, SNDRV_CARDS);
+}
+
+static void __exit alsa_card_sc6000_exit(void)
+{
+	isa_unregister_driver(&snd_sc6000_driver);
+}
+
+module_init(alsa_card_sc6000_init)
+module_exit(alsa_card_sc6000_exit)

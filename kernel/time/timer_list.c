@@ -16,9 +16,9 @@
 #include <linux/sched.h>
 #include <linux/seq_file.h>
 #include <linux/kallsyms.h>
-#include <linux/nmi.h>
+#include <linux/tick.h>
 
-#include <linux/uaccess.h>
+#include <asm/uaccess.h>
 
 #include "tick-internal.h"
 
@@ -34,20 +34,13 @@ typedef void (*print_fn_t)(struct seq_file *m, unsigned int *classes);
  * This allows printing both to /proc/timer_list and
  * to the console (on SysRq-Q):
  */
-__printf(2, 3)
-static void SEQ_printf(struct seq_file *m, const char *fmt, ...)
-{
-	va_list args;
-
-	va_start(args, fmt);
-
-	if (m)
-		seq_vprintf(m, fmt, args);
-	else
-		vprintk(fmt, args);
-
-	va_end(args);
-}
+#define SEQ_printf(m, x...)			\
+ do {						\
+	if (m)					\
+		seq_printf(m, x);		\
+	else					\
+		printk(x);			\
+ } while (0)
 
 static void print_name_offset(struct seq_file *m, void *sym)
 {
@@ -63,11 +56,21 @@ static void
 print_timer(struct seq_file *m, struct hrtimer *taddr, struct hrtimer *timer,
 	    int idx, u64 now)
 {
+#ifdef CONFIG_TIMER_STATS
+	char tmp[TASK_COMM_LEN + 1];
+#endif
 	SEQ_printf(m, " #%d: ", idx);
 	print_name_offset(m, taddr);
 	SEQ_printf(m, ", ");
 	print_name_offset(m, timer->function);
-	SEQ_printf(m, ", S:%02x", timer->state);
+	SEQ_printf(m, ", S:%02lx", timer->state);
+#ifdef CONFIG_TIMER_STATS
+	SEQ_printf(m, ", ");
+	print_name_offset(m, timer->start_site);
+	memcpy(tmp, timer->start_comm, TASK_COMM_LEN);
+	tmp[TASK_COMM_LEN] = 0;
+	SEQ_printf(m, ", %s/%d", tmp, timer->start_pid);
+#endif
 	SEQ_printf(m, "\n");
 	SEQ_printf(m, " # expires at %Lu-%Lu nsecs [in %Ld to %Ld nsecs]\n",
 		(unsigned long long)ktime_to_ns(hrtimer_get_softexpires(timer)),
@@ -87,9 +90,6 @@ print_active_timers(struct seq_file *m, struct hrtimer_clock_base *base,
 
 next_one:
 	i = 0;
-
-	touch_nmi_watchdog();
-
 	raw_spin_lock_irqsave(&base->cpu_base->lock, flags);
 
 	curr = timerqueue_getnext(&base->active);
@@ -119,10 +119,10 @@ static void
 print_base(struct seq_file *m, struct hrtimer_clock_base *base, u64 now)
 {
 	SEQ_printf(m, "  .base:       %pK\n", base);
-	SEQ_printf(m, "  .index:      %d\n", base->index);
-
-	SEQ_printf(m, "  .resolution: %u nsecs\n", hrtimer_resolution);
-
+	SEQ_printf(m, "  .index:      %d\n",
+			base->index);
+	SEQ_printf(m, "  .resolution: %Lu nsecs\n",
+			(unsigned long long)ktime_to_ns(base->resolution));
 	SEQ_printf(m,   "  .get_time:   ");
 	print_name_offset(m, base->get_time);
 	SEQ_printf(m,   "\n");
@@ -131,7 +131,7 @@ print_base(struct seq_file *m, struct hrtimer_clock_base *base, u64 now)
 		   (unsigned long long) ktime_to_ns(base->offset));
 #endif
 	SEQ_printf(m,   "active timers:\n");
-	print_active_timers(m, base, now + ktime_to_ns(base->offset));
+	print_active_timers(m, base, now);
 }
 
 static void print_cpu(struct seq_file *m, int cpu, u64 now)
@@ -157,7 +157,7 @@ static void print_cpu(struct seq_file *m, int cpu, u64 now)
 	P(nr_events);
 	P(nr_retries);
 	P(nr_hangs);
-	P(max_hang_time);
+	P_ns(max_hang_time);
 #endif
 #undef P
 #undef P_ns
@@ -201,8 +201,6 @@ print_tickdevice(struct seq_file *m, struct tick_device *td, int cpu)
 {
 	struct clock_event_device *dev = td->evtdev;
 
-	touch_nmi_watchdog();
-
 	SEQ_printf(m, "Tick Device: mode:     %d\n", td->mode);
 	if (cpu < 0)
 		SEQ_printf(m, "Broadcast device\n");
@@ -221,7 +219,7 @@ print_tickdevice(struct seq_file *m, struct tick_device *td, int cpu)
 		   (unsigned long long) dev->min_delta_ns);
 	SEQ_printf(m, " mult:           %u\n", dev->mult);
 	SEQ_printf(m, " shift:          %u\n", dev->shift);
-	SEQ_printf(m, " mode:           %d\n", clockevent_get_state(dev));
+	SEQ_printf(m, " mode:           %d\n", dev->mode);
 	SEQ_printf(m, " next_event:     %Ld nsecs\n",
 		   (unsigned long long) ktime_to_ns(dev->next_event));
 
@@ -229,35 +227,9 @@ print_tickdevice(struct seq_file *m, struct tick_device *td, int cpu)
 	print_name_offset(m, dev->set_next_event);
 	SEQ_printf(m, "\n");
 
-	if (dev->set_state_shutdown) {
-		SEQ_printf(m, " shutdown: ");
-		print_name_offset(m, dev->set_state_shutdown);
-		SEQ_printf(m, "\n");
-	}
-
-	if (dev->set_state_periodic) {
-		SEQ_printf(m, " periodic: ");
-		print_name_offset(m, dev->set_state_periodic);
-		SEQ_printf(m, "\n");
-	}
-
-	if (dev->set_state_oneshot) {
-		SEQ_printf(m, " oneshot:  ");
-		print_name_offset(m, dev->set_state_oneshot);
-		SEQ_printf(m, "\n");
-	}
-
-	if (dev->set_state_oneshot_stopped) {
-		SEQ_printf(m, " oneshot stopped: ");
-		print_name_offset(m, dev->set_state_oneshot_stopped);
-		SEQ_printf(m, "\n");
-	}
-
-	if (dev->tick_resume) {
-		SEQ_printf(m, " resume:   ");
-		print_name_offset(m, dev->tick_resume);
-		SEQ_printf(m, "\n");
-	}
+	SEQ_printf(m, " set_mode:       ");
+	print_name_offset(m, dev->set_mode);
+	SEQ_printf(m, "\n");
 
 	SEQ_printf(m, " event_handler:  ");
 	print_name_offset(m, dev->event_handler);
@@ -270,11 +242,11 @@ static void timer_list_show_tickdevices_header(struct seq_file *m)
 {
 #ifdef CONFIG_GENERIC_CLOCKEVENTS_BROADCAST
 	print_tickdevice(m, tick_get_broadcast_device(), -1);
-	SEQ_printf(m, "tick_broadcast_mask: %*pb\n",
-		   cpumask_pr_args(tick_get_broadcast_mask()));
+	SEQ_printf(m, "tick_broadcast_mask: %08lx\n",
+		   cpumask_bits(tick_get_broadcast_mask())[0]);
 #ifdef CONFIG_TICK_ONESHOT
-	SEQ_printf(m, "tick_broadcast_oneshot_mask: %*pb\n",
-		   cpumask_pr_args(tick_get_broadcast_oneshot_mask()));
+	SEQ_printf(m, "tick_broadcast_oneshot_mask: %08lx\n",
+		   cpumask_bits(tick_get_broadcast_oneshot_mask())[0]);
 #endif
 	SEQ_printf(m, "\n");
 #endif
@@ -389,7 +361,7 @@ static int __init init_timer_list_procfs(void)
 {
 	struct proc_dir_entry *pe;
 
-	pe = proc_create("timer_list", 0400, NULL, &timer_list_fops);
+	pe = proc_create("timer_list", 0444, NULL, &timer_list_fops);
 	if (!pe)
 		return -ENOMEM;
 	return 0;

@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __NETNS_XFRM_H
 #define __NETNS_XFRM_H
 
@@ -7,12 +6,16 @@
 #include <linux/workqueue.h>
 #include <linux/xfrm.h>
 #include <net/dst_ops.h>
+#include <net/flowcache.h>
 
 struct ctl_table_header;
 
 struct xfrm_policy_hash {
-	struct hlist_head	__rcu *table;
+	struct hlist_head	*table;
 	unsigned int		hmask;
+};
+
+struct xfrm_policy_hash_ext {
 	u8			dbits4;
 	u8			sbits4;
 	u8			dbits6;
@@ -38,21 +41,24 @@ struct netns_xfrm {
 	 * mode. Also, it can be used by ah/esp icmp error handler to find
 	 * offending SA.
 	 */
-	struct hlist_head	__rcu *state_bydst;
-	struct hlist_head	__rcu *state_bysrc;
-	struct hlist_head	__rcu *state_byspi;
+	struct hlist_head	*state_bydst;
+	struct hlist_head	*state_bysrc;
+	struct hlist_head	*state_byspi;
 	unsigned int		state_hmask;
 	unsigned int		state_num;
 	struct work_struct	state_hash_work;
+	struct hlist_head	state_gc_list;
+	struct work_struct	state_gc_work;
+
+	RH_KABI_DEPRECATE(wait_queue_head_t,	km_waitq)
 
 	struct list_head	policy_all;
 	struct hlist_head	*policy_byidx;
 	unsigned int		policy_idx_hmask;
-	struct hlist_head	policy_inexact[XFRM_POLICY_MAX];
-	struct xfrm_policy_hash	policy_bydst[XFRM_POLICY_MAX];
+	struct hlist_head	policy_inexact[XFRM_POLICY_MAX * 2];
+	struct xfrm_policy_hash	policy_bydst[XFRM_POLICY_MAX * 2];
 	unsigned int		policy_count[XFRM_POLICY_MAX * 2];
 	struct work_struct	policy_hash_work;
-	struct xfrm_policy_hthresh policy_hthresh;
 
 
 	struct sock		*nlsk;
@@ -70,9 +76,6 @@ struct netns_xfrm {
 #if IS_ENABLED(CONFIG_IPV6)
 	struct dst_ops		xfrm6_dst_ops;
 #endif
-	spinlock_t xfrm_state_lock;
-	spinlock_t xfrm_policy_lock;
-	struct mutex xfrm_cfg_mutex;
 };
 
 #endif

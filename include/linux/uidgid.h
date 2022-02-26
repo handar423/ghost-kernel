@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _LINUX_UIDGID_H
 #define _LINUX_UIDGID_H
 
@@ -18,6 +17,8 @@
 struct user_namespace;
 extern struct user_namespace init_user_ns;
 
+#ifdef CONFIG_UIDGID_STRICT_TYPE_CHECKS
+
 typedef struct {
 	uid_t val;
 } kuid_t;
@@ -30,7 +31,6 @@ typedef struct {
 #define KUIDT_INIT(value) (kuid_t){ value }
 #define KGIDT_INIT(value) (kgid_t){ value }
 
-#ifdef CONFIG_MULTIUSER
 static inline uid_t __kuid_val(kuid_t uid)
 {
 	return uid.val;
@@ -40,16 +40,25 @@ static inline gid_t __kgid_val(kgid_t gid)
 {
 	return gid.val;
 }
+
 #else
+
+typedef uid_t kuid_t;
+typedef gid_t kgid_t;
+
 static inline uid_t __kuid_val(kuid_t uid)
 {
-	return 0;
+	return uid;
 }
 
 static inline gid_t __kgid_val(kgid_t gid)
 {
-	return 0;
+	return gid;
 }
+
+#define KUIDT_INIT(value) ((kuid_t) value )
+#define KGIDT_INIT(value) ((kgid_t) value )
+
 #endif
 
 #define GLOBAL_ROOT_UID KUIDT_INIT(0)
@@ -110,12 +119,12 @@ static inline bool gid_lte(kgid_t left, kgid_t right)
 
 static inline bool uid_valid(kuid_t uid)
 {
-	return __kuid_val(uid) != (uid_t) -1;
+	return !uid_eq(uid, INVALID_UID);
 }
 
 static inline bool gid_valid(kgid_t gid)
 {
-	return __kgid_val(gid) != (gid_t) -1;
+	return !gid_eq(gid, INVALID_GID);
 }
 
 #ifdef CONFIG_USER_NS

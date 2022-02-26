@@ -26,10 +26,9 @@
 #include <linux/mtd/partitions.h>
 
 #include <linux/i2c/pxa-i2c.h>
-#include <linux/platform_data/pcf857x.h>
+#include <linux/i2c/pcf857x.h>
 #include <linux/platform_data/at24.h>
 #include <linux/smc91x.h>
-#include <linux/gpio/machine.h>
 #include <linux/gpio.h>
 #include <linux/leds.h>
 
@@ -44,15 +43,16 @@
 #include <asm/mach/irq.h>
 #include <asm/mach/flash.h>
 
-#include "pxa27x.h"
+#include <mach/pxa27x.h>
 #include <linux/platform_data/mmc-pxamci.h>
-#include "udc.h"
-#include "pxa27x-udc.h"
+#include <mach/udc.h>
+#include <mach/pxa27x-udc.h>
 #include <mach/smemc.h>
 
 #include <linux/spi/spi.h>
 #include <linux/spi/pxa2xx_spi.h>
 #include <linux/mfd/da903x.h>
+#include <linux/platform_data/sht15.h>
 
 #include "devices.h"
 #include "generic.h"
@@ -137,18 +137,17 @@ static unsigned long sg2_im2_unified_pin_config[] __initdata = {
 	GPIO10_GPIO, /* large basic connector pin 23 */
 };
 
-static struct gpiod_lookup_table sht15_gpiod_table = {
-	.dev_id = "sht15",
-	.table = {
-		/* FIXME: should this have |GPIO_OPEN_DRAIN set? */
-		GPIO_LOOKUP("gpio-pxa", 100, "data", GPIO_ACTIVE_HIGH),
-		GPIO_LOOKUP("gpio-pxa", 98, "clk", GPIO_ACTIVE_HIGH),
-	},
+static struct sht15_platform_data platform_data_sht15 = {
+	.gpio_data =  100,
+	.gpio_sck  =  98,
 };
 
 static struct platform_device sht15 = {
 	.name = "sht15",
 	.id = -1,
+	.dev = {
+		.platform_data = &platform_data_sht15,
+	},
 };
 
 static struct regulator_consumer_supply stargate2_sensor_3_con[] = {
@@ -609,7 +608,6 @@ static void __init imote2_init(void)
 
 	imote2_stargate2_init();
 
-	gpiod_add_lookup_table(&sht15_gpiod_table);
 	platform_add_devices(imote2_devices, ARRAY_SIZE(imote2_devices));
 
 	i2c_register_board_info(0, imote2_i2c_board_info,
@@ -675,7 +673,6 @@ static struct resource smc91x_resources[] = {
 static struct smc91x_platdata stargate2_smc91x_info = {
 	.flags = SMC91X_USE_8BIT | SMC91X_USE_16BIT | SMC91X_USE_32BIT
 	| SMC91X_NOWAIT | SMC91X_USE_DMA,
-	.pxa_u16_align4 = true,
 };
 
 static struct platform_device smc91x_device = {
@@ -737,10 +734,9 @@ static int stargate2_mci_init(struct device *dev,
  *
  * Very simple control. Either it is on or off and is controlled by
  * a gpio pin */
-static int stargate2_mci_setpower(struct device *dev, unsigned int vdd)
+static void stargate2_mci_setpower(struct device *dev, unsigned int vdd)
 {
 	gpio_set_value(SG2_SD_POWER_ENABLE, !!vdd);
-	return 0;
 }
 
 static void stargate2_mci_exit(struct device *dev, void *data)
@@ -990,7 +986,6 @@ static void __init stargate2_init(void)
 
 	imote2_stargate2_init();
 
-	gpiod_add_lookup_table(&sht15_gpiod_table);
 	platform_add_devices(ARRAY_AND_SIZE(stargate2_devices));
 
 	i2c_register_board_info(0, ARRAY_AND_SIZE(stargate2_i2c_board_info));

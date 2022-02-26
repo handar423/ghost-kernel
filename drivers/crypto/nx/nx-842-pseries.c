@@ -226,12 +226,9 @@ static int nx842_validate_result(struct device *dev,
 	switch (csb->completion_code) {
 	case 0:	/* Completed without error */
 		break;
-	case 64: /* Compression ok, but output larger than input */
-		dev_dbg(dev, "%s: output size larger than input size\n",
-					__func__);
-		break;
+	case 64: /* Target bytes > Source bytes during compression */
 	case 13: /* Output buffer too small */
-		dev_dbg(dev, "%s: Out of space in output buffer\n",
+		dev_dbg(dev, "%s: Compression output larger than input\n",
 					__func__);
 		return -ENOSPC;
 	case 65: /* Calculated CRC doesn't match the passed value */
@@ -763,14 +760,28 @@ static int nx842_OF_upd(struct property *new_prop)
 		goto error_out;
 	}
 
-	/*
-	 * If this is a property update, there are only certain properties that
-	 * we care about. Bail if it isn't in the below list
-	 */
-	if (new_prop && (strncmp(new_prop->name, "status", new_prop->length) ||
-		         strncmp(new_prop->name, "ibm,max-sg-len", new_prop->length) ||
-		         strncmp(new_prop->name, "ibm,max-sync-cop", new_prop->length)))
-		goto out;
+	/* Set ptr to new property if provided */
+	if (new_prop) {
+		/* Single property */
+		if (!strncmp(new_prop->name, "status", new_prop->length)) {
+			status = new_prop;
+
+		} else if (!strncmp(new_prop->name, "ibm,max-sg-len",
+					new_prop->length)) {
+			maxsglen = new_prop;
+
+		} else if (!strncmp(new_prop->name, "ibm,max-sync-cop",
+					new_prop->length)) {
+			maxsyncop = new_prop;
+
+		} else {
+			/*
+			 * Skip the update, the property being updated
+			 * has no impact.
+			 */
+			goto out;
+		}
+	}
 
 	/* Perform property updates */
 	ret = nx842_OF_upd_status(status);
@@ -836,9 +847,9 @@ error_out:
  *		notifier_to_errno() to decode this value
  */
 static int nx842_OF_notifier(struct notifier_block *np, unsigned long action,
-			     void *data)
+			     void *update)
 {
-	struct of_reconfig_data *upd = data;
+	struct of_prop_reconfig *upd = update;
 	struct nx842_devdata *local_devdata;
 	struct device_node *node = NULL;
 
@@ -1082,7 +1093,7 @@ static int nx842_remove(struct vio_dev *viodev)
 	return 0;
 }
 
-static const struct vio_device_id nx842_vio_driver_ids[] = {
+static struct vio_device_id nx842_vio_driver_ids[] = {
 	{"ibm,compression-v1", "ibm,compression"},
 	{"", ""},
 };

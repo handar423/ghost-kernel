@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_X86_CHECKSUM_64_H
 #define _ASM_X86_CHECKSUM_64_H
 
@@ -9,7 +8,7 @@
  */
 
 #include <linux/compiler.h>
-#include <linux/uaccess.h>
+#include <asm/uaccess.h>
 #include <asm/byteorder.h>
 
 /**
@@ -134,7 +133,7 @@ extern __wsum csum_partial(const void *buff, int len, __wsum sum);
 
 
 /* Do not call this directly. Use the wrappers below */
-extern __visible __wsum csum_partial_copy_generic(const void *src, const void *dst,
+extern __wsum csum_partial_copy_generic(const void *src, const void *dst,
 					int len, __wsum sum,
 					int *src_err_ptr, int *dst_err_ptr);
 
@@ -178,7 +177,7 @@ struct in6_addr;
 #define _HAVE_ARCH_IPV6_CSUM 1
 extern __sum16
 csum_ipv6_magic(const struct in6_addr *saddr, const struct in6_addr *daddr,
-		__u32 len, __u8 proto, __wsum sum);
+		__u32 len, unsigned short proto, __wsum sum);
 
 static inline unsigned add32_with_carry(unsigned a, unsigned b)
 {

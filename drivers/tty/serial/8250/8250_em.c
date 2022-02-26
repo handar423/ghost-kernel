@@ -1,14 +1,28 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * Renesas Emma Mobile 8250 driver
  *
  *  Copyright (C) 2012 Magnus Damm
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #include <linux/device.h>
+#include <linux/init.h>
 #include <linux/io.h>
 #include <linux/module.h>
 #include <linux/serial_8250.h>
+#include <linux/serial_core.h>
 #include <linux/serial_reg.h>
 #include <linux/platform_device.h>
 #include <linux/clk.h>
@@ -81,21 +95,25 @@ static int serial8250_em_probe(struct platform_device *pdev)
 	struct resource *irq = platform_get_resource(pdev, IORESOURCE_IRQ, 0);
 	struct serial8250_em_priv *priv;
 	struct uart_8250_port up;
-	int ret;
+	int ret = -EINVAL;
 
 	if (!regs || !irq) {
 		dev_err(&pdev->dev, "missing registers or irq\n");
-		return -EINVAL;
+		goto err0;
 	}
 
-	priv = devm_kzalloc(&pdev->dev, sizeof(*priv), GFP_KERNEL);
-	if (!priv)
-		return -ENOMEM;
+	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+	if (!priv) {
+		dev_err(&pdev->dev, "unable to allocate private data\n");
+		ret = -ENOMEM;
+		goto err0;
+	}
 
-	priv->sclk = devm_clk_get(&pdev->dev, "sclk");
+	priv->sclk = clk_get(&pdev->dev, "sclk");
 	if (IS_ERR(priv->sclk)) {
 		dev_err(&pdev->dev, "unable to get clock\n");
-		return PTR_ERR(priv->sclk);
+		ret = PTR_ERR(priv->sclk);
+		goto err1;
 	}
 
 	memset(&up, 0, sizeof(up));
@@ -106,7 +124,7 @@ static int serial8250_em_probe(struct platform_device *pdev)
 	up.port.dev = &pdev->dev;
 	up.port.private_data = priv;
 
-	clk_prepare_enable(priv->sclk);
+	clk_enable(priv->sclk);
 	up.port.uartclk = clk_get_rate(priv->sclk);
 
 	up.port.iotype = UPIO_MEM32;
@@ -118,13 +136,20 @@ static int serial8250_em_probe(struct platform_device *pdev)
 	ret = serial8250_register_8250_port(&up);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "unable to register 8250 port\n");
-		clk_disable_unprepare(priv->sclk);
-		return ret;
+		goto err2;
 	}
 
 	priv->line = ret;
 	platform_set_drvdata(pdev, priv);
 	return 0;
+
+ err2:
+	clk_disable(priv->sclk);
+	clk_put(priv->sclk);
+ err1:
+	kfree(priv);
+ err0:
+	return ret;
 }
 
 static int serial8250_em_remove(struct platform_device *pdev)
@@ -132,7 +157,9 @@ static int serial8250_em_remove(struct platform_device *pdev)
 	struct serial8250_em_priv *priv = platform_get_drvdata(pdev);
 
 	serial8250_unregister_port(priv->line);
-	clk_disable_unprepare(priv->sclk);
+	clk_disable(priv->sclk);
+	clk_put(priv->sclk);
+	kfree(priv);
 	return 0;
 }
 
@@ -146,6 +173,7 @@ static struct platform_driver serial8250_em_platform_driver = {
 	.driver = {
 		.name		= "serial8250-em",
 		.of_match_table = serial8250_em_dt_ids,
+		.owner		= THIS_MODULE,
 	},
 	.probe			= serial8250_em_probe,
 	.remove			= serial8250_em_remove,

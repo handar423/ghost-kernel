@@ -1,4 +1,3 @@
-# SPDX-License-Identifier: GPL-2.0
 # Makefile for powerpc selftests
 
 # ARCH can be overridden by the user for cross compiling
@@ -9,67 +8,32 @@ ifeq ($(ARCH),powerpc)
 
 GIT_VERSION = $(shell git describe --always --long --dirty || echo "unknown")
 
-CFLAGS := -std=gnu99 -O2 -Wall -Werror -DGIT_VERSION='"$(GIT_VERSION)"' -I$(CURDIR)/include $(CFLAGS)
+CC := $(CROSS_COMPILE)$(CC)
+CFLAGS := -Wall -O2 -flto -Wall -Werror -DGIT_VERSION='"$(GIT_VERSION)"' -I$(CURDIR) $(CFLAGS)
 
-export CFLAGS
+export CC CFLAGS
 
-SUB_DIRS = alignment		\
-	   benchmarks		\
-	   cache_shape		\
-	   copyloops		\
-	   context_switch	\
-	   dscr			\
-	   mm			\
-	   pmu			\
-	   signal		\
-	   primitives		\
-	   stringloops		\
-	   switch_endian	\
-	   syscalls		\
-	   tm			\
-	   vphn         \
-	   math		\
-	   ptrace
+SUB_DIRS = tm switch_endian dscr
 
 endif
 
-all: $(SUB_DIRS)
-
-$(SUB_DIRS):
-	BUILD_TARGET=$(OUTPUT)/$@; mkdir -p $$BUILD_TARGET; $(MAKE) OUTPUT=$$BUILD_TARGET -k -C $@ all
-
-include ../lib.mk
-
-override define RUN_TESTS
+all:
 	@for TARGET in $(SUB_DIRS); do \
-		BUILD_TARGET=$(OUTPUT)/$$TARGET;	\
-		$(MAKE) OUTPUT=$$BUILD_TARGET -C $$TARGET run_tests;\
+		$(MAKE) -C $$TARGET all; \
 	done;
-endef
 
-override define INSTALL_RULE
+run_tests: all
 	@for TARGET in $(SUB_DIRS); do \
-		BUILD_TARGET=$(OUTPUT)/$$TARGET;	\
-		$(MAKE) OUTPUT=$$BUILD_TARGET -C $$TARGET install;\
+		$(MAKE) -C $$TARGET run_tests; \
 	done;
-endef
 
-override define EMIT_TESTS
+clean:
 	@for TARGET in $(SUB_DIRS); do \
-		BUILD_TARGET=$(OUTPUT)/$$TARGET;	\
-		$(MAKE) OUTPUT=$$BUILD_TARGET -s -C $$TARGET emit_tests;\
-	done;
-endef
-
-override define CLEAN
-	@for TARGET in $(SUB_DIRS); do \
-		BUILD_TARGET=$(OUTPUT)/$$TARGET;	\
-		$(MAKE) OUTPUT=$$BUILD_TARGET -C $$TARGET clean; \
+		$(MAKE) -C $$TARGET clean; \
 	done;
 	rm -f tags
-endef
 
 tags:
 	find . -name '*.c' -o -name '*.h' | xargs ctags
 
-.PHONY: tags $(SUB_DIRS)
+.PHONY: all run_tests clean tags

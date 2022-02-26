@@ -19,8 +19,8 @@
  * Author: Kent Yoder <yoder1@us.ibm.com>
  */
 
-#include <crypto/internal/aead.h>
 #include <crypto/internal/hash.h>
+#include <crypto/hash.h>
 #include <crypto/aes.h>
 #include <crypto/sha.h>
 #include <crypto/algapi.h>
@@ -29,9 +29,11 @@
 #include <linux/moduleparam.h>
 #include <linux/types.h>
 #include <linux/mm.h>
+#include <linux/crypto.h>
 #include <linux/scatterlist.h>
 #include <linux/device.h>
 #include <linux/of.h>
+#include <linux/types.h>
 #include <asm/hvcall.h>
 #include <asm/vio.h>
 
@@ -176,7 +178,7 @@ struct nx_sg *nx_walk_and_build(struct nx_sg       *nx_dst,
 			break;
 
 		offset += sg_src->length;
-		sg_src = sg_next(sg_src);
+		sg_src = scatterwalk_sg_next(sg_src);
 	}
 
 	/* start - offset is the number of bytes to advance in the scatterlist
@@ -186,9 +188,9 @@ struct nx_sg *nx_walk_and_build(struct nx_sg       *nx_dst,
 	while (len && (nx_sg - nx_dst) < sglen) {
 		n = scatterwalk_clamp(&walk, len);
 		if (!n) {
-			/* In cases where we have scatterlist chain sg_next
+			/* In cases where we have scatterlist chain scatterwalk_sg_next
 			 * handles with it properly */
-			scatterwalk_start(&walk, sg_next(walk.sg));
+			scatterwalk_start(&walk, scatterwalk_sg_next(walk.sg));
 			n = scatterwalk_clamp(&walk, len);
 		}
 		dst = scatterwalk_map(&walk);
@@ -391,7 +393,7 @@ static void nx_of_update_msc(struct device   *dev,
 		     ((bytes_so_far + sizeof(struct msc_triplet)) <= lenp) &&
 		     i < msc->triplets;
 		     i++) {
-			if (msc->fc >= NX_MAX_FC || msc->mode >= NX_MAX_MODE) {
+			if (msc->fc > NX_MAX_FC || msc->mode > NX_MAX_MODE) {
 				dev_err(dev, "unknown function code/mode "
 					"combo: %d/%d (ignored)\n", msc->fc,
 					msc->mode);
@@ -529,12 +531,6 @@ static int nx_register_alg(struct crypto_alg *alg, u32 fc, u32 mode)
 	       crypto_register_alg(alg) : 0;
 }
 
-static int nx_register_aead(struct aead_alg *alg, u32 fc, u32 mode)
-{
-	return nx_check_props(&nx_driver.viodev->dev, fc, mode) ?
-	       crypto_register_aead(alg) : 0;
-}
-
 static int nx_register_shash(struct shash_alg *alg, u32 fc, u32 mode, int slot)
 {
 	return (slot >= 0 ? nx_check_prop(&nx_driver.viodev->dev,
@@ -547,12 +543,6 @@ static void nx_unregister_alg(struct crypto_alg *alg, u32 fc, u32 mode)
 {
 	if (nx_check_props(NULL, fc, mode))
 		crypto_unregister_alg(alg);
-}
-
-static void nx_unregister_aead(struct aead_alg *alg, u32 fc, u32 mode)
-{
-	if (nx_check_props(NULL, fc, mode))
-		crypto_unregister_aead(alg);
 }
 
 static void nx_unregister_shash(struct shash_alg *alg, u32 fc, u32 mode,
@@ -599,19 +589,19 @@ static int nx_register_algs(void)
 	if (rc)
 		goto out_unreg_cbc;
 
-	rc = nx_register_aead(&nx_gcm_aes_alg, NX_FC_AES, NX_MODE_AES_GCM);
+	rc = nx_register_alg(&nx_gcm_aes_alg, NX_FC_AES, NX_MODE_AES_GCM);
 	if (rc)
 		goto out_unreg_ctr3686;
 
-	rc = nx_register_aead(&nx_gcm4106_aes_alg, NX_FC_AES, NX_MODE_AES_GCM);
+	rc = nx_register_alg(&nx_gcm4106_aes_alg, NX_FC_AES, NX_MODE_AES_GCM);
 	if (rc)
 		goto out_unreg_gcm;
 
-	rc = nx_register_aead(&nx_ccm_aes_alg, NX_FC_AES, NX_MODE_AES_CCM);
+	rc = nx_register_alg(&nx_ccm_aes_alg, NX_FC_AES, NX_MODE_AES_CCM);
 	if (rc)
 		goto out_unreg_gcm4106;
 
-	rc = nx_register_aead(&nx_ccm4309_aes_alg, NX_FC_AES, NX_MODE_AES_CCM);
+	rc = nx_register_alg(&nx_ccm4309_aes_alg, NX_FC_AES, NX_MODE_AES_CCM);
 	if (rc)
 		goto out_unreg_ccm;
 
@@ -639,13 +629,13 @@ out_unreg_s256:
 	nx_unregister_shash(&nx_shash_sha256_alg, NX_FC_SHA, NX_MODE_SHA,
 			    NX_PROPS_SHA256);
 out_unreg_ccm4309:
-	nx_unregister_aead(&nx_ccm4309_aes_alg, NX_FC_AES, NX_MODE_AES_CCM);
+	nx_unregister_alg(&nx_ccm4309_aes_alg, NX_FC_AES, NX_MODE_AES_CCM);
 out_unreg_ccm:
-	nx_unregister_aead(&nx_ccm_aes_alg, NX_FC_AES, NX_MODE_AES_CCM);
+	nx_unregister_alg(&nx_ccm_aes_alg, NX_FC_AES, NX_MODE_AES_CCM);
 out_unreg_gcm4106:
-	nx_unregister_aead(&nx_gcm4106_aes_alg, NX_FC_AES, NX_MODE_AES_GCM);
+	nx_unregister_alg(&nx_gcm4106_aes_alg, NX_FC_AES, NX_MODE_AES_GCM);
 out_unreg_gcm:
-	nx_unregister_aead(&nx_gcm_aes_alg, NX_FC_AES, NX_MODE_AES_GCM);
+	nx_unregister_alg(&nx_gcm_aes_alg, NX_FC_AES, NX_MODE_AES_GCM);
 out_unreg_ctr3686:
 	nx_unregister_alg(&nx_ctr3686_aes_alg, NX_FC_AES, NX_MODE_AES_CTR);
 out_unreg_cbc:
@@ -704,17 +694,17 @@ static int nx_crypto_ctx_init(struct nx_crypto_ctx *nx_ctx, u32 fc, u32 mode)
 }
 
 /* entry points from the crypto tfm initializers */
-int nx_crypto_ctx_aes_ccm_init(struct crypto_aead *tfm)
+int nx_crypto_ctx_aes_ccm_init(struct crypto_tfm *tfm)
 {
-	crypto_aead_set_reqsize(tfm, sizeof(struct nx_ccm_rctx));
-	return nx_crypto_ctx_init(crypto_aead_ctx(tfm), NX_FC_AES,
+	tfm->crt_aead.reqsize = sizeof(struct nx_ccm_rctx);
+	return nx_crypto_ctx_init(crypto_tfm_ctx(tfm), NX_FC_AES,
 				  NX_MODE_AES_CCM);
 }
 
-int nx_crypto_ctx_aes_gcm_init(struct crypto_aead *tfm)
+int nx_crypto_ctx_aes_gcm_init(struct crypto_tfm *tfm)
 {
-	crypto_aead_set_reqsize(tfm, sizeof(struct nx_gcm_rctx));
-	return nx_crypto_ctx_init(crypto_aead_ctx(tfm), NX_FC_AES,
+	tfm->crt_aead.reqsize = sizeof(struct nx_gcm_rctx);
+	return nx_crypto_ctx_init(crypto_tfm_ctx(tfm), NX_FC_AES,
 				  NX_MODE_AES_GCM);
 }
 
@@ -766,13 +756,6 @@ void nx_crypto_ctx_exit(struct crypto_tfm *tfm)
 	nx_ctx->out_sg = NULL;
 }
 
-void nx_crypto_ctx_aead_exit(struct crypto_aead *tfm)
-{
-	struct nx_crypto_ctx *nx_ctx = crypto_aead_ctx(tfm);
-
-	kzfree(nx_ctx->kmem);
-}
-
 static int nx_probe(struct vio_dev *viodev, const struct vio_device_id *id)
 {
 	dev_dbg(&viodev->dev, "driver probed: %s resource id: 0x%x\n",
@@ -805,12 +788,12 @@ static int nx_remove(struct vio_dev *viodev)
 				    NX_FC_SHA, NX_MODE_SHA, NX_PROPS_SHA256);
 		nx_unregister_shash(&nx_shash_sha256_alg,
 				    NX_FC_SHA, NX_MODE_SHA, NX_PROPS_SHA512);
-		nx_unregister_aead(&nx_ccm4309_aes_alg,
-				   NX_FC_AES, NX_MODE_AES_CCM);
-		nx_unregister_aead(&nx_ccm_aes_alg, NX_FC_AES, NX_MODE_AES_CCM);
-		nx_unregister_aead(&nx_gcm4106_aes_alg,
+		nx_unregister_alg(&nx_ccm4309_aes_alg,
+				  NX_FC_AES, NX_MODE_AES_CCM);
+		nx_unregister_alg(&nx_ccm_aes_alg, NX_FC_AES, NX_MODE_AES_CCM);
+		nx_unregister_alg(&nx_gcm4106_aes_alg,
 				   NX_FC_AES, NX_MODE_AES_GCM);
-		nx_unregister_aead(&nx_gcm_aes_alg,
+		nx_unregister_alg(&nx_gcm_aes_alg,
 				   NX_FC_AES, NX_MODE_AES_GCM);
 		nx_unregister_alg(&nx_ctr3686_aes_alg,
 				  NX_FC_AES, NX_MODE_AES_CTR);
@@ -833,7 +816,7 @@ static void __exit nx_fini(void)
 	vio_unregister_driver(&nx_driver.viodriver);
 }
 
-static const struct vio_device_id nx_crypto_driver_ids[] = {
+static struct vio_device_id nx_crypto_driver_ids[] = {
 	{ "ibm,sym-encryption-v1", "ibm,sym-encryption" },
 	{ "", "" }
 };

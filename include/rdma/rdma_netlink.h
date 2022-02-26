@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _RDMA_NETLINK_H
 #define _RDMA_NETLINK_H
 
@@ -7,8 +6,7 @@
 #include <uapi/rdma/rdma_netlink.h>
 
 struct rdma_nl_cbs {
-	int (*doit)(struct sk_buff *skb, struct nlmsghdr *nlh,
-		    struct netlink_ext_ack *extack);
+	int (*doit)(struct sk_buff *skb, struct nlmsghdr *nlh);
 	int (*dump)(struct sk_buff *skb, struct netlink_callback *nlcb);
 	u8 flags;
 };
@@ -96,7 +94,7 @@ int rdma_nl_multicast(struct sk_buff *skb, unsigned int group, gfp_t flags);
 /**
  * Check if there are any listeners to the netlink group
  * @group: the netlink group ID
- * Returns 0 on success or a negative for no listeners.
+ * Returns true on success or false if no listeners.
  */
-int rdma_nl_chk_listeners(unsigned int group);
+bool rdma_nl_chk_listeners(unsigned int group);
 #endif /* _RDMA_NETLINK_H */

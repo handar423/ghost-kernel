@@ -74,8 +74,8 @@ config IPMI_SSIF
        select I2C
        help
          Provides a driver for a SMBus interface to a BMC, meaning that you
-	 have a driver that must be accessed over an I2C bus instead of a
-	 standard interface.  This module requires I2C support.
+         have a driver that must be accessed over an I2C bus instead of a
+         standard interface.  This module requires I2C support.
 
 config IPMI_POWERNV
        depends on PPC_POWERNV
@@ -97,8 +97,7 @@ config IPMI_POWEROFF
 endif # IPMI_HANDLER
 
 config ASPEED_BT_IPMI_BMC
-	depends on ARCH_ASPEED || COMPILE_TEST
-       depends on REGMAP && REGMAP_MMIO && MFD_SYSCON
+	depends on ARCH_ASPEED
 	tristate "BT IPMI bmc driver"
 	help
 	  Provides a driver for the BT (Block Transfer) IPMI interface

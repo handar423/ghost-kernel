@@ -57,12 +57,13 @@ union hv_timer_config {
 		u64 periodic:1;
 		u64 lazy:1;
 		u64 auto_enable:1;
-		u64 reserved_z0:12;
+		u64 apic_vector:8;
+		u64 direct_mode:1;
+		u64 reserved_z0:3;
 		u64 sintx:4;
 		u64 reserved_z1:44;
 	};
 };
-
 
 /* Define the synthetic interrupt controller event flags format. */
 union hv_synic_event_flags {
@@ -184,6 +185,7 @@ struct hv_input_post_message {
 
 enum {
 	VMBUS_MESSAGE_CONNECTION_ID	= 1,
+	VMBUS_MESSAGE_CONNECTION_ID_4	= 4,
 	VMBUS_MESSAGE_PORT_ID		= 1,
 	VMBUS_EVENT_CONNECTION_ID	= 2,
 	VMBUS_EVENT_PORT_ID		= 2,
@@ -257,6 +259,12 @@ extern int hv_synic_cleanup(unsigned int cpu);
 
 extern void hv_synic_clockevents_cleanup(void);
 
+extern void hv_clockevents_bind(int cpu);
+
+extern void hv_clockevents_unbind(int cpu);
+
+extern int hv_synic_cpu_used(unsigned int cpu);
+
 /* Interface */
 
 
@@ -299,6 +307,8 @@ struct vmbus_connection {
 	 */
 	int connect_cpu;
 
+	u32 msg_conn_id;
+
 	atomic_t offer_in_progress;
 
 	enum vmbus_connect_state conn_state;
@@ -329,7 +339,14 @@ struct vmbus_connection {
 	struct list_head chn_list;
 	struct mutex channel_mutex;
 
+	/*
+	 * An offer message is handled first on the work_queue, and then
+	 * is further handled on handle_primary_chan_wq or
+	 * handle_sub_chan_wq.
+	 */
 	struct workqueue_struct *work_queue;
+	struct workqueue_struct *handle_primary_chan_wq;
+	struct workqueue_struct *handle_sub_chan_wq;
 };
 
 

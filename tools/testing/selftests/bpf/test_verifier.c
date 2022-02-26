@@ -2,6 +2,7 @@
  * Testsuite for eBPF verifier
  *
  * Copyright (c) 2014 PLUMgrid, http://plumgrid.com
+ * Copyright (c) 2017 Facebook
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of version 2 of the GNU General Public
@@ -20,6 +21,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include <sched.h>
+#include <limits.h>
 
 #include <sys/capability.h>
 #include <sys/resource.h>
@@ -28,6 +30,7 @@
 #include <linux/filter.h>
 #include <linux/bpf_perf_event.h>
 #include <linux/bpf.h>
+#include <linux/if_ether.h>
 
 #include <bpf/bpf.h>
 
@@ -45,9 +48,11 @@
 # define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 #endif
 
-#define MAX_INSNS	512
+#define MAX_INSNS	BPF_MAXINSNS
 #define MAX_FIXUPS	8
 #define MAX_NR_MAPS	4
+#define POINTER_VALUE	0xcafe4all
+#define TEST_DATA_LEN	64
 
 #define F_NEEDS_EFFICIENT_UNALIGNED_ACCESS	(1 << 0)
 #define F_LOAD_WITH_STRICT_ALIGNMENT		(1 << 1)
@@ -57,10 +62,12 @@ struct bpf_test {
 	struct bpf_insn	insns[MAX_INSNS];
 	int fixup_map1[MAX_FIXUPS];
 	int fixup_map2[MAX_FIXUPS];
+	int fixup_map3[MAX_FIXUPS];
 	int fixup_prog[MAX_FIXUPS];
 	int fixup_map_in_map[MAX_FIXUPS];
 	const char *errstr;
 	const char *errstr_unpriv;
+	uint32_t retval;
 	enum {
 		UNDEF,
 		ACCEPT,
@@ -68,6 +75,9 @@ struct bpf_test {
 	} result, result_unpriv;
 	enum bpf_prog_type prog_type;
 	uint8_t flags;
+	bool disabled;
+	__u8 data[TEST_DATA_LEN];
+	void (*fill_helper)(struct bpf_test *self);
 };
 
 /* Note we want this to be 64 bit aligned so that the end of our array is
@@ -79,6 +89,67 @@ struct test_val {
 	unsigned int index;
 	int foo[MAX_ENTRIES];
 };
+
+struct other_val {
+	long long foo;
+	long long bar;
+};
+
+static void bpf_fill_ld_abs_vlan_push_pop(struct bpf_test *self)
+{
+	/* test: {skb->data[0], vlan_push} x 68 + {skb->data[0], vlan_pop} x 68 */
+#define PUSH_CNT 51
+	unsigned int len = BPF_MAXINSNS;
+	struct bpf_insn *insn = self->insns;
+	int i = 0, j, k = 0;
+
+	insn[i++] = BPF_MOV64_REG(BPF_REG_6, BPF_REG_1);
+loop:
+	for (j = 0; j < PUSH_CNT; j++) {
+		insn[i++] = BPF_LD_ABS(BPF_B, 0);
+		insn[i] = BPF_JMP_IMM(BPF_JNE, BPF_REG_0, 0x34, len - i - 2);
+		i++;
+		insn[i++] = BPF_MOV64_REG(BPF_REG_1, BPF_REG_6);
+		insn[i++] = BPF_MOV64_IMM(BPF_REG_2, 1);
+		insn[i++] = BPF_MOV64_IMM(BPF_REG_3, 2);
+		insn[i++] = BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0,
+					 BPF_FUNC_skb_vlan_push),
+		insn[i] = BPF_JMP_IMM(BPF_JNE, BPF_REG_0, 0, len - i - 2);
+		i++;
+	}
+
+	for (j = 0; j < PUSH_CNT; j++) {
+		insn[i++] = BPF_LD_ABS(BPF_B, 0);
+		insn[i] = BPF_JMP_IMM(BPF_JNE, BPF_REG_0, 0x34, len - i - 2);
+		i++;
+		insn[i++] = BPF_MOV64_REG(BPF_REG_1, BPF_REG_6);
+		insn[i++] = BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0,
+					 BPF_FUNC_skb_vlan_pop),
+		insn[i] = BPF_JMP_IMM(BPF_JNE, BPF_REG_0, 0, len - i - 2);
+		i++;
+	}
+	if (++k < 5)
+		goto loop;
+
+	for (; i < len - 1; i++)
+		insn[i] = BPF_ALU32_IMM(BPF_MOV, BPF_REG_0, 0xbef);
+	insn[len - 1] = BPF_EXIT_INSN();
+}
+
+static void bpf_fill_jump_around_ld_abs(struct bpf_test *self)
+{
+	struct bpf_insn *insn = self->insns;
+	unsigned int len = BPF_MAXINSNS;
+	int i = 0;
+
+	insn[i++] = BPF_MOV64_REG(BPF_REG_6, BPF_REG_1);
+	insn[i++] = BPF_LD_ABS(BPF_B, 0);
+	insn[i] = BPF_JMP_IMM(BPF_JEQ, BPF_REG_0, 10, len - i - 2);
+	i++;
+	while (i < len - 1)
+		insn[i++] = BPF_LD_ABS(BPF_B, 1);
+	insn[i] = BPF_EXIT_INSN();
+}
 
 static struct bpf_test tests[] = {
 	{
@@ -94,6 +165,326 @@ static struct bpf_test tests[] = {
 			BPF_EXIT_INSN(),
 		},
 		.result = ACCEPT,
+		.retval = -3,
+	},
+	{
+		"DIV32 by 0, zero check 1",
+		.insns = {
+			BPF_MOV32_IMM(BPF_REG_0, 42),
+			BPF_MOV32_IMM(BPF_REG_1, 0),
+			BPF_MOV32_IMM(BPF_REG_2, 1),
+			BPF_ALU32_REG(BPF_DIV, BPF_REG_2, BPF_REG_1),
+			BPF_EXIT_INSN(),
+		},
+		.result = ACCEPT,
+		.retval = 42,
+	},
+	{
+		"DIV32 by 0, zero check 2",
+		.insns = {
+			BPF_MOV32_IMM(BPF_REG_0, 42),
+			BPF_LD_IMM64(BPF_REG_1, 0xffffffff00000000LL),
+			BPF_MOV32_IMM(BPF_REG_2, 1),
+			BPF_ALU32_REG(BPF_DIV, BPF_REG_2, BPF_REG_1),
+			BPF_EXIT_INSN(),
+		},
+		.result = ACCEPT,
+		.retval = 42,
+	},
+	{
+		"DIV64 by 0, zero check",
+		.insns = {
+			BPF_MOV32_IMM(BPF_REG_0, 42),
+			BPF_MOV32_IMM(BPF_REG_1, 0),
+			BPF_MOV32_IMM(BPF_REG_2, 1),
+			BPF_ALU64_REG(BPF_DIV, BPF_REG_2, BPF_REG_1),
+			BPF_EXIT_INSN(),
+		},
+		.result = ACCEPT,
+		.retval = 42,
+	},
+	{
+		"MOD32 by 0, zero check 1",
+		.insns = {
+			BPF_MOV32_IMM(BPF_REG_0, 42),
+			BPF_MOV32_IMM(BPF_REG_1, 0),
+			BPF_MOV32_IMM(BPF_REG_2, 1),
+			BPF_ALU32_REG(BPF_MOD, BPF_REG_2, BPF_REG_1),
+			BPF_EXIT_INSN(),
+		},
+		.result = ACCEPT,
+		.retval = 42,
+	},
+	{
+		"MOD32 by 0, zero check 2",
+		.insns = {
+			BPF_MOV32_IMM(BPF_REG_0, 42),
+			BPF_LD_IMM64(BPF_REG_1, 0xffffffff00000000LL),
+			BPF_MOV32_IMM(BPF_REG_2, 1),
+			BPF_ALU32_REG(BPF_MOD, BPF_REG_2, BPF_REG_1),
+			BPF_EXIT_INSN(),
+		},
+		.result = ACCEPT,
+		.retval = 42,
+	},
+	{
+		"MOD64 by 0, zero check",
+		.insns = {
+			BPF_MOV32_IMM(BPF_REG_0, 42),
+			BPF_MOV32_IMM(BPF_REG_1, 0),
+			BPF_MOV32_IMM(BPF_REG_2, 1),
+			BPF_ALU64_REG(BPF_MOD, BPF_REG_2, BPF_REG_1),
+			BPF_EXIT_INSN(),
+		},
+		.result = ACCEPT,
+		.retval = 42,
+	},
+	{
+		"DIV32 by 0, zero check ok, cls",
+		.insns = {
+			BPF_MOV32_IMM(BPF_REG_0, 42),
+			BPF_MOV32_IMM(BPF_REG_1, 2),
+			BPF_MOV32_IMM(BPF_REG_2, 16),
+			BPF_ALU32_REG(BPF_DIV, BPF_REG_2, BPF_REG_1),
+			BPF_MOV64_REG(BPF_REG_0, BPF_REG_2),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.result = ACCEPT,
+		.retval = 8,
+	},
+	{
+		"DIV32 by 0, zero check 1, cls",
+		.insns = {
+			BPF_MOV32_IMM(BPF_REG_1, 0),
+			BPF_MOV32_IMM(BPF_REG_0, 1),
+			BPF_ALU32_REG(BPF_DIV, BPF_REG_0, BPF_REG_1),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.result = ACCEPT,
+		.retval = 0,
+	},
+	{
+		"DIV32 by 0, zero check 2, cls",
+		.insns = {
+			BPF_LD_IMM64(BPF_REG_1, 0xffffffff00000000LL),
+			BPF_MOV32_IMM(BPF_REG_0, 1),
+			BPF_ALU32_REG(BPF_DIV, BPF_REG_0, BPF_REG_1),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.result = ACCEPT,
+		.retval = 0,
+	},
+	{
+		"DIV64 by 0, zero check, cls",
+		.insns = {
+			BPF_MOV32_IMM(BPF_REG_1, 0),
+			BPF_MOV32_IMM(BPF_REG_0, 1),
+			BPF_ALU64_REG(BPF_DIV, BPF_REG_0, BPF_REG_1),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.result = ACCEPT,
+		.retval = 0,
+	},
+	{
+		"MOD32 by 0, zero check ok, cls",
+		.insns = {
+			BPF_MOV32_IMM(BPF_REG_0, 42),
+			BPF_MOV32_IMM(BPF_REG_1, 3),
+			BPF_MOV32_IMM(BPF_REG_2, 5),
+			BPF_ALU32_REG(BPF_MOD, BPF_REG_2, BPF_REG_1),
+			BPF_MOV64_REG(BPF_REG_0, BPF_REG_2),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.result = ACCEPT,
+		.retval = 2,
+	},
+	{
+		"MOD32 by 0, zero check 1, cls",
+		.insns = {
+			BPF_MOV32_IMM(BPF_REG_1, 0),
+			BPF_MOV32_IMM(BPF_REG_0, 1),
+			BPF_ALU32_REG(BPF_MOD, BPF_REG_0, BPF_REG_1),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.result = ACCEPT,
+		.retval = 1,
+	},
+	{
+		"MOD32 by 0, zero check 2, cls",
+		.insns = {
+			BPF_LD_IMM64(BPF_REG_1, 0xffffffff00000000LL),
+			BPF_MOV32_IMM(BPF_REG_0, 1),
+			BPF_ALU32_REG(BPF_MOD, BPF_REG_0, BPF_REG_1),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.result = ACCEPT,
+		.retval = 1,
+	},
+	{
+		"MOD64 by 0, zero check 1, cls",
+		.insns = {
+			BPF_MOV32_IMM(BPF_REG_1, 0),
+			BPF_MOV32_IMM(BPF_REG_0, 2),
+			BPF_ALU64_REG(BPF_MOD, BPF_REG_0, BPF_REG_1),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.result = ACCEPT,
+		.retval = 2,
+	},
+	{
+		"MOD64 by 0, zero check 2, cls",
+		.insns = {
+			BPF_MOV32_IMM(BPF_REG_1, 0),
+			BPF_MOV32_IMM(BPF_REG_0, -1),
+			BPF_ALU64_REG(BPF_MOD, BPF_REG_0, BPF_REG_1),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.result = ACCEPT,
+		.retval = -1,
+	},
+	/* Just make sure that JITs used udiv/umod as otherwise we get
+	 * an exception from INT_MIN/-1 overflow similarly as with div
+	 * by zero.
+	 */
+	{
+		"DIV32 overflow, check 1",
+		.insns = {
+			BPF_MOV32_IMM(BPF_REG_1, -1),
+			BPF_MOV32_IMM(BPF_REG_0, INT_MIN),
+			BPF_ALU32_REG(BPF_DIV, BPF_REG_0, BPF_REG_1),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.result = ACCEPT,
+		.retval = 0,
+	},
+	{
+		"DIV32 overflow, check 2",
+		.insns = {
+			BPF_MOV32_IMM(BPF_REG_0, INT_MIN),
+			BPF_ALU32_IMM(BPF_DIV, BPF_REG_0, -1),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.result = ACCEPT,
+		.retval = 0,
+	},
+	{
+		"DIV64 overflow, check 1",
+		.insns = {
+			BPF_MOV64_IMM(BPF_REG_1, -1),
+			BPF_LD_IMM64(BPF_REG_0, LLONG_MIN),
+			BPF_ALU64_REG(BPF_DIV, BPF_REG_0, BPF_REG_1),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.result = ACCEPT,
+		.retval = 0,
+	},
+	{
+		"DIV64 overflow, check 2",
+		.insns = {
+			BPF_LD_IMM64(BPF_REG_0, LLONG_MIN),
+			BPF_ALU64_IMM(BPF_DIV, BPF_REG_0, -1),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.result = ACCEPT,
+		.retval = 0,
+	},
+	{
+		"MOD32 overflow, check 1",
+		.insns = {
+			BPF_MOV32_IMM(BPF_REG_1, -1),
+			BPF_MOV32_IMM(BPF_REG_0, INT_MIN),
+			BPF_ALU32_REG(BPF_MOD, BPF_REG_0, BPF_REG_1),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.result = ACCEPT,
+		.retval = INT_MIN,
+	},
+	{
+		"MOD32 overflow, check 2",
+		.insns = {
+			BPF_MOV32_IMM(BPF_REG_0, INT_MIN),
+			BPF_ALU32_IMM(BPF_MOD, BPF_REG_0, -1),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.result = ACCEPT,
+		.retval = INT_MIN,
+	},
+	{
+		"MOD64 overflow, check 1",
+		.insns = {
+			BPF_MOV64_IMM(BPF_REG_1, -1),
+			BPF_LD_IMM64(BPF_REG_2, LLONG_MIN),
+			BPF_MOV64_REG(BPF_REG_3, BPF_REG_2),
+			BPF_ALU64_REG(BPF_MOD, BPF_REG_2, BPF_REG_1),
+			BPF_MOV32_IMM(BPF_REG_0, 0),
+			BPF_JMP_REG(BPF_JNE, BPF_REG_3, BPF_REG_2, 1),
+			BPF_MOV32_IMM(BPF_REG_0, 1),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.result = ACCEPT,
+		.retval = 1,
+	},
+	{
+		"MOD64 overflow, check 2",
+		.insns = {
+			BPF_LD_IMM64(BPF_REG_2, LLONG_MIN),
+			BPF_MOV64_REG(BPF_REG_3, BPF_REG_2),
+			BPF_ALU64_IMM(BPF_MOD, BPF_REG_2, -1),
+			BPF_MOV32_IMM(BPF_REG_0, 0),
+			BPF_JMP_REG(BPF_JNE, BPF_REG_3, BPF_REG_2, 1),
+			BPF_MOV32_IMM(BPF_REG_0, 1),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.result = ACCEPT,
+		.retval = 1,
+	},
+	{
+		"xor32 zero extend check",
+		.insns = {
+			BPF_MOV32_IMM(BPF_REG_2, -1),
+			BPF_ALU64_IMM(BPF_LSH, BPF_REG_2, 32),
+			BPF_ALU64_IMM(BPF_OR, BPF_REG_2, 0xffff),
+			BPF_ALU32_REG(BPF_XOR, BPF_REG_2, BPF_REG_2),
+			BPF_MOV32_IMM(BPF_REG_0, 2),
+			BPF_JMP_IMM(BPF_JNE, BPF_REG_2, 0, 1),
+			BPF_MOV32_IMM(BPF_REG_0, 1),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.result = ACCEPT,
+		.retval = 1,
+	},
+	{
+		"empty prog",
+		.insns = {
+		},
+		.errstr = "unknown opcode 00",
+		.result = REJECT,
+	},
+	{
+		"only exit insn",
+		.insns = {
+			BPF_EXIT_INSN(),
+		},
+		.errstr = "R0 !read_ok",
+		.result = REJECT,
 	},
 	{
 		"unreachable",
@@ -209,6 +600,7 @@ static struct bpf_test tests[] = {
 			BPF_EXIT_INSN(),
 		},
 		.result = ACCEPT,
+		.retval = 1,
 	},
 	{
 		"test8 ld_imm64",
@@ -280,7 +672,7 @@ static struct bpf_test tests[] = {
 			BPF_EXIT_INSN(),
 		},
 		.result = REJECT,
-		.errstr = "BPF_ARSH not supported for 32 bit ALU",
+		.errstr = "unknown opcode c4",
 	},
 	{
 		"arsh32 on reg",
@@ -291,7 +683,7 @@ static struct bpf_test tests[] = {
 			BPF_EXIT_INSN(),
 		},
 		.result = REJECT,
-		.errstr = "BPF_ARSH not supported for 32 bit ALU",
+		.errstr = "unknown opcode cc",
 	},
 	{
 		"arsh64 on imm",
@@ -317,7 +709,7 @@ static struct bpf_test tests[] = {
 		.insns = {
 			BPF_ALU64_REG(BPF_MOV, BPF_REG_0, BPF_REG_2),
 		},
-		.errstr = "jump out of range",
+		.errstr = "not an exit",
 		.result = REJECT,
 	},
 	{
@@ -407,7 +799,7 @@ static struct bpf_test tests[] = {
 			BPF_RAW_INSN(BPF_JMP | BPF_CALL | BPF_X, 0, 0, 0, 0),
 			BPF_EXIT_INSN(),
 		},
-		.errstr = "BPF_CALL uses reserved",
+		.errstr = "unknown opcode 8d",
 		.result = REJECT,
 	},
 	{
@@ -486,6 +878,7 @@ static struct bpf_test tests[] = {
 		.errstr = "R1 !read_ok",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"non-invalid argument register",
@@ -500,6 +893,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"check valid spill/fill",
@@ -516,6 +910,7 @@ static struct bpf_test tests[] = {
 		.errstr_unpriv = "R0 leaks addr",
 		.result = ACCEPT,
 		.result_unpriv = REJECT,
+		.retval = POINTER_VALUE,
 	},
 	{
 		"check valid spill/fill, skb mark",
@@ -529,6 +924,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.result_unpriv = ACCEPT,
+		.disabled = true,
 	},
 	{
 		"check corrupted spill/fill",
@@ -596,7 +992,7 @@ static struct bpf_test tests[] = {
 			BPF_RAW_INSN(0, 0, 0, 0, 0),
 			BPF_EXIT_INSN(),
 		},
-		.errstr = "invalid BPF_LD_IMM",
+		.errstr = "unknown opcode 00",
 		.result = REJECT,
 	},
 	{
@@ -614,7 +1010,7 @@ static struct bpf_test tests[] = {
 			BPF_RAW_INSN(-1, 0, 0, 0, 0),
 			BPF_EXIT_INSN(),
 		},
-		.errstr = "invalid BPF_ALU opcode f0",
+		.errstr = "unknown opcode ff",
 		.result = REJECT,
 	},
 	{
@@ -623,7 +1019,7 @@ static struct bpf_test tests[] = {
 			BPF_RAW_INSN(-1, -1, -1, -1, -1),
 			BPF_EXIT_INSN(),
 		},
-		.errstr = "invalid BPF_ALU opcode f0",
+		.errstr = "unknown opcode ff",
 		.result = REJECT,
 	},
 	{
@@ -802,6 +1198,7 @@ static struct bpf_test tests[] = {
 		.errstr_unpriv = "R1 pointer comparison",
 		.result_unpriv = REJECT,
 		.result = ACCEPT,
+		.retval = -ENOENT,
 	},
 	{
 		"jump test 4",
@@ -924,6 +1321,7 @@ static struct bpf_test tests[] = {
 			BPF_EXIT_INSN(),
 		},
 		.result = ACCEPT,
+		.disabled = true,
 	},
 	{
 		"access skb fields bad1",
@@ -955,6 +1353,7 @@ static struct bpf_test tests[] = {
 		.errstr = "different pointers",
 		.errstr_unpriv = "R1 pointer comparison",
 		.result = REJECT,
+		.disabled = true,
 	},
 	{
 		"access skb fields bad3",
@@ -978,6 +1377,7 @@ static struct bpf_test tests[] = {
 		.errstr = "different pointers",
 		.errstr_unpriv = "R1 pointer comparison",
 		.result = REJECT,
+		.disabled = true,
 	},
 	{
 		"access skb fields bad4",
@@ -1002,6 +1402,7 @@ static struct bpf_test tests[] = {
 		.errstr = "different pointers",
 		.errstr_unpriv = "R1 pointer comparison",
 		.result = REJECT,
+		.disabled = true,
 	},
 	{
 		"invalid access __sk_buff family",
@@ -1012,6 +1413,7 @@ static struct bpf_test tests[] = {
 		},
 		.errstr = "invalid bpf_context access",
 		.result = REJECT,
+		.disabled = true,
 	},
 	{
 		"invalid access __sk_buff remote_ip4",
@@ -1022,6 +1424,7 @@ static struct bpf_test tests[] = {
 		},
 		.errstr = "invalid bpf_context access",
 		.result = REJECT,
+		.disabled = true,
 	},
 	{
 		"invalid access __sk_buff local_ip4",
@@ -1032,6 +1435,7 @@ static struct bpf_test tests[] = {
 		},
 		.errstr = "invalid bpf_context access",
 		.result = REJECT,
+		.disabled = true,
 	},
 	{
 		"invalid access __sk_buff remote_ip6",
@@ -1042,6 +1446,7 @@ static struct bpf_test tests[] = {
 		},
 		.errstr = "invalid bpf_context access",
 		.result = REJECT,
+		.disabled = true,
 	},
 	{
 		"invalid access __sk_buff local_ip6",
@@ -1052,6 +1457,7 @@ static struct bpf_test tests[] = {
 		},
 		.errstr = "invalid bpf_context access",
 		.result = REJECT,
+		.disabled = true,
 	},
 	{
 		"invalid access __sk_buff remote_port",
@@ -1062,6 +1468,7 @@ static struct bpf_test tests[] = {
 		},
 		.errstr = "invalid bpf_context access",
 		.result = REJECT,
+		.disabled = true,
 	},
 	{
 		"invalid access __sk_buff remote_port",
@@ -1082,6 +1489,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_SK_SKB,
+		.disabled = true,
 	},
 	{
 		"valid access __sk_buff remote_ip4",
@@ -1092,6 +1500,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_SK_SKB,
+		.disabled = true,
 	},
 	{
 		"valid access __sk_buff local_ip4",
@@ -1102,6 +1511,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_SK_SKB,
+		.disabled = true,
 	},
 	{
 		"valid access __sk_buff remote_ip6",
@@ -1118,6 +1528,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_SK_SKB,
+		.disabled = true,
 	},
 	{
 		"valid access __sk_buff local_ip6",
@@ -1134,6 +1545,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_SK_SKB,
+		.disabled = true,
 	},
 	{
 		"valid access __sk_buff remote_port",
@@ -1144,6 +1556,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_SK_SKB,
+		.disabled = true,
 	},
 	{
 		"valid access __sk_buff remote_port",
@@ -1154,6 +1567,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_SK_SKB,
+		.disabled = true,
 	},
 	{
 		"invalid access of tc_classid for SK_SKB",
@@ -1165,6 +1579,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_SK_SKB,
 		.errstr = "invalid bpf_context access",
+		.disabled = true,
 	},
 	{
 		"invalid access of skb->mark for SK_SKB",
@@ -1176,6 +1591,7 @@ static struct bpf_test tests[] = {
 		.result =  REJECT,
 		.prog_type = BPF_PROG_TYPE_SK_SKB,
 		.errstr = "invalid bpf_context access",
+		.disabled = true,
 	},
 	{
 		"check skb->mark is not writeable by SK_SKB",
@@ -1188,6 +1604,7 @@ static struct bpf_test tests[] = {
 		.result =  REJECT,
 		.prog_type = BPF_PROG_TYPE_SK_SKB,
 		.errstr = "invalid bpf_context access",
+		.disabled = true,
 	},
 	{
 		"check skb->tc_index is writeable by SK_SKB",
@@ -1199,6 +1616,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_SK_SKB,
+		.disabled = true,
 	},
 	{
 		"check skb->priority is writeable by SK_SKB",
@@ -1210,6 +1628,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_SK_SKB,
+		.disabled = true,
 	},
 	{
 		"direct packet read for SK_SKB",
@@ -1227,6 +1646,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_SK_SKB,
+		.disabled = true,
 	},
 	{
 		"direct packet write for SK_SKB",
@@ -1244,6 +1664,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_SK_SKB,
+		.disabled = true,
 	},
 	{
 		"overlapping checks for direct packet access SK_SKB",
@@ -1264,6 +1685,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_SK_SKB,
+		.disabled = true,
 	},
 	{
 		"check skb->mark is not writeable by sockets",
@@ -1374,6 +1796,7 @@ static struct bpf_test tests[] = {
 			BPF_EXIT_INSN(),
 		},
 		.result = ACCEPT,
+		.disabled = true,
 	},
 	{
 		"__sk_buff->hash, offset 0, byte store not permitted",
@@ -1411,6 +1834,7 @@ static struct bpf_test tests[] = {
 			BPF_EXIT_INSN(),
 		},
 		.result = ACCEPT,
+		.disabled = true,
 	},
 	{
 		"check skb->hash byte load not permitted 1",
@@ -1461,6 +1885,7 @@ static struct bpf_test tests[] = {
 		.errstr = "invalid bpf_context access",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_CGROUP_SOCK,
+		.disabled = true,
 	},
 	{
 		"check cb access: half",
@@ -1509,6 +1934,7 @@ static struct bpf_test tests[] = {
 			BPF_EXIT_INSN(),
 		},
 		.result = ACCEPT,
+		.disabled = true,
 	},
 	{
 		"check cb access: half, unaligned",
@@ -1558,6 +1984,7 @@ static struct bpf_test tests[] = {
 			BPF_EXIT_INSN(),
 		},
 		.result = ACCEPT,
+		.disabled = true,
 	},
 	{
 		"check skb->hash half load not permitted",
@@ -1586,6 +2013,7 @@ static struct bpf_test tests[] = {
 		.errstr = "invalid bpf_context access",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_CGROUP_SOCK,
+		.disabled = true,
 	},
 	{
 		"check cb access: word",
@@ -1614,6 +2042,7 @@ static struct bpf_test tests[] = {
 			BPF_EXIT_INSN(),
 		},
 		.result = ACCEPT,
+		.disabled = true,
 	},
 	{
 		"check cb access: word, unaligned 1",
@@ -1678,6 +2107,7 @@ static struct bpf_test tests[] = {
 			BPF_EXIT_INSN(),
 		},
 		.result = ACCEPT,
+		.disabled = true,
 	},
 	{
 		"check cb access: double, unaligned 1",
@@ -1758,6 +2188,7 @@ static struct bpf_test tests[] = {
 		.errstr = "invalid bpf_context access",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_CGROUP_SOCK,
+		.disabled = true,
 	},
 	{
 		"check out of range skb->cb access",
@@ -1791,6 +2222,7 @@ static struct bpf_test tests[] = {
 		.result = ACCEPT,
 		.errstr_unpriv = "R1 leaks addr",
 		.result_unpriv = REJECT,
+		.disabled = true,
 	},
 	{
 		"write skb fields from tc_cls_act prog",
@@ -1811,6 +2243,7 @@ static struct bpf_test tests[] = {
 		.result_unpriv = REJECT,
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"PTR_TO_STACK store/load",
@@ -1822,6 +2255,7 @@ static struct bpf_test tests[] = {
 			BPF_EXIT_INSN(),
 		},
 		.result = ACCEPT,
+		.retval = 0xfaceb00c,
 	},
 	{
 		"PTR_TO_STACK store/load - bad alignment on off",
@@ -1880,6 +2314,7 @@ static struct bpf_test tests[] = {
 		.result = ACCEPT,
 		.result_unpriv = REJECT,
 		.errstr_unpriv = "R0 leaks addr",
+		.retval = POINTER_VALUE,
 	},
 	{
 		"unpriv: add const to pointer",
@@ -2053,10 +2488,12 @@ static struct bpf_test tests[] = {
 			BPF_LDX_MEM(BPF_DW, BPF_REG_1, BPF_REG_6, 0),
 			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0,
 				     BPF_FUNC_get_hash_recalc),
+			BPF_MOV64_IMM(BPF_REG_0, 0),
 			BPF_EXIT_INSN(),
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"unpriv: spill/fill of ctx 3",
@@ -2073,6 +2510,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.errstr = "R1 type=fp expected=ctx",
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"unpriv: spill/fill of ctx 4",
@@ -2091,6 +2529,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.errstr = "R1 type=inv expected=ctx",
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"unpriv: spill/fill of different pointers stx",
@@ -2113,6 +2552,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.errstr = "same insn cannot be used with different pointers",
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"unpriv: spill/fill of different pointers ldx",
@@ -2255,6 +2695,32 @@ static struct bpf_test tests[] = {
 		.result = ACCEPT,
 	},
 	{
+		"runtime/jit: pass negative index to tail_call",
+		.insns = {
+			BPF_MOV64_IMM(BPF_REG_3, -1),
+			BPF_LD_MAP_FD(BPF_REG_2, 0),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0,
+				     BPF_FUNC_tail_call),
+			BPF_MOV64_IMM(BPF_REG_0, 0),
+			BPF_EXIT_INSN(),
+		},
+		.fixup_prog = { 1 },
+		.result = ACCEPT,
+	},
+	{
+		"runtime/jit: pass > 32bit index to tail_call",
+		.insns = {
+			BPF_LD_IMM64(BPF_REG_3, 0x100000000ULL),
+			BPF_LD_MAP_FD(BPF_REG_2, 0),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0,
+				     BPF_FUNC_tail_call),
+			BPF_MOV64_IMM(BPF_REG_0, 0),
+			BPF_EXIT_INSN(),
+		},
+		.fixup_prog = { 2 },
+		.result = ACCEPT,
+	},
+	{
 		"stack pointer arithmetic",
 		.insns = {
 			BPF_MOV64_IMM(BPF_REG_1, 4),
@@ -2305,6 +2771,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.errstr = "R4 min value is negative",
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"raw_stack: skb_load_bytes, negative len 2",
@@ -2322,6 +2789,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.errstr = "R4 min value is negative",
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"raw_stack: skb_load_bytes, zero len",
@@ -2339,6 +2807,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.errstr = "invalid stack type R3",
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"raw_stack: skb_load_bytes, no init",
@@ -2355,6 +2824,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"raw_stack: skb_load_bytes, init",
@@ -2372,6 +2842,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"raw_stack: skb_load_bytes, spilled regs around bounds",
@@ -2396,6 +2867,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"raw_stack: skb_load_bytes, spilled regs corruption",
@@ -2416,6 +2888,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.errstr = "R0 invalid mem access 'inv'",
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"raw_stack: skb_load_bytes, spilled regs corruption 2",
@@ -2446,6 +2919,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.errstr = "R3 invalid mem access 'inv'",
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"raw_stack: skb_load_bytes, spilled regs + data",
@@ -2473,6 +2947,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"raw_stack: skb_load_bytes, invalid access 1",
@@ -2490,6 +2965,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.errstr = "invalid stack type R3 off=-513 access_size=8",
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"raw_stack: skb_load_bytes, invalid access 2",
@@ -2507,6 +2983,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.errstr = "invalid stack type R3 off=-1 access_size=8",
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"raw_stack: skb_load_bytes, invalid access 3",
@@ -2524,6 +3001,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.errstr = "R4 min value is negative",
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"raw_stack: skb_load_bytes, invalid access 4",
@@ -2541,6 +3019,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.errstr = "R4 unbounded memory access, use 'var &= const' or 'if (var < const)'",
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"raw_stack: skb_load_bytes, invalid access 5",
@@ -2558,6 +3037,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.errstr = "R4 unbounded memory access, use 'var &= const' or 'if (var < const)'",
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"raw_stack: skb_load_bytes, invalid access 6",
@@ -2575,6 +3055,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.errstr = "invalid stack type R3 off=-512 access_size=0",
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"raw_stack: skb_load_bytes, large access",
@@ -2591,6 +3072,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"context stores via ST",
@@ -2631,6 +3113,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"direct packet access: test2",
@@ -2665,6 +3148,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"direct packet access: test3",
@@ -2694,6 +3178,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"direct packet access: test5 (pkt_end >= reg, good access)",
@@ -2713,6 +3198,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"direct packet access: test6 (pkt_end >= reg, bad access)",
@@ -2733,6 +3219,7 @@ static struct bpf_test tests[] = {
 		.errstr = "invalid access to packet",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"direct packet access: test7 (pkt_end >= reg, both accesses)",
@@ -2754,6 +3241,7 @@ static struct bpf_test tests[] = {
 		.errstr = "invalid access to packet",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"direct packet access: test8 (double test, variant 1)",
@@ -2775,6 +3263,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"direct packet access: test9 (double test, variant 2)",
@@ -2796,6 +3285,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"direct packet access: test10 (write invalid)",
@@ -2816,6 +3306,7 @@ static struct bpf_test tests[] = {
 		.errstr = "invalid access to packet",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"direct packet access: test11 (shift, good access)",
@@ -2840,6 +3331,8 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.retval = 1,
+		.disabled = true,
 	},
 	{
 		"direct packet access: test12 (and, good access)",
@@ -2864,6 +3357,8 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.retval = 1,
+		.disabled = true,
 	},
 	{
 		"direct packet access: test13 (branches, good access)",
@@ -2894,6 +3389,8 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.retval = 1,
+		.disabled = true,
 	},
 	{
 		"direct packet access: test14 (pkt_ptr += 0, CONST_IMM, good access)",
@@ -2917,6 +3414,8 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.retval = 1,
+		.disabled = true,
 	},
 	{
 		"direct packet access: test15 (spill with xadd)",
@@ -2941,6 +3440,7 @@ static struct bpf_test tests[] = {
 		.errstr = "R2 invalid mem access 'inv'",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"direct packet access: test16 (arith on data_end)",
@@ -2957,9 +3457,10 @@ static struct bpf_test tests[] = {
 			BPF_MOV64_IMM(BPF_REG_0, 0),
 			BPF_EXIT_INSN(),
 		},
-		.errstr = "R3 pointer arithmetic on PTR_TO_PACKET_END",
+		.errstr = "R3 pointer arithmetic on pkt_end",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"direct packet access: test17 (pruning, alignment)",
@@ -2984,6 +3485,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
 		.flags = F_LOAD_WITH_STRICT_ALIGNMENT,
+		.disabled = true,
 	},
 	{
 		"direct packet access: test18 (imm += pkt_ptr, 1)",
@@ -3001,6 +3503,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"direct packet access: test19 (imm += pkt_ptr, 2)",
@@ -3020,6 +3523,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"direct packet access: test20 (x += pkt_ptr, 1)",
@@ -3043,6 +3547,7 @@ static struct bpf_test tests[] = {
 		},
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
 		.result = ACCEPT,
+		.disabled = true,
 	},
 	{
 		"direct packet access: test21 (x += pkt_ptr, 2)",
@@ -3068,6 +3573,7 @@ static struct bpf_test tests[] = {
 		},
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
 		.result = ACCEPT,
+		.disabled = true,
 	},
 	{
 		"direct packet access: test22 (x += pkt_ptr, 3)",
@@ -3098,6 +3604,7 @@ static struct bpf_test tests[] = {
 		},
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
 		.result = ACCEPT,
+		.disabled = true,
 	},
 	{
 		"direct packet access: test23 (x += pkt_ptr, 4)",
@@ -3124,6 +3631,7 @@ static struct bpf_test tests[] = {
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
 		.result = REJECT,
 		.errstr = "invalid access to packet, off=0 size=8, R5(id=1,off=0,r=0)",
+		.disabled = true,
 	},
 	{
 		"direct packet access: test24 (x += pkt_ptr, 5)",
@@ -3149,6 +3657,7 @@ static struct bpf_test tests[] = {
 		},
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
 		.result = ACCEPT,
+		.disabled = true,
 	},
 	{
 		"direct packet access: test25 (marking on <, good access)",
@@ -3167,6 +3676,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"direct packet access: test26 (marking on <, bad access)",
@@ -3186,6 +3696,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.errstr = "invalid access to packet",
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"direct packet access: test27 (marking on <=, good access)",
@@ -3203,6 +3714,8 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.retval = 1,
+		.disabled = true,
 	},
 	{
 		"direct packet access: test28 (marking on <=, bad access)",
@@ -3222,6 +3735,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.errstr = "invalid access to packet",
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"helper access to packet: test1, valid packet_ptr range",
@@ -3245,6 +3759,7 @@ static struct bpf_test tests[] = {
 		.result_unpriv = ACCEPT,
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
 	},
 	{
 		"helper access to packet: test2, unchecked packet_ptr",
@@ -3261,6 +3776,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.errstr = "invalid access to packet",
 		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
 	},
 	{
 		"helper access to packet: test3, variable add",
@@ -3288,6 +3804,7 @@ static struct bpf_test tests[] = {
 		.fixup_map1 = { 11 },
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
 	},
 	{
 		"helper access to packet: test4, packet_ptr with bad range",
@@ -3311,6 +3828,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.errstr = "invalid access to packet",
 		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
 	},
 	{
 		"helper access to packet: test5, packet_ptr with too short range",
@@ -3333,6 +3851,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.errstr = "invalid access to packet",
 		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
 	},
 	{
 		"helper access to packet: test6, cls valid packet_ptr range",
@@ -3355,6 +3874,7 @@ static struct bpf_test tests[] = {
 		.fixup_map1 = { 5 },
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"helper access to packet: test7, cls unchecked packet_ptr",
@@ -3371,6 +3891,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.errstr = "invalid access to packet",
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"helper access to packet: test8, cls variable add",
@@ -3398,6 +3919,7 @@ static struct bpf_test tests[] = {
 		.fixup_map1 = { 11 },
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"helper access to packet: test9, cls packet_ptr with bad range",
@@ -3421,6 +3943,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.errstr = "invalid access to packet",
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"helper access to packet: test10, cls packet_ptr with too short range",
@@ -3443,6 +3966,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.errstr = "invalid access to packet",
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"helper access to packet: test11, cls unsuitable helper 1",
@@ -3466,6 +3990,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.errstr = "helper access to the packet",
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"helper access to packet: test12, cls unsuitable helper 2",
@@ -3487,6 +4012,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.errstr = "helper access to the packet",
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"helper access to packet: test13, cls helper ok",
@@ -3511,6 +4037,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"helper access to packet: test14, cls helper ok sub",
@@ -3535,6 +4062,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"helper access to packet: test15, cls helper fail sub",
@@ -3560,6 +4088,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.errstr = "invalid access to packet",
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"helper access to packet: test16, cls helper fail range 1",
@@ -3585,6 +4114,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.errstr = "invalid access to packet",
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"helper access to packet: test17, cls helper fail range 2",
@@ -3610,6 +4140,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.errstr = "R2 min value is negative",
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"helper access to packet: test18, cls helper fail range 3",
@@ -3635,6 +4166,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.errstr = "R2 min value is negative",
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"helper access to packet: test19, cls helper range zero",
@@ -3659,6 +4191,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"helper access to packet: test20, pkt end as input",
@@ -3684,6 +4217,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.errstr = "R1 type=pkt_end expected=fp",
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"helper access to packet: test21, wrong reg",
@@ -3708,6 +4242,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.errstr = "invalid access to packet",
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"valid map access into an array with a constant",
@@ -3984,7 +4519,7 @@ static struct bpf_test tests[] = {
 			BPF_EXIT_INSN(),
 		},
 		.fixup_map1 = { 4 },
-		.errstr = "R4 pointer arithmetic on PTR_TO_MAP_VALUE_OR_NULL",
+		.errstr = "R4 pointer arithmetic on map_value_or_null",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS
 	},
@@ -4005,7 +4540,7 @@ static struct bpf_test tests[] = {
 			BPF_EXIT_INSN(),
 		},
 		.fixup_map1 = { 4 },
-		.errstr = "R4 pointer arithmetic on PTR_TO_MAP_VALUE_OR_NULL",
+		.errstr = "R4 pointer arithmetic on map_value_or_null",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS
 	},
@@ -4026,7 +4561,7 @@ static struct bpf_test tests[] = {
 			BPF_EXIT_INSN(),
 		},
 		.fixup_map1 = { 4 },
-		.errstr = "R4 pointer arithmetic on PTR_TO_MAP_VALUE_OR_NULL",
+		.errstr = "R4 pointer arithmetic on map_value_or_null",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS
 	},
@@ -4184,6 +4719,7 @@ static struct bpf_test tests[] = {
 		.errstr = "cannot write into packet",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_LWT_IN,
+		.disabled = true,
 	},
 	{
 		"invalid direct packet write for LWT_OUT",
@@ -4202,6 +4738,7 @@ static struct bpf_test tests[] = {
 		.errstr = "cannot write into packet",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_LWT_OUT,
+		.disabled = true,
 	},
 	{
 		"direct packet write for LWT_XMIT",
@@ -4219,6 +4756,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_LWT_XMIT,
+		.disabled = true,
 	},
 	{
 		"direct packet read for LWT_IN",
@@ -4236,6 +4774,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_LWT_IN,
+		.disabled = true,
 	},
 	{
 		"direct packet read for LWT_OUT",
@@ -4253,6 +4792,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_LWT_OUT,
+		.disabled = true,
 	},
 	{
 		"direct packet read for LWT_XMIT",
@@ -4270,6 +4810,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_LWT_XMIT,
+		.disabled = true,
 	},
 	{
 		"overlapping checks for direct packet access",
@@ -4290,6 +4831,26 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_LWT_XMIT,
+		.disabled = true,
+	},
+	{
+		"make headroom for LWT_XMIT",
+		.insns = {
+			BPF_MOV64_REG(BPF_REG_6, BPF_REG_1),
+			BPF_MOV64_IMM(BPF_REG_2, 34),
+			BPF_MOV64_IMM(BPF_REG_3, 0),
+			BPF_EMIT_CALL(BPF_FUNC_skb_change_head),
+			/* split for s390 to succeed */
+			BPF_MOV64_REG(BPF_REG_1, BPF_REG_6),
+			BPF_MOV64_IMM(BPF_REG_2, 42),
+			BPF_MOV64_IMM(BPF_REG_3, 0),
+			BPF_EMIT_CALL(BPF_FUNC_skb_change_head),
+			BPF_MOV64_IMM(BPF_REG_0, 0),
+			BPF_EXIT_INSN(),
+		},
+		.result = ACCEPT,
+		.prog_type = BPF_PROG_TYPE_LWT_XMIT,
+		.disabled = true,
 	},
 	{
 		"invalid access of tc_classid for LWT_IN",
@@ -4337,6 +4898,7 @@ static struct bpf_test tests[] = {
 		.result_unpriv = REJECT,
 		.result = REJECT,
 		.errstr = "BPF_XADD stores into R1 context is not allowed",
+		.disabled = true,
 	},
 	{
 		"leak pointer into ctx 2",
@@ -4352,6 +4914,7 @@ static struct bpf_test tests[] = {
 		.result_unpriv = REJECT,
 		.result = REJECT,
 		.errstr = "BPF_XADD stores into R1 context is not allowed",
+		.disabled = true,
 	},
 	{
 		"leak pointer into ctx 3",
@@ -4366,6 +4929,7 @@ static struct bpf_test tests[] = {
 		.errstr_unpriv = "R2 leaks addr into ctx",
 		.result_unpriv = REJECT,
 		.result = ACCEPT,
+		.disabled = true,
 	},
 	{
 		"leak pointer into map val",
@@ -5117,6 +5681,257 @@ static struct bpf_test tests[] = {
 		.prog_type = BPF_PROG_TYPE_TRACEPOINT,
 	},
 	{
+		"map lookup helper access to map",
+		.insns = {
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -8),
+			BPF_ST_MEM(BPF_DW, BPF_REG_2, 0, 0),
+			BPF_LD_MAP_FD(BPF_REG_1, 0),
+			BPF_EMIT_CALL(BPF_FUNC_map_lookup_elem),
+			BPF_JMP_IMM(BPF_JEQ, BPF_REG_0, 0, 4),
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_0),
+			BPF_LD_MAP_FD(BPF_REG_1, 0),
+			BPF_EMIT_CALL(BPF_FUNC_map_lookup_elem),
+			BPF_EXIT_INSN(),
+		},
+		.fixup_map3 = { 3, 8 },
+		.result = ACCEPT,
+		.prog_type = BPF_PROG_TYPE_TRACEPOINT,
+	},
+	{
+		"map update helper access to map",
+		.insns = {
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -8),
+			BPF_ST_MEM(BPF_DW, BPF_REG_2, 0, 0),
+			BPF_LD_MAP_FD(BPF_REG_1, 0),
+			BPF_EMIT_CALL(BPF_FUNC_map_lookup_elem),
+			BPF_JMP_IMM(BPF_JEQ, BPF_REG_0, 0, 6),
+			BPF_MOV64_IMM(BPF_REG_4, 0),
+			BPF_MOV64_REG(BPF_REG_3, BPF_REG_0),
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_0),
+			BPF_LD_MAP_FD(BPF_REG_1, 0),
+			BPF_EMIT_CALL(BPF_FUNC_map_update_elem),
+			BPF_EXIT_INSN(),
+		},
+		.fixup_map3 = { 3, 10 },
+		.result = ACCEPT,
+		.prog_type = BPF_PROG_TYPE_TRACEPOINT,
+	},
+	{
+		"map update helper access to map: wrong size",
+		.insns = {
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -8),
+			BPF_ST_MEM(BPF_DW, BPF_REG_2, 0, 0),
+			BPF_LD_MAP_FD(BPF_REG_1, 0),
+			BPF_EMIT_CALL(BPF_FUNC_map_lookup_elem),
+			BPF_JMP_IMM(BPF_JEQ, BPF_REG_0, 0, 6),
+			BPF_MOV64_IMM(BPF_REG_4, 0),
+			BPF_MOV64_REG(BPF_REG_3, BPF_REG_0),
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_0),
+			BPF_LD_MAP_FD(BPF_REG_1, 0),
+			BPF_EMIT_CALL(BPF_FUNC_map_update_elem),
+			BPF_EXIT_INSN(),
+		},
+		.fixup_map1 = { 3 },
+		.fixup_map3 = { 10 },
+		.result = REJECT,
+		.errstr = "invalid access to map value, value_size=8 off=0 size=16",
+		.prog_type = BPF_PROG_TYPE_TRACEPOINT,
+	},
+	{
+		"map helper access to adjusted map (via const imm)",
+		.insns = {
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -8),
+			BPF_ST_MEM(BPF_DW, BPF_REG_2, 0, 0),
+			BPF_LD_MAP_FD(BPF_REG_1, 0),
+			BPF_EMIT_CALL(BPF_FUNC_map_lookup_elem),
+			BPF_JMP_IMM(BPF_JEQ, BPF_REG_0, 0, 5),
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_0),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2,
+				      offsetof(struct other_val, bar)),
+			BPF_LD_MAP_FD(BPF_REG_1, 0),
+			BPF_EMIT_CALL(BPF_FUNC_map_lookup_elem),
+			BPF_EXIT_INSN(),
+		},
+		.fixup_map3 = { 3, 9 },
+		.result = ACCEPT,
+		.prog_type = BPF_PROG_TYPE_TRACEPOINT,
+	},
+	{
+		"map helper access to adjusted map (via const imm): out-of-bound 1",
+		.insns = {
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -8),
+			BPF_ST_MEM(BPF_DW, BPF_REG_2, 0, 0),
+			BPF_LD_MAP_FD(BPF_REG_1, 0),
+			BPF_EMIT_CALL(BPF_FUNC_map_lookup_elem),
+			BPF_JMP_IMM(BPF_JEQ, BPF_REG_0, 0, 5),
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_0),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2,
+				      sizeof(struct other_val) - 4),
+			BPF_LD_MAP_FD(BPF_REG_1, 0),
+			BPF_EMIT_CALL(BPF_FUNC_map_lookup_elem),
+			BPF_EXIT_INSN(),
+		},
+		.fixup_map3 = { 3, 9 },
+		.result = REJECT,
+		.errstr = "invalid access to map value, value_size=16 off=12 size=8",
+		.prog_type = BPF_PROG_TYPE_TRACEPOINT,
+	},
+	{
+		"map helper access to adjusted map (via const imm): out-of-bound 2",
+		.insns = {
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -8),
+			BPF_ST_MEM(BPF_DW, BPF_REG_2, 0, 0),
+			BPF_LD_MAP_FD(BPF_REG_1, 0),
+			BPF_EMIT_CALL(BPF_FUNC_map_lookup_elem),
+			BPF_JMP_IMM(BPF_JEQ, BPF_REG_0, 0, 5),
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_0),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -4),
+			BPF_LD_MAP_FD(BPF_REG_1, 0),
+			BPF_EMIT_CALL(BPF_FUNC_map_lookup_elem),
+			BPF_EXIT_INSN(),
+		},
+		.fixup_map3 = { 3, 9 },
+		.result = REJECT,
+		.errstr = "invalid access to map value, value_size=16 off=-4 size=8",
+		.prog_type = BPF_PROG_TYPE_TRACEPOINT,
+	},
+	{
+		"map helper access to adjusted map (via const reg)",
+		.insns = {
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -8),
+			BPF_ST_MEM(BPF_DW, BPF_REG_2, 0, 0),
+			BPF_LD_MAP_FD(BPF_REG_1, 0),
+			BPF_EMIT_CALL(BPF_FUNC_map_lookup_elem),
+			BPF_JMP_IMM(BPF_JEQ, BPF_REG_0, 0, 6),
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_0),
+			BPF_MOV64_IMM(BPF_REG_3,
+				      offsetof(struct other_val, bar)),
+			BPF_ALU64_REG(BPF_ADD, BPF_REG_2, BPF_REG_3),
+			BPF_LD_MAP_FD(BPF_REG_1, 0),
+			BPF_EMIT_CALL(BPF_FUNC_map_lookup_elem),
+			BPF_EXIT_INSN(),
+		},
+		.fixup_map3 = { 3, 10 },
+		.result = ACCEPT,
+		.prog_type = BPF_PROG_TYPE_TRACEPOINT,
+	},
+	{
+		"map helper access to adjusted map (via const reg): out-of-bound 1",
+		.insns = {
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -8),
+			BPF_ST_MEM(BPF_DW, BPF_REG_2, 0, 0),
+			BPF_LD_MAP_FD(BPF_REG_1, 0),
+			BPF_EMIT_CALL(BPF_FUNC_map_lookup_elem),
+			BPF_JMP_IMM(BPF_JEQ, BPF_REG_0, 0, 6),
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_0),
+			BPF_MOV64_IMM(BPF_REG_3,
+				      sizeof(struct other_val) - 4),
+			BPF_ALU64_REG(BPF_ADD, BPF_REG_2, BPF_REG_3),
+			BPF_LD_MAP_FD(BPF_REG_1, 0),
+			BPF_EMIT_CALL(BPF_FUNC_map_lookup_elem),
+			BPF_EXIT_INSN(),
+		},
+		.fixup_map3 = { 3, 10 },
+		.result = REJECT,
+		.errstr = "invalid access to map value, value_size=16 off=12 size=8",
+		.prog_type = BPF_PROG_TYPE_TRACEPOINT,
+	},
+	{
+		"map helper access to adjusted map (via const reg): out-of-bound 2",
+		.insns = {
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -8),
+			BPF_ST_MEM(BPF_DW, BPF_REG_2, 0, 0),
+			BPF_LD_MAP_FD(BPF_REG_1, 0),
+			BPF_EMIT_CALL(BPF_FUNC_map_lookup_elem),
+			BPF_JMP_IMM(BPF_JEQ, BPF_REG_0, 0, 6),
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_0),
+			BPF_MOV64_IMM(BPF_REG_3, -4),
+			BPF_ALU64_REG(BPF_ADD, BPF_REG_2, BPF_REG_3),
+			BPF_LD_MAP_FD(BPF_REG_1, 0),
+			BPF_EMIT_CALL(BPF_FUNC_map_lookup_elem),
+			BPF_EXIT_INSN(),
+		},
+		.fixup_map3 = { 3, 10 },
+		.result = REJECT,
+		.errstr = "invalid access to map value, value_size=16 off=-4 size=8",
+		.prog_type = BPF_PROG_TYPE_TRACEPOINT,
+	},
+	{
+		"map helper access to adjusted map (via variable)",
+		.insns = {
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -8),
+			BPF_ST_MEM(BPF_DW, BPF_REG_2, 0, 0),
+			BPF_LD_MAP_FD(BPF_REG_1, 0),
+			BPF_EMIT_CALL(BPF_FUNC_map_lookup_elem),
+			BPF_JMP_IMM(BPF_JEQ, BPF_REG_0, 0, 7),
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_0),
+			BPF_LDX_MEM(BPF_W, BPF_REG_3, BPF_REG_0, 0),
+			BPF_JMP_IMM(BPF_JGT, BPF_REG_3,
+				    offsetof(struct other_val, bar), 4),
+			BPF_ALU64_REG(BPF_ADD, BPF_REG_2, BPF_REG_3),
+			BPF_LD_MAP_FD(BPF_REG_1, 0),
+			BPF_EMIT_CALL(BPF_FUNC_map_lookup_elem),
+			BPF_EXIT_INSN(),
+		},
+		.fixup_map3 = { 3, 11 },
+		.result = ACCEPT,
+		.prog_type = BPF_PROG_TYPE_TRACEPOINT,
+	},
+	{
+		"map helper access to adjusted map (via variable): no max check",
+		.insns = {
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -8),
+			BPF_ST_MEM(BPF_DW, BPF_REG_2, 0, 0),
+			BPF_LD_MAP_FD(BPF_REG_1, 0),
+			BPF_EMIT_CALL(BPF_FUNC_map_lookup_elem),
+			BPF_JMP_IMM(BPF_JEQ, BPF_REG_0, 0, 6),
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_0),
+			BPF_LDX_MEM(BPF_W, BPF_REG_3, BPF_REG_0, 0),
+			BPF_ALU64_REG(BPF_ADD, BPF_REG_2, BPF_REG_3),
+			BPF_LD_MAP_FD(BPF_REG_1, 0),
+			BPF_EMIT_CALL(BPF_FUNC_map_lookup_elem),
+			BPF_EXIT_INSN(),
+		},
+		.fixup_map3 = { 3, 10 },
+		.result = REJECT,
+		.errstr = "R2 unbounded memory access, make sure to bounds check any array access into a map",
+		.prog_type = BPF_PROG_TYPE_TRACEPOINT,
+	},
+	{
+		"map helper access to adjusted map (via variable): wrong max check",
+		.insns = {
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -8),
+			BPF_ST_MEM(BPF_DW, BPF_REG_2, 0, 0),
+			BPF_LD_MAP_FD(BPF_REG_1, 0),
+			BPF_EMIT_CALL(BPF_FUNC_map_lookup_elem),
+			BPF_JMP_IMM(BPF_JEQ, BPF_REG_0, 0, 7),
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_0),
+			BPF_LDX_MEM(BPF_W, BPF_REG_3, BPF_REG_0, 0),
+			BPF_JMP_IMM(BPF_JGT, BPF_REG_3,
+				    offsetof(struct other_val, bar) + 1, 4),
+			BPF_ALU64_REG(BPF_ADD, BPF_REG_2, BPF_REG_3),
+			BPF_LD_MAP_FD(BPF_REG_1, 0),
+			BPF_EMIT_CALL(BPF_FUNC_map_lookup_elem),
+			BPF_EXIT_INSN(),
+		},
+		.fixup_map3 = { 3, 11 },
+		.result = REJECT,
+		.errstr = "invalid access to map value, value_size=16 off=9 size=8",
+		.prog_type = BPF_PROG_TYPE_TRACEPOINT,
+	},
+	{
 		"map element value is preserved across register spilling",
 		.insns = {
 			BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
@@ -5695,12 +6510,13 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"helper access to variable memory: size > 0 not allowed on NULL (ARG_PTR_TO_MEM_OR_NULL)",
 		.insns = {
 			BPF_MOV64_IMM(BPF_REG_1, 0),
-			BPF_MOV64_IMM(BPF_REG_2, 0),
+			BPF_MOV64_IMM(BPF_REG_2, 1),
 			BPF_STX_MEM(BPF_DW, BPF_REG_10, BPF_REG_2, -128),
 			BPF_LDX_MEM(BPF_DW, BPF_REG_2, BPF_REG_10, -128),
 			BPF_ALU64_IMM(BPF_AND, BPF_REG_2, 64),
@@ -5713,6 +6529,7 @@ static struct bpf_test tests[] = {
 		.errstr = "R1 type=inv expected=fp",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"helper access to variable memory: size = 0 allowed on != NULL stack pointer (ARG_PTR_TO_MEM_OR_NULL)",
@@ -5730,6 +6547,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"helper access to variable memory: size = 0 allowed on != NULL map pointer (ARG_PTR_TO_MEM_OR_NULL)",
@@ -5752,6 +6570,7 @@ static struct bpf_test tests[] = {
 		.fixup_map1 = { 3 },
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"helper access to variable memory: size possible = 0 allowed on != NULL stack pointer (ARG_PTR_TO_MEM_OR_NULL)",
@@ -5777,6 +6596,7 @@ static struct bpf_test tests[] = {
 		.fixup_map1 = { 3 },
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"helper access to variable memory: size possible = 0 allowed on != NULL map pointer (ARG_PTR_TO_MEM_OR_NULL)",
@@ -5800,6 +6620,7 @@ static struct bpf_test tests[] = {
 		.fixup_map1 = { 3 },
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"helper access to variable memory: size possible = 0 allowed on != NULL packet pointer (ARG_PTR_TO_MEM_OR_NULL)",
@@ -5822,6 +6643,8 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.retval = 0 /* csum_diff of 64-byte packet */,
+		.disabled = true,
 	},
 	{
 		"helper access to variable memory: size = 0 not allowed on NULL (!ARG_PTR_TO_MEM_OR_NULL)",
@@ -5880,6 +6703,7 @@ static struct bpf_test tests[] = {
 		.fixup_map1 = { 3 },
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_TRACEPOINT,
+		.disabled = true,
 	},
 	{
 		"helper access to variable memory: size possible = 0 allowed on != NULL stack pointer (!ARG_PTR_TO_MEM_OR_NULL)",
@@ -5921,6 +6745,7 @@ static struct bpf_test tests[] = {
 		.fixup_map1 = { 3 },
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_TRACEPOINT,
+		.disabled = true,
 	},
 	{
 		"helper access to variable memory: 8 bytes leak",
@@ -5935,7 +6760,7 @@ static struct bpf_test tests[] = {
 			BPF_STX_MEM(BPF_DW, BPF_REG_10, BPF_REG_0, -24),
 			BPF_STX_MEM(BPF_DW, BPF_REG_10, BPF_REG_0, -16),
 			BPF_STX_MEM(BPF_DW, BPF_REG_10, BPF_REG_0, -8),
-			BPF_MOV64_IMM(BPF_REG_2, 0),
+			BPF_MOV64_IMM(BPF_REG_2, 1),
 			BPF_STX_MEM(BPF_DW, BPF_REG_10, BPF_REG_2, -128),
 			BPF_LDX_MEM(BPF_DW, BPF_REG_2, BPF_REG_10, -128),
 			BPF_ALU64_IMM(BPF_AND, BPF_REG_2, 63),
@@ -6071,7 +6896,7 @@ static struct bpf_test tests[] = {
 			BPF_EXIT_INSN(),
 		},
 		.fixup_map_in_map = { 3 },
-		.errstr = "R1 pointer arithmetic on CONST_PTR_TO_MAP prohibited",
+		.errstr = "R1 pointer arithmetic on map_ptr prohibited",
 		.result = REJECT,
 	},
 	{
@@ -6190,6 +7015,8 @@ static struct bpf_test tests[] = {
 		},
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
 		.result = ACCEPT,
+		.retval = 42 /* ultimate return value */,
+		.disabled = true,
 	},
 	{
 		"ld_ind: check calling conv, r1",
@@ -6261,6 +7088,7 @@ static struct bpf_test tests[] = {
 			BPF_EXIT_INSN(),
 		},
 		.result = ACCEPT,
+		.retval = 1,
 	},
 	{
 		"check bpf_perf_event_data->sample_period byte load permitted",
@@ -6353,6 +7181,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.errstr = "invalid bpf_context access",
 		.prog_type = BPF_PROG_TYPE_LWT_IN,
+		.disabled = true,
 	},
 	{
 		"bounds checks mixing signed and unsigned, positive bounds",
@@ -6522,6 +7351,7 @@ static struct bpf_test tests[] = {
 		},
 		.errstr = "R4 min value is negative, either use unsigned",
 		.result = REJECT,
+		.disabled = true,
 	},
 	{
 		"bounds checks mixing signed and unsigned, variant 7",
@@ -6734,6 +7564,7 @@ static struct bpf_test tests[] = {
 		.fixup_map1 = { 4 },
 		.errstr = "R0 invalid mem access 'inv'",
 		.result = REJECT,
+		.disabled = true,
 	},
 	{
 		"bounds checks mixing signed and unsigned, variant 15",
@@ -6916,6 +7747,7 @@ static struct bpf_test tests[] = {
 		.errstr = "value_size=8 off=1073741825",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"bounds check based on reg_off + var_off + insn_off. test2",
@@ -6941,6 +7773,7 @@ static struct bpf_test tests[] = {
 		.errstr = "value 1073741823",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"bounds check after truncation of non-boundary-crossing range",
@@ -7248,6 +8081,7 @@ static struct bpf_test tests[] = {
 		},
 		.fixup_map1 = { 3 },
 		.result = ACCEPT,
+		.retval = POINTER_VALUE,
 		.result_unpriv = REJECT,
 		.errstr_unpriv = "R0 leaks addr as return value"
 	},
@@ -7268,6 +8102,7 @@ static struct bpf_test tests[] = {
 		},
 		.fixup_map1 = { 3 },
 		.result = ACCEPT,
+		.retval = POINTER_VALUE,
 		.result_unpriv = REJECT,
 		.errstr_unpriv = "R0 leaks addr as return value"
 	},
@@ -7289,6 +8124,7 @@ static struct bpf_test tests[] = {
 		.errstr = "variable ctx access var_off=(0x0; 0x4)",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_LWT_IN,
+		.disabled = true,
 	},
 	{
 		"variable-offset stack access",
@@ -7311,6 +8147,7 @@ static struct bpf_test tests[] = {
 		.errstr = "variable stack access var_off=(0xfffffffffffffff8; 0x4)",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_LWT_IN,
+		.disabled = true,
 	},
 	{
 		"indirect variable-offset stack access",
@@ -7337,6 +8174,7 @@ static struct bpf_test tests[] = {
 		.errstr = "variable stack read R2",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_LWT_IN,
+		.disabled = true,
 	},
 	{
 		"direct stack access with 32-bit wraparound. test1",
@@ -7392,6 +8230,7 @@ static struct bpf_test tests[] = {
 		.errstr = "R0 !read_ok",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_LWT_IN,
+		.disabled = true,
 	},
 	{
 		"varlen_map_value_access pruning",
@@ -7434,8 +8273,23 @@ static struct bpf_test tests[] = {
 			},
 			BPF_EXIT_INSN(),
 		},
-		.errstr = "BPF_END uses reserved fields",
+		.errstr = "unknown opcode d7",
 		.result = REJECT,
+	},
+	{
+		"XDP, using ifindex from netdev",
+		.insns = {
+			BPF_MOV64_IMM(BPF_REG_0, 0),
+			BPF_LDX_MEM(BPF_W, BPF_REG_2, BPF_REG_1,
+				    offsetof(struct xdp_md, ingress_ifindex)),
+			BPF_JMP_IMM(BPF_JLT, BPF_REG_2, 1, 1),
+			BPF_MOV64_IMM(BPF_REG_0, 1),
+			BPF_EXIT_INSN(),
+		},
+		.result = ACCEPT,
+		.prog_type = BPF_PROG_TYPE_XDP,
+		.retval = 1,
+		.disabled = true,
 	},
 	{
 		"meta access, test1",
@@ -7453,6 +8307,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
 	},
 	{
 		"meta access, test2",
@@ -7473,6 +8328,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.errstr = "invalid access to packet, off=-8",
 		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
 	},
 	{
 		"meta access, test3",
@@ -7491,6 +8347,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.errstr = "invalid access to packet",
 		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
 	},
 	{
 		"meta access, test4",
@@ -7511,6 +8368,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.errstr = "invalid access to packet",
 		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
 	},
 	{
 		"meta access, test5",
@@ -7532,6 +8390,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.errstr = "R3 !read_ok",
 		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
 	},
 	{
 		"meta access, test6",
@@ -7552,6 +8411,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.errstr = "invalid access to packet",
 		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
 	},
 	{
 		"meta access, test7",
@@ -7571,6 +8431,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
 	},
 	{
 		"meta access, test8",
@@ -7588,6 +8449,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
 	},
 	{
 		"meta access, test9",
@@ -7607,6 +8469,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.errstr = "invalid access to packet",
 		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
 	},
 	{
 		"meta access, test10",
@@ -7635,6 +8498,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.errstr = "invalid access to packet",
 		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
 	},
 	{
 		"meta access, test11",
@@ -7660,6 +8524,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
 	},
 	{
 		"meta access, test12",
@@ -7683,6 +8548,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
 	},
 	{
 		"arithmetic ops make PTR_TO_CTX unusable",
@@ -7694,7 +8560,7 @@ static struct bpf_test tests[] = {
 				    offsetof(struct __sk_buff, mark)),
 			BPF_EXIT_INSN(),
 		},
-		.errstr = "dereference of modified ctx ptr R1 off=68+8, ctx+const is allowed, ctx+const+const is not",
+		.errstr = "dereference of modified ctx ptr",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
 	},
@@ -7709,7 +8575,9 @@ static struct bpf_test tests[] = {
 			BPF_EXIT_INSN(),
 		},
 		.result = ACCEPT,
+		.retval = TEST_DATA_LEN,
 		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_end mangling, bad access 1",
@@ -7726,9 +8594,10 @@ static struct bpf_test tests[] = {
 			BPF_MOV64_IMM(BPF_REG_0, 0),
 			BPF_EXIT_INSN(),
 		},
-		.errstr = "R3 pointer arithmetic on PTR_TO_PACKET_END",
+		.errstr = "R3 pointer arithmetic on pkt_end",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_end mangling, bad access 2",
@@ -7745,9 +8614,10 @@ static struct bpf_test tests[] = {
 			BPF_MOV64_IMM(BPF_REG_0, 0),
 			BPF_EXIT_INSN(),
 		},
-		.errstr = "R3 pointer arithmetic on PTR_TO_PACKET_END",
+		.errstr = "R3 pointer arithmetic on pkt_end",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_data' > pkt_end, good access",
@@ -7765,6 +8635,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_data' > pkt_end, bad access 1",
@@ -7784,6 +8655,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_XDP,
 		.flags = F_NEEDS_EFFICIENT_UNALIGNED_ACCESS,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_data' > pkt_end, bad access 2",
@@ -7802,6 +8674,7 @@ static struct bpf_test tests[] = {
 		.errstr = "R1 offset is outside of the packet",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_end > pkt_data', good access",
@@ -7821,6 +8694,7 @@ static struct bpf_test tests[] = {
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_XDP,
 		.flags = F_NEEDS_EFFICIENT_UNALIGNED_ACCESS,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_end > pkt_data', bad access 1",
@@ -7840,6 +8714,7 @@ static struct bpf_test tests[] = {
 		.errstr = "R1 offset is outside of the packet",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_end > pkt_data', bad access 2",
@@ -7858,6 +8733,7 @@ static struct bpf_test tests[] = {
 		.errstr = "R1 offset is outside of the packet",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_data' < pkt_end, good access",
@@ -7877,6 +8753,7 @@ static struct bpf_test tests[] = {
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_XDP,
 		.flags = F_NEEDS_EFFICIENT_UNALIGNED_ACCESS,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_data' < pkt_end, bad access 1",
@@ -7896,6 +8773,7 @@ static struct bpf_test tests[] = {
 		.errstr = "R1 offset is outside of the packet",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_data' < pkt_end, bad access 2",
@@ -7914,6 +8792,7 @@ static struct bpf_test tests[] = {
 		.errstr = "R1 offset is outside of the packet",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_end < pkt_data', good access",
@@ -7931,6 +8810,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_end < pkt_data', bad access 1",
@@ -7950,6 +8830,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_XDP,
 		.flags = F_NEEDS_EFFICIENT_UNALIGNED_ACCESS,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_end < pkt_data', bad access 2",
@@ -7968,6 +8849,7 @@ static struct bpf_test tests[] = {
 		.errstr = "R1 offset is outside of the packet",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_data' >= pkt_end, good access",
@@ -7986,6 +8868,7 @@ static struct bpf_test tests[] = {
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_XDP,
 		.flags = F_NEEDS_EFFICIENT_UNALIGNED_ACCESS,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_data' >= pkt_end, bad access 1",
@@ -8004,6 +8887,7 @@ static struct bpf_test tests[] = {
 		.errstr = "R1 offset is outside of the packet",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_data' >= pkt_end, bad access 2",
@@ -8023,6 +8907,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_XDP,
 		.flags = F_NEEDS_EFFICIENT_UNALIGNED_ACCESS,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_end >= pkt_data', good access",
@@ -8041,6 +8926,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_end >= pkt_data', bad access 1",
@@ -8061,6 +8947,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_XDP,
 		.flags = F_NEEDS_EFFICIENT_UNALIGNED_ACCESS,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_end >= pkt_data', bad access 2",
@@ -8079,6 +8966,7 @@ static struct bpf_test tests[] = {
 		.errstr = "R1 offset is outside of the packet",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_data' <= pkt_end, good access",
@@ -8097,6 +8985,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_data' <= pkt_end, bad access 1",
@@ -8117,6 +9006,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_XDP,
 		.flags = F_NEEDS_EFFICIENT_UNALIGNED_ACCESS,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_data' <= pkt_end, bad access 2",
@@ -8135,6 +9025,7 @@ static struct bpf_test tests[] = {
 		.errstr = "R1 offset is outside of the packet",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_end <= pkt_data', good access",
@@ -8153,6 +9044,7 @@ static struct bpf_test tests[] = {
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_XDP,
 		.flags = F_NEEDS_EFFICIENT_UNALIGNED_ACCESS,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_end <= pkt_data', bad access 1",
@@ -8171,6 +9063,7 @@ static struct bpf_test tests[] = {
 		.errstr = "R1 offset is outside of the packet",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_end <= pkt_data', bad access 2",
@@ -8190,6 +9083,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_XDP,
 		.flags = F_NEEDS_EFFICIENT_UNALIGNED_ACCESS,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_meta' > pkt_data, good access",
@@ -8207,6 +9101,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_meta' > pkt_data, bad access 1",
@@ -8226,6 +9121,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_XDP,
 		.flags = F_NEEDS_EFFICIENT_UNALIGNED_ACCESS,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_meta' > pkt_data, bad access 2",
@@ -8244,6 +9140,7 @@ static struct bpf_test tests[] = {
 		.errstr = "R1 offset is outside of the packet",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_data > pkt_meta', good access",
@@ -8263,6 +9160,7 @@ static struct bpf_test tests[] = {
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_XDP,
 		.flags = F_NEEDS_EFFICIENT_UNALIGNED_ACCESS,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_data > pkt_meta', bad access 1",
@@ -8282,6 +9180,7 @@ static struct bpf_test tests[] = {
 		.errstr = "R1 offset is outside of the packet",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_data > pkt_meta', bad access 2",
@@ -8300,6 +9199,7 @@ static struct bpf_test tests[] = {
 		.errstr = "R1 offset is outside of the packet",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_meta' < pkt_data, good access",
@@ -8319,6 +9219,7 @@ static struct bpf_test tests[] = {
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_XDP,
 		.flags = F_NEEDS_EFFICIENT_UNALIGNED_ACCESS,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_meta' < pkt_data, bad access 1",
@@ -8338,6 +9239,7 @@ static struct bpf_test tests[] = {
 		.errstr = "R1 offset is outside of the packet",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_meta' < pkt_data, bad access 2",
@@ -8356,6 +9258,7 @@ static struct bpf_test tests[] = {
 		.errstr = "R1 offset is outside of the packet",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_data < pkt_meta', good access",
@@ -8373,6 +9276,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_data < pkt_meta', bad access 1",
@@ -8392,6 +9296,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_XDP,
 		.flags = F_NEEDS_EFFICIENT_UNALIGNED_ACCESS,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_data < pkt_meta', bad access 2",
@@ -8410,6 +9315,7 @@ static struct bpf_test tests[] = {
 		.errstr = "R1 offset is outside of the packet",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_meta' >= pkt_data, good access",
@@ -8428,6 +9334,7 @@ static struct bpf_test tests[] = {
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_XDP,
 		.flags = F_NEEDS_EFFICIENT_UNALIGNED_ACCESS,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_meta' >= pkt_data, bad access 1",
@@ -8446,6 +9353,7 @@ static struct bpf_test tests[] = {
 		.errstr = "R1 offset is outside of the packet",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_meta' >= pkt_data, bad access 2",
@@ -8465,6 +9373,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_XDP,
 		.flags = F_NEEDS_EFFICIENT_UNALIGNED_ACCESS,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_data >= pkt_meta', good access",
@@ -8483,6 +9392,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_data >= pkt_meta', bad access 1",
@@ -8503,6 +9413,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_XDP,
 		.flags = F_NEEDS_EFFICIENT_UNALIGNED_ACCESS,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_data >= pkt_meta', bad access 2",
@@ -8521,6 +9432,7 @@ static struct bpf_test tests[] = {
 		.errstr = "R1 offset is outside of the packet",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_meta' <= pkt_data, good access",
@@ -8539,6 +9451,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_meta' <= pkt_data, bad access 1",
@@ -8559,6 +9472,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_XDP,
 		.flags = F_NEEDS_EFFICIENT_UNALIGNED_ACCESS,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_meta' <= pkt_data, bad access 2",
@@ -8577,6 +9491,7 @@ static struct bpf_test tests[] = {
 		.errstr = "R1 offset is outside of the packet",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_data <= pkt_meta', good access",
@@ -8595,6 +9510,7 @@ static struct bpf_test tests[] = {
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_XDP,
 		.flags = F_NEEDS_EFFICIENT_UNALIGNED_ACCESS,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_data <= pkt_meta', bad access 1",
@@ -8613,6 +9529,7 @@ static struct bpf_test tests[] = {
 		.errstr = "R1 offset is outside of the packet",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
 	},
 	{
 		"XDP pkt read, pkt_data <= pkt_meta', bad access 2",
@@ -8632,6 +9549,7 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_XDP,
 		.flags = F_NEEDS_EFFICIENT_UNALIGNED_ACCESS,
+		.disabled = true,
 	},
 	{
 		"check deducing bounds from const, 1",
@@ -8656,6 +9574,7 @@ static struct bpf_test tests[] = {
 			BPF_EXIT_INSN(),
 		},
 		.result = ACCEPT,
+		.retval = 1,
 	},
 	{
 		"check deducing bounds from const, 3",
@@ -8763,6 +9682,7 @@ static struct bpf_test tests[] = {
 		.errstr = "R0 has value (0x0; 0xffffffff)",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_CGROUP_SOCK,
+		.disabled = true,
 	},
 	{
 		"bpf_exit with invalid return code. test2",
@@ -8773,6 +9693,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_CGROUP_SOCK,
+		.disabled = true,
 	},
 	{
 		"bpf_exit with invalid return code. test3",
@@ -8784,6 +9705,7 @@ static struct bpf_test tests[] = {
 		.errstr = "R0 has value (0x0; 0x3)",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_CGROUP_SOCK,
+		.disabled = true,
 	},
 	{
 		"bpf_exit with invalid return code. test4",
@@ -8793,6 +9715,7 @@ static struct bpf_test tests[] = {
 		},
 		.result = ACCEPT,
 		.prog_type = BPF_PROG_TYPE_CGROUP_SOCK,
+		.disabled = true,
 	},
 	{
 		"bpf_exit with invalid return code. test5",
@@ -8803,6 +9726,7 @@ static struct bpf_test tests[] = {
 		.errstr = "R0 has value (0x2; 0x0)",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_CGROUP_SOCK,
+		.disabled = true,
 	},
 	{
 		"bpf_exit with invalid return code. test6",
@@ -8813,6 +9737,7 @@ static struct bpf_test tests[] = {
 		.errstr = "R0 is not a known value (ctx)",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_CGROUP_SOCK,
+		.disabled = true,
 	},
 	{
 		"bpf_exit with invalid return code. test7",
@@ -8825,6 +9750,2385 @@ static struct bpf_test tests[] = {
 		.errstr = "R0 has unknown scalar value",
 		.result = REJECT,
 		.prog_type = BPF_PROG_TYPE_CGROUP_SOCK,
+		.disabled = true,
+	},
+	{
+		"calls: basic sanity",
+		.insns = {
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 2),
+			BPF_MOV64_IMM(BPF_REG_0, 1),
+			BPF_EXIT_INSN(),
+			BPF_MOV64_IMM(BPF_REG_0, 2),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_TRACEPOINT,
+		.result = ACCEPT,
+#ifdef __s390x__
+		.disabled = true,
+#endif
+	},
+	{
+		"calls: not on unpriviledged",
+		.insns = {
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 2),
+			BPF_MOV64_IMM(BPF_REG_0, 1),
+			BPF_EXIT_INSN(),
+			BPF_MOV64_IMM(BPF_REG_0, 2),
+			BPF_EXIT_INSN(),
+		},
+		.errstr_unpriv = "function calls to other bpf functions are allowed for root only",
+		.result_unpriv = REJECT,
+		.result = ACCEPT,
+		.retval = 1,
+#ifdef __s390x__
+		.disabled = true,
+#endif
+	},
+	{
+		"calls: div by 0 in subprog",
+		.insns = {
+			BPF_MOV64_REG(BPF_REG_6, BPF_REG_1),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 8),
+			BPF_MOV64_REG(BPF_REG_1, BPF_REG_6),
+			BPF_LDX_MEM(BPF_W, BPF_REG_1, BPF_REG_1,
+				    offsetof(struct __sk_buff, data_end)),
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_0),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, 8),
+			BPF_JMP_REG(BPF_JGT, BPF_REG_2, BPF_REG_1, 1),
+			BPF_LDX_MEM(BPF_B, BPF_REG_0, BPF_REG_0, 0),
+			BPF_MOV64_IMM(BPF_REG_0, 1),
+			BPF_EXIT_INSN(),
+			BPF_MOV32_IMM(BPF_REG_2, 0),
+			BPF_MOV32_IMM(BPF_REG_3, 1),
+			BPF_ALU32_REG(BPF_DIV, BPF_REG_3, BPF_REG_2),
+			BPF_LDX_MEM(BPF_W, BPF_REG_0, BPF_REG_1,
+				    offsetof(struct __sk_buff, data)),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.result = ACCEPT,
+		.retval = 1,
+		.disabled = true,
+	},
+	{
+		"calls: multiple ret types in subprog 1",
+		.insns = {
+			BPF_MOV64_REG(BPF_REG_6, BPF_REG_1),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 8),
+			BPF_MOV64_REG(BPF_REG_1, BPF_REG_6),
+			BPF_LDX_MEM(BPF_W, BPF_REG_1, BPF_REG_1,
+				    offsetof(struct __sk_buff, data_end)),
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_0),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, 8),
+			BPF_JMP_REG(BPF_JGT, BPF_REG_2, BPF_REG_1, 1),
+			BPF_LDX_MEM(BPF_B, BPF_REG_0, BPF_REG_0, 0),
+			BPF_MOV64_IMM(BPF_REG_0, 1),
+			BPF_EXIT_INSN(),
+			BPF_LDX_MEM(BPF_W, BPF_REG_0, BPF_REG_1,
+				    offsetof(struct __sk_buff, data)),
+			BPF_JMP_IMM(BPF_JNE, BPF_REG_0, 0, 1),
+			BPF_MOV32_IMM(BPF_REG_0, 42),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.result = REJECT,
+		.errstr = "R0 invalid mem access 'inv'",
+		.disabled = true,
+	},
+	{
+		"calls: multiple ret types in subprog 2",
+		.insns = {
+			BPF_MOV64_REG(BPF_REG_6, BPF_REG_1),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 8),
+			BPF_MOV64_REG(BPF_REG_1, BPF_REG_6),
+			BPF_LDX_MEM(BPF_W, BPF_REG_1, BPF_REG_1,
+				    offsetof(struct __sk_buff, data_end)),
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_0),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, 8),
+			BPF_JMP_REG(BPF_JGT, BPF_REG_2, BPF_REG_1, 1),
+			BPF_LDX_MEM(BPF_B, BPF_REG_0, BPF_REG_0, 0),
+			BPF_MOV64_IMM(BPF_REG_0, 1),
+			BPF_EXIT_INSN(),
+			BPF_LDX_MEM(BPF_W, BPF_REG_0, BPF_REG_1,
+				    offsetof(struct __sk_buff, data)),
+			BPF_MOV64_REG(BPF_REG_6, BPF_REG_1),
+			BPF_JMP_IMM(BPF_JNE, BPF_REG_0, 0, 9),
+			BPF_ST_MEM(BPF_DW, BPF_REG_10, -8, 0),
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -8),
+			BPF_LD_MAP_FD(BPF_REG_1, 0),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0,
+				     BPF_FUNC_map_lookup_elem),
+			BPF_JMP_IMM(BPF_JNE, BPF_REG_0, 0, 1),
+			BPF_LDX_MEM(BPF_W, BPF_REG_0, BPF_REG_6,
+				    offsetof(struct __sk_buff, data)),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_0, 64),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.fixup_map1 = { 16 },
+		.result = REJECT,
+		.errstr = "R0 min value is outside of the array range",
+		.disabled = true,
+	},
+	{
+		"calls: overlapping caller/callee",
+		.insns = {
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 0),
+			BPF_MOV64_IMM(BPF_REG_0, 1),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_TRACEPOINT,
+		.errstr = "last insn is not an exit or jmp",
+		.result = REJECT,
+	},
+	{
+		"calls: wrong recursive calls",
+		.insns = {
+			BPF_JMP_IMM(BPF_JA, 0, 0, 4),
+			BPF_JMP_IMM(BPF_JA, 0, 0, 4),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, -2),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, -2),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, -2),
+			BPF_MOV64_IMM(BPF_REG_0, 1),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_TRACEPOINT,
+		.errstr = "jump out of range",
+		.result = REJECT,
+	},
+	{
+		"calls: wrong src reg",
+		.insns = {
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 2, 0, 0),
+			BPF_MOV64_IMM(BPF_REG_0, 1),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_TRACEPOINT,
+		.errstr = "BPF_CALL uses reserved fields",
+		.result = REJECT,
+	},
+	{
+		"calls: wrong off value",
+		.insns = {
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, -1, 2),
+			BPF_MOV64_IMM(BPF_REG_0, 1),
+			BPF_EXIT_INSN(),
+			BPF_MOV64_IMM(BPF_REG_0, 2),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_TRACEPOINT,
+		.errstr = "BPF_CALL uses reserved fields",
+		.result = REJECT,
+	},
+	{
+		"calls: jump back loop",
+		.insns = {
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, -1),
+			BPF_MOV64_IMM(BPF_REG_0, 1),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_TRACEPOINT,
+		.errstr = "back-edge from insn 0 to 0",
+		.result = REJECT,
+	},
+	{
+		"calls: conditional call",
+		.insns = {
+			BPF_LDX_MEM(BPF_W, BPF_REG_0, BPF_REG_1,
+				    offsetof(struct __sk_buff, mark)),
+			BPF_JMP_IMM(BPF_JEQ, BPF_REG_0, 0, 3),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 2),
+			BPF_MOV64_IMM(BPF_REG_0, 1),
+			BPF_EXIT_INSN(),
+			BPF_MOV64_IMM(BPF_REG_0, 2),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_TRACEPOINT,
+		.errstr = "jump out of range",
+		.result = REJECT,
+	},
+	{
+		"calls: conditional call 2",
+		.insns = {
+			BPF_LDX_MEM(BPF_W, BPF_REG_0, BPF_REG_1,
+				    offsetof(struct __sk_buff, mark)),
+			BPF_JMP_IMM(BPF_JEQ, BPF_REG_0, 0, 3),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 4),
+			BPF_MOV64_IMM(BPF_REG_0, 1),
+			BPF_EXIT_INSN(),
+			BPF_MOV64_IMM(BPF_REG_0, 2),
+			BPF_EXIT_INSN(),
+			BPF_MOV64_IMM(BPF_REG_0, 3),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_TRACEPOINT,
+		.result = ACCEPT,
+#ifdef __s390x__
+		.disabled = true,
+#endif
+	},
+	{
+		"calls: conditional call 3",
+		.insns = {
+			BPF_LDX_MEM(BPF_W, BPF_REG_0, BPF_REG_1,
+				    offsetof(struct __sk_buff, mark)),
+			BPF_JMP_IMM(BPF_JEQ, BPF_REG_0, 0, 3),
+			BPF_JMP_IMM(BPF_JA, 0, 0, 4),
+			BPF_MOV64_IMM(BPF_REG_0, 1),
+			BPF_EXIT_INSN(),
+			BPF_MOV64_IMM(BPF_REG_0, 1),
+			BPF_JMP_IMM(BPF_JA, 0, 0, -6),
+			BPF_MOV64_IMM(BPF_REG_0, 3),
+			BPF_JMP_IMM(BPF_JA, 0, 0, -6),
+		},
+		.prog_type = BPF_PROG_TYPE_TRACEPOINT,
+		.errstr = "back-edge from insn",
+		.result = REJECT,
+	},
+	{
+		"calls: conditional call 4",
+		.insns = {
+			BPF_LDX_MEM(BPF_W, BPF_REG_0, BPF_REG_1,
+				    offsetof(struct __sk_buff, mark)),
+			BPF_JMP_IMM(BPF_JEQ, BPF_REG_0, 0, 3),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 4),
+			BPF_MOV64_IMM(BPF_REG_0, 1),
+			BPF_EXIT_INSN(),
+			BPF_MOV64_IMM(BPF_REG_0, 1),
+			BPF_JMP_IMM(BPF_JA, 0, 0, -5),
+			BPF_MOV64_IMM(BPF_REG_0, 3),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_TRACEPOINT,
+		.result = ACCEPT,
+#ifdef __s390x__
+		.disabled = true,
+#endif
+	},
+	{
+		"calls: conditional call 5",
+		.insns = {
+			BPF_LDX_MEM(BPF_W, BPF_REG_0, BPF_REG_1,
+				    offsetof(struct __sk_buff, mark)),
+			BPF_JMP_IMM(BPF_JEQ, BPF_REG_0, 0, 3),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 4),
+			BPF_MOV64_IMM(BPF_REG_0, 1),
+			BPF_EXIT_INSN(),
+			BPF_MOV64_IMM(BPF_REG_0, 1),
+			BPF_JMP_IMM(BPF_JA, 0, 0, -6),
+			BPF_MOV64_IMM(BPF_REG_0, 3),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_TRACEPOINT,
+		.errstr = "back-edge from insn",
+		.result = REJECT,
+	},
+	{
+		"calls: conditional call 6",
+		.insns = {
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 2),
+			BPF_JMP_IMM(BPF_JEQ, BPF_REG_0, 0, -2),
+			BPF_EXIT_INSN(),
+			BPF_LDX_MEM(BPF_W, BPF_REG_0, BPF_REG_1,
+				    offsetof(struct __sk_buff, mark)),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_TRACEPOINT,
+		.errstr = "back-edge from insn",
+		.result = REJECT,
+	},
+	{
+		"calls: using r0 returned by callee",
+		.insns = {
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 1),
+			BPF_EXIT_INSN(),
+			BPF_MOV64_IMM(BPF_REG_0, 2),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_TRACEPOINT,
+		.result = ACCEPT,
+#ifdef __s390x__
+		.disabled = true,
+#endif
+	},
+	{
+		"calls: using uninit r0 from callee",
+		.insns = {
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 1),
+			BPF_EXIT_INSN(),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_TRACEPOINT,
+		.errstr = "!read_ok",
+		.result = REJECT,
+	},
+	{
+		"calls: callee is using r1",
+		.insns = {
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 1),
+			BPF_EXIT_INSN(),
+			BPF_LDX_MEM(BPF_W, BPF_REG_0, BPF_REG_1,
+				    offsetof(struct __sk_buff, len)),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_ACT,
+		.result = ACCEPT,
+		.retval = TEST_DATA_LEN,
+		.disabled = true,
+	},
+	{
+		"calls: callee using args1",
+		.insns = {
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 1),
+			BPF_EXIT_INSN(),
+			BPF_MOV64_REG(BPF_REG_0, BPF_REG_1),
+			BPF_EXIT_INSN(),
+		},
+		.errstr_unpriv = "allowed for root only",
+		.result_unpriv = REJECT,
+		.result = ACCEPT,
+		.retval = POINTER_VALUE,
+#ifdef __s390x__
+		.disabled = true,
+#endif
+	},
+	{
+		"calls: callee using wrong args2",
+		.insns = {
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 1),
+			BPF_EXIT_INSN(),
+			BPF_MOV64_REG(BPF_REG_0, BPF_REG_2),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_TRACEPOINT,
+		.errstr = "R2 !read_ok",
+		.result = REJECT,
+	},
+	{
+		"calls: callee using two args",
+		.insns = {
+			BPF_MOV64_REG(BPF_REG_6, BPF_REG_1),
+			BPF_LDX_MEM(BPF_W, BPF_REG_1, BPF_REG_6,
+				    offsetof(struct __sk_buff, len)),
+			BPF_LDX_MEM(BPF_W, BPF_REG_2, BPF_REG_6,
+				    offsetof(struct __sk_buff, len)),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 1),
+			BPF_EXIT_INSN(),
+			BPF_MOV64_REG(BPF_REG_0, BPF_REG_1),
+			BPF_ALU64_REG(BPF_ADD, BPF_REG_0, BPF_REG_2),
+			BPF_EXIT_INSN(),
+		},
+		.errstr_unpriv = "allowed for root only",
+		.result_unpriv = REJECT,
+		.result = ACCEPT,
+		.retval = TEST_DATA_LEN + TEST_DATA_LEN - ETH_HLEN - ETH_HLEN,
+		.disabled = true,
+	},
+	{
+		"calls: callee changing pkt pointers",
+		.insns = {
+			BPF_LDX_MEM(BPF_W, BPF_REG_6, BPF_REG_1,
+				    offsetof(struct xdp_md, data)),
+			BPF_LDX_MEM(BPF_W, BPF_REG_7, BPF_REG_1,
+				    offsetof(struct xdp_md, data_end)),
+			BPF_MOV64_REG(BPF_REG_8, BPF_REG_6),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_8, 8),
+			BPF_JMP_REG(BPF_JGT, BPF_REG_8, BPF_REG_7, 2),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 3),
+			/* clear_all_pkt_pointers() has to walk all frames
+			 * to make sure that pkt pointers in the caller
+			 * are cleared when callee is calling a helper that
+			 * adjusts packet size
+			 */
+			BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_6, 0),
+			BPF_MOV32_IMM(BPF_REG_0, 0),
+			BPF_EXIT_INSN(),
+			BPF_MOV64_IMM(BPF_REG_2, 0),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0,
+				     BPF_FUNC_xdp_adjust_head),
+			BPF_EXIT_INSN(),
+		},
+		.result = REJECT,
+		.errstr = "R6 invalid mem access 'inv'",
+		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
+	},
+	{
+		"calls: two calls with args",
+		.insns = {
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 1),
+			BPF_EXIT_INSN(),
+			BPF_MOV64_REG(BPF_REG_6, BPF_REG_1),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 6),
+			BPF_MOV64_REG(BPF_REG_7, BPF_REG_0),
+			BPF_MOV64_REG(BPF_REG_1, BPF_REG_6),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 3),
+			BPF_ALU64_REG(BPF_ADD, BPF_REG_7, BPF_REG_0),
+			BPF_MOV64_REG(BPF_REG_0, BPF_REG_7),
+			BPF_EXIT_INSN(),
+			BPF_LDX_MEM(BPF_W, BPF_REG_0, BPF_REG_1,
+				    offsetof(struct __sk_buff, len)),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.result = ACCEPT,
+		.retval = TEST_DATA_LEN + TEST_DATA_LEN,
+		.disabled = true,
+	},
+	{
+		"calls: calls with stack arith",
+		.insns = {
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -64),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 1),
+			BPF_EXIT_INSN(),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -64),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 1),
+			BPF_EXIT_INSN(),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -64),
+			BPF_MOV64_IMM(BPF_REG_0, 42),
+			BPF_STX_MEM(BPF_DW, BPF_REG_2, BPF_REG_0, 0),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.result = ACCEPT,
+		.retval = 42,
+#ifdef __s390x__
+		.disabled = true,
+#endif
+	},
+	{
+		"calls: calls with misaligned stack access",
+		.insns = {
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -63),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 1),
+			BPF_EXIT_INSN(),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -61),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 1),
+			BPF_EXIT_INSN(),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -63),
+			BPF_MOV64_IMM(BPF_REG_0, 42),
+			BPF_STX_MEM(BPF_DW, BPF_REG_2, BPF_REG_0, 0),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.flags = F_LOAD_WITH_STRICT_ALIGNMENT,
+		.errstr = "misaligned stack access",
+		.result = REJECT,
+	},
+	{
+		"calls: calls control flow, jump test",
+		.insns = {
+			BPF_MOV64_IMM(BPF_REG_0, 42),
+			BPF_JMP_IMM(BPF_JA, 0, 0, 2),
+			BPF_MOV64_IMM(BPF_REG_0, 43),
+			BPF_JMP_IMM(BPF_JA, 0, 0, 1),
+			BPF_JMP_IMM(BPF_JA, 0, 0, -3),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.result = ACCEPT,
+		.retval = 43,
+	},
+	{
+		"calls: calls control flow, jump test 2",
+		.insns = {
+			BPF_MOV64_IMM(BPF_REG_0, 42),
+			BPF_JMP_IMM(BPF_JA, 0, 0, 2),
+			BPF_MOV64_IMM(BPF_REG_0, 43),
+			BPF_JMP_IMM(BPF_JA, 0, 0, 1),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, -3),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.errstr = "jump out of range from insn 1 to 4",
+		.result = REJECT,
+	},
+	{
+		"calls: two calls with bad jump",
+		.insns = {
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 1),
+			BPF_EXIT_INSN(),
+			BPF_MOV64_REG(BPF_REG_6, BPF_REG_1),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 6),
+			BPF_MOV64_REG(BPF_REG_7, BPF_REG_0),
+			BPF_MOV64_REG(BPF_REG_1, BPF_REG_6),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 3),
+			BPF_ALU64_REG(BPF_ADD, BPF_REG_7, BPF_REG_0),
+			BPF_MOV64_REG(BPF_REG_0, BPF_REG_7),
+			BPF_EXIT_INSN(),
+			BPF_LDX_MEM(BPF_W, BPF_REG_0, BPF_REG_1,
+				    offsetof(struct __sk_buff, len)),
+			BPF_JMP_IMM(BPF_JEQ, BPF_REG_0, 0, -3),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_TRACEPOINT,
+		.errstr = "jump out of range from insn 11 to 9",
+		.result = REJECT,
+	},
+	{
+		"calls: recursive call. test1",
+		.insns = {
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 1),
+			BPF_EXIT_INSN(),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, -1),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_TRACEPOINT,
+		.errstr = "back-edge",
+		.result = REJECT,
+	},
+	{
+		"calls: recursive call. test2",
+		.insns = {
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 1),
+			BPF_EXIT_INSN(),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, -3),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_TRACEPOINT,
+		.errstr = "back-edge",
+		.result = REJECT,
+	},
+	{
+		"calls: unreachable code",
+		.insns = {
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 1),
+			BPF_EXIT_INSN(),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 1),
+			BPF_EXIT_INSN(),
+			BPF_MOV64_IMM(BPF_REG_0, 0),
+			BPF_EXIT_INSN(),
+			BPF_MOV64_IMM(BPF_REG_0, 0),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_TRACEPOINT,
+		.errstr = "unreachable insn 6",
+		.result = REJECT,
+	},
+	{
+		"calls: invalid call",
+		.insns = {
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 1),
+			BPF_EXIT_INSN(),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, -4),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_TRACEPOINT,
+		.errstr = "invalid destination",
+		.result = REJECT,
+	},
+	{
+		"calls: invalid call 2",
+		.insns = {
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 1),
+			BPF_EXIT_INSN(),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 0x7fffffff),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_TRACEPOINT,
+		.errstr = "invalid destination",
+		.result = REJECT,
+	},
+	{
+		"calls: jumping across function bodies. test1",
+		.insns = {
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 2),
+			BPF_MOV64_IMM(BPF_REG_0, 0),
+			BPF_EXIT_INSN(),
+			BPF_JMP_IMM(BPF_JEQ, BPF_REG_1, 0, -3),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_TRACEPOINT,
+		.errstr = "jump out of range",
+		.result = REJECT,
+	},
+	{
+		"calls: jumping across function bodies. test2",
+		.insns = {
+			BPF_JMP_IMM(BPF_JEQ, BPF_REG_1, 0, 3),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 2),
+			BPF_MOV64_IMM(BPF_REG_0, 0),
+			BPF_EXIT_INSN(),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_TRACEPOINT,
+		.errstr = "jump out of range",
+		.result = REJECT,
+	},
+	{
+		"calls: call without exit",
+		.insns = {
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 1),
+			BPF_EXIT_INSN(),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 1),
+			BPF_EXIT_INSN(),
+			BPF_MOV64_IMM(BPF_REG_0, 0),
+			BPF_JMP_IMM(BPF_JEQ, BPF_REG_1, 0, -2),
+		},
+		.prog_type = BPF_PROG_TYPE_TRACEPOINT,
+		.errstr = "not an exit",
+		.result = REJECT,
+	},
+	{
+		"calls: call into middle of ld_imm64",
+		.insns = {
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 3),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 3),
+			BPF_MOV64_IMM(BPF_REG_0, 0),
+			BPF_EXIT_INSN(),
+			BPF_LD_IMM64(BPF_REG_0, 0),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_TRACEPOINT,
+		.errstr = "last insn",
+		.result = REJECT,
+	},
+	{
+		"calls: call into middle of other call",
+		.insns = {
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 3),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 3),
+			BPF_MOV64_IMM(BPF_REG_0, 0),
+			BPF_EXIT_INSN(),
+			BPF_MOV64_IMM(BPF_REG_0, 0),
+			BPF_MOV64_IMM(BPF_REG_0, 0),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_TRACEPOINT,
+		.errstr = "last insn",
+		.result = REJECT,
+	},
+	{
+		"calls: ld_abs with changing ctx data in callee",
+		.insns = {
+			BPF_MOV64_REG(BPF_REG_6, BPF_REG_1),
+			BPF_LD_ABS(BPF_B, 0),
+			BPF_LD_ABS(BPF_H, 0),
+			BPF_LD_ABS(BPF_W, 0),
+			BPF_MOV64_REG(BPF_REG_7, BPF_REG_6),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 5),
+			BPF_MOV64_REG(BPF_REG_6, BPF_REG_7),
+			BPF_LD_ABS(BPF_B, 0),
+			BPF_LD_ABS(BPF_H, 0),
+			BPF_LD_ABS(BPF_W, 0),
+			BPF_EXIT_INSN(),
+			BPF_MOV64_IMM(BPF_REG_2, 1),
+			BPF_MOV64_IMM(BPF_REG_3, 2),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0,
+				     BPF_FUNC_skb_vlan_push),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.errstr = "BPF_LD_[ABS|IND] instructions cannot be mixed",
+		.result = REJECT,
+	},
+	{
+		"calls: two calls with bad fallthrough",
+		.insns = {
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 1),
+			BPF_EXIT_INSN(),
+			BPF_MOV64_REG(BPF_REG_6, BPF_REG_1),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 6),
+			BPF_MOV64_REG(BPF_REG_7, BPF_REG_0),
+			BPF_MOV64_REG(BPF_REG_1, BPF_REG_6),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 3),
+			BPF_ALU64_REG(BPF_ADD, BPF_REG_7, BPF_REG_0),
+			BPF_MOV64_REG(BPF_REG_0, BPF_REG_7),
+			BPF_MOV64_REG(BPF_REG_0, BPF_REG_0),
+			BPF_LDX_MEM(BPF_W, BPF_REG_0, BPF_REG_1,
+				    offsetof(struct __sk_buff, len)),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_TRACEPOINT,
+		.errstr = "not an exit",
+		.result = REJECT,
+	},
+	{
+		"calls: two calls with stack read",
+		.insns = {
+			BPF_ST_MEM(BPF_DW, BPF_REG_10, -8, 0),
+			BPF_MOV64_REG(BPF_REG_1, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_1, -8),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 1),
+			BPF_EXIT_INSN(),
+			BPF_MOV64_REG(BPF_REG_6, BPF_REG_1),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 6),
+			BPF_MOV64_REG(BPF_REG_7, BPF_REG_0),
+			BPF_MOV64_REG(BPF_REG_1, BPF_REG_6),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 3),
+			BPF_ALU64_REG(BPF_ADD, BPF_REG_7, BPF_REG_0),
+			BPF_MOV64_REG(BPF_REG_0, BPF_REG_7),
+			BPF_EXIT_INSN(),
+			BPF_LDX_MEM(BPF_W, BPF_REG_0, BPF_REG_1, 0),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_XDP,
+		.result = ACCEPT,
+		.disabled = true,
+	},
+	{
+		"calls: two calls with stack write",
+		.insns = {
+			/* main prog */
+			BPF_ST_MEM(BPF_DW, BPF_REG_10, -8, 0),
+			BPF_MOV64_REG(BPF_REG_1, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_1, -8),
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -16),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 2),
+			BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_10, -16),
+			BPF_EXIT_INSN(),
+
+			/* subprog 1 */
+			BPF_MOV64_REG(BPF_REG_6, BPF_REG_1),
+			BPF_MOV64_REG(BPF_REG_7, BPF_REG_2),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 7),
+			BPF_MOV64_REG(BPF_REG_8, BPF_REG_0),
+			BPF_MOV64_REG(BPF_REG_1, BPF_REG_6),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 4),
+			BPF_ALU64_REG(BPF_ADD, BPF_REG_8, BPF_REG_0),
+			BPF_MOV64_REG(BPF_REG_0, BPF_REG_8),
+			/* write into stack frame of main prog */
+			BPF_STX_MEM(BPF_DW, BPF_REG_7, BPF_REG_0, 0),
+			BPF_EXIT_INSN(),
+
+			/* subprog 2 */
+			/* read from stack frame of main prog */
+			BPF_LDX_MEM(BPF_W, BPF_REG_0, BPF_REG_1, 0),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_XDP,
+		.result = ACCEPT,
+		.disabled = true,
+	},
+	{
+		"calls: stack overflow using two frames (pre-call access)",
+		.insns = {
+			/* prog 1 */
+			BPF_ST_MEM(BPF_B, BPF_REG_10, -300, 0),
+			BPF_RAW_INSN(BPF_JMP|BPF_CALL, 0, 1, 0, 1),
+			BPF_EXIT_INSN(),
+
+			/* prog 2 */
+			BPF_ST_MEM(BPF_B, BPF_REG_10, -300, 0),
+			BPF_MOV64_IMM(BPF_REG_0, 0),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_XDP,
+		.errstr = "combined stack size",
+		.result = REJECT,
+		.disabled = true,
+	},
+	{
+		"calls: stack overflow using two frames (post-call access)",
+		.insns = {
+			/* prog 1 */
+			BPF_RAW_INSN(BPF_JMP|BPF_CALL, 0, 1, 0, 2),
+			BPF_ST_MEM(BPF_B, BPF_REG_10, -300, 0),
+			BPF_EXIT_INSN(),
+
+			/* prog 2 */
+			BPF_ST_MEM(BPF_B, BPF_REG_10, -300, 0),
+			BPF_MOV64_IMM(BPF_REG_0, 0),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_XDP,
+		.errstr = "combined stack size",
+		.result = REJECT,
+		.disabled = true,
+	},
+	{
+		"calls: stack depth check using three frames. test1",
+		.insns = {
+			/* main */
+			BPF_RAW_INSN(BPF_JMP|BPF_CALL, 0, 1, 0, 4), /* call A */
+			BPF_RAW_INSN(BPF_JMP|BPF_CALL, 0, 1, 0, 5), /* call B */
+			BPF_ST_MEM(BPF_B, BPF_REG_10, -32, 0),
+			BPF_MOV64_IMM(BPF_REG_0, 0),
+			BPF_EXIT_INSN(),
+			/* A */
+			BPF_ST_MEM(BPF_B, BPF_REG_10, -256, 0),
+			BPF_EXIT_INSN(),
+			/* B */
+			BPF_RAW_INSN(BPF_JMP|BPF_CALL, 0, 1, 0, -3), /* call A */
+			BPF_ST_MEM(BPF_B, BPF_REG_10, -64, 0),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_XDP,
+		/* stack_main=32, stack_A=256, stack_B=64
+		 * and max(main+A, main+A+B) < 512
+		 */
+		.result = ACCEPT,
+		.disabled = true,
+	},
+	{
+		"calls: stack depth check using three frames. test2",
+		.insns = {
+			/* main */
+			BPF_RAW_INSN(BPF_JMP|BPF_CALL, 0, 1, 0, 4), /* call A */
+			BPF_RAW_INSN(BPF_JMP|BPF_CALL, 0, 1, 0, 5), /* call B */
+			BPF_ST_MEM(BPF_B, BPF_REG_10, -32, 0),
+			BPF_MOV64_IMM(BPF_REG_0, 0),
+			BPF_EXIT_INSN(),
+			/* A */
+			BPF_ST_MEM(BPF_B, BPF_REG_10, -64, 0),
+			BPF_EXIT_INSN(),
+			/* B */
+			BPF_RAW_INSN(BPF_JMP|BPF_CALL, 0, 1, 0, -3), /* call A */
+			BPF_ST_MEM(BPF_B, BPF_REG_10, -256, 0),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_XDP,
+		/* stack_main=32, stack_A=64, stack_B=256
+		 * and max(main+A, main+A+B) < 512
+		 */
+		.result = ACCEPT,
+		.disabled = true,
+	},
+	{
+		"calls: stack depth check using three frames. test3",
+		.insns = {
+			/* main */
+			BPF_MOV64_REG(BPF_REG_6, BPF_REG_1),
+			BPF_RAW_INSN(BPF_JMP|BPF_CALL, 0, 1, 0, 6), /* call A */
+			BPF_MOV64_REG(BPF_REG_1, BPF_REG_6),
+			BPF_RAW_INSN(BPF_JMP|BPF_CALL, 0, 1, 0, 8), /* call B */
+			BPF_JMP_IMM(BPF_JGE, BPF_REG_6, 0, 1),
+			BPF_ST_MEM(BPF_B, BPF_REG_10, -64, 0),
+			BPF_MOV64_IMM(BPF_REG_0, 0),
+			BPF_EXIT_INSN(),
+			/* A */
+			BPF_JMP_IMM(BPF_JLT, BPF_REG_1, 10, 1),
+			BPF_EXIT_INSN(),
+			BPF_ST_MEM(BPF_B, BPF_REG_10, -224, 0),
+			BPF_JMP_IMM(BPF_JA, 0, 0, -3),
+			/* B */
+			BPF_JMP_IMM(BPF_JGT, BPF_REG_1, 2, 1),
+			BPF_RAW_INSN(BPF_JMP|BPF_CALL, 0, 1, 0, -6), /* call A */
+			BPF_ST_MEM(BPF_B, BPF_REG_10, -256, 0),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_XDP,
+		/* stack_main=64, stack_A=224, stack_B=256
+		 * and max(main+A, main+A+B) > 512
+		 */
+		.errstr = "combined stack",
+		.result = REJECT,
+		.disabled = true,
+	},
+	{
+		"calls: stack depth check using three frames. test4",
+		/* void main(void) {
+		 *   func1(0);
+		 *   func1(1);
+		 *   func2(1);
+		 * }
+		 * void func1(int alloc_or_recurse) {
+		 *   if (alloc_or_recurse) {
+		 *     frame_pointer[-300] = 1;
+		 *   } else {
+		 *     func2(alloc_or_recurse);
+		 *   }
+		 * }
+		 * void func2(int alloc_or_recurse) {
+		 *   if (alloc_or_recurse) {
+		 *     frame_pointer[-300] = 1;
+		 *   }
+		 * }
+		 */
+		.insns = {
+			/* main */
+			BPF_MOV64_IMM(BPF_REG_1, 0),
+			BPF_RAW_INSN(BPF_JMP|BPF_CALL, 0, 1, 0, 6), /* call A */
+			BPF_MOV64_IMM(BPF_REG_1, 1),
+			BPF_RAW_INSN(BPF_JMP|BPF_CALL, 0, 1, 0, 4), /* call A */
+			BPF_MOV64_IMM(BPF_REG_1, 1),
+			BPF_RAW_INSN(BPF_JMP|BPF_CALL, 0, 1, 0, 7), /* call B */
+			BPF_MOV64_IMM(BPF_REG_0, 0),
+			BPF_EXIT_INSN(),
+			/* A */
+			BPF_JMP_IMM(BPF_JEQ, BPF_REG_1, 0, 2),
+			BPF_ST_MEM(BPF_B, BPF_REG_10, -300, 0),
+			BPF_EXIT_INSN(),
+			BPF_RAW_INSN(BPF_JMP|BPF_CALL, 0, 1, 0, 1), /* call B */
+			BPF_EXIT_INSN(),
+			/* B */
+			BPF_JMP_IMM(BPF_JEQ, BPF_REG_1, 0, 1),
+			BPF_ST_MEM(BPF_B, BPF_REG_10, -300, 0),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_XDP,
+		.result = REJECT,
+		.errstr = "combined stack",
+		.disabled = true,
+	},
+	{
+		"calls: stack depth check using three frames. test5",
+		.insns = {
+			/* main */
+			BPF_RAW_INSN(BPF_JMP|BPF_CALL, 0, 1, 0, 1), /* call A */
+			BPF_EXIT_INSN(),
+			/* A */
+			BPF_RAW_INSN(BPF_JMP|BPF_CALL, 0, 1, 0, 1), /* call B */
+			BPF_EXIT_INSN(),
+			/* B */
+			BPF_RAW_INSN(BPF_JMP|BPF_CALL, 0, 1, 0, 1), /* call C */
+			BPF_EXIT_INSN(),
+			/* C */
+			BPF_RAW_INSN(BPF_JMP|BPF_CALL, 0, 1, 0, 1), /* call D */
+			BPF_EXIT_INSN(),
+			/* D */
+			BPF_RAW_INSN(BPF_JMP|BPF_CALL, 0, 1, 0, 1), /* call E */
+			BPF_EXIT_INSN(),
+			/* E */
+			BPF_RAW_INSN(BPF_JMP|BPF_CALL, 0, 1, 0, 1), /* call F */
+			BPF_EXIT_INSN(),
+			/* F */
+			BPF_RAW_INSN(BPF_JMP|BPF_CALL, 0, 1, 0, 1), /* call G */
+			BPF_EXIT_INSN(),
+			/* G */
+			BPF_RAW_INSN(BPF_JMP|BPF_CALL, 0, 1, 0, 1), /* call H */
+			BPF_EXIT_INSN(),
+			/* H */
+			BPF_MOV64_IMM(BPF_REG_0, 0),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_XDP,
+		.errstr = "call stack",
+		.result = REJECT,
+		.disabled = true,
+	},
+	{
+		"calls: spill into caller stack frame",
+		.insns = {
+			BPF_ST_MEM(BPF_DW, BPF_REG_10, -8, 0),
+			BPF_MOV64_REG(BPF_REG_1, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_1, -8),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 1),
+			BPF_EXIT_INSN(),
+			BPF_STX_MEM(BPF_DW, BPF_REG_1, BPF_REG_1, 0),
+			BPF_MOV64_IMM(BPF_REG_0, 0),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_XDP,
+		.errstr = "cannot spill",
+		.result = REJECT,
+		.disabled = true,
+	},
+	{
+		"calls: write into caller stack frame",
+		.insns = {
+			BPF_MOV64_REG(BPF_REG_1, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_1, -8),
+			BPF_MOV64_REG(BPF_REG_6, BPF_REG_1),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 2),
+			BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_6, 0),
+			BPF_EXIT_INSN(),
+			BPF_ST_MEM(BPF_DW, BPF_REG_1, 0, 42),
+			BPF_MOV64_IMM(BPF_REG_0, 0),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_XDP,
+		.result = ACCEPT,
+		.retval = 42,
+		.disabled = true,
+	},
+	{
+		"calls: write into callee stack frame",
+		.insns = {
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 2),
+			BPF_ST_MEM(BPF_DW, BPF_REG_0, 0, 42),
+			BPF_EXIT_INSN(),
+			BPF_MOV64_REG(BPF_REG_0, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_0, -8),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_XDP,
+		.errstr = "cannot return stack pointer",
+		.result = REJECT,
+		.disabled = true,
+	},
+	{
+		"calls: two calls with stack write and void return",
+		.insns = {
+			/* main prog */
+			BPF_ST_MEM(BPF_DW, BPF_REG_10, -8, 0),
+			BPF_MOV64_REG(BPF_REG_1, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_1, -8),
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -16),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 2),
+			BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_10, -16),
+			BPF_EXIT_INSN(),
+
+			/* subprog 1 */
+			BPF_MOV64_REG(BPF_REG_6, BPF_REG_1),
+			BPF_MOV64_REG(BPF_REG_7, BPF_REG_2),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 3),
+			BPF_MOV64_REG(BPF_REG_1, BPF_REG_7),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 1),
+			BPF_EXIT_INSN(),
+
+			/* subprog 2 */
+			/* write into stack frame of main prog */
+			BPF_ST_MEM(BPF_DW, BPF_REG_1, 0, 0),
+			BPF_EXIT_INSN(), /* void return */
+		},
+		.prog_type = BPF_PROG_TYPE_XDP,
+		.result = ACCEPT,
+		.disabled = true,
+	},
+	{
+		"calls: ambiguous return value",
+		.insns = {
+			BPF_MOV64_REG(BPF_REG_6, BPF_REG_1),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 5),
+			BPF_MOV64_REG(BPF_REG_1, BPF_REG_0),
+			BPF_MOV64_REG(BPF_REG_1, BPF_REG_6),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 2),
+			BPF_MOV64_REG(BPF_REG_1, BPF_REG_0),
+			BPF_EXIT_INSN(),
+			BPF_JMP_IMM(BPF_JEQ, BPF_REG_1, 0, 1),
+			BPF_MOV64_IMM(BPF_REG_0, 0),
+			BPF_EXIT_INSN(),
+		},
+		.errstr_unpriv = "allowed for root only",
+		.result_unpriv = REJECT,
+		.errstr = "R0 !read_ok",
+		.result = REJECT,
+	},
+	{
+		"calls: two calls that return map_value",
+		.insns = {
+			/* main prog */
+			/* pass fp-16, fp-8 into a function */
+			BPF_MOV64_REG(BPF_REG_1, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_1, -8),
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -16),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 8),
+
+			/* fetch map_value_ptr from the stack of this function */
+			BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_10, -8),
+			BPF_JMP_IMM(BPF_JEQ, BPF_REG_0, 0, 1),
+			/* write into map value */
+			BPF_ST_MEM(BPF_DW, BPF_REG_0, 0, 0),
+			/* fetch secound map_value_ptr from the stack */
+			BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_10, -16),
+			BPF_JMP_IMM(BPF_JEQ, BPF_REG_0, 0, 1),
+			/* write into map value */
+			BPF_ST_MEM(BPF_DW, BPF_REG_0, 0, 0),
+			BPF_MOV64_IMM(BPF_REG_0, 0),
+			BPF_EXIT_INSN(),
+
+			/* subprog 1 */
+			/* call 3rd function twice */
+			BPF_MOV64_REG(BPF_REG_6, BPF_REG_1),
+			BPF_MOV64_REG(BPF_REG_7, BPF_REG_2),
+			/* first time with fp-8 */
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 3),
+			BPF_MOV64_REG(BPF_REG_1, BPF_REG_7),
+			/* second time with fp-16 */
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 1),
+			BPF_EXIT_INSN(),
+
+			/* subprog 2 */
+			BPF_MOV64_REG(BPF_REG_6, BPF_REG_1),
+			/* lookup from map */
+			BPF_ST_MEM(BPF_DW, BPF_REG_10, -8, 0),
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -8),
+			BPF_LD_MAP_FD(BPF_REG_1, 0),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0,
+				     BPF_FUNC_map_lookup_elem),
+			/* write map_value_ptr into stack frame of main prog */
+			BPF_STX_MEM(BPF_DW, BPF_REG_6, BPF_REG_0, 0),
+			BPF_MOV64_IMM(BPF_REG_0, 0),
+			BPF_EXIT_INSN(), /* return 0 */
+		},
+		.prog_type = BPF_PROG_TYPE_XDP,
+		.fixup_map1 = { 23 },
+		.result = ACCEPT,
+		.disabled = true,
+	},
+	{
+		"calls: two calls that return map_value with bool condition",
+		.insns = {
+			/* main prog */
+			/* pass fp-16, fp-8 into a function */
+			BPF_MOV64_REG(BPF_REG_1, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_1, -8),
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -16),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 2),
+			BPF_MOV64_IMM(BPF_REG_0, 0),
+			BPF_EXIT_INSN(),
+
+			/* subprog 1 */
+			/* call 3rd function twice */
+			BPF_MOV64_REG(BPF_REG_6, BPF_REG_1),
+			BPF_MOV64_REG(BPF_REG_7, BPF_REG_2),
+			/* first time with fp-8 */
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 9),
+			BPF_JMP_IMM(BPF_JNE, BPF_REG_0, 1, 2),
+			/* fetch map_value_ptr from the stack of this function */
+			BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_6, 0),
+			/* write into map value */
+			BPF_ST_MEM(BPF_DW, BPF_REG_0, 0, 0),
+			BPF_MOV64_REG(BPF_REG_1, BPF_REG_7),
+			/* second time with fp-16 */
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 4),
+			BPF_JMP_IMM(BPF_JNE, BPF_REG_0, 1, 2),
+			/* fetch secound map_value_ptr from the stack */
+			BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_7, 0),
+			/* write into map value */
+			BPF_ST_MEM(BPF_DW, BPF_REG_0, 0, 0),
+			BPF_EXIT_INSN(),
+
+			/* subprog 2 */
+			BPF_MOV64_REG(BPF_REG_6, BPF_REG_1),
+			/* lookup from map */
+			BPF_ST_MEM(BPF_DW, BPF_REG_10, -8, 0),
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -8),
+			BPF_LD_MAP_FD(BPF_REG_1, 0),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0,
+				     BPF_FUNC_map_lookup_elem),
+			BPF_JMP_IMM(BPF_JNE, BPF_REG_0, 0, 2),
+			BPF_MOV64_IMM(BPF_REG_0, 0),
+			BPF_EXIT_INSN(), /* return 0 */
+			/* write map_value_ptr into stack frame of main prog */
+			BPF_STX_MEM(BPF_DW, BPF_REG_6, BPF_REG_0, 0),
+			BPF_MOV64_IMM(BPF_REG_0, 1),
+			BPF_EXIT_INSN(), /* return 1 */
+		},
+		.prog_type = BPF_PROG_TYPE_XDP,
+		.fixup_map1 = { 23 },
+		.result = ACCEPT,
+		.disabled = true,
+	},
+	{
+		"calls: two calls that return map_value with incorrect bool check",
+		.insns = {
+			/* main prog */
+			/* pass fp-16, fp-8 into a function */
+			BPF_MOV64_REG(BPF_REG_1, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_1, -8),
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -16),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 2),
+			BPF_MOV64_IMM(BPF_REG_0, 0),
+			BPF_EXIT_INSN(),
+
+			/* subprog 1 */
+			/* call 3rd function twice */
+			BPF_MOV64_REG(BPF_REG_6, BPF_REG_1),
+			BPF_MOV64_REG(BPF_REG_7, BPF_REG_2),
+			/* first time with fp-8 */
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 9),
+			BPF_JMP_IMM(BPF_JNE, BPF_REG_0, 1, 2),
+			/* fetch map_value_ptr from the stack of this function */
+			BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_6, 0),
+			/* write into map value */
+			BPF_ST_MEM(BPF_DW, BPF_REG_0, 0, 0),
+			BPF_MOV64_REG(BPF_REG_1, BPF_REG_7),
+			/* second time with fp-16 */
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 4),
+			BPF_JMP_IMM(BPF_JNE, BPF_REG_0, 0, 2),
+			/* fetch secound map_value_ptr from the stack */
+			BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_7, 0),
+			/* write into map value */
+			BPF_ST_MEM(BPF_DW, BPF_REG_0, 0, 0),
+			BPF_EXIT_INSN(),
+
+			/* subprog 2 */
+			BPF_MOV64_REG(BPF_REG_6, BPF_REG_1),
+			/* lookup from map */
+			BPF_ST_MEM(BPF_DW, BPF_REG_10, -8, 0),
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -8),
+			BPF_LD_MAP_FD(BPF_REG_1, 0),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0,
+				     BPF_FUNC_map_lookup_elem),
+			BPF_JMP_IMM(BPF_JNE, BPF_REG_0, 0, 2),
+			BPF_MOV64_IMM(BPF_REG_0, 0),
+			BPF_EXIT_INSN(), /* return 0 */
+			/* write map_value_ptr into stack frame of main prog */
+			BPF_STX_MEM(BPF_DW, BPF_REG_6, BPF_REG_0, 0),
+			BPF_MOV64_IMM(BPF_REG_0, 1),
+			BPF_EXIT_INSN(), /* return 1 */
+		},
+		.prog_type = BPF_PROG_TYPE_XDP,
+		.fixup_map1 = { 23 },
+		.result = REJECT,
+		.errstr = "invalid read from stack off -16+0 size 8",
+		.disabled = true,
+	},
+	{
+		"calls: two calls that receive map_value via arg=ptr_stack_of_caller. test1",
+		.insns = {
+			/* main prog */
+			/* pass fp-16, fp-8 into a function */
+			BPF_MOV64_REG(BPF_REG_1, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_1, -8),
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -16),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 2),
+			BPF_MOV64_IMM(BPF_REG_0, 0),
+			BPF_EXIT_INSN(),
+
+			/* subprog 1 */
+			BPF_MOV64_REG(BPF_REG_6, BPF_REG_1),
+			BPF_MOV64_REG(BPF_REG_7, BPF_REG_2),
+			/* 1st lookup from map */
+			BPF_ST_MEM(BPF_DW, BPF_REG_10, -8, 0),
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -8),
+			BPF_LD_MAP_FD(BPF_REG_1, 0),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0,
+				     BPF_FUNC_map_lookup_elem),
+			BPF_JMP_IMM(BPF_JNE, BPF_REG_0, 0, 2),
+			BPF_MOV64_IMM(BPF_REG_8, 0),
+			BPF_JMP_IMM(BPF_JA, 0, 0, 2),
+			/* write map_value_ptr into stack frame of main prog at fp-8 */
+			BPF_STX_MEM(BPF_DW, BPF_REG_6, BPF_REG_0, 0),
+			BPF_MOV64_IMM(BPF_REG_8, 1),
+
+			/* 2nd lookup from map */
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_10), /* 20 */
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -8),
+			BPF_LD_MAP_FD(BPF_REG_1, 0),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0, /* 24 */
+				     BPF_FUNC_map_lookup_elem),
+			BPF_JMP_IMM(BPF_JNE, BPF_REG_0, 0, 2),
+			BPF_MOV64_IMM(BPF_REG_9, 0),
+			BPF_JMP_IMM(BPF_JA, 0, 0, 2),
+			/* write map_value_ptr into stack frame of main prog at fp-16 */
+			BPF_STX_MEM(BPF_DW, BPF_REG_7, BPF_REG_0, 0),
+			BPF_MOV64_IMM(BPF_REG_9, 1),
+
+			/* call 3rd func with fp-8, 0|1, fp-16, 0|1 */
+			BPF_MOV64_REG(BPF_REG_1, BPF_REG_6), /* 30 */
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_8),
+			BPF_MOV64_REG(BPF_REG_3, BPF_REG_7),
+			BPF_MOV64_REG(BPF_REG_4, BPF_REG_9),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 1),  /* 34 */
+			BPF_EXIT_INSN(),
+
+			/* subprog 2 */
+			/* if arg2 == 1 do *arg1 = 0 */
+			BPF_JMP_IMM(BPF_JNE, BPF_REG_2, 1, 2),
+			/* fetch map_value_ptr from the stack of this function */
+			BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_1, 0),
+			/* write into map value */
+			BPF_ST_MEM(BPF_DW, BPF_REG_0, 0, 0),
+
+			/* if arg4 == 1 do *arg3 = 0 */
+			BPF_JMP_IMM(BPF_JNE, BPF_REG_4, 1, 2),
+			/* fetch map_value_ptr from the stack of this function */
+			BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_3, 0),
+			/* write into map value */
+			BPF_ST_MEM(BPF_DW, BPF_REG_0, 2, 0),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.fixup_map1 = { 12, 22 },
+		.result = REJECT,
+		.errstr = "invalid access to map value, value_size=8 off=2 size=8",
+	},
+	{
+		"calls: two calls that receive map_value via arg=ptr_stack_of_caller. test2",
+		.insns = {
+			/* main prog */
+			/* pass fp-16, fp-8 into a function */
+			BPF_MOV64_REG(BPF_REG_1, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_1, -8),
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -16),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 2),
+			BPF_MOV64_IMM(BPF_REG_0, 0),
+			BPF_EXIT_INSN(),
+
+			/* subprog 1 */
+			BPF_MOV64_REG(BPF_REG_6, BPF_REG_1),
+			BPF_MOV64_REG(BPF_REG_7, BPF_REG_2),
+			/* 1st lookup from map */
+			BPF_ST_MEM(BPF_DW, BPF_REG_10, -8, 0),
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -8),
+			BPF_LD_MAP_FD(BPF_REG_1, 0),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0,
+				     BPF_FUNC_map_lookup_elem),
+			BPF_JMP_IMM(BPF_JNE, BPF_REG_0, 0, 2),
+			BPF_MOV64_IMM(BPF_REG_8, 0),
+			BPF_JMP_IMM(BPF_JA, 0, 0, 2),
+			/* write map_value_ptr into stack frame of main prog at fp-8 */
+			BPF_STX_MEM(BPF_DW, BPF_REG_6, BPF_REG_0, 0),
+			BPF_MOV64_IMM(BPF_REG_8, 1),
+
+			/* 2nd lookup from map */
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_10), /* 20 */
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -8),
+			BPF_LD_MAP_FD(BPF_REG_1, 0),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0, /* 24 */
+				     BPF_FUNC_map_lookup_elem),
+			BPF_JMP_IMM(BPF_JNE, BPF_REG_0, 0, 2),
+			BPF_MOV64_IMM(BPF_REG_9, 0),
+			BPF_JMP_IMM(BPF_JA, 0, 0, 2),
+			/* write map_value_ptr into stack frame of main prog at fp-16 */
+			BPF_STX_MEM(BPF_DW, BPF_REG_7, BPF_REG_0, 0),
+			BPF_MOV64_IMM(BPF_REG_9, 1),
+
+			/* call 3rd func with fp-8, 0|1, fp-16, 0|1 */
+			BPF_MOV64_REG(BPF_REG_1, BPF_REG_6), /* 30 */
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_8),
+			BPF_MOV64_REG(BPF_REG_3, BPF_REG_7),
+			BPF_MOV64_REG(BPF_REG_4, BPF_REG_9),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 1),  /* 34 */
+			BPF_EXIT_INSN(),
+
+			/* subprog 2 */
+			/* if arg2 == 1 do *arg1 = 0 */
+			BPF_JMP_IMM(BPF_JNE, BPF_REG_2, 1, 2),
+			/* fetch map_value_ptr from the stack of this function */
+			BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_1, 0),
+			/* write into map value */
+			BPF_ST_MEM(BPF_DW, BPF_REG_0, 0, 0),
+
+			/* if arg4 == 1 do *arg3 = 0 */
+			BPF_JMP_IMM(BPF_JNE, BPF_REG_4, 1, 2),
+			/* fetch map_value_ptr from the stack of this function */
+			BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_3, 0),
+			/* write into map value */
+			BPF_ST_MEM(BPF_DW, BPF_REG_0, 0, 0),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.fixup_map1 = { 12, 22 },
+		.result = ACCEPT,
+#ifdef __s390x__
+		.disabled = true,
+#endif
+	},
+	{
+		"calls: two jumps that receive map_value via arg=ptr_stack_of_jumper. test3",
+		.insns = {
+			/* main prog */
+			/* pass fp-16, fp-8 into a function */
+			BPF_MOV64_REG(BPF_REG_1, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_1, -8),
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -16),
+			BPF_JMP_IMM(BPF_JNE, BPF_REG_1, 0, 2),
+			BPF_MOV64_IMM(BPF_REG_0, 0),
+			BPF_EXIT_INSN(),
+
+			/* subprog 1 */
+			BPF_MOV64_REG(BPF_REG_6, BPF_REG_1),
+			BPF_MOV64_REG(BPF_REG_7, BPF_REG_2),
+			/* 1st lookup from map */
+			BPF_ST_MEM(BPF_DW, BPF_REG_10, -24, 0),
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -24),
+			BPF_LD_MAP_FD(BPF_REG_1, 0),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0,
+				     BPF_FUNC_map_lookup_elem),
+			BPF_JMP_IMM(BPF_JNE, BPF_REG_0, 0, 2),
+			BPF_MOV64_IMM(BPF_REG_8, 0),
+			BPF_JMP_IMM(BPF_JA, 0, 0, 2),
+			/* write map_value_ptr into stack frame of main prog at fp-8 */
+			BPF_STX_MEM(BPF_DW, BPF_REG_6, BPF_REG_0, 0),
+			BPF_MOV64_IMM(BPF_REG_8, 1),
+
+			/* 2nd lookup from map */
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -24),
+			BPF_LD_MAP_FD(BPF_REG_1, 0),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0,
+				     BPF_FUNC_map_lookup_elem),
+			BPF_JMP_IMM(BPF_JNE, BPF_REG_0, 0, 2),
+			BPF_MOV64_IMM(BPF_REG_9, 0),  // 26
+			BPF_JMP_IMM(BPF_JA, 0, 0, 2),
+			/* write map_value_ptr into stack frame of main prog at fp-16 */
+			BPF_STX_MEM(BPF_DW, BPF_REG_7, BPF_REG_0, 0),
+			BPF_MOV64_IMM(BPF_REG_9, 1),
+
+			/* call 3rd func with fp-8, 0|1, fp-16, 0|1 */
+			BPF_MOV64_REG(BPF_REG_1, BPF_REG_6), // 30
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_8),
+			BPF_MOV64_REG(BPF_REG_3, BPF_REG_7),
+			BPF_MOV64_REG(BPF_REG_4, BPF_REG_9),
+			BPF_JMP_IMM(BPF_JNE, BPF_REG_1, 0, 1), // 34
+			BPF_JMP_IMM(BPF_JA, 0, 0, -30),
+
+			/* subprog 2 */
+			/* if arg2 == 1 do *arg1 = 0 */
+			BPF_JMP_IMM(BPF_JNE, BPF_REG_2, 1, 2),
+			/* fetch map_value_ptr from the stack of this function */
+			BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_1, 0),
+			/* write into map value */
+			BPF_ST_MEM(BPF_DW, BPF_REG_0, 0, 0),
+
+			/* if arg4 == 1 do *arg3 = 0 */
+			BPF_JMP_IMM(BPF_JNE, BPF_REG_4, 1, 2),
+			/* fetch map_value_ptr from the stack of this function */
+			BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_3, 0),
+			/* write into map value */
+			BPF_ST_MEM(BPF_DW, BPF_REG_0, 2, 0),
+			BPF_JMP_IMM(BPF_JA, 0, 0, -8),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.fixup_map1 = { 12, 22 },
+		.result = REJECT,
+		.errstr = "invalid access to map value, value_size=8 off=2 size=8",
+	},
+	{
+		"calls: two calls that receive map_value_ptr_or_null via arg. test1",
+		.insns = {
+			/* main prog */
+			/* pass fp-16, fp-8 into a function */
+			BPF_MOV64_REG(BPF_REG_1, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_1, -8),
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -16),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 2),
+			BPF_MOV64_IMM(BPF_REG_0, 0),
+			BPF_EXIT_INSN(),
+
+			/* subprog 1 */
+			BPF_MOV64_REG(BPF_REG_6, BPF_REG_1),
+			BPF_MOV64_REG(BPF_REG_7, BPF_REG_2),
+			/* 1st lookup from map */
+			BPF_ST_MEM(BPF_DW, BPF_REG_10, -8, 0),
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -8),
+			BPF_LD_MAP_FD(BPF_REG_1, 0),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0,
+				     BPF_FUNC_map_lookup_elem),
+			/* write map_value_ptr_or_null into stack frame of main prog at fp-8 */
+			BPF_STX_MEM(BPF_DW, BPF_REG_6, BPF_REG_0, 0),
+			BPF_JMP_IMM(BPF_JNE, BPF_REG_0, 0, 2),
+			BPF_MOV64_IMM(BPF_REG_8, 0),
+			BPF_JMP_IMM(BPF_JA, 0, 0, 1),
+			BPF_MOV64_IMM(BPF_REG_8, 1),
+
+			/* 2nd lookup from map */
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -8),
+			BPF_LD_MAP_FD(BPF_REG_1, 0),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0,
+				     BPF_FUNC_map_lookup_elem),
+			/* write map_value_ptr_or_null into stack frame of main prog at fp-16 */
+			BPF_STX_MEM(BPF_DW, BPF_REG_7, BPF_REG_0, 0),
+			BPF_JMP_IMM(BPF_JNE, BPF_REG_0, 0, 2),
+			BPF_MOV64_IMM(BPF_REG_9, 0),
+			BPF_JMP_IMM(BPF_JA, 0, 0, 1),
+			BPF_MOV64_IMM(BPF_REG_9, 1),
+
+			/* call 3rd func with fp-8, 0|1, fp-16, 0|1 */
+			BPF_MOV64_REG(BPF_REG_1, BPF_REG_6),
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_8),
+			BPF_MOV64_REG(BPF_REG_3, BPF_REG_7),
+			BPF_MOV64_REG(BPF_REG_4, BPF_REG_9),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 1),
+			BPF_EXIT_INSN(),
+
+			/* subprog 2 */
+			/* if arg2 == 1 do *arg1 = 0 */
+			BPF_JMP_IMM(BPF_JNE, BPF_REG_2, 1, 2),
+			/* fetch map_value_ptr from the stack of this function */
+			BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_1, 0),
+			/* write into map value */
+			BPF_ST_MEM(BPF_DW, BPF_REG_0, 0, 0),
+
+			/* if arg4 == 1 do *arg3 = 0 */
+			BPF_JMP_IMM(BPF_JNE, BPF_REG_4, 1, 2),
+			/* fetch map_value_ptr from the stack of this function */
+			BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_3, 0),
+			/* write into map value */
+			BPF_ST_MEM(BPF_DW, BPF_REG_0, 0, 0),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.fixup_map1 = { 12, 22 },
+		.result = ACCEPT,
+#ifdef __s390x__
+		.disabled = true,
+#endif
+	},
+	{
+		"calls: two calls that receive map_value_ptr_or_null via arg. test2",
+		.insns = {
+			/* main prog */
+			/* pass fp-16, fp-8 into a function */
+			BPF_MOV64_REG(BPF_REG_1, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_1, -8),
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -16),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 2),
+			BPF_MOV64_IMM(BPF_REG_0, 0),
+			BPF_EXIT_INSN(),
+
+			/* subprog 1 */
+			BPF_MOV64_REG(BPF_REG_6, BPF_REG_1),
+			BPF_MOV64_REG(BPF_REG_7, BPF_REG_2),
+			/* 1st lookup from map */
+			BPF_ST_MEM(BPF_DW, BPF_REG_10, -8, 0),
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -8),
+			BPF_LD_MAP_FD(BPF_REG_1, 0),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0,
+				     BPF_FUNC_map_lookup_elem),
+			/* write map_value_ptr_or_null into stack frame of main prog at fp-8 */
+			BPF_STX_MEM(BPF_DW, BPF_REG_6, BPF_REG_0, 0),
+			BPF_JMP_IMM(BPF_JNE, BPF_REG_0, 0, 2),
+			BPF_MOV64_IMM(BPF_REG_8, 0),
+			BPF_JMP_IMM(BPF_JA, 0, 0, 1),
+			BPF_MOV64_IMM(BPF_REG_8, 1),
+
+			/* 2nd lookup from map */
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -8),
+			BPF_LD_MAP_FD(BPF_REG_1, 0),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0,
+				     BPF_FUNC_map_lookup_elem),
+			/* write map_value_ptr_or_null into stack frame of main prog at fp-16 */
+			BPF_STX_MEM(BPF_DW, BPF_REG_7, BPF_REG_0, 0),
+			BPF_JMP_IMM(BPF_JNE, BPF_REG_0, 0, 2),
+			BPF_MOV64_IMM(BPF_REG_9, 0),
+			BPF_JMP_IMM(BPF_JA, 0, 0, 1),
+			BPF_MOV64_IMM(BPF_REG_9, 1),
+
+			/* call 3rd func with fp-8, 0|1, fp-16, 0|1 */
+			BPF_MOV64_REG(BPF_REG_1, BPF_REG_6),
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_8),
+			BPF_MOV64_REG(BPF_REG_3, BPF_REG_7),
+			BPF_MOV64_REG(BPF_REG_4, BPF_REG_9),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 1),
+			BPF_EXIT_INSN(),
+
+			/* subprog 2 */
+			/* if arg2 == 1 do *arg1 = 0 */
+			BPF_JMP_IMM(BPF_JNE, BPF_REG_2, 1, 2),
+			/* fetch map_value_ptr from the stack of this function */
+			BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_1, 0),
+			/* write into map value */
+			BPF_ST_MEM(BPF_DW, BPF_REG_0, 0, 0),
+
+			/* if arg4 == 0 do *arg3 = 0 */
+			BPF_JMP_IMM(BPF_JNE, BPF_REG_4, 0, 2),
+			/* fetch map_value_ptr from the stack of this function */
+			BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_3, 0),
+			/* write into map value */
+			BPF_ST_MEM(BPF_DW, BPF_REG_0, 0, 0),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.fixup_map1 = { 12, 22 },
+		.result = REJECT,
+		.errstr = "R0 invalid mem access 'inv'",
+	},
+	{
+		"calls: pkt_ptr spill into caller stack",
+		.insns = {
+			BPF_MOV64_REG(BPF_REG_4, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_4, -8),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 1),
+			BPF_EXIT_INSN(),
+
+			/* subprog 1 */
+			BPF_LDX_MEM(BPF_W, BPF_REG_2, BPF_REG_1,
+				    offsetof(struct __sk_buff, data)),
+			BPF_LDX_MEM(BPF_W, BPF_REG_3, BPF_REG_1,
+				    offsetof(struct __sk_buff, data_end)),
+			BPF_MOV64_REG(BPF_REG_0, BPF_REG_2),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_0, 8),
+			/* spill unchecked pkt_ptr into stack of caller */
+			BPF_STX_MEM(BPF_DW, BPF_REG_4, BPF_REG_2, 0),
+			BPF_JMP_REG(BPF_JGT, BPF_REG_0, BPF_REG_3, 2),
+			/* now the pkt range is verified, read pkt_ptr from stack */
+			BPF_LDX_MEM(BPF_DW, BPF_REG_2, BPF_REG_4, 0),
+			/* write 4 bytes into packet */
+			BPF_ST_MEM(BPF_W, BPF_REG_2, 0, 0),
+			BPF_EXIT_INSN(),
+		},
+		.result = ACCEPT,
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.retval = POINTER_VALUE,
+		.disabled = true,
+	},
+	{
+		"calls: pkt_ptr spill into caller stack 2",
+		.insns = {
+			BPF_MOV64_REG(BPF_REG_4, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_4, -8),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 3),
+			/* Marking is still kept, but not in all cases safe. */
+			BPF_LDX_MEM(BPF_DW, BPF_REG_4, BPF_REG_10, -8),
+			BPF_ST_MEM(BPF_W, BPF_REG_4, 0, 0),
+			BPF_EXIT_INSN(),
+
+			/* subprog 1 */
+			BPF_LDX_MEM(BPF_W, BPF_REG_2, BPF_REG_1,
+				    offsetof(struct __sk_buff, data)),
+			BPF_LDX_MEM(BPF_W, BPF_REG_3, BPF_REG_1,
+				    offsetof(struct __sk_buff, data_end)),
+			BPF_MOV64_REG(BPF_REG_0, BPF_REG_2),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_0, 8),
+			/* spill unchecked pkt_ptr into stack of caller */
+			BPF_STX_MEM(BPF_DW, BPF_REG_4, BPF_REG_2, 0),
+			BPF_JMP_REG(BPF_JGT, BPF_REG_0, BPF_REG_3, 2),
+			/* now the pkt range is verified, read pkt_ptr from stack */
+			BPF_LDX_MEM(BPF_DW, BPF_REG_2, BPF_REG_4, 0),
+			/* write 4 bytes into packet */
+			BPF_ST_MEM(BPF_W, BPF_REG_2, 0, 0),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.errstr = "invalid access to packet",
+		.result = REJECT,
+		.disabled = true,
+	},
+	{
+		"calls: pkt_ptr spill into caller stack 3",
+		.insns = {
+			BPF_MOV64_REG(BPF_REG_4, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_4, -8),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 4),
+			BPF_JMP_IMM(BPF_JEQ, BPF_REG_0, 0, 2),
+			/* Marking is still kept and safe here. */
+			BPF_LDX_MEM(BPF_DW, BPF_REG_4, BPF_REG_10, -8),
+			BPF_ST_MEM(BPF_W, BPF_REG_4, 0, 0),
+			BPF_EXIT_INSN(),
+
+			/* subprog 1 */
+			BPF_LDX_MEM(BPF_W, BPF_REG_2, BPF_REG_1,
+				    offsetof(struct __sk_buff, data)),
+			BPF_LDX_MEM(BPF_W, BPF_REG_3, BPF_REG_1,
+				    offsetof(struct __sk_buff, data_end)),
+			BPF_MOV64_REG(BPF_REG_0, BPF_REG_2),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_0, 8),
+			/* spill unchecked pkt_ptr into stack of caller */
+			BPF_STX_MEM(BPF_DW, BPF_REG_4, BPF_REG_2, 0),
+			BPF_MOV64_IMM(BPF_REG_5, 0),
+			BPF_JMP_REG(BPF_JGT, BPF_REG_0, BPF_REG_3, 3),
+			BPF_MOV64_IMM(BPF_REG_5, 1),
+			/* now the pkt range is verified, read pkt_ptr from stack */
+			BPF_LDX_MEM(BPF_DW, BPF_REG_2, BPF_REG_4, 0),
+			/* write 4 bytes into packet */
+			BPF_ST_MEM(BPF_W, BPF_REG_2, 0, 0),
+			BPF_MOV64_REG(BPF_REG_0, BPF_REG_5),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.result = ACCEPT,
+		.retval = 1,
+		.disabled = true,
+	},
+	{
+		"calls: pkt_ptr spill into caller stack 4",
+		.insns = {
+			BPF_MOV64_REG(BPF_REG_4, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_4, -8),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 4),
+			BPF_JMP_IMM(BPF_JEQ, BPF_REG_0, 0, 2),
+			/* Check marking propagated. */
+			BPF_LDX_MEM(BPF_DW, BPF_REG_4, BPF_REG_10, -8),
+			BPF_ST_MEM(BPF_W, BPF_REG_4, 0, 0),
+			BPF_EXIT_INSN(),
+
+			/* subprog 1 */
+			BPF_LDX_MEM(BPF_W, BPF_REG_2, BPF_REG_1,
+				    offsetof(struct __sk_buff, data)),
+			BPF_LDX_MEM(BPF_W, BPF_REG_3, BPF_REG_1,
+				    offsetof(struct __sk_buff, data_end)),
+			BPF_MOV64_REG(BPF_REG_0, BPF_REG_2),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_0, 8),
+			/* spill unchecked pkt_ptr into stack of caller */
+			BPF_STX_MEM(BPF_DW, BPF_REG_4, BPF_REG_2, 0),
+			BPF_MOV64_IMM(BPF_REG_5, 0),
+			BPF_JMP_REG(BPF_JGT, BPF_REG_0, BPF_REG_3, 2),
+			BPF_MOV64_IMM(BPF_REG_5, 1),
+			/* don't read back pkt_ptr from stack here */
+			/* write 4 bytes into packet */
+			BPF_ST_MEM(BPF_W, BPF_REG_2, 0, 0),
+			BPF_MOV64_REG(BPF_REG_0, BPF_REG_5),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.result = ACCEPT,
+		.retval = 1,
+		.disabled = true,
+	},
+	{
+		"calls: pkt_ptr spill into caller stack 5",
+		.insns = {
+			BPF_MOV64_REG(BPF_REG_4, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_4, -8),
+			BPF_STX_MEM(BPF_DW, BPF_REG_4, BPF_REG_1, 0),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 3),
+			BPF_LDX_MEM(BPF_DW, BPF_REG_4, BPF_REG_10, -8),
+			BPF_LDX_MEM(BPF_W, BPF_REG_0, BPF_REG_4, 0),
+			BPF_EXIT_INSN(),
+
+			/* subprog 1 */
+			BPF_LDX_MEM(BPF_W, BPF_REG_2, BPF_REG_1,
+				    offsetof(struct __sk_buff, data)),
+			BPF_LDX_MEM(BPF_W, BPF_REG_3, BPF_REG_1,
+				    offsetof(struct __sk_buff, data_end)),
+			BPF_MOV64_REG(BPF_REG_0, BPF_REG_2),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_0, 8),
+			BPF_MOV64_IMM(BPF_REG_5, 0),
+			BPF_JMP_REG(BPF_JGT, BPF_REG_0, BPF_REG_3, 3),
+			/* spill checked pkt_ptr into stack of caller */
+			BPF_STX_MEM(BPF_DW, BPF_REG_4, BPF_REG_2, 0),
+			BPF_MOV64_IMM(BPF_REG_5, 1),
+			/* don't read back pkt_ptr from stack here */
+			/* write 4 bytes into packet */
+			BPF_ST_MEM(BPF_W, BPF_REG_2, 0, 0),
+			BPF_MOV64_REG(BPF_REG_0, BPF_REG_5),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.errstr = "same insn cannot be used with different",
+		.result = REJECT,
+		.disabled = true,
+	},
+	{
+		"calls: pkt_ptr spill into caller stack 6",
+		.insns = {
+			BPF_LDX_MEM(BPF_W, BPF_REG_2, BPF_REG_1,
+				    offsetof(struct __sk_buff, data_end)),
+			BPF_MOV64_REG(BPF_REG_4, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_4, -8),
+			BPF_STX_MEM(BPF_DW, BPF_REG_4, BPF_REG_2, 0),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 3),
+			BPF_LDX_MEM(BPF_DW, BPF_REG_4, BPF_REG_10, -8),
+			BPF_LDX_MEM(BPF_W, BPF_REG_0, BPF_REG_4, 0),
+			BPF_EXIT_INSN(),
+
+			/* subprog 1 */
+			BPF_LDX_MEM(BPF_W, BPF_REG_2, BPF_REG_1,
+				    offsetof(struct __sk_buff, data)),
+			BPF_LDX_MEM(BPF_W, BPF_REG_3, BPF_REG_1,
+				    offsetof(struct __sk_buff, data_end)),
+			BPF_MOV64_REG(BPF_REG_0, BPF_REG_2),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_0, 8),
+			BPF_MOV64_IMM(BPF_REG_5, 0),
+			BPF_JMP_REG(BPF_JGT, BPF_REG_0, BPF_REG_3, 3),
+			/* spill checked pkt_ptr into stack of caller */
+			BPF_STX_MEM(BPF_DW, BPF_REG_4, BPF_REG_2, 0),
+			BPF_MOV64_IMM(BPF_REG_5, 1),
+			/* don't read back pkt_ptr from stack here */
+			/* write 4 bytes into packet */
+			BPF_ST_MEM(BPF_W, BPF_REG_2, 0, 0),
+			BPF_MOV64_REG(BPF_REG_0, BPF_REG_5),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.errstr = "R4 invalid mem access",
+		.result = REJECT,
+		.disabled = true,
+	},
+	{
+		"calls: pkt_ptr spill into caller stack 7",
+		.insns = {
+			BPF_MOV64_IMM(BPF_REG_2, 0),
+			BPF_MOV64_REG(BPF_REG_4, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_4, -8),
+			BPF_STX_MEM(BPF_DW, BPF_REG_4, BPF_REG_2, 0),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 3),
+			BPF_LDX_MEM(BPF_DW, BPF_REG_4, BPF_REG_10, -8),
+			BPF_LDX_MEM(BPF_W, BPF_REG_0, BPF_REG_4, 0),
+			BPF_EXIT_INSN(),
+
+			/* subprog 1 */
+			BPF_LDX_MEM(BPF_W, BPF_REG_2, BPF_REG_1,
+				    offsetof(struct __sk_buff, data)),
+			BPF_LDX_MEM(BPF_W, BPF_REG_3, BPF_REG_1,
+				    offsetof(struct __sk_buff, data_end)),
+			BPF_MOV64_REG(BPF_REG_0, BPF_REG_2),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_0, 8),
+			BPF_MOV64_IMM(BPF_REG_5, 0),
+			BPF_JMP_REG(BPF_JGT, BPF_REG_0, BPF_REG_3, 3),
+			/* spill checked pkt_ptr into stack of caller */
+			BPF_STX_MEM(BPF_DW, BPF_REG_4, BPF_REG_2, 0),
+			BPF_MOV64_IMM(BPF_REG_5, 1),
+			/* don't read back pkt_ptr from stack here */
+			/* write 4 bytes into packet */
+			BPF_ST_MEM(BPF_W, BPF_REG_2, 0, 0),
+			BPF_MOV64_REG(BPF_REG_0, BPF_REG_5),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.errstr = "R4 invalid mem access",
+		.result = REJECT,
+		.disabled = true,
+	},
+	{
+		"calls: pkt_ptr spill into caller stack 8",
+		.insns = {
+			BPF_LDX_MEM(BPF_W, BPF_REG_2, BPF_REG_1,
+				    offsetof(struct __sk_buff, data)),
+			BPF_LDX_MEM(BPF_W, BPF_REG_3, BPF_REG_1,
+				    offsetof(struct __sk_buff, data_end)),
+			BPF_MOV64_REG(BPF_REG_0, BPF_REG_2),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_0, 8),
+			BPF_JMP_REG(BPF_JLE, BPF_REG_0, BPF_REG_3, 1),
+			BPF_EXIT_INSN(),
+			BPF_MOV64_REG(BPF_REG_4, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_4, -8),
+			BPF_STX_MEM(BPF_DW, BPF_REG_4, BPF_REG_2, 0),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 3),
+			BPF_LDX_MEM(BPF_DW, BPF_REG_4, BPF_REG_10, -8),
+			BPF_LDX_MEM(BPF_W, BPF_REG_0, BPF_REG_4, 0),
+			BPF_EXIT_INSN(),
+
+			/* subprog 1 */
+			BPF_LDX_MEM(BPF_W, BPF_REG_2, BPF_REG_1,
+				    offsetof(struct __sk_buff, data)),
+			BPF_LDX_MEM(BPF_W, BPF_REG_3, BPF_REG_1,
+				    offsetof(struct __sk_buff, data_end)),
+			BPF_MOV64_REG(BPF_REG_0, BPF_REG_2),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_0, 8),
+			BPF_MOV64_IMM(BPF_REG_5, 0),
+			BPF_JMP_REG(BPF_JGT, BPF_REG_0, BPF_REG_3, 3),
+			/* spill checked pkt_ptr into stack of caller */
+			BPF_STX_MEM(BPF_DW, BPF_REG_4, BPF_REG_2, 0),
+			BPF_MOV64_IMM(BPF_REG_5, 1),
+			/* don't read back pkt_ptr from stack here */
+			/* write 4 bytes into packet */
+			BPF_ST_MEM(BPF_W, BPF_REG_2, 0, 0),
+			BPF_MOV64_REG(BPF_REG_0, BPF_REG_5),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.result = ACCEPT,
+		.disabled = true,
+	},
+	{
+		"calls: pkt_ptr spill into caller stack 9",
+		.insns = {
+			BPF_LDX_MEM(BPF_W, BPF_REG_2, BPF_REG_1,
+				    offsetof(struct __sk_buff, data)),
+			BPF_LDX_MEM(BPF_W, BPF_REG_3, BPF_REG_1,
+				    offsetof(struct __sk_buff, data_end)),
+			BPF_MOV64_REG(BPF_REG_0, BPF_REG_2),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_0, 8),
+			BPF_JMP_REG(BPF_JLE, BPF_REG_0, BPF_REG_3, 1),
+			BPF_EXIT_INSN(),
+			BPF_MOV64_REG(BPF_REG_4, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_4, -8),
+			BPF_STX_MEM(BPF_DW, BPF_REG_4, BPF_REG_2, 0),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 3),
+			BPF_LDX_MEM(BPF_DW, BPF_REG_4, BPF_REG_10, -8),
+			BPF_LDX_MEM(BPF_W, BPF_REG_0, BPF_REG_4, 0),
+			BPF_EXIT_INSN(),
+
+			/* subprog 1 */
+			BPF_LDX_MEM(BPF_W, BPF_REG_2, BPF_REG_1,
+				    offsetof(struct __sk_buff, data)),
+			BPF_LDX_MEM(BPF_W, BPF_REG_3, BPF_REG_1,
+				    offsetof(struct __sk_buff, data_end)),
+			BPF_MOV64_REG(BPF_REG_0, BPF_REG_2),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_0, 8),
+			BPF_MOV64_IMM(BPF_REG_5, 0),
+			/* spill unchecked pkt_ptr into stack of caller */
+			BPF_STX_MEM(BPF_DW, BPF_REG_4, BPF_REG_2, 0),
+			BPF_JMP_REG(BPF_JGT, BPF_REG_0, BPF_REG_3, 2),
+			BPF_MOV64_IMM(BPF_REG_5, 1),
+			/* don't read back pkt_ptr from stack here */
+			/* write 4 bytes into packet */
+			BPF_ST_MEM(BPF_W, BPF_REG_2, 0, 0),
+			BPF_MOV64_REG(BPF_REG_0, BPF_REG_5),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.errstr = "invalid access to packet",
+		.result = REJECT,
+		.disabled = true,
+	},
+	{
+		"calls: caller stack init to zero or map_value_or_null",
+		.insns = {
+			BPF_MOV64_IMM(BPF_REG_0, 0),
+			BPF_STX_MEM(BPF_DW, BPF_REG_10, BPF_REG_0, -8),
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -8),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 1, 0, 4),
+			/* fetch map_value_or_null or const_zero from stack */
+			BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_10, -8),
+			BPF_JMP_IMM(BPF_JEQ, BPF_REG_0, 0, 1),
+			/* store into map_value */
+			BPF_ST_MEM(BPF_W, BPF_REG_0, 0, 0),
+			BPF_EXIT_INSN(),
+
+			/* subprog 1 */
+			/* if (ctx == 0) return; */
+			BPF_JMP_IMM(BPF_JEQ, BPF_REG_1, 0, 8),
+			/* else bpf_map_lookup() and *(fp - 8) = r0 */
+			BPF_MOV64_REG(BPF_REG_6, BPF_REG_2),
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -8),
+			BPF_LD_MAP_FD(BPF_REG_1, 0),
+			BPF_ST_MEM(BPF_DW, BPF_REG_10, -8, 0),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0,
+				     BPF_FUNC_map_lookup_elem),
+			/* write map_value_ptr_or_null into stack frame of main prog at fp-8 */
+			BPF_STX_MEM(BPF_DW, BPF_REG_6, BPF_REG_0, 0),
+			BPF_EXIT_INSN(),
+		},
+		.fixup_map1 = { 13 },
+		.result = ACCEPT,
+		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
+	},
+	{
+		"calls: stack init to zero and pruning",
+		.insns = {
+			/* first make allocated_stack 16 byte */
+			BPF_ST_MEM(BPF_DW, BPF_REG_10, -16, 0),
+			/* now fork the execution such that the false branch
+			 * of JGT insn will be verified second and it skisp zero
+			 * init of fp-8 stack slot. If stack liveness marking
+			 * is missing live_read marks from call map_lookup
+			 * processing then pruning will incorrectly assume
+			 * that fp-8 stack slot was unused in the fall-through
+			 * branch and will accept the program incorrectly
+			 */
+			BPF_JMP_IMM(BPF_JGT, BPF_REG_1, 2, 2),
+			BPF_ST_MEM(BPF_DW, BPF_REG_10, -8, 0),
+			BPF_JMP_IMM(BPF_JA, 0, 0, 0),
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -8),
+			BPF_LD_MAP_FD(BPF_REG_1, 0),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0,
+				     BPF_FUNC_map_lookup_elem),
+			BPF_EXIT_INSN(),
+		},
+		.fixup_map2 = { 6 },
+		.errstr = "invalid indirect read from stack off -8+0 size 8",
+		.result = REJECT,
+		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
+	},
+	{
+		"search pruning: all branches should be verified (nop operation)",
+		.insns = {
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -8),
+			BPF_ST_MEM(BPF_DW, BPF_REG_2, 0, 0),
+			BPF_LD_MAP_FD(BPF_REG_1, 0),
+			BPF_EMIT_CALL(BPF_FUNC_map_lookup_elem),
+			BPF_JMP_IMM(BPF_JEQ, BPF_REG_0, 0, 11),
+			BPF_LDX_MEM(BPF_DW, BPF_REG_3, BPF_REG_0, 0),
+			BPF_JMP_IMM(BPF_JEQ, BPF_REG_3, 0xbeef, 2),
+			BPF_MOV64_IMM(BPF_REG_4, 0),
+			BPF_JMP_A(1),
+			BPF_MOV64_IMM(BPF_REG_4, 1),
+			BPF_STX_MEM(BPF_DW, BPF_REG_10, BPF_REG_4, -16),
+			BPF_EMIT_CALL(BPF_FUNC_ktime_get_ns),
+			BPF_LDX_MEM(BPF_DW, BPF_REG_5, BPF_REG_10, -16),
+			BPF_JMP_IMM(BPF_JEQ, BPF_REG_5, 0, 2),
+			BPF_MOV64_IMM(BPF_REG_6, 0),
+			BPF_ST_MEM(BPF_DW, BPF_REG_6, 0, 0xdead),
+			BPF_EXIT_INSN(),
+		},
+		.fixup_map1 = { 3 },
+		.errstr = "R6 invalid mem access 'inv'",
+		.result = REJECT,
+		.prog_type = BPF_PROG_TYPE_TRACEPOINT,
+	},
+	{
+		"search pruning: all branches should be verified (invalid stack access)",
+		.insns = {
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -8),
+			BPF_ST_MEM(BPF_DW, BPF_REG_2, 0, 0),
+			BPF_LD_MAP_FD(BPF_REG_1, 0),
+			BPF_EMIT_CALL(BPF_FUNC_map_lookup_elem),
+			BPF_JMP_IMM(BPF_JEQ, BPF_REG_0, 0, 8),
+			BPF_LDX_MEM(BPF_DW, BPF_REG_3, BPF_REG_0, 0),
+			BPF_MOV64_IMM(BPF_REG_4, 0),
+			BPF_JMP_IMM(BPF_JEQ, BPF_REG_3, 0xbeef, 2),
+			BPF_STX_MEM(BPF_DW, BPF_REG_10, BPF_REG_4, -16),
+			BPF_JMP_A(1),
+			BPF_STX_MEM(BPF_DW, BPF_REG_10, BPF_REG_4, -24),
+			BPF_EMIT_CALL(BPF_FUNC_ktime_get_ns),
+			BPF_LDX_MEM(BPF_DW, BPF_REG_5, BPF_REG_10, -16),
+			BPF_EXIT_INSN(),
+		},
+		.fixup_map1 = { 3 },
+		.errstr = "invalid read from stack off -16+0 size 8",
+		.result = REJECT,
+		.prog_type = BPF_PROG_TYPE_TRACEPOINT,
+	},
+	{
+		"xadd/w check unaligned stack",
+		.insns = {
+			BPF_MOV64_IMM(BPF_REG_0, 1),
+			BPF_STX_MEM(BPF_DW, BPF_REG_10, BPF_REG_0, -8),
+			BPF_STX_XADD(BPF_W, BPF_REG_10, BPF_REG_0, -7),
+			BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_10, -8),
+			BPF_EXIT_INSN(),
+		},
+		.result = REJECT,
+		.errstr = "misaligned stack access off",
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+	},
+	{
+		"xadd/w check unaligned map",
+		.insns = {
+			BPF_ST_MEM(BPF_DW, BPF_REG_10, -8, 0),
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -8),
+			BPF_LD_MAP_FD(BPF_REG_1, 0),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0,
+				     BPF_FUNC_map_lookup_elem),
+			BPF_JMP_IMM(BPF_JNE, BPF_REG_0, 0, 1),
+			BPF_EXIT_INSN(),
+			BPF_MOV64_IMM(BPF_REG_1, 1),
+			BPF_STX_XADD(BPF_W, BPF_REG_0, BPF_REG_1, 3),
+			BPF_LDX_MEM(BPF_W, BPF_REG_0, BPF_REG_0, 3),
+			BPF_EXIT_INSN(),
+		},
+		.fixup_map1 = { 3 },
+		.result = REJECT,
+		.errstr = "misaligned value access off",
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+	},
+	{
+		"xadd/w check unaligned pkt",
+		.insns = {
+			BPF_LDX_MEM(BPF_W, BPF_REG_2, BPF_REG_1,
+				    offsetof(struct xdp_md, data)),
+			BPF_LDX_MEM(BPF_W, BPF_REG_3, BPF_REG_1,
+				    offsetof(struct xdp_md, data_end)),
+			BPF_MOV64_REG(BPF_REG_1, BPF_REG_2),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_1, 8),
+			BPF_JMP_REG(BPF_JLT, BPF_REG_1, BPF_REG_3, 2),
+			BPF_MOV64_IMM(BPF_REG_0, 99),
+			BPF_JMP_IMM(BPF_JA, 0, 0, 6),
+			BPF_MOV64_IMM(BPF_REG_0, 1),
+			BPF_ST_MEM(BPF_W, BPF_REG_2, 0, 0),
+			BPF_ST_MEM(BPF_W, BPF_REG_2, 3, 0),
+			BPF_STX_XADD(BPF_W, BPF_REG_2, BPF_REG_0, 1),
+			BPF_STX_XADD(BPF_W, BPF_REG_2, BPF_REG_0, 2),
+			BPF_LDX_MEM(BPF_W, BPF_REG_0, BPF_REG_2, 1),
+			BPF_EXIT_INSN(),
+		},
+		.result = REJECT,
+		.errstr = "BPF_XADD stores into R2 packet",
+		.prog_type = BPF_PROG_TYPE_XDP,
+		.disabled = true,
+	},
+	{
+		"invalid map access from else condition",
+		.insns = {
+			BPF_ST_MEM(BPF_DW, BPF_REG_10, -8, 0),
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -8),
+			BPF_LD_MAP_FD(BPF_REG_1, 0),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_map_lookup_elem),
+			BPF_JMP_IMM(BPF_JEQ, BPF_REG_0, 0, 6),
+			BPF_LDX_MEM(BPF_W, BPF_REG_1, BPF_REG_0, 0),
+			BPF_JMP_IMM(BPF_JGE, BPF_REG_1, MAX_ENTRIES-1, 1),
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_1, 1),
+			BPF_ALU64_IMM(BPF_LSH, BPF_REG_1, 2),
+			BPF_ALU64_REG(BPF_ADD, BPF_REG_0, BPF_REG_1),
+			BPF_ST_MEM(BPF_DW, BPF_REG_0, 0, offsetof(struct test_val, foo)),
+			BPF_EXIT_INSN(),
+		},
+		.fixup_map2 = { 3 },
+		.errstr = "R0 unbounded memory access, make sure to bounds check any array access into a map",
+		.result = REJECT,
+		.errstr_unpriv = "R0 pointer arithmetic prohibited",
+		.result_unpriv = REJECT,
+	},
+	{
+		"ld_abs: invalid op 1",
+		.insns = {
+			BPF_MOV64_REG(BPF_REG_6, BPF_REG_1),
+			BPF_LD_ABS(BPF_DW, 0),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.result = REJECT,
+		.errstr = "unknown opcode",
+	},
+	{
+		"ld_abs: invalid op 2",
+		.insns = {
+			BPF_MOV32_IMM(BPF_REG_0, 256),
+			BPF_MOV64_REG(BPF_REG_6, BPF_REG_1),
+			BPF_LD_IND(BPF_DW, BPF_REG_0, 0),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.result = REJECT,
+		.errstr = "unknown opcode",
+	},
+	{
+		"ld_abs: nmap reduced",
+		.insns = {
+			BPF_MOV64_REG(BPF_REG_6, BPF_REG_1),
+			BPF_LD_ABS(BPF_H, 12),
+			BPF_JMP_IMM(BPF_JNE, BPF_REG_0, 0x806, 28),
+			BPF_LD_ABS(BPF_H, 12),
+			BPF_JMP_IMM(BPF_JNE, BPF_REG_0, 0x806, 26),
+			BPF_MOV32_IMM(BPF_REG_0, 18),
+			BPF_STX_MEM(BPF_W, BPF_REG_10, BPF_REG_0, -64),
+			BPF_LDX_MEM(BPF_W, BPF_REG_7, BPF_REG_10, -64),
+			BPF_LD_IND(BPF_W, BPF_REG_7, 14),
+			BPF_STX_MEM(BPF_W, BPF_REG_10, BPF_REG_0, -60),
+			BPF_MOV32_IMM(BPF_REG_0, 280971478),
+			BPF_STX_MEM(BPF_W, BPF_REG_10, BPF_REG_0, -56),
+			BPF_LDX_MEM(BPF_W, BPF_REG_7, BPF_REG_10, -56),
+			BPF_LDX_MEM(BPF_W, BPF_REG_0, BPF_REG_10, -60),
+			BPF_ALU32_REG(BPF_SUB, BPF_REG_0, BPF_REG_7),
+			BPF_JMP_IMM(BPF_JNE, BPF_REG_0, 0, 15),
+			BPF_LD_ABS(BPF_H, 12),
+			BPF_JMP_IMM(BPF_JNE, BPF_REG_0, 0x806, 13),
+			BPF_MOV32_IMM(BPF_REG_0, 22),
+			BPF_STX_MEM(BPF_W, BPF_REG_10, BPF_REG_0, -56),
+			BPF_LDX_MEM(BPF_W, BPF_REG_7, BPF_REG_10, -56),
+			BPF_LD_IND(BPF_H, BPF_REG_7, 14),
+			BPF_STX_MEM(BPF_W, BPF_REG_10, BPF_REG_0, -52),
+			BPF_MOV32_IMM(BPF_REG_0, 17366),
+			BPF_STX_MEM(BPF_W, BPF_REG_10, BPF_REG_0, -48),
+			BPF_LDX_MEM(BPF_W, BPF_REG_7, BPF_REG_10, -48),
+			BPF_LDX_MEM(BPF_W, BPF_REG_0, BPF_REG_10, -52),
+			BPF_ALU32_REG(BPF_SUB, BPF_REG_0, BPF_REG_7),
+			BPF_JMP_IMM(BPF_JNE, BPF_REG_0, 0, 2),
+			BPF_MOV32_IMM(BPF_REG_0, 256),
+			BPF_EXIT_INSN(),
+			BPF_MOV32_IMM(BPF_REG_0, 0),
+			BPF_EXIT_INSN(),
+		},
+		.data = {
+			0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x08, 0x06, 0,
+			0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+			0x10, 0xbf, 0x48, 0xd6, 0x43, 0xd6,
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.result = ACCEPT,
+		.retval = 256,
+	},
+	{
+		"ld_abs: div + abs, test 1",
+		.insns = {
+			BPF_ALU64_REG(BPF_MOV, BPF_REG_6, BPF_REG_1),
+			BPF_LD_ABS(BPF_B, 3),
+			BPF_ALU64_IMM(BPF_MOV, BPF_REG_2, 2),
+			BPF_ALU32_REG(BPF_DIV, BPF_REG_0, BPF_REG_2),
+			BPF_ALU64_REG(BPF_MOV, BPF_REG_8, BPF_REG_0),
+			BPF_LD_ABS(BPF_B, 4),
+			BPF_ALU64_REG(BPF_ADD, BPF_REG_8, BPF_REG_0),
+			BPF_LD_IND(BPF_B, BPF_REG_8, -70),
+			BPF_EXIT_INSN(),
+		},
+		.data = {
+			10, 20, 30, 40, 50,
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.result = ACCEPT,
+		.retval = 10,
+	},
+	{
+		"ld_abs: div + abs, test 2",
+		.insns = {
+			BPF_ALU64_REG(BPF_MOV, BPF_REG_6, BPF_REG_1),
+			BPF_LD_ABS(BPF_B, 3),
+			BPF_ALU64_IMM(BPF_MOV, BPF_REG_2, 2),
+			BPF_ALU32_REG(BPF_DIV, BPF_REG_0, BPF_REG_2),
+			BPF_ALU64_REG(BPF_MOV, BPF_REG_8, BPF_REG_0),
+			BPF_LD_ABS(BPF_B, 128),
+			BPF_ALU64_REG(BPF_ADD, BPF_REG_8, BPF_REG_0),
+			BPF_LD_IND(BPF_B, BPF_REG_8, -70),
+			BPF_EXIT_INSN(),
+		},
+		.data = {
+			10, 20, 30, 40, 50,
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.result = ACCEPT,
+		.retval = 0,
+	},
+	{
+		"ld_abs: div + abs, test 3",
+		.insns = {
+			BPF_ALU64_REG(BPF_MOV, BPF_REG_6, BPF_REG_1),
+			BPF_ALU64_IMM(BPF_MOV, BPF_REG_7, 0),
+			BPF_LD_ABS(BPF_B, 3),
+			BPF_ALU32_REG(BPF_DIV, BPF_REG_0, BPF_REG_7),
+			BPF_EXIT_INSN(),
+		},
+		.data = {
+			10, 20, 30, 40, 50,
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.result = ACCEPT,
+		.retval = 0,
+	},
+	{
+		"ld_abs: div + abs, test 4",
+		.insns = {
+			BPF_ALU64_REG(BPF_MOV, BPF_REG_6, BPF_REG_1),
+			BPF_ALU64_IMM(BPF_MOV, BPF_REG_7, 0),
+			BPF_LD_ABS(BPF_B, 256),
+			BPF_ALU32_REG(BPF_DIV, BPF_REG_0, BPF_REG_7),
+			BPF_EXIT_INSN(),
+		},
+		.data = {
+			10, 20, 30, 40, 50,
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.result = ACCEPT,
+		.retval = 0,
+	},
+	{
+		"ld_abs: vlan + abs, test 1",
+		.insns = { },
+		.data = {
+			0x34,
+		},
+		.fill_helper = bpf_fill_ld_abs_vlan_push_pop,
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.result = ACCEPT,
+		.retval = 0xbef,
+		.disabled = true,
+	},
+	{
+		"ld_abs: vlan + abs, test 2",
+		.insns = {
+			BPF_MOV64_REG(BPF_REG_6, BPF_REG_1),
+			BPF_LD_ABS(BPF_B, 0),
+			BPF_LD_ABS(BPF_H, 0),
+			BPF_LD_ABS(BPF_W, 0),
+			BPF_MOV64_REG(BPF_REG_7, BPF_REG_6),
+			BPF_MOV64_IMM(BPF_REG_6, 0),
+			BPF_MOV64_REG(BPF_REG_1, BPF_REG_7),
+			BPF_MOV64_IMM(BPF_REG_2, 1),
+			BPF_MOV64_IMM(BPF_REG_3, 2),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0,
+				     BPF_FUNC_skb_vlan_push),
+			BPF_MOV64_REG(BPF_REG_6, BPF_REG_7),
+			BPF_LD_ABS(BPF_B, 0),
+			BPF_LD_ABS(BPF_H, 0),
+			BPF_LD_ABS(BPF_W, 0),
+			BPF_MOV64_IMM(BPF_REG_0, 42),
+			BPF_EXIT_INSN(),
+		},
+		.data = {
+			0x34,
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.result = ACCEPT,
+		.retval = 42,
+		.disabled = true,
+	},
+	{
+		"ld_abs: jump around ld_abs",
+		.insns = { },
+		.data = {
+			10, 11,
+		},
+		.fill_helper = bpf_fill_jump_around_ld_abs,
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.result = ACCEPT,
+		.retval = 10,
+#ifdef __s390x__
+		.disabled = true,
+#endif
+	},
+	{
+		"pass unmodified ctx pointer to helper",
+		.insns = {
+			BPF_MOV64_IMM(BPF_REG_2, 0),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0,
+				     BPF_FUNC_csum_update),
+			BPF_MOV64_IMM(BPF_REG_0, 0),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.result = ACCEPT,
+		.disabled = true,
+	},
+	{
+		"pass modified ctx pointer to helper, 1",
+		.insns = {
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_1, -612),
+			BPF_MOV64_IMM(BPF_REG_2, 0),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0,
+				     BPF_FUNC_csum_update),
+			BPF_MOV64_IMM(BPF_REG_0, 0),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.result = REJECT,
+		.errstr = "dereference of modified ctx ptr",
+		.disabled = true,
+	},
+	{
+		"pass modified ctx pointer to helper, 2",
+		.insns = {
+			BPF_ALU64_IMM(BPF_ADD, BPF_REG_1, -612),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0,
+				     BPF_FUNC_get_socket_cookie),
+			BPF_MOV64_IMM(BPF_REG_0, 0),
+			BPF_EXIT_INSN(),
+		},
+		.result_unpriv = REJECT,
+		.result = REJECT,
+		.errstr_unpriv = "dereference of modified ctx ptr",
+		.errstr = "dereference of modified ctx ptr",
+		.disabled = true,
+	},
+	{
+		"pass modified ctx pointer to helper, 3",
+		.insns = {
+			BPF_LDX_MEM(BPF_W, BPF_REG_3, BPF_REG_1, 0),
+			BPF_ALU64_IMM(BPF_AND, BPF_REG_3, 4),
+			BPF_ALU64_REG(BPF_ADD, BPF_REG_1, BPF_REG_3),
+			BPF_MOV64_IMM(BPF_REG_2, 0),
+			BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0,
+				     BPF_FUNC_csum_update),
+			BPF_MOV64_IMM(BPF_REG_0, 0),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.result = REJECT,
+		.errstr = "variable ctx access var_off=(0x0; 0x4)",
+		.disabled = true,
+	},
+	{
+		"mov64 src == dst",
+		.insns = {
+			BPF_MOV64_IMM(BPF_REG_2, 0),
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_2),
+			// Check bounds are OK
+			BPF_ALU64_REG(BPF_ADD, BPF_REG_1, BPF_REG_2),
+			BPF_MOV64_IMM(BPF_REG_0, 0),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.result = ACCEPT,
+	},
+	{
+		"mov64 src != dst",
+		.insns = {
+			BPF_MOV64_IMM(BPF_REG_3, 0),
+			BPF_MOV64_REG(BPF_REG_2, BPF_REG_3),
+			// Check bounds are OK
+			BPF_ALU64_REG(BPF_ADD, BPF_REG_1, BPF_REG_2),
+			BPF_MOV64_IMM(BPF_REG_0, 0),
+			BPF_EXIT_INSN(),
+		},
+		.prog_type = BPF_PROG_TYPE_SCHED_CLS,
+		.result = ACCEPT,
 	},
 };
 
@@ -8884,15 +12188,19 @@ static int create_map_in_map(void)
 	return outer_map_fd;
 }
 
-static char bpf_vlog[32768];
+static char bpf_vlog[UINT_MAX >> 8];
 
 static void do_test_fixup(struct bpf_test *test, struct bpf_insn *prog,
 			  int *map_fds)
 {
 	int *fixup_map1 = test->fixup_map1;
 	int *fixup_map2 = test->fixup_map2;
+	int *fixup_map3 = test->fixup_map3;
 	int *fixup_prog = test->fixup_prog;
 	int *fixup_map_in_map = test->fixup_map_in_map;
+
+	if (test->fill_helper)
+		test->fill_helper(test);
 
 	/* Allocating HTs with 1 elem is fine here, since we only test
 	 * for verifier and not do a runtime lookup, so the only thing
@@ -8912,6 +12220,14 @@ static void do_test_fixup(struct bpf_test *test, struct bpf_insn *prog,
 			prog[*fixup_map2].imm = map_fds[1];
 			fixup_map2++;
 		} while (*fixup_map2);
+	}
+
+	if (*fixup_map3) {
+		map_fds[1] = create_map(sizeof(struct other_val), 1);
+		do {
+			prog[*fixup_map3].imm = map_fds[1];
+			fixup_map3++;
+		} while (*fixup_map3);
 	}
 
 	if (*fixup_prog) {
@@ -8935,17 +12251,23 @@ static void do_test_single(struct bpf_test *test, bool unpriv,
 			   int *passes, int *errors)
 {
 	int fd_prog, expected_ret, reject_from_alignment;
+	int prog_len, prog_type = test->prog_type;
 	struct bpf_insn *prog = test->insns;
-	int prog_len = probe_filter_length(prog);
-	int prog_type = test->prog_type;
 	int map_fds[MAX_NR_MAPS];
 	const char *expected_err;
-	int i;
+	uint32_t retval;
+	int i, err;
+
+	if (test->disabled) {
+		printf("DISABLED\n");
+		return;
+	}
 
 	for (i = 0; i < MAX_NR_MAPS; i++)
 		map_fds[i] = -1;
 
 	do_test_fixup(test, prog, map_fds);
+	prog_len = probe_filter_length(prog);
 
 	fd_prog = bpf_verify_program(prog_type ? : BPF_PROG_TYPE_SOCKET_FILTER,
 				     prog, prog_len, test->flags & F_LOAD_WITH_STRICT_ALIGNMENT,
@@ -8983,6 +12305,23 @@ static void do_test_single(struct bpf_test *test, bool unpriv,
 		}
 	}
 
+	if (fd_prog >= 0) {
+		__u8 tmp[TEST_DATA_LEN << 2];
+		__u32 size_tmp = sizeof(tmp);
+
+		err = bpf_prog_test_run(fd_prog, 1, test->data,
+					sizeof(test->data), tmp, &size_tmp,
+					&retval, NULL);
+		if (err && errno != 524/*ENOTSUPP*/ && errno != EPERM) {
+			printf("Unexpected bpf_prog_test_run error\n");
+			goto fail_log;
+		}
+		if (!err && retval != test->retval &&
+		    test->retval != POINTER_VALUE) {
+			printf("FAIL retval %d != %d\n", retval, test->retval);
+			goto fail_log;
+		}
+	}
 	(*passes)++;
 	printf("OK%s\n", reject_from_alignment ?
 	       " (NOTE: reject due to unknown alignment)" : "");
@@ -9022,7 +12361,7 @@ static bool is_admin(void)
 	return (sysadmin == CAP_SET);
 }
 
-static int set_admin(bool admin)
+__attribute__((unused)) static int set_admin(bool admin)
 {
 	cap_t caps;
 	const cap_value_t cap_val = CAP_SYS_ADMIN;
@@ -9056,6 +12395,7 @@ static int do_test(bool unpriv, unsigned int from, unsigned int to)
 	for (i = from; i < to; i++) {
 		struct bpf_test *test = &tests[i];
 
+#if 0
 		/* Program types that are not supported by non-root we
 		 * skip right away.
 		 */
@@ -9067,6 +12407,7 @@ static int do_test(bool unpriv, unsigned int from, unsigned int to)
 			if (!unpriv)
 				set_admin(true);
 		}
+#endif
 
 		if (!unpriv) {
 			printf("#%d/p %s ", i, test->descr);

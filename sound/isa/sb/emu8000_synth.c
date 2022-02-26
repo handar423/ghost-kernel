@@ -105,8 +105,10 @@ static int snd_emu8000_remove(struct device *_dev)
 	hw = dev->driver_data;
 	if (hw->pcm)
 		snd_device_free(dev->card, hw->pcm);
-	snd_emux_free(hw->emu);
-	snd_util_memhdr_free(hw->memhdr);
+	if (hw->emu)
+		snd_emux_free(hw->emu);
+	if (hw->memhdr)
+		snd_util_memhdr_free(hw->memhdr);
 	hw->emu = NULL;
 	hw->memhdr = NULL;
 	return 0;

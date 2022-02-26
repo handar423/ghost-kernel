@@ -2,7 +2,7 @@
  * common LSM auditing functions
  *
  * Based on code written for SELinux by :
- *			Stephen Smalley, <sds@tycho.nsa.gov>
+ *			Stephen Smalley, <sds@epoch.ncsc.mil>
  * 			James Morris <jmorris@redhat.com>
  * Author : Etienne Basset, <etienne.basset@ensta.org>
  *
@@ -99,7 +99,7 @@ int ipv4_skb_to_auditdata(struct sk_buff *skb,
 	}
 	return ret;
 }
-#if IS_ENABLED(CONFIG_IPV6)
+#if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
 /**
  * ipv6_skb_to_auditdata : fill auditdata from skb
  * @skb : the skb
@@ -237,7 +237,7 @@ static void dump_common_audit_data(struct audit_buffer *ab,
 
 		audit_log_d_path(ab, " path=", &a->u.path);
 
-		inode = d_backing_inode(a->u.path.dentry);
+		inode = a->u.path.dentry->d_inode;
 		if (inode) {
 			audit_log_format(ab, " dev=");
 			audit_log_untrustedstring(ab, inode->i_sb->s_id);
@@ -270,7 +270,7 @@ static void dump_common_audit_data(struct audit_buffer *ab,
 			audit_log_format(ab, " ino=%lu", inode->i_ino);
 		}
 
-		audit_log_format(ab, " ioctlcmd=0x%hx", a->u.op->cmd);
+		audit_log_format(ab, " ioctlcmd=%hx", a->u.op->cmd);
 		break;
 	}
 	case LSM_AUDIT_DATA_DENTRY: {
@@ -279,7 +279,7 @@ static void dump_common_audit_data(struct audit_buffer *ab,
 		audit_log_format(ab, " name=");
 		audit_log_untrustedstring(ab, a->u.dentry->d_name.name);
 
-		inode = d_backing_inode(a->u.dentry);
+		inode = a->u.dentry->d_inode;
 		if (inode) {
 			audit_log_format(ab, " dev=");
 			audit_log_untrustedstring(ab, inode->i_sb->s_id);
@@ -310,7 +310,7 @@ static void dump_common_audit_data(struct audit_buffer *ab,
 			pid_t pid = task_tgid_nr(tsk);
 			if (pid) {
 				char comm[sizeof(tsk->comm)];
-				audit_log_format(ab, " opid=%d ocomm=", pid);
+				audit_log_format(ab, " pid=%d comm=", pid);
 				audit_log_untrustedstring(ab,
 				    memcpy(comm, tsk->comm, sizeof(comm)));
 			}

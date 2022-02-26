@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_POWERPC_DMA_H
 #define _ASM_POWERPC_DMA_H
 #ifdef __KERNEL__
@@ -340,6 +339,7 @@ static __inline__ int get_dma_residue(unsigned int dmanr)
 extern int request_dma(unsigned int dmanr, const char *device_id);
 /* release it again */
 extern void free_dma(unsigned int dmanr);
+extern int arch_dma_init(struct device *dev);
 
 #ifdef CONFIG_PCI
 extern int isa_dma_bridge_buggy;

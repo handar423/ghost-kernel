@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _LINUX_MISCDEVICE_H
 #define _LINUX_MISCDEVICE_H
 #include <linux/major.h>
@@ -13,33 +12,28 @@
  */
 
 #define PSMOUSE_MINOR		1
-#define MS_BUSMOUSE_MINOR	2	/* unused */
-#define ATIXL_BUSMOUSE_MINOR	3	/* unused */
+#define MS_BUSMOUSE_MINOR	2
+#define ATIXL_BUSMOUSE_MINOR	3
 /*#define AMIGAMOUSE_MINOR	4	FIXME OBSOLETE */
-#define ATARIMOUSE_MINOR	5	/* unused */
-#define SUN_MOUSE_MINOR		6	/* unused */
-#define APOLLO_MOUSE_MINOR	7	/* unused */
-#define PC110PAD_MINOR		9	/* unused */
+#define ATARIMOUSE_MINOR	5
+#define SUN_MOUSE_MINOR		6
+#define APOLLO_MOUSE_MINOR	7
+#define PC110PAD_MINOR		9
 /*#define ADB_MOUSE_MINOR	10	FIXME OBSOLETE */
 #define WATCHDOG_MINOR		130	/* Watchdog timer     */
 #define TEMP_MINOR		131	/* Temperature Sensor */
-#define APM_MINOR_DEV		134
 #define RTC_MINOR		135
 #define EFI_RTC_MINOR		136	/* EFI Time services */
 #define VHCI_MINOR		137
 #define SUN_OPENPROM_MINOR	139
-#define DMAPI_MINOR		140	/* unused */
+#define DMAPI_MINOR		140	/* DMAPI */
 #define NVRAM_MINOR		144
 #define SGI_MMTIMER		153
-#define STORE_QUEUE_MINOR	155	/* unused */
+#define STORE_QUEUE_MINOR	155
 #define I2O_MINOR		166
-#define HWRNG_MINOR		183
 #define MICROCODE_MINOR		184
-#define IRNET_MINOR		187
-#define D7S_MINOR		193
 #define VFIO_MINOR		196
 #define TUN_MINOR		200
-#define CUSE_MINOR		203
 #define MWAVE_MINOR		219	/* ACP/Mwave Modem */
 #define MPT_MINOR		220
 #define MPT2SAS_MINOR		221
@@ -55,12 +49,9 @@
 #define LOOP_CTRL_MINOR		237
 #define VHOST_NET_MINOR		238
 #define UHID_MINOR		239
-#define USERIO_MINOR		240
-#define VHOST_VSOCK_MINOR	241
 #define MISC_DYNAMIC_MINOR	255
 
 struct device;
-struct attribute_group;
 
 struct miscdevice  {
 	int minor;
@@ -69,20 +60,12 @@ struct miscdevice  {
 	struct list_head list;
 	struct device *parent;
 	struct device *this_device;
-	const struct attribute_group **groups;
 	const char *nodename;
 	umode_t mode;
 };
 
-extern int misc_register(struct miscdevice *misc);
-extern void misc_deregister(struct miscdevice *misc);
-
-/*
- * Helper macro for drivers that don't do anything special in the initcall.
- * This helps in eleminating of boilerplate code.
- */
-#define builtin_misc_device(__misc_device) \
-	builtin_driver(__misc_device, misc_register)
+extern int misc_register(struct miscdevice * misc);
+extern int misc_deregister(struct miscdevice *misc);
 
 /*
  * Helper macro for drivers that don't do anything special in module init / exit

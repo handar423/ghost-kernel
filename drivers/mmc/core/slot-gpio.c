@@ -121,20 +121,18 @@ EXPORT_SYMBOL(mmc_gpio_request_ro);
 void mmc_gpiod_request_cd_irq(struct mmc_host *host)
 {
 	struct mmc_gpio *ctx = host->slot.handler_priv;
-	int ret, irq;
+	int irq = -EINVAL;
+	int ret;
 
 	if (host->slot.cd_irq >= 0 || !ctx || !ctx->cd_gpio)
 		return;
 
-	irq = gpiod_to_irq(ctx->cd_gpio);
-
 	/*
-	 * Even if gpiod_to_irq() returns a valid IRQ number, the platform might
-	 * still prefer to poll, e.g., because that IRQ number is already used
-	 * by another unit and cannot be shared.
+	 * Do not use IRQ if the platform prefers to poll, e.g., because that
+	 * IRQ number is already used by another unit and cannot be shared.
 	 */
-	if (irq >= 0 && host->caps & MMC_CAP_NEEDS_POLL)
-		irq = -EINVAL;
+	if (!(host->caps & MMC_CAP_NEEDS_POLL))
+		irq = gpiod_to_irq(ctx->cd_gpio);
 
 	if (irq >= 0) {
 		if (!ctx->cd_gpio_isr)
@@ -237,9 +235,13 @@ int mmc_gpiod_request_cd(struct mmc_host *host, const char *con_id,
 	struct gpio_desc *desc;
 	int ret;
 
-	desc = devm_gpiod_get_index(host->parent, con_id, idx, GPIOD_IN);
+	desc = devm_gpiod_get_index(host->parent, con_id, idx);
 	if (IS_ERR(desc))
 		return PTR_ERR(desc);
+
+	ret = gpiod_direction_input(desc);
+	if (ret < 0)
+		return ret;
 
 	if (debounce) {
 		ret = gpiod_set_debounce(desc, debounce);
@@ -288,9 +290,13 @@ int mmc_gpiod_request_ro(struct mmc_host *host, const char *con_id,
 	struct gpio_desc *desc;
 	int ret;
 
-	desc = devm_gpiod_get_index(host->parent, con_id, idx, GPIOD_IN);
+	desc = devm_gpiod_get_index(host->parent, con_id, idx);
 	if (IS_ERR(desc))
 		return PTR_ERR(desc);
+
+	ret = gpiod_direction_input(desc);
+	if (ret < 0)
+		return ret;
 
 	if (debounce) {
 		ret = gpiod_set_debounce(desc, debounce);

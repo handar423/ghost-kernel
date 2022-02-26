@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 
 /*
  * DECnet       An implementation of the DECnet protocol suite for the LINUX
@@ -248,9 +247,7 @@ void __init dn_fib_rules_init(void)
 
 void __exit dn_fib_rules_cleanup(void)
 {
-	rtnl_lock();
 	fib_rules_unregister(dn_fib_rules_ops);
-	rtnl_unlock();
 	rcu_barrier();
 }
 

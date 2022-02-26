@@ -33,7 +33,7 @@
 #include <asm/hw_breakpoint.h>
 #include <asm/processor.h>
 #include <asm/sstep.h>
-#include <linux/uaccess.h>
+#include <asm/uaccess.h>
 
 /*
  * Stores the breakpoints currently in use on each breakpoint address
@@ -63,7 +63,7 @@ int hw_breakpoint_slots(int type)
 int arch_install_hw_breakpoint(struct perf_event *bp)
 {
 	struct arch_hw_breakpoint *info = counter_arch_bp(bp);
-	struct perf_event **slot = this_cpu_ptr(&bp_per_reg);
+	struct perf_event **slot = &__get_cpu_var(bp_per_reg);
 
 	*slot = bp;
 
@@ -88,7 +88,7 @@ int arch_install_hw_breakpoint(struct perf_event *bp)
  */
 void arch_uninstall_hw_breakpoint(struct perf_event *bp)
 {
-	struct perf_event **slot = this_cpu_ptr(&bp_per_reg);
+	struct perf_event **slot = &__get_cpu_var(bp_per_reg);
 
 	if (*slot != bp) {
 		WARN_ONCE(1, "Can't find the breakpoint");
@@ -206,16 +206,14 @@ void thread_change_pc(struct task_struct *tsk, struct pt_regs *regs)
 /*
  * Handle debug exception notifications.
  */
-int hw_breakpoint_handler(struct die_args *args)
+int __kprobes hw_breakpoint_handler(struct die_args *args)
 {
 	int rc = NOTIFY_STOP;
 	struct perf_event *bp;
 	struct pt_regs *regs = args->regs;
-#ifndef CONFIG_PPC_8xx
 	int stepped = 1;
-	unsigned int instr;
-#endif
 	struct arch_hw_breakpoint *info;
+	unsigned int instr;
 	unsigned long dar = regs->dar;
 
 	/* Disable breakpoints during exception handling */
@@ -229,11 +227,9 @@ int hw_breakpoint_handler(struct die_args *args)
 	 */
 	rcu_read_lock();
 
-	bp = __this_cpu_read(bp_per_reg);
-	if (!bp) {
-		rc = NOTIFY_DONE;
+	bp = __get_cpu_var(bp_per_reg);
+	if (!bp)
 		goto out;
-	}
 	info = counter_arch_bp(bp);
 
 	/*
@@ -259,7 +255,6 @@ int hw_breakpoint_handler(struct die_args *args)
 	      (dar - bp->attr.bp_addr < bp->attr.bp_len)))
 		info->type |= HW_BRK_TYPE_EXTRANEOUS_IRQ;
 
-#ifndef CONFIG_PPC_8xx
 	/* Do not emulate user-space instructions, instead single-step them */
 	if (user_mode(regs)) {
 		current->thread.last_hit_ubp = bp;
@@ -283,7 +278,6 @@ int hw_breakpoint_handler(struct die_args *args)
 		perf_event_disable_inatomic(bp);
 		goto out;
 	}
-#endif
 	/*
 	 * As a policy, the callback is invoked in a 'trigger-after-execute'
 	 * fashion
@@ -296,12 +290,11 @@ out:
 	rcu_read_unlock();
 	return rc;
 }
-NOKPROBE_SYMBOL(hw_breakpoint_handler);
 
 /*
  * Handle single-step exceptions following a DABR hit.
  */
-static int single_step_dabr_instruction(struct die_args *args)
+int __kprobes single_step_dabr_instruction(struct die_args *args)
 {
 	struct pt_regs *regs = args->regs;
 	struct perf_event *bp = NULL;
@@ -336,12 +329,11 @@ static int single_step_dabr_instruction(struct die_args *args)
 
 	return NOTIFY_STOP;
 }
-NOKPROBE_SYMBOL(single_step_dabr_instruction);
 
 /*
  * Handle debug exception notifications.
  */
-int hw_breakpoint_exceptions_notify(
+int __kprobes hw_breakpoint_exceptions_notify(
 		struct notifier_block *unused, unsigned long val, void *data)
 {
 	int ret = NOTIFY_DONE;
@@ -357,7 +349,6 @@ int hw_breakpoint_exceptions_notify(
 
 	return ret;
 }
-NOKPROBE_SYMBOL(hw_breakpoint_exceptions_notify);
 
 /*
  * Release the user breakpoints used by ptrace

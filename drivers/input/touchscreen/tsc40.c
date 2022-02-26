@@ -11,6 +11,7 @@
 #include <linux/slab.h>
 #include <linux/input.h>
 #include <linux/serio.h>
+#include <linux/init.h>
 
 #define PACKET_LENGTH  5
 struct tsc_ser {
@@ -141,7 +142,7 @@ static void tsc_disconnect(struct serio *serio)
 	serio_set_drvdata(serio, NULL);
 }
 
-static const struct serio_device_id tsc_serio_ids[] = {
+static struct serio_device_id tsc_serio_ids[] = {
 	{
 		.type   = SERIO_RS232,
 		.proto  = SERIO_TSC40,

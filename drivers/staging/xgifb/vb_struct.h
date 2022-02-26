@@ -1,7 +1,6 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _VB_STRUCT_
 #define _VB_STRUCT_
-#include "../../video/fbdev/sis/vstruct.h"
+#include "../../video/sis/vstruct.h"
 
 struct XGI_LVDSCRT1HDataStruct {
 	unsigned char Reg[8];
@@ -66,6 +65,7 @@ struct XGI330_TVDataTablStruct {
 	struct SiS_TVData const *DATAPTR;
 };
 
+
 struct XGI_TimingHStruct {
 	unsigned char data[8];
 };
@@ -116,6 +116,7 @@ struct XGI21_LVDSCapStruct {
 struct XGI_CRT1TableStruct {
 	unsigned char CR[16];
 };
+
 
 struct XGI301C_Tap4TimingStruct {
 	unsigned short DE;

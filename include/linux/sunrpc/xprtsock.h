@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 /*
  *  linux/include/linux/sunrpc/xprtsock.h
  *
@@ -56,12 +55,10 @@ struct sock_xprt {
 	size_t			rcvsize,
 				sndsize;
 
-	struct rpc_timeout	tcp_timeout;
-
 	/*
 	 * Saved socket callback addresses
 	 */
-	void			(*old_data_ready)(struct sock *);
+	void			(*old_data_ready)(struct sock *, int);
 	void			(*old_state_change)(struct sock *);
 	void			(*old_write_space)(struct sock *);
 	void			(*old_error_report)(struct sock *);
@@ -84,7 +81,6 @@ struct sock_xprt {
 
 #define XPRT_SOCK_CONNECTING	1U
 #define XPRT_SOCK_DATA_READY	(2)
-#define XPRT_SOCK_UPD_TIMEOUT	(3)
 
 #endif /* __KERNEL__ */
 

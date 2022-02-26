@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_X86_MICROCODE_AMD_H
 #define _ASM_X86_MICROCODE_AMD_H
 
@@ -45,14 +44,15 @@ struct microcode_amd {
 
 #ifdef CONFIG_MICROCODE_AMD
 extern void __init load_ucode_amd_bsp(unsigned int family);
-extern void load_ucode_amd_ap(unsigned int family);
-extern int __init save_microcode_in_initrd_amd(unsigned int family);
+extern void load_ucode_amd_ap(void);
+extern int __init save_microcode_in_initrd_amd(void);
 void reload_ucode_amd(void);
 #else
 static inline void __init load_ucode_amd_bsp(unsigned int family) {}
-static inline void load_ucode_amd_ap(unsigned int family) {}
-static inline int __init
-save_microcode_in_initrd_amd(unsigned int family) { return -EINVAL; }
+static inline void load_ucode_amd_ap(void) {}
+static inline int __init save_microcode_in_initrd_amd(void) { return -EINVAL; }
 void reload_ucode_amd(void) {}
 #endif
+
+extern bool check_current_patch_level(u32 *rev, bool early);
 #endif /* _ASM_X86_MICROCODE_AMD_H */

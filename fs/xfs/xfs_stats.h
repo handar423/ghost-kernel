@@ -155,11 +155,7 @@ struct __xfsstats {
 	uint32_t		xs_ibt_2[__XBTS_MAX];
 #define XFSSTAT_END_FIBT_V2		(XFSSTAT_END_IBT_V2 + __XBTS_MAX)
 	uint32_t		xs_fibt_2[__XBTS_MAX];
-#define XFSSTAT_END_RMAP_V2		(XFSSTAT_END_FIBT_V2 + __XBTS_MAX)
-	uint32_t		xs_rmap_2[__XBTS_MAX];
-#define XFSSTAT_END_REFCOUNT		(XFSSTAT_END_RMAP_V2 + __XBTS_MAX)
-	uint32_t		xs_refcbt_2[__XBTS_MAX];
-#define XFSSTAT_END_XQMSTAT		(XFSSTAT_END_REFCOUNT + 6)
+#define XFSSTAT_END_XQMSTAT		(XFSSTAT_END_FIBT_V2+6)
 	uint32_t		xs_qm_dqreclaims;
 	uint32_t		xs_qm_dqreclaim_misses;
 	uint32_t		xs_qm_dquot_dups;

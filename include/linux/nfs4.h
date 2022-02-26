@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 /*
  *  include/linux/nfs4.h
  *
@@ -16,13 +15,6 @@
 #include <linux/list.h>
 #include <linux/uidgid.h>
 #include <uapi/linux/nfs4.h>
-
-enum nfs4_acl_whotype {
-	NFS4_ACL_WHO_NAMED = 0,
-	NFS4_ACL_WHO_OWNER,
-	NFS4_ACL_WHO_GROUP,
-	NFS4_ACL_WHO_EVERYONE,
-};
 
 struct nfs4_ace {
 	uint32_t	type;
@@ -480,7 +472,6 @@ enum {
 	NFSPROC4_CLNT_ACCESS,
 	NFSPROC4_CLNT_GETATTR,
 	NFSPROC4_CLNT_LOOKUP,
-	NFSPROC4_CLNT_LOOKUPP,
 	NFSPROC4_CLNT_LOOKUP_ROOT,
 	NFSPROC4_CLNT_REMOVE,
 	NFSPROC4_CLNT_RENAME,
@@ -646,17 +637,6 @@ enum pnfs_update_layout_reason {
 	PNFS_UPDATE_LAYOUT_BLOCKED,
 	PNFS_UPDATE_LAYOUT_INVALID_OPEN,
 	PNFS_UPDATE_LAYOUT_SEND_LAYOUTGET,
-};
-
-#define NFS4_OP_MAP_NUM_LONGS					\
-	DIV_ROUND_UP(LAST_NFS4_OP, 8 * sizeof(unsigned long))
-#define NFS4_OP_MAP_NUM_WORDS \
-	(NFS4_OP_MAP_NUM_LONGS * sizeof(unsigned long) / sizeof(u32))
-struct nfs4_op_map {
-	union {
-		unsigned long longs[NFS4_OP_MAP_NUM_LONGS];
-		u32 words[NFS4_OP_MAP_NUM_WORDS];
-	} u;
 };
 
 #endif

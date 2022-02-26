@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * Functions for saving/restoring console.
  *
@@ -10,7 +9,6 @@
 #include <linux/kbd_kern.h>
 #include <linux/vt.h>
 #include <linux/module.h>
-#include <linux/slab.h>
 #include "power.h"
 
 #define SUSPEND_CONSOLE	(MAX_NR_CONSOLES-1)
@@ -127,17 +125,17 @@ out:
 	return ret;
 }
 
-void pm_prepare_console(void)
+int pm_prepare_console(void)
 {
 	if (!pm_vt_switch())
-		return;
+		return 0;
 
 	orig_fgconsole = vt_move_to_console(SUSPEND_CONSOLE, 1);
 	if (orig_fgconsole < 0)
-		return;
+		return 1;
 
 	orig_kmsg = vt_kmsg_redirect(SUSPEND_CONSOLE);
-	return;
+	return 0;
 }
 
 void pm_restore_console(void)

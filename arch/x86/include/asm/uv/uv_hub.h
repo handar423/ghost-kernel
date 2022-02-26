@@ -19,6 +19,7 @@
 #include <linux/topology.h>
 #include <asm/types.h>
 #include <asm/percpu.h>
+#include <asm/uv/uv.h>
 #include <asm/uv/uv_mmrs.h>
 #include <asm/uv/bios.h>
 #include <asm/irq_vectors.h>
@@ -241,71 +242,63 @@ static inline int uv_hub_info_check(int version)
 #define UV2_HUB_REVISION_BASE		3
 #define UV3_HUB_REVISION_BASE		5
 #define UV4_HUB_REVISION_BASE		7
+#define UV4A_HUB_REVISION_BASE		8	/* UV4 (fixed) rev 2 */
 
+/* WARNING: UVx_HUB_IS_SUPPORTED defines are deprecated and will be removed */
+static inline int is_uv1_hub(void)
+{
 #ifdef	UV1_HUB_IS_SUPPORTED
-static inline int is_uv1_hub(void)
-{
-	return uv_hub_info->hub_revision < UV2_HUB_REVISION_BASE;
-}
+	return is_uv_hubbed(uv(1));
 #else
-static inline int is_uv1_hub(void)
-{
 	return 0;
-}
 #endif
+}
 
+static inline int is_uv2_hub(void)
+{
 #ifdef	UV2_HUB_IS_SUPPORTED
-static inline int is_uv2_hub(void)
-{
-	return ((uv_hub_info->hub_revision >= UV2_HUB_REVISION_BASE) &&
-		(uv_hub_info->hub_revision < UV3_HUB_REVISION_BASE));
-}
+	return is_uv_hubbed(uv(2));
 #else
-static inline int is_uv2_hub(void)
-{
 	return 0;
-}
 #endif
+}
 
+static inline int is_uv3_hub(void)
+{
 #ifdef	UV3_HUB_IS_SUPPORTED
-static inline int is_uv3_hub(void)
-{
-	return ((uv_hub_info->hub_revision >= UV3_HUB_REVISION_BASE) &&
-		(uv_hub_info->hub_revision < UV4_HUB_REVISION_BASE));
-}
+	return is_uv_hubbed(uv(3));
 #else
-static inline int is_uv3_hub(void)
-{
 	return 0;
-}
 #endif
+}
 
-#ifdef	UV4_HUB_IS_SUPPORTED
-static inline int is_uv4_hub(void)
+/* First test "is UV4A", then "is UV4" */
+static inline int is_uv4a_hub(void)
 {
-	return uv_hub_info->hub_revision >= UV4_HUB_REVISION_BASE;
-}
-#else
-static inline int is_uv4_hub(void)
-{
+#ifdef	UV4A_HUB_IS_SUPPORTED
+	if (is_uv_hubbed(uv(4)))
+		return (uv_hub_info->hub_revision == UV4A_HUB_REVISION_BASE);
+#endif
 	return 0;
 }
+
+static inline int is_uv4_hub(void)
+{
+#ifdef	UV4_HUB_IS_SUPPORTED
+	return is_uv_hubbed(uv(4));
+#else
+	return 0;
 #endif
+}
 
 static inline int is_uvx_hub(void)
 {
-	if (uv_hub_info->hub_revision >= UV2_HUB_REVISION_BASE)
-		return uv_hub_info->hub_revision;
-
-	return 0;
+	return (is_uv_hubbed(-2) >= uv(2));
 }
 
 static inline int is_uv_hub(void)
 {
-#ifdef	UV1_HUB_IS_SUPPORTED
-	return uv_hub_info->hub_revision;
-#endif
-	return is_uvx_hub();
+	return is_uv1_hub() || is_uvx_hub();
 }
 
 union uvh_apicid {
@@ -821,16 +814,16 @@ struct uv_hub_nmi_s {
 
 struct uv_cpu_nmi_s {
 	struct uv_hub_nmi_s	*hub;
-	int			state;
-	int			pinging;
+	atomic_t		state;
+	atomic_t		pinging;
 	int			queries;
 	int			pings;
 };
 
-DECLARE_PER_CPU(struct uv_cpu_nmi_s, uv_cpu_nmi);
-
-#define uv_hub_nmi			this_cpu_read(uv_cpu_nmi.hub)
-#define uv_cpu_nmi_per(cpu)		(per_cpu(uv_cpu_nmi, cpu))
+DECLARE_PER_CPU(struct uv_cpu_nmi_s, __uv_cpu_nmi);
+#define uv_cpu_nmi			(__get_cpu_var(__uv_cpu_nmi))
+#define uv_hub_nmi			(uv_cpu_nmi.hub)
+#define uv_cpu_nmi_per(cpu)		(per_cpu(__uv_cpu_nmi, cpu))
 #define uv_hub_nmi_per(cpu)		(uv_cpu_nmi_per(cpu).hub)
 
 /* uv_cpu_nmi_states */

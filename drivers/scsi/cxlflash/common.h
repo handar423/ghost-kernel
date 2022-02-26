@@ -175,7 +175,9 @@ struct afu_cmd {
 
 static inline struct afu_cmd *sc_to_afuc(struct scsi_cmnd *sc)
 {
-	return PTR_ALIGN(scsi_cmd_priv(sc), __alignof__(struct afu_cmd));
+	struct afu_cmd *afu = (struct afu_cmd *)(sc + 1);
+
+	return PTR_ALIGN(afu, __alignof__(struct afu_cmd));
 }
 
 static inline struct afu_cmd *sc_to_afuci(struct scsi_cmnd *sc)

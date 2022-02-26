@@ -29,8 +29,10 @@ void __init *s3c_set_platdata(void *pd, size_t pdsize,
 	}
 
 	npd = kmemdup(pd, pdsize, GFP_KERNEL);
-	if (!npd)
+	if (!npd) {
+		printk(KERN_ERR "%s: cannot clone platform data\n", pdev->name);
 		return NULL;
+	}
 
 	pdev->dev.platform_data = npd;
 	return npd;

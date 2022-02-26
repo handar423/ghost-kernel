@@ -37,20 +37,11 @@ struct atmel_tcb_pwm_device {
 	unsigned period;		/* PWM period expressed in clk cycles */
 };
 
-struct atmel_tcb_channel {
-	u32 enabled;
-	u32 cmr;
-	u32 ra;
-	u32 rb;
-	u32 rc;
-};
-
 struct atmel_tcb_pwm_chip {
 	struct pwm_chip chip;
 	spinlock_t lock;
 	struct atmel_tc *tc;
 	struct atmel_tcb_pwm_device *pwms[NPWM];
-	struct atmel_tcb_channel bkup[NPWM / 2];
 };
 
 static inline struct atmel_tcb_pwm_chip *to_tcb_chip(struct pwm_chip *chip)
@@ -85,7 +76,7 @@ static int atmel_tcb_pwm_request(struct pwm_chip *chip,
 	if (!tcbpwm)
 		return -ENOMEM;
 
-	ret = clk_prepare_enable(tc->clk[group]);
+	ret = clk_enable(tc->clk[group]);
 	if (ret) {
 		devm_kfree(chip->dev, tcbpwm);
 		return ret;
@@ -133,7 +124,7 @@ static void atmel_tcb_pwm_free(struct pwm_chip *chip, struct pwm_device *pwm)
 	struct atmel_tcb_pwm_device *tcbpwm = pwm_get_chip_data(pwm);
 	struct atmel_tc *tc = tcbpwmc->tc;
 
-	clk_disable_unprepare(tc->clk[pwm->hwpwm / 2]);
+	clk_disable(tc->clk[pwm->hwpwm / 2]);
 	tcbpwmc->pwms[pwm->hwpwm] = NULL;
 	devm_kfree(chip->dev, tcbpwm);
 }
@@ -184,15 +175,12 @@ static void atmel_tcb_pwm_disable(struct pwm_chip *chip, struct pwm_device *pwm)
 	 * Use software trigger to apply the new setting.
 	 * If both PWM devices in this group are disabled we stop the clock.
 	 */
-	if (!(cmr & (ATMEL_TC_ACPC | ATMEL_TC_BCPC))) {
+	if (!(cmr & (ATMEL_TC_ACPC | ATMEL_TC_BCPC)))
 		__raw_writel(ATMEL_TC_SWTRG | ATMEL_TC_CLKDIS,
 			     regs + ATMEL_TC_REG(group, CCR));
-		tcbpwmc->bkup[group].enabled = 1;
-	} else {
+	else
 		__raw_writel(ATMEL_TC_SWTRG, regs +
 			     ATMEL_TC_REG(group, CCR));
-		tcbpwmc->bkup[group].enabled = 0;
-	}
 
 	spin_unlock(&tcbpwmc->lock);
 }
@@ -261,8 +249,6 @@ static int atmel_tcb_pwm_enable(struct pwm_chip *chip, struct pwm_device *pwm)
 		}
 	}
 
-	cmr |= (tcbpwm->div & ATMEL_TC_TCCLKS);
-
 	__raw_writel(cmr, regs + ATMEL_TC_REG(group, CMR));
 
 	if (index == 0)
@@ -275,7 +261,6 @@ static int atmel_tcb_pwm_enable(struct pwm_chip *chip, struct pwm_device *pwm)
 	/* Use software trigger to apply the new setting */
 	__raw_writel(ATMEL_TC_CLKEN | ATMEL_TC_SWTRG,
 		     regs + ATMEL_TC_REG(group, CCR));
-	tcbpwmc->bkup[group].enabled = 1;
 	spin_unlock(&tcbpwmc->lock);
 	return 0;
 }
@@ -318,9 +303,9 @@ static int atmel_tcb_pwm_config(struct pwm_chip *chip, struct pwm_device *pwm,
 	 */
 	if (i == 5) {
 		i = slowclk;
-		rate = clk_get_rate(tc->slow_clk);
+		rate = 32768;
 		min = div_u64(NSEC_PER_SEC, rate);
-		max = min << tc->tcb_config->counter_width;
+		max = min << 16;
 
 		/* If period is too big return ERANGE error */
 		if (max < period_ns)
@@ -360,7 +345,7 @@ static int atmel_tcb_pwm_config(struct pwm_chip *chip, struct pwm_device *pwm,
 	tcbpwm->duty = duty;
 
 	/* If the PWM is enabled, call enable to apply the new conf */
-	if (pwm_is_enabled(pwm))
+	if (test_bit(PWMF_ENABLED, &pwm->flags))
 		atmel_tcb_pwm_enable(chip, pwm);
 
 	return 0;
@@ -392,7 +377,7 @@ static int atmel_tcb_pwm_probe(struct platform_device *pdev)
 		return err;
 	}
 
-	tc = atmel_tc_alloc(tcblock);
+	tc = atmel_tc_alloc(tcblock, "tcb-pwm");
 	if (tc == NULL) {
 		dev_err(&pdev->dev, "failed to allocate Timer Counter Block\n");
 		return -ENOMEM;
@@ -400,9 +385,9 @@ static int atmel_tcb_pwm_probe(struct platform_device *pdev)
 
 	tcbpwm = devm_kzalloc(&pdev->dev, sizeof(*tcbpwm), GFP_KERNEL);
 	if (tcbpwm == NULL) {
-		err = -ENOMEM;
+		atmel_tc_free(tc);
 		dev_err(&pdev->dev, "failed to allocate memory\n");
-		goto err_free_tc;
+		return -ENOMEM;
 	}
 
 	tcbpwm->chip.dev = &pdev->dev;
@@ -413,35 +398,23 @@ static int atmel_tcb_pwm_probe(struct platform_device *pdev)
 	tcbpwm->chip.npwm = NPWM;
 	tcbpwm->tc = tc;
 
-	err = clk_prepare_enable(tc->slow_clk);
-	if (err)
-		goto err_free_tc;
-
 	spin_lock_init(&tcbpwm->lock);
 
 	err = pwmchip_add(&tcbpwm->chip);
-	if (err < 0)
-		goto err_disable_clk;
+	if (err < 0) {
+		atmel_tc_free(tc);
+		return err;
+	}
 
 	platform_set_drvdata(pdev, tcbpwm);
 
 	return 0;
-
-err_disable_clk:
-	clk_disable_unprepare(tcbpwm->tc->slow_clk);
-
-err_free_tc:
-	atmel_tc_free(tc);
-
-	return err;
 }
 
 static int atmel_tcb_pwm_remove(struct platform_device *pdev)
 {
 	struct atmel_tcb_pwm_chip *tcbpwm = platform_get_drvdata(pdev);
 	int err;
-
-	clk_disable_unprepare(tcbpwm->tc->slow_clk);
 
 	err = pwmchip_remove(&tcbpwm->chip);
 	if (err < 0)
@@ -458,56 +431,10 @@ static const struct of_device_id atmel_tcb_pwm_dt_ids[] = {
 };
 MODULE_DEVICE_TABLE(of, atmel_tcb_pwm_dt_ids);
 
-#ifdef CONFIG_PM_SLEEP
-static int atmel_tcb_pwm_suspend(struct device *dev)
-{
-	struct platform_device *pdev = to_platform_device(dev);
-	struct atmel_tcb_pwm_chip *tcbpwm = platform_get_drvdata(pdev);
-	void __iomem *base = tcbpwm->tc->regs;
-	int i;
-
-	for (i = 0; i < (NPWM / 2); i++) {
-		struct atmel_tcb_channel *chan = &tcbpwm->bkup[i];
-
-		chan->cmr = readl(base + ATMEL_TC_REG(i, CMR));
-		chan->ra = readl(base + ATMEL_TC_REG(i, RA));
-		chan->rb = readl(base + ATMEL_TC_REG(i, RB));
-		chan->rc = readl(base + ATMEL_TC_REG(i, RC));
-	}
-	return 0;
-}
-
-static int atmel_tcb_pwm_resume(struct device *dev)
-{
-	struct platform_device *pdev = to_platform_device(dev);
-	struct atmel_tcb_pwm_chip *tcbpwm = platform_get_drvdata(pdev);
-	void __iomem *base = tcbpwm->tc->regs;
-	int i;
-
-	for (i = 0; i < (NPWM / 2); i++) {
-		struct atmel_tcb_channel *chan = &tcbpwm->bkup[i];
-
-		writel(chan->cmr, base + ATMEL_TC_REG(i, CMR));
-		writel(chan->ra, base + ATMEL_TC_REG(i, RA));
-		writel(chan->rb, base + ATMEL_TC_REG(i, RB));
-		writel(chan->rc, base + ATMEL_TC_REG(i, RC));
-		if (chan->enabled) {
-			writel(ATMEL_TC_CLKEN | ATMEL_TC_SWTRG,
-				base + ATMEL_TC_REG(i, CCR));
-		}
-	}
-	return 0;
-}
-#endif
-
-static SIMPLE_DEV_PM_OPS(atmel_tcb_pwm_pm_ops, atmel_tcb_pwm_suspend,
-			 atmel_tcb_pwm_resume);
-
 static struct platform_driver atmel_tcb_pwm_driver = {
 	.driver = {
 		.name = "atmel-tcb-pwm",
 		.of_match_table = atmel_tcb_pwm_dt_ids,
-		.pm = &atmel_tcb_pwm_pm_ops,
 	},
 	.probe = atmel_tcb_pwm_probe,
 	.remove = atmel_tcb_pwm_remove,

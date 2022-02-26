@@ -5,7 +5,7 @@
  ******************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2017, Intel Corp.
+ * Copyright (C) 2000 - 2013, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -89,9 +89,9 @@ acpi_ut_get_mutex_object(acpi_handle handle,
 
 	mutex_node = handle;
 	if (pathname != NULL) {
-		status =
-		    acpi_get_handle(handle, pathname,
-				    ACPI_CAST_PTR(acpi_handle, &mutex_node));
+		status = acpi_get_handle(handle, pathname,
+					 ACPI_CAST_PTR(acpi_handle,
+						       &mutex_node));
 		if (ACPI_FAILURE(status)) {
 			return (status);
 		}
@@ -151,8 +151,6 @@ acpi_acquire_mutex(acpi_handle handle, acpi_string pathname, u16 timeout)
 	return (status);
 }
 
-ACPI_EXPORT_SYMBOL(acpi_acquire_mutex)
-
 /*******************************************************************************
  *
  * FUNCTION:    acpi_release_mutex
@@ -169,6 +167,7 @@ ACPI_EXPORT_SYMBOL(acpi_acquire_mutex)
  *              not both.
  *
  ******************************************************************************/
+
 acpi_status acpi_release_mutex(acpi_handle handle, acpi_string pathname)
 {
 	acpi_status status;
@@ -186,5 +185,3 @@ acpi_status acpi_release_mutex(acpi_handle handle, acpi_string pathname)
 	acpi_os_release_mutex(mutex_obj->mutex.os_mutex);
 	return (AE_OK);
 }
-
-ACPI_EXPORT_SYMBOL(acpi_release_mutex)

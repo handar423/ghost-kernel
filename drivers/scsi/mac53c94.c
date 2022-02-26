@@ -382,16 +382,16 @@ static void set_dma_cmds(struct fsc_state *state, struct scsi_cmnd *cmd)
 		if (dma_len > 0xffff)
 			panic("mac53c94: scatterlist element >= 64k");
 		total += dma_len;
-		dcmds->req_count = cpu_to_le16(dma_len);
-		dcmds->command = cpu_to_le16(dma_cmd);
-		dcmds->phy_addr = cpu_to_le32(dma_addr);
+		st_le16(&dcmds->req_count, dma_len);
+		st_le16(&dcmds->command, dma_cmd);
+		st_le32(&dcmds->phy_addr, dma_addr);
 		dcmds->xfer_status = 0;
 		++dcmds;
 	}
 
 	dma_cmd += OUTPUT_LAST - OUTPUT_MORE;
-	dcmds[-1].command = cpu_to_le16(dma_cmd);
-	dcmds->command = cpu_to_le16(DBDMA_STOP);
+	st_le16(&dcmds[-1].command, dma_cmd);
+	st_le16(&dcmds->command, DBDMA_STOP);
 	cmd->SCp.this_residual = total;
 }
 
@@ -403,6 +403,7 @@ static struct scsi_host_template mac53c94_template = {
 	.can_queue	= 1,
 	.this_id	= 7,
 	.sg_tablesize	= SG_ALL,
+	.cmd_per_lun	= 1,
 	.use_clustering	= DISABLE_CLUSTERING,
 };
 
@@ -448,14 +449,15 @@ static int mac53c94_probe(struct macio_dev *mdev, const struct of_device_id *mat
 		ioremap(macio_resource_start(mdev, 1), 0x1000);
 	state->dmaintr = macio_irq(mdev, 1);
 	if (state->regs == NULL || state->dma == NULL) {
-		printk(KERN_ERR "mac53c94: ioremap failed for %pOF\n", node);
+		printk(KERN_ERR "mac53c94: ioremap failed for %s\n",
+		       node->full_name);
 		goto out_free;
 	}
 
 	clkprop = of_get_property(node, "clock-frequency", &proplen);
        	if (clkprop == NULL || proplen != sizeof(int)) {
-       		printk(KERN_ERR "%pOF: can't get clock frequency, "
-       		       "assuming 25MHz\n", node);
+       		printk(KERN_ERR "%s: can't get clock frequency, "
+       		       "assuming 25MHz\n", node->full_name);
        		state->clk_freq = 25000000;
        	} else
        		state->clk_freq = *(int *)clkprop;
@@ -468,7 +470,7 @@ static int mac53c94_probe(struct macio_dev *mdev, const struct of_device_id *mat
        				sizeof(struct dbdma_cmd), GFP_KERNEL);
        	if (dma_cmd_space == 0) {
        		printk(KERN_ERR "mac53c94: couldn't allocate dma "
-       		       "command space for %pOF\n", node);
+       		       "command space for %s\n", node->full_name);
 		rc = -ENOMEM;
        		goto out_free;
        	}
@@ -480,8 +482,8 @@ static int mac53c94_probe(struct macio_dev *mdev, const struct of_device_id *mat
 	mac53c94_init(state);
 
 	if (request_irq(state->intr, do_mac53c94_interrupt, 0, "53C94",state)) {
-		printk(KERN_ERR "mac53C94: can't get irq %d for %pOF\n",
-		       state->intr, node);
+		printk(KERN_ERR "mac53C94: can't get irq %d for %s\n",
+		       state->intr, node->full_name);
 		goto out_free_dma;
 	}
 

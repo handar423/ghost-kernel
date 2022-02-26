@@ -687,7 +687,6 @@ static int find_rsb_dir(struct dlm_ls *ls, char *name, int len,
 		log_error(ls, "find_rsb new from_other %d dir %d our %d %s",
 			  from_nodeid, dir_nodeid, our_nodeid, r->res_name);
 		dlm_free_rsb(r);
-		r = NULL;
 		error = -ENOTBLK;
 		goto out_unlock;
 	}
@@ -1003,6 +1002,7 @@ int dlm_master_lookup(struct dlm_ls *ls, int from_nodeid, char *name, int len,
 		if (r->res_master_nodeid == our_nodeid) {
 			log_error(ls, "from_master %d our_master", from_nodeid);
 			dlm_dump_rsb(r);
+			dlm_send_rcom_lookup_dump(r, from_nodeid);
 			goto out_found;
 		}
 
@@ -1394,6 +1394,7 @@ static int nodeid_warned(int nodeid, int num_nodes, int *warned)
 void dlm_scan_waiters(struct dlm_ls *ls)
 {
 	struct dlm_lkb *lkb;
+	ktime_t zero = ktime_set(0, 0);
 	s64 us;
 	s64 debug_maxus = 0;
 	u32 debug_scanned = 0;
@@ -1407,7 +1408,7 @@ void dlm_scan_waiters(struct dlm_ls *ls)
 	mutex_lock(&ls->ls_waiters_mutex);
 
 	list_for_each_entry(lkb, &ls->ls_waiters, lkb_wait_reply) {
-		if (!lkb->lkb_wait_time)
+		if (ktime_equal(lkb->lkb_wait_time, zero))
 			continue;
 
 		debug_scanned++;
@@ -1417,7 +1418,7 @@ void dlm_scan_waiters(struct dlm_ls *ls)
 		if (us < dlm_config.ci_waitwarn_us)
 			continue;
 
-		lkb->lkb_wait_time = 0;
+		lkb->lkb_wait_time = zero;
 
 		debug_expired++;
 		if (us > debug_maxus)
@@ -1425,7 +1426,7 @@ void dlm_scan_waiters(struct dlm_ls *ls)
 
 		if (!num_nodes) {
 			num_nodes = ls->ls_num_nodes;
-			warned = kcalloc(num_nodes, sizeof(int), GFP_KERNEL);
+			warned = kzalloc(num_nodes * sizeof(int), GFP_KERNEL);
 		}
 		if (!warned)
 			continue;
@@ -2037,8 +2038,8 @@ static void set_lvb_lock_pc(struct dlm_rsb *r, struct dlm_lkb *lkb,
 	b = dlm_lvb_operations[lkb->lkb_grmode + 1][lkb->lkb_rqmode + 1];
 	if (b == 1) {
 		int len = receive_extralen(ms);
-		if (len > r->res_ls->ls_lvblen)
-			len = r->res_ls->ls_lvblen;
+		if (len > DLM_RESNAME_MAXLEN)
+			len = DLM_RESNAME_MAXLEN;
 		memcpy(lkb->lkb_lvbptr, ms->m_extra, len);
 		lkb->lkb_lvbseq = ms->m_lvbseq;
 	}
@@ -2464,12 +2465,14 @@ static int can_be_granted(struct dlm_rsb *r, struct dlm_lkb *lkb, int now,
 		if (lkb->lkb_exflags & DLM_LKF_CONVDEADLK) {
 			lkb->lkb_grmode = DLM_LOCK_NL;
 			lkb->lkb_sbflags |= DLM_SBF_DEMOTED;
-		} else if (err) {
-			*err = -EDEADLK;
-		} else {
-			log_print("can_be_granted deadlock %x now %d",
-				  lkb->lkb_id, now);
-			dlm_dump_rsb(r);
+		} else if (!(lkb->lkb_exflags & DLM_LKF_NODLCKWT)) {
+			if (err)
+				*err = -EDEADLK;
+			else {
+				log_print("can_be_granted deadlock %x now %d",
+					  lkb->lkb_id, now);
+				dlm_dump_rsb(r);
+			}
 		}
 		goto out;
 	}
@@ -2497,6 +2500,13 @@ static int can_be_granted(struct dlm_rsb *r, struct dlm_lkb *lkb, int now,
  out:
 	return rv;
 }
+
+/* FIXME: I don't think that can_be_granted() can/will demote or find deadlock
+   for locks pending on the convert list.  Once verified (watch for these
+   log_prints), we should be able to just call _can_be_granted() and not
+   bother with the demote/deadlk cases here (and there's no easy way to deal
+   with a deadlk here, we'd have to generate something like grant_lock with
+   the deadlk error.) */
 
 /* Returns the highest requested mode of all blocked conversions; sets
    cw if there's a blocked conversion to DLM_LOCK_CW. */
@@ -2535,22 +2545,9 @@ static int grant_pending_convert(struct dlm_rsb *r, int high, int *cw,
 		}
 
 		if (deadlk) {
-			/*
-			 * If DLM_LKB_NODLKWT flag is set and conversion
-			 * deadlock is detected, we request blocking AST and
-			 * down (or cancel) conversion.
-			 */
-			if (lkb->lkb_exflags & DLM_LKF_NODLCKWT) {
-				if (lkb->lkb_highbast < lkb->lkb_rqmode) {
-					queue_bast(r, lkb, lkb->lkb_rqmode);
-					lkb->lkb_highbast = lkb->lkb_rqmode;
-				}
-			} else {
-				log_print("WARN: pending deadlock %x node %d %s",
-					  lkb->lkb_id, lkb->lkb_nodeid,
-					  r->res_name);
-				dlm_dump_rsb(r);
-			}
+			log_print("WARN: pending deadlock %x node %d %s",
+				  lkb->lkb_id, lkb->lkb_nodeid, r->res_name);
+			dlm_dump_rsb(r);
 			continue;
 		}
 
@@ -3126,7 +3123,7 @@ static int do_convert(struct dlm_rsb *r, struct dlm_lkb *lkb)
 	   deadlock, so we leave it on the granted queue and return EDEADLK in
 	   the ast for the convert. */
 
-	if (deadlk && !(lkb->lkb_exflags & DLM_LKF_NODLCKWT)) {
+	if (deadlk) {
 		/* it's left on the granted queue */
 		revert_lock(r, lkb);
 		queue_cast(r, lkb, -EDEADLK);
@@ -3896,8 +3893,8 @@ static int receive_lvb(struct dlm_ls *ls, struct dlm_lkb *lkb,
 		if (!lkb->lkb_lvbptr)
 			return -ENOMEM;
 		len = receive_extralen(ms);
-		if (len > ls->ls_lvblen)
-			len = ls->ls_lvblen;
+		if (len > DLM_RESNAME_MAXLEN)
+			len = DLM_RESNAME_MAXLEN;
 		memcpy(lkb->lkb_lvbptr, ms->m_extra, len);
 	}
 	return 0;
@@ -5122,9 +5119,11 @@ void dlm_recover_waiters_pre(struct dlm_ls *ls)
 	int wait_type, stub_unlock_result, stub_cancel_result;
 	int dir_nodeid;
 
-	ms_stub = kmalloc(sizeof(*ms_stub), GFP_KERNEL);
-	if (!ms_stub)
+	ms_stub = kmalloc(sizeof(struct dlm_message), GFP_KERNEL);
+	if (!ms_stub) {
+		log_error(ls, "dlm_recover_waiters_pre no mem");
 		return;
+	}
 
 	mutex_lock(&ls->ls_waiters_mutex);
 
@@ -5463,7 +5462,7 @@ void dlm_recover_purge(struct dlm_ls *ls)
 	up_write(&ls->ls_root_sem);
 
 	if (lkb_count)
-		log_rinfo(ls, "dlm_recover_purge %u locks for %u nodes",
+		log_debug(ls, "dlm_recover_purge %u locks for %u nodes",
 			  lkb_count, nodes_count);
 }
 
@@ -5537,7 +5536,7 @@ void dlm_recover_grant(struct dlm_ls *ls)
 	}
 
 	if (lkb_count)
-		log_rinfo(ls, "dlm_recover_grant %u locks on %u resources",
+		log_debug(ls, "dlm_recover_grant %u locks on %u resources",
 			  lkb_count, rsb_count);
 }
 
@@ -5696,7 +5695,7 @@ int dlm_recover_master_copy(struct dlm_ls *ls, struct dlm_rcom *rc)
 	put_rsb(r);
  out:
 	if (error && error != -EEXIST)
-		log_rinfo(ls, "dlm_recover_master_copy remote %d %x error %d",
+		log_debug(ls, "dlm_recover_master_copy remote %d %x error %d",
 			  from_nodeid, remid, error);
 	rl->rl_result = cpu_to_le32(error);
 	return error;

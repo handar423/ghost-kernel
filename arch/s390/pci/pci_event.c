@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  *  Copyright IBM Corp. 2012
  *
@@ -6,8 +5,8 @@
  *    Jan Glauber <jang@linux.vnet.ibm.com>
  */
 
-#define KMSG_COMPONENT "zpci"
-#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+#define COMPONENT "zPCI"
+#define pr_fmt(fmt) COMPONENT ": " fmt
 
 #include <linux/kernel.h>
 #include <linux/pci.h>
@@ -61,7 +60,6 @@ static void __zpci_event_error(struct zpci_ccdf_err *ccdf)
 	if (!pdev)
 		return;
 
-	pdev->error_state = pci_channel_io_perm_failure;
 	pci_dev_put(pdev);
 }
 
@@ -154,7 +152,8 @@ static void __zpci_event_availability(struct zpci_ccdf_avail *ccdf)
 	default:
 		break;
 	}
-	pci_dev_put(pdev);
+	if (pdev)
+		pci_dev_put(pdev);
 }
 
 void zpci_event_availability(void *data)

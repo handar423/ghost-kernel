@@ -1,13 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Thunderbolt DMA configuration based mailbox support
  *
  * Copyright (C) 2017, Intel Corporation
  * Authors: Michael Jamet <michael.jamet@intel.com>
  *          Mika Westerberg <mika.westerberg@linux.intel.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #ifndef DMA_PORT_H_
@@ -19,7 +16,7 @@ struct tb_switch;
 struct tb_dma_port;
 
 #define DMA_PORT_CSS_ADDRESS		0x3fffff
-#define DMA_PORT_CSS_MAX_SIZE		SZ_128
+#define DMA_PORT_CSS_MAX_SIZE		0x00000080
 
 struct tb_dma_port *dma_port_alloc(struct tb_switch *sw);
 void dma_port_free(struct tb_dma_port *dma);

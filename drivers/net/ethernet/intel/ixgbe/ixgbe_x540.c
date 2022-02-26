@@ -1,30 +1,5 @@
-/*******************************************************************************
-
-  Intel 10 Gigabit PCI Express Linux driver
-  Copyright(c) 1999 - 2016 Intel Corporation.
-
-  This program is free software; you can redistribute it and/or modify it
-  under the terms and conditions of the GNU General Public License,
-  version 2, as published by the Free Software Foundation.
-
-  This program is distributed in the hope it will be useful, but WITHOUT
-  ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
-  FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
-  more details.
-
-  You should have received a copy of the GNU General Public License along with
-  this program; if not, write to the Free Software Foundation, Inc.,
-  51 Franklin St - Fifth Floor, Boston, MA 02110-1301 USA.
-
-  The full GNU General Public License is included in this distribution in
-  the file called "COPYING".
-
-  Contact Information:
-  Linux NICS <linux.nics@intel.com>
-  e1000-devel Mailing List <e1000-devel@lists.sourceforge.net>
-  Intel Corporation, 5200 N.E. Elam Young Parkway, Hillsboro, OR 97124-6497
-
-*******************************************************************************/
+// SPDX-License-Identifier: GPL-2.0
+/* Copyright(c) 1999 - 2018 Intel Corporation. */
 
 #include <linux/pci.h>
 #include <linux/delay.h>
@@ -425,34 +400,23 @@ static s32 ixgbe_validate_eeprom_checksum_X540(struct ixgbe_hw *hw,
 	if (hw->mac.ops.acquire_swfw_sync(hw, IXGBE_GSSR_EEP_SM))
 		return IXGBE_ERR_SWFW_SYNC;
 
-	status = hw->eeprom.ops.calc_checksum(hw);
-	if (status < 0)
-		goto out;
-
-	checksum = (u16)(status & 0xffff);
+	checksum = hw->eeprom.ops.calc_checksum(hw);
 
 	/* Do not use hw->eeprom.ops.read because we do not want to take
 	 * the synchronization semaphores twice here.
 	 */
 	status = ixgbe_read_eerd_generic(hw, IXGBE_EEPROM_CHECKSUM,
 					 &read_checksum);
-	if (status)
-		goto out;
 
-	/* Verify read checksum from EEPROM is the same as
-	 * calculated checksum
-	 */
-	if (read_checksum != checksum) {
-		hw_dbg(hw, "Invalid EEPROM checksum");
-		status = IXGBE_ERR_EEPROM_CHECKSUM;
-	}
+	hw->mac.ops.release_swfw_sync(hw, IXGBE_GSSR_EEP_SM);
 
 	/* If the user cares, return the calculated checksum */
 	if (checksum_val)
 		*checksum_val = checksum;
 
-out:
-	hw->mac.ops.release_swfw_sync(hw, IXGBE_GSSR_EEP_SM);
+	/* Verify read and calculated checksums are the same */
+	if (read_checksum != checksum)
+		return IXGBE_ERR_EEPROM_CHECKSUM;
 
 	return status;
 }
@@ -483,22 +447,15 @@ static s32 ixgbe_update_eeprom_checksum_X540(struct ixgbe_hw *hw)
 	if (hw->mac.ops.acquire_swfw_sync(hw, IXGBE_GSSR_EEP_SM))
 		return  IXGBE_ERR_SWFW_SYNC;
 
-	status = hw->eeprom.ops.calc_checksum(hw);
-	if (status < 0)
-		goto out;
-
-	checksum = (u16)(status & 0xffff);
+	checksum = hw->eeprom.ops.calc_checksum(hw);
 
 	/* Do not use hw->eeprom.ops.write because we do not want to
 	 * take the synchronization semaphores twice here.
 	 */
 	status = ixgbe_write_eewr_generic(hw, IXGBE_EEPROM_CHECKSUM, checksum);
-	if (status)
-		goto out;
+	if (!status)
+		status = ixgbe_update_flash_X540(hw);
 
-	status = ixgbe_update_flash_X540(hw);
-
-out:
 	hw->mac.ops.release_swfw_sync(hw, IXGBE_GSSR_EEP_SM);
 	return status;
 }

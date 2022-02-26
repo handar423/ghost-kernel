@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * Author(s)......: Holger Smolinski <Holger.Smolinski@de.ibm.com>
  * Based on.......: linux/drivers/s390/block/mdisk.c
@@ -150,13 +149,14 @@ dasd_diag_erp(struct dasd_device *device)
 	rc = mdsk_init_io(device, device->block->bp_block, 0, NULL);
 	if (rc == 4) {
 		if (!(test_and_set_bit(DASD_FLAG_DEVICE_RO, &device->flags)))
-			pr_warn("%s: The access mode of a DIAG device changed to read-only\n",
-				dev_name(&device->cdev->dev));
+			pr_warning("%s: The access mode of a DIAG device "
+				   "changed to read-only\n",
+				   dev_name(&device->cdev->dev));
 		rc = 0;
 	}
 	if (rc)
-		pr_warn("%s: DIAG ERP failed with rc=%d\n",
-			dev_name(&device->cdev->dev), rc);
+		pr_warning("%s: DIAG ERP failed with "
+			    "rc=%d\n", dev_name(&device->cdev->dev), rc);
 }
 
 /* Start a given request at the device. Return zero on success, non-zero
@@ -236,7 +236,7 @@ static void dasd_ext_handler(struct ext_code ext_code,
 {
 	struct dasd_ccw_req *cqr, *next;
 	struct dasd_device *device;
-	unsigned long expires;
+	unsigned long long expires;
 	unsigned long flags;
 	addr_t ip;
 	int rc;
@@ -320,7 +320,7 @@ dasd_diag_check_device(struct dasd_device *device)
 	struct dasd_diag_characteristics *rdc_data;
 	struct vtoc_cms_label *label;
 	struct dasd_block *block;
-	struct dasd_diag_bio bio;
+	struct dasd_diag_bio *bio;
 	unsigned int sb, bsize;
 	blocknum_t end_block;
 	int rc;
@@ -361,7 +361,6 @@ dasd_diag_check_device(struct dasd_device *device)
 	}
 
 	device->default_expires = DIAG_TIMEOUT;
-	device->default_retries = DIAG_MAX_RETRIES;
 
 	/* Figure out position of label block */
 	switch (private->rdc_data.vdev_class) {
@@ -372,9 +371,9 @@ dasd_diag_check_device(struct dasd_device *device)
 		private->pt_block = 2;
 		break;
 	default:
-		pr_warn("%s: Device type %d is not supported in DIAG mode\n",
-			dev_name(&device->cdev->dev),
-			private->rdc_data.vdev_class);
+		pr_warning("%s: Device type %d is not supported "
+			   "in DIAG mode\n", dev_name(&device->cdev->dev),
+			   private->rdc_data.vdev_class);
 		rc = -EOPNOTSUPP;
 		goto out;
 	}
@@ -396,39 +395,47 @@ dasd_diag_check_device(struct dasd_device *device)
 		rc = -ENOMEM;
 		goto out;
 	}
+	bio = kzalloc(sizeof(*bio), GFP_KERNEL);
+	if (bio == NULL)  {
+		DBF_DEV_EVENT(DBF_WARNING, device, "%s",
+			      "No memory to allocate initialization bio");
+		rc = -ENOMEM;
+		goto out_label;
+	}
 	rc = 0;
 	end_block = 0;
 	/* try all sizes - needed for ECKD devices */
 	for (bsize = 512; bsize <= PAGE_SIZE; bsize <<= 1) {
 		mdsk_init_io(device, bsize, 0, &end_block);
-		memset(&bio, 0, sizeof (struct dasd_diag_bio));
-		bio.type = MDSK_READ_REQ;
-		bio.block_number = private->pt_block + 1;
-		bio.buffer = label;
+		memset(bio, 0, sizeof(*bio));
+		bio->type = MDSK_READ_REQ;
+		bio->block_number = private->pt_block + 1;
+		bio->buffer = label;
 		memset(&private->iob, 0, sizeof (struct dasd_diag_rw_io));
 		private->iob.dev_nr = rdc_data->dev_nr;
 		private->iob.key = 0;
 		private->iob.flags = 0;	/* do synchronous io */
 		private->iob.block_count = 1;
 		private->iob.interrupt_params = 0;
-		private->iob.bio_list = &bio;
+		private->iob.bio_list = bio;
 		private->iob.flaga = DASD_DIAG_FLAGA_DEFAULT;
 		rc = dia250(&private->iob, RW_BIO);
 		if (rc == 3) {
-			pr_warn("%s: A 64-bit DIAG call failed\n",
-				dev_name(&device->cdev->dev));
+			pr_warning("%s: A 64-bit DIAG call failed\n",
+				   dev_name(&device->cdev->dev));
 			rc = -EOPNOTSUPP;
-			goto out_label;
+			goto out_bio;
 		}
 		mdsk_term_io(device);
 		if (rc == 0)
 			break;
 	}
 	if (bsize > PAGE_SIZE) {
-		pr_warn("%s: Accessing the DASD failed because of an incorrect format (rc=%d)\n",
-			dev_name(&device->cdev->dev), rc);
+		pr_warning("%s: Accessing the DASD failed because of an "
+			   "incorrect format (rc=%d)\n",
+			   dev_name(&device->cdev->dev), rc);
 		rc = -EIO;
-		goto out_label;
+		goto out_bio;
 	}
 	/* check for label block */
 	if (memcmp(label->label_id, DASD_DIAG_CMS1,
@@ -444,8 +451,8 @@ dasd_diag_check_device(struct dasd_device *device)
 		block->s2b_shift++;
 	rc = mdsk_init_io(device, block->bp_block, 0, NULL);
 	if (rc && (rc != 4)) {
-		pr_warn("%s: DIAG initialization failed with rc=%d\n",
-			dev_name(&device->cdev->dev), rc);
+		pr_warning("%s: DIAG initialization failed with rc=%d\n",
+			   dev_name(&device->cdev->dev), rc);
 		rc = -EIO;
 	} else {
 		if (rc == 4)
@@ -458,6 +465,8 @@ dasd_diag_check_device(struct dasd_device *device)
 			(rc == 4) ? ", read-only device" : "");
 		rc = 0;
 	}
+out_bio:
+	kfree(bio);
 out_label:
 	free_page((long) label);
 out:
@@ -505,9 +514,9 @@ static struct dasd_ccw_req *dasd_diag_build_cp(struct dasd_device *memdev,
 	struct dasd_diag_req *dreq;
 	struct dasd_diag_bio *dbio;
 	struct req_iterator iter;
-	struct bio_vec bv;
+	struct bio_vec *bv;
 	char *dst;
-	unsigned int count, datasize;
+	unsigned int count;
 	sector_t recid, first_rec, last_rec;
 	unsigned int blksize, off;
 	unsigned char rw_cmd;
@@ -526,18 +535,17 @@ static struct dasd_ccw_req *dasd_diag_build_cp(struct dasd_device *memdev,
 	/* Check struct bio and count the number of blocks for the request. */
 	count = 0;
 	rq_for_each_segment(bv, req, iter) {
-		if (bv.bv_len & (blksize - 1))
+		if (bv->bv_len & (blksize - 1))
 			/* Fba can only do full blocks. */
 			return ERR_PTR(-EINVAL);
-		count += bv.bv_len >> (block->s2b_shift + 9);
+		count += bv->bv_len >> (block->s2b_shift + 9);
 	}
 	/* Paranoia. */
 	if (count != last_rec - first_rec + 1)
 		return ERR_PTR(-EINVAL);
 	/* Build the request */
-	datasize = sizeof(struct dasd_diag_req) +
-		count*sizeof(struct dasd_diag_bio);
-	cqr = dasd_smalloc_request(DASD_DIAG_MAGIC, 0, datasize, memdev);
+	cqr = dasd_smalloc_request(DASD_DIAG_MAGIC, 0, struct_size(dreq, bio, count),
+				   memdev);
 	if (IS_ERR(cqr))
 		return cqr;
 
@@ -546,8 +554,8 @@ static struct dasd_ccw_req *dasd_diag_build_cp(struct dasd_device *memdev,
 	dbio = dreq->bio;
 	recid = first_rec;
 	rq_for_each_segment(bv, req, iter) {
-		dst = page_address(bv.bv_page) + bv.bv_offset;
-		for (off = 0; off < bv.bv_len; off += blksize) {
+		dst = page_address(bv->bv_page) + bv->bv_offset;
+		for (off = 0; off < bv->bv_len; off += blksize) {
 			memset(dbio, 0, sizeof (struct dasd_diag_bio));
 			dbio->type = rw_cmd;
 			dbio->block_number = recid + 1;
@@ -557,7 +565,7 @@ static struct dasd_ccw_req *dasd_diag_build_cp(struct dasd_device *memdev,
 			recid++;
 		}
 	}
-	cqr->retries = memdev->default_retries;
+	cqr->retries = DIAG_MAX_RETRIES;
 	cqr->buildclk = get_tod_clock();
 	if (blk_noretry_request(req) ||
 	    block->base->features & DASD_FEATURE_FAILFAST)
@@ -584,10 +592,7 @@ dasd_diag_free_cp(struct dasd_ccw_req *cqr, struct request *req)
 
 static void dasd_diag_handle_terminated_request(struct dasd_ccw_req *cqr)
 {
-	if (cqr->retries < 0)
-		cqr->status = DASD_CQR_FAILED;
-	else
-		cqr->status = DASD_CQR_FILLED;
+	cqr->status = DASD_CQR_FILLED;
 };
 
 /* Fill in IOCTL data for device. */

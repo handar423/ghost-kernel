@@ -206,13 +206,13 @@ static void cbs_disable_offload(struct net_device *dev,
 	q->dequeue = cbs_dequeue_soft;
 
 	ops = dev->netdev_ops;
-	if (!ops->ndo_setup_tc)
+	if (!__rh_has_ndo_setup_tc(dev))
 		return;
 
 	cbs.queue = q->queue;
 	cbs.enable = 0;
 
-	err = ops->ndo_setup_tc(dev, TC_SETUP_QDISC_CBS, &cbs);
+	err = __rh_call_ndo_setup_tc(dev, 0, TC_SETUP_QDISC_CBS, &cbs);
 	if (err < 0)
 		pr_warn("Couldn't disable CBS offload for queue %d\n",
 			cbs.queue);
@@ -221,11 +221,11 @@ static void cbs_disable_offload(struct net_device *dev,
 static int cbs_enable_offload(struct net_device *dev, struct cbs_sched_data *q,
 			      const struct tc_cbs_qopt *opt)
 {
-	const struct net_device_ops *ops = dev->netdev_ops;
+	const struct net_device_ops *ops __maybe_unused = dev->netdev_ops;
 	struct tc_cbs_qopt_offload cbs = { };
 	int err;
 
-	if (!ops->ndo_setup_tc)
+	if (!__rh_has_ndo_setup_tc(dev))
 		return -EOPNOTSUPP;
 
 	cbs.queue = q->queue;
@@ -236,7 +236,7 @@ static int cbs_enable_offload(struct net_device *dev, struct cbs_sched_data *q,
 	cbs.idleslope = opt->idleslope;
 	cbs.sendslope = opt->sendslope;
 
-	err = ops->ndo_setup_tc(dev, TC_SETUP_QDISC_CBS, &cbs);
+	err = __rh_call_ndo_setup_tc(dev, 0, TC_SETUP_QDISC_CBS, &cbs);
 	if (err < 0)
 		return err;
 
@@ -254,7 +254,7 @@ static int cbs_change(struct Qdisc *sch, struct nlattr *opt)
 	struct tc_cbs_qopt *qopt;
 	int err;
 
-	err = nla_parse_nested(tb, TCA_CBS_MAX, opt, cbs_policy, NULL);
+	err = nla_parse_nested(tb, TCA_CBS_MAX, opt, cbs_policy);
 	if (err < 0)
 		return err;
 
@@ -313,6 +313,13 @@ static void cbs_destroy(struct Qdisc *sch)
 {
 	struct cbs_sched_data *q = qdisc_priv(sch);
 	struct net_device *dev = qdisc_dev(sch);
+
+	/*
+	 * RHEL: don't try further uninit if qdisc_watchdog_init()
+	 * and cbs_change() have not been called.
+	 */
+	if (!q->watchdog.qdisc)
+		return;
 
 	qdisc_watchdog_cancel(&q->watchdog);
 

@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 /*
  *    Copyright IBM Corp. 1999,2013
  *
@@ -12,17 +11,30 @@
  * big-endian system because, unlike little endian, the number of each
  * bit depends on the word size.
  *
- * The bitop functions are defined to work on unsigned longs, so the bits
- * end up numbered:
- *   |63..............0|127............64|191...........128|255...........192|
+ * The bitop functions are defined to work on unsigned longs, so for an
+ * s390x system the bits end up numbered:
+ *   |63..............0|127............64|191...........128|255...........196|
+ * and on s390:
+ *   |31.....0|63....31|95....64|127...96|159..128|191..160|223..192|255..224|
  *
- * We also have special functions which work with an MSB0 encoding.
- * The bits are numbered:
+ * There are a few little-endian macros used mostly for filesystem
+ * bitmaps, these work on similar bit arrays layouts, but
+ * byte-oriented:
+ *   |7...0|15...8|23...16|31...24|39...32|47...40|55...48|63...56|
+ *
+ * The main difference is that bit 3-5 (64b) or 3-4 (32b) in the bit
+ * number field needs to be reversed compared to the big-endian bit
+ * fields. This can be achieved by XOR with 0x38 (64b) or 0x18 (32b).
+ *
+ * We also have special functions which work with an MSB0 encoding:
+ * on an s390x system the bits are numbered:
  *   |0..............63|64............127|128...........191|192...........255|
+ * and on s390:
+ *   |0.....31|31....63|64....95|96...127|128..159|160..191|192..223|224..255|
  *
- * The main difference is that bit 0-63 in the bit number field needs to be
- * reversed compared to the LSB0 encoded bit fields. This can be achieved by
- * XOR with 0x3f.
+ * The main difference is that bit 0-63 (64b) or 0-31 (32b) in the bit
+ * number field needs to be reversed compared to the LSB0 encoded bit
+ * fields. This can be achieved by XOR with 0x3f (64b) or 0x1f (32b).
  *
  */
 
@@ -35,8 +47,77 @@
 
 #include <linux/typecheck.h>
 #include <linux/compiler.h>
-#include <asm/atomic_ops.h>
-#include <asm/barrier.h>
+
+#ifndef CONFIG_64BIT
+
+#define __BITOPS_OR		"or"
+#define __BITOPS_AND		"nr"
+#define __BITOPS_XOR		"xr"
+
+#define __BITOPS_LOOP(__addr, __val, __op_string)		\
+({								\
+	unsigned long __old, __new;				\
+								\
+	typecheck(unsigned long *, (__addr));			\
+	asm volatile(						\
+		"	l	%0,%2\n"			\
+		"0:	lr	%1,%0\n"			\
+		__op_string "	%1,%3\n"			\
+		"	cs	%0,%1,%2\n"			\
+		"	jl	0b"				\
+		: "=&d" (__old), "=&d" (__new), "+Q" (*(__addr))\
+		: "d" (__val)					\
+		: "cc");					\
+	__old;							\
+})
+
+#else /* CONFIG_64BIT */
+
+#ifdef CONFIG_HAVE_MARCH_Z196_FEATURES
+
+#define __BITOPS_OR		"laog"
+#define __BITOPS_AND		"lang"
+#define __BITOPS_XOR		"laxg"
+
+#define __BITOPS_LOOP(__addr, __val, __op_string)		\
+({								\
+	unsigned long __old;					\
+								\
+	typecheck(unsigned long *, (__addr));			\
+	asm volatile(						\
+		__op_string "	%0,%2,%1\n"			\
+		: "=d" (__old),	"+Q" (*(__addr))		\
+		: "d" (__val)					\
+		: "cc");					\
+	__old;							\
+})
+
+#else /* CONFIG_HAVE_MARCH_Z196_FEATURES */
+
+#define __BITOPS_OR		"ogr"
+#define __BITOPS_AND		"ngr"
+#define __BITOPS_XOR		"xgr"
+
+#define __BITOPS_LOOP(__addr, __val, __op_string)		\
+({								\
+	unsigned long __old, __new;				\
+								\
+	typecheck(unsigned long *, (__addr));			\
+	asm volatile(						\
+		"	lg	%0,%2\n"			\
+		"0:	lgr	%1,%0\n"			\
+		__op_string "	%1,%3\n"			\
+		"	csg	%0,%1,%2\n"			\
+		"	jl	0b"				\
+		: "=&d" (__old), "=&d" (__new), "+Q" (*(__addr))\
+		: "d" (__val)					\
+		: "cc");					\
+	__old;							\
+})
+
+#endif /* CONFIG_HAVE_MARCH_Z196_FEATURES */
+
+#endif /* CONFIG_64BIT */
 
 #define __BITOPS_WORDS(bits) (((bits) + BITS_PER_LONG - 1) / BITS_PER_LONG)
 
@@ -60,20 +141,8 @@ static inline void set_bit(unsigned long nr, volatile unsigned long *ptr)
 	unsigned long *addr = __bitops_word(nr, ptr);
 	unsigned long mask;
 
-#ifdef CONFIG_HAVE_MARCH_ZEC12_FEATURES
-	if (__builtin_constant_p(nr)) {
-		unsigned char *caddr = __bitops_byte(nr, ptr);
-
-		asm volatile(
-			"oi	%0,%b1\n"
-			: "+Q" (*caddr)
-			: "i" (1 << (nr & 7))
-			: "cc", "memory");
-		return;
-	}
-#endif
 	mask = 1UL << (nr & (BITS_PER_LONG - 1));
-	__atomic64_or(mask, addr);
+	__BITOPS_LOOP(addr, mask, __BITOPS_OR);
 }
 
 static inline void clear_bit(unsigned long nr, volatile unsigned long *ptr)
@@ -81,20 +150,8 @@ static inline void clear_bit(unsigned long nr, volatile unsigned long *ptr)
 	unsigned long *addr = __bitops_word(nr, ptr);
 	unsigned long mask;
 
-#ifdef CONFIG_HAVE_MARCH_ZEC12_FEATURES
-	if (__builtin_constant_p(nr)) {
-		unsigned char *caddr = __bitops_byte(nr, ptr);
-
-		asm volatile(
-			"ni	%0,%b1\n"
-			: "+Q" (*caddr)
-			: "i" (~(1 << (nr & 7)))
-			: "cc", "memory");
-		return;
-	}
-#endif
 	mask = ~(1UL << (nr & (BITS_PER_LONG - 1)));
-	__atomic64_and(mask, addr);
+	__BITOPS_LOOP(addr, mask, __BITOPS_AND);
 }
 
 static inline void change_bit(unsigned long nr, volatile unsigned long *ptr)
@@ -102,20 +159,8 @@ static inline void change_bit(unsigned long nr, volatile unsigned long *ptr)
 	unsigned long *addr = __bitops_word(nr, ptr);
 	unsigned long mask;
 
-#ifdef CONFIG_HAVE_MARCH_ZEC12_FEATURES
-	if (__builtin_constant_p(nr)) {
-		unsigned char *caddr = __bitops_byte(nr, ptr);
-
-		asm volatile(
-			"xi	%0,%b1\n"
-			: "+Q" (*caddr)
-			: "i" (1 << (nr & 7))
-			: "cc", "memory");
-		return;
-	}
-#endif
 	mask = 1UL << (nr & (BITS_PER_LONG - 1));
-	__atomic64_xor(mask, addr);
+	__BITOPS_LOOP(addr, mask, __BITOPS_XOR);
 }
 
 static inline int
@@ -125,7 +170,8 @@ test_and_set_bit(unsigned long nr, volatile unsigned long *ptr)
 	unsigned long old, mask;
 
 	mask = 1UL << (nr & (BITS_PER_LONG - 1));
-	old = __atomic64_or_barrier(mask, addr);
+	old = __BITOPS_LOOP(addr, mask, __BITOPS_OR);
+	barrier();
 	return (old & mask) != 0;
 }
 
@@ -136,7 +182,8 @@ test_and_clear_bit(unsigned long nr, volatile unsigned long *ptr)
 	unsigned long old, mask;
 
 	mask = ~(1UL << (nr & (BITS_PER_LONG - 1)));
-	old = __atomic64_and_barrier(mask, addr);
+	old = __BITOPS_LOOP(addr, mask, __BITOPS_AND);
+	barrier();
 	return (old & ~mask) != 0;
 }
 
@@ -147,7 +194,8 @@ test_and_change_bit(unsigned long nr, volatile unsigned long *ptr)
 	unsigned long old, mask;
 
 	mask = 1UL << (nr & (BITS_PER_LONG - 1));
-	old = __atomic64_xor_barrier(mask, addr);
+	old = __BITOPS_LOOP(addr, mask, __BITOPS_XOR);
+	barrier();
 	return (old & mask) != 0;
 }
 
@@ -215,32 +263,12 @@ static inline int test_bit(unsigned long nr, const volatile unsigned long *ptr)
 	return (*addr >> (nr & 7)) & 1;
 }
 
-static inline int test_and_set_bit_lock(unsigned long nr,
-					volatile unsigned long *ptr)
-{
-	if (test_bit(nr, ptr))
-		return 1;
-	return test_and_set_bit(nr, ptr);
-}
-
-static inline void clear_bit_unlock(unsigned long nr,
-				    volatile unsigned long *ptr)
-{
-	smp_mb__before_atomic();
-	clear_bit(nr, ptr);
-}
-
-static inline void __clear_bit_unlock(unsigned long nr,
-				      volatile unsigned long *ptr)
-{
-	smp_mb();
-	__clear_bit(nr, ptr);
-}
-
 /*
  * Functions which use MSB0 bit numbering.
- * The bits are numbered:
+ * On an s390x system the bits are numbered:
  *   |0..............63|64............127|128...........191|192...........255|
+ * and on s390:
+ *   |0.....31|31....63|64....95|96...127|128..159|160..191|192..223|224..255|
  */
 unsigned long find_first_bit_inv(const unsigned long *addr, unsigned long size);
 unsigned long find_next_bit_inv(const unsigned long *addr, unsigned long size,
@@ -410,6 +438,7 @@ static inline int fls(int word)
 #include <asm-generic/bitops/ffz.h>
 #include <asm-generic/bitops/find.h>
 #include <asm-generic/bitops/hweight.h>
+#include <asm-generic/bitops/lock.h>
 #include <asm-generic/bitops/sched.h>
 #include <asm-generic/bitops/le.h>
 #include <asm-generic/bitops/ext2-atomic-setbit.h>

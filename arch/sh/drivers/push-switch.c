@@ -26,9 +26,9 @@ static ssize_t switch_show(struct device *dev,
 }
 static DEVICE_ATTR(switch, S_IRUGO, switch_show, NULL);
 
-static void switch_timer(struct timer_list *t)
+static void switch_timer(unsigned long data)
 {
-	struct push_switch *psw = from_timer(psw, t, debounce);
+	struct push_switch *psw = (struct push_switch *)data;
 
 	schedule_work(&psw->work);
 }
@@ -78,7 +78,10 @@ static int switch_drv_probe(struct platform_device *pdev)
 	}
 
 	INIT_WORK(&psw->work, switch_work_handler);
-	timer_setup(&psw->debounce, switch_timer, 0);
+	init_timer(&psw->debounce);
+
+	psw->debounce.function = switch_timer;
+	psw->debounce.data = (unsigned long)psw;
 
 	/* Workqueue API brain-damage */
 	psw->pdev = pdev;

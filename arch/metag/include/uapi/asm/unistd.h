@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0+ WITH Linux-syscall-note */
 /*
  * Copyright (C) 2012 Imagination Technologies Ltd.
  *
@@ -7,8 +6,6 @@
  * the Free Software Foundation; either version 2 of the License, or
  * (at your option) any later version.
  */
-
-#define __ARCH_WANT_RENAMEAT
 
 /* Use the standard ABI for syscalls. */
 #include <asm-generic/unistd.h>

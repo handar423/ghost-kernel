@@ -171,10 +171,10 @@ int xprt_setup_bc(struct rpc_xprt *xprt, unsigned int min_reqs)
 	/*
 	 * Add the temporary list to the backchannel preallocation list
 	 */
-	spin_lock(&xprt->bc_pa_lock);
+	spin_lock_bh(&xprt->bc_pa_lock);
 	list_splice(&tmp_list, &xprt->bc_pa_list);
 	xprt_inc_alloc_count(xprt, min_reqs);
-	spin_unlock(&xprt->bc_pa_lock);
+	spin_unlock_bh(&xprt->bc_pa_lock);
 
 	dprintk("RPC:       setup backchannel transport done\n");
 	return 0;
@@ -281,9 +281,9 @@ void xprt_free_bc_rqst(struct rpc_rqst *req)
 	dprintk("RPC:       free backchannel req=%p\n", req);
 
 	req->rq_connect_cookie = xprt->connect_cookie - 1;
-	smp_mb__before_atomic();
+	smp_mb__before_clear_bit();
 	clear_bit(RPC_BC_PA_IN_USE, &req->rq_bc_pa_state);
-	smp_mb__after_atomic();
+	smp_mb__after_clear_bit();
 
 	/*
 	 * Return it to the list of preallocations so that it

@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __ASM_SH_PCI_H
 #define __ASM_SH_PCI_H
 
@@ -64,8 +63,12 @@ extern int pci_is_66mhz_capable(struct pci_channel *hose,
 
 extern unsigned long PCIBIOS_MIN_IO, PCIBIOS_MIN_MEM;
 
+struct pci_dev;
+
 #define HAVE_PCI_MMAP
-#define ARCH_GENERIC_PCI_MMAP_RESOURCE
+extern int pci_mmap_page_range(struct pci_dev *dev, struct vm_area_struct *vma,
+	enum pci_mmap_state mmap_state, int write_combine);
+extern void pcibios_set_master(struct pci_dev *dev);
 
 /* Dynamic DMA mapping stuff.
  * SuperH has everything mapped statically like x86.
@@ -83,6 +86,24 @@ extern unsigned long PCIBIOS_MIN_IO, PCIBIOS_MIN_MEM;
  * direct memory write.
  */
 #define PCI_DISABLE_MWI
+
+static inline void pci_dma_burst_advice(struct pci_dev *pdev,
+					enum pci_dma_burst_strategy *strat,
+					unsigned long *strategy_parameter)
+{
+	unsigned long cacheline_size;
+	u8 byte;
+
+	pci_read_config_byte(pdev, PCI_CACHE_LINE_SIZE, &byte);
+
+	if (byte == 0)
+		cacheline_size = L1_CACHE_BYTES;
+	else
+		cacheline_size = byte << 2;
+
+	*strat = PCI_DMA_BURST_MULTIPLE;
+	*strategy_parameter = cacheline_size;
+}
 #endif
 
 /* Board-specific fixup routines. */

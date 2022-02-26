@@ -23,7 +23,7 @@ static const char *verstr = "20160209";
 
 #include <linux/fs.h>
 #include <linux/kernel.h>
-#include <linux/sched/signal.h>
+#include <linux/sched.h>
 #include <linux/mm.h>
 #include <linux/init.h>
 #include <linux/string.h>
@@ -41,7 +41,7 @@ static const char *verstr = "20160209";
 #include <linux/delay.h>
 #include <linux/mutex.h>
 
-#include <linux/uaccess.h>
+#include <asm/uaccess.h>
 #include <asm/dma.h>
 
 #include <scsi/scsi.h>
@@ -200,9 +200,9 @@ static int st_probe(struct device *);
 static int st_remove(struct device *);
 
 static struct scsi_driver st_template = {
+	.owner			= THIS_MODULE,
 	.gendrv = {
 		.name		= "st",
-		.owner		= THIS_MODULE,
 		.probe		= st_probe,
 		.remove		= st_remove,
 		.groups		= st_drv_groups,
@@ -475,12 +475,12 @@ static void st_do_stats(struct scsi_tape *STp, struct request *req)
 	ktime_t now;
 
 	now = ktime_get();
-	if (scsi_req(req)->cmd[0] == WRITE_6) {
+	if (req->cmd[0] == WRITE_6) {
 		now = ktime_sub(now, STp->stats->write_time);
 		atomic64_add(ktime_to_ns(now), &STp->stats->tot_write_time);
 		atomic64_add(ktime_to_ns(now), &STp->stats->tot_io_time);
 		atomic64_inc(&STp->stats->write_cnt);
-		if (scsi_req(req)->result) {
+		if (req->errors) {
 			atomic64_add(atomic_read(&STp->stats->last_write_size)
 				- STp->buffer->cmdstat.residual,
 				&STp->stats->write_byte_cnt);
@@ -489,12 +489,12 @@ static void st_do_stats(struct scsi_tape *STp, struct request *req)
 		} else
 			atomic64_add(atomic_read(&STp->stats->last_write_size),
 				&STp->stats->write_byte_cnt);
-	} else if (scsi_req(req)->cmd[0] == READ_6) {
+	} else if (req->cmd[0] == READ_6) {
 		now = ktime_sub(now, STp->stats->read_time);
 		atomic64_add(ktime_to_ns(now), &STp->stats->tot_read_time);
 		atomic64_add(ktime_to_ns(now), &STp->stats->tot_io_time);
 		atomic64_inc(&STp->stats->read_cnt);
-		if (scsi_req(req)->result) {
+		if (req->errors) {
 			atomic64_add(atomic_read(&STp->stats->last_read_size)
 				- STp->buffer->cmdstat.residual,
 				&STp->stats->read_byte_cnt);
@@ -511,21 +511,18 @@ static void st_do_stats(struct scsi_tape *STp, struct request *req)
 	atomic64_dec(&STp->stats->in_flight);
 }
 
-static void st_scsi_execute_end(struct request *req, blk_status_t status)
+static void st_scsi_execute_end(struct request *req, int uptodate)
 {
 	struct st_request *SRpnt = req->end_io_data;
-	struct scsi_request *rq = scsi_req(req);
 	struct scsi_tape *STp = SRpnt->stp;
 	struct bio *tmp;
 
-	STp->buffer->cmdstat.midlevel_result = SRpnt->result = rq->result;
-	STp->buffer->cmdstat.residual = rq->resid_len;
+	STp->buffer->cmdstat.midlevel_result = SRpnt->result = req->errors;
+	STp->buffer->cmdstat.residual = req->resid_len;
 
 	st_do_stats(STp, req);
 
 	tmp = SRpnt->bio;
-	if (rq->sense_len)
-		memcpy(SRpnt->sense, rq->sense, SCSI_SENSE_BUFFERSIZE);
 	if (SRpnt->waiting)
 		complete(SRpnt->waiting);
 
@@ -538,18 +535,18 @@ static int st_scsi_execute(struct st_request *SRpnt, const unsigned char *cmd,
 			   int timeout, int retries)
 {
 	struct request *req;
-	struct scsi_request *rq;
 	struct rq_map_data *mdata = &SRpnt->stp->buffer->map_data;
 	int err = 0;
+	int write = (data_direction == DMA_TO_DEVICE);
 	struct scsi_tape *STp = SRpnt->stp;
 
-	req = blk_get_request(SRpnt->stp->device->request_queue,
-			data_direction == DMA_TO_DEVICE ?
-			REQ_OP_SCSI_OUT : REQ_OP_SCSI_IN, GFP_KERNEL);
+	req = blk_get_request(SRpnt->stp->device->request_queue, write,
+			      GFP_KERNEL);
 	if (IS_ERR(req))
 		return DRIVER_ERROR << 24;
-	rq = scsi_req(req);
-	req->rq_flags |= RQF_QUIET;
+
+	blk_rq_set_block_pc(req);
+	req->cmd_flags |= REQ_QUIET;
 
 	mdata->null_mapped = 1;
 
@@ -574,11 +571,13 @@ static int st_scsi_execute(struct st_request *SRpnt, const unsigned char *cmd,
 	}
 
 	SRpnt->bio = req->bio;
-	rq->cmd_len = COMMAND_SIZE(cmd[0]);
-	memset(rq->cmd, 0, BLK_MAX_CDB);
-	memcpy(rq->cmd, cmd, rq->cmd_len);
+	req->cmd_len = COMMAND_SIZE(cmd[0]);
+	memset(req->cmd, 0, BLK_MAX_CDB);
+	memcpy(req->cmd, cmd, req->cmd_len);
+	req->sense = SRpnt->sense;
+	req->sense_len = 0;
 	req->timeout = timeout;
-	rq->retries = retries;
+	req->retries = retries;
 	req->end_io_data = SRpnt;
 
 	blk_execute_rq_nowait(req->q, NULL, req, 1, st_scsi_execute_end);
@@ -828,10 +827,7 @@ static int st_flush_write_buffer(struct scsi_tape * STp)
 static int flush_buffer(struct scsi_tape *STp, int seek_next)
 {
 	int backspace, result;
-	struct st_buffer *STbuffer;
 	struct st_partstat *STps;
-
-	STbuffer = STp->buffer;
 
 	/*
 	 * If there was a bus reset, block further access
@@ -3528,10 +3524,11 @@ static long st_ioctl(struct file *file, unsigned int cmd_in, unsigned long arg)
 	 * may try and take the device offline, in which case all further
 	 * access to the device is prohibited.
 	 */
-	retval = scsi_ioctl_block_when_processing_errors(STp->device, cmd_in,
-			file->f_flags & O_NDELAY);
-	if (retval)
+	retval = scsi_nonblockable_ioctl(STp->device, cmd_in, p,
+					file->f_flags & O_NDELAY);
+	if (!scsi_block_when_processing_errors(STp->device) || retval != -ENODEV)
 		goto out;
+	retval = 0;
 
 	cmd_type = _IOC_TYPE(cmd_in);
 	cmd_nr = _IOC_NR(cmd_in);
@@ -4557,41 +4554,11 @@ static ssize_t version_show(struct device_driver *ddd, char *buf)
 }
 static DRIVER_ATTR_RO(version);
 
-#if DEBUG
-static ssize_t debug_flag_store(struct device_driver *ddp,
-	const char *buf, size_t count)
-{
-/* We only care what the first byte of the data is the rest is unused.
- * if it's a '1' we turn on debug and if it's a '0' we disable it. All
- * other values have -EINVAL returned if they are passed in.
- */
-	if (count > 0) {
-		if (buf[0] == '0') {
-			debugging = NO_DEBUG;
-			return count;
-		} else if (buf[0] == '1') {
-			debugging = 1;
-			return count;
-		}
-	}
-	return -EINVAL;
-}
-
-static ssize_t debug_flag_show(struct device_driver *ddp, char *buf)
-{
-	return scnprintf(buf, PAGE_SIZE, "%d\n", debugging);
-}
-static DRIVER_ATTR_RW(debug_flag);
-#endif
-
 static struct attribute *st_drv_attrs[] = {
 	&driver_attr_try_direct_io.attr,
 	&driver_attr_fixed_buffer_size.attr,
 	&driver_attr_max_sg_segs.attr,
 	&driver_attr_version.attr,
-#if DEBUG
-	&driver_attr_debug_flag.attr,
-#endif
 	NULL,
 };
 ATTRIBUTE_GROUPS(st_drv);
@@ -4712,7 +4679,7 @@ static ssize_t read_byte_cnt_show(struct device *dev,
 static DEVICE_ATTR_RO(read_byte_cnt);
 
 /**
- * read_us_show - return read us - overall time spent waiting on reads in ns.
+ * read_ns_show - return read ns - overall time spent waiting on reads in ns.
  * @dev: struct device
  * @attr: attribute structure
  * @buf: buffer to return formatted data in
@@ -4920,7 +4887,14 @@ static int sgl_map_user_pages(struct st_buffer *STbp,
 
         /* Try to fault in all of the necessary pages */
         /* rw==READ means read from drive, write into memory area */
-	res = get_user_pages_fast(uaddr, nr_pages, rw == READ, pages);
+	res = get_user_pages_unlocked(
+		current,
+		current->mm,
+		uaddr,
+		nr_pages,
+		rw == READ,
+		0, /* don't force */
+		pages);
 
 	/* Errors and no page mapped should return here */
 	if (res < nr_pages)
@@ -4940,7 +4914,7 @@ static int sgl_map_user_pages(struct st_buffer *STbp,
  out_unmap:
 	if (res > 0) {
 		for (j=0; j < res; j++)
-			put_page(pages[j]);
+			page_cache_release(pages[j]);
 		res = 0;
 	}
 	kfree(pages);
@@ -4962,7 +4936,7 @@ static int sgl_unmap_user_pages(struct st_buffer *STbp,
 		/* FIXME: cache flush missing for rw==READ
 		 * FIXME: call the correct reference counting function
 		 */
-		put_page(page);
+		page_cache_release(page);
 	}
 	kfree(STbp->mapped_pages);
 	STbp->mapped_pages = NULL;

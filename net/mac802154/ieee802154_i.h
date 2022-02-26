@@ -180,8 +180,7 @@ void ieee802154_iface_exit(void);
 void ieee802154_if_remove(struct ieee802154_sub_if_data *sdata);
 struct net_device *
 ieee802154_if_add(struct ieee802154_local *local, const char *name,
-		  unsigned char name_assign_type, enum nl802154_iftype type,
-		  __le64 extended_addr);
+		  enum nl802154_iftype type, __le64 extended_addr);
 void ieee802154_remove_interfaces(struct ieee802154_local *local);
 void ieee802154_stop_device(struct ieee802154_local *local);
 

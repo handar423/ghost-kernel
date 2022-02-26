@@ -115,7 +115,7 @@ static void wacom_feature_mapping(struct hid_device *hdev,
 	unsigned int equivalent_usage = wacom_equivalent_usage(usage->hid);
 	u8 *data;
 	int ret;
-	int n;
+	u32 n;
 
 	switch (equivalent_usage) {
 	case HID_DG_CONTACTMAX:
@@ -291,6 +291,14 @@ static void wacom_usage_mapping(struct hid_device *hdev,
 		}
 	}
 
+	/* 2nd-generation Intuos Pro Large has incorrect Y maximum */
+	if (hdev->vendor == USB_VENDOR_ID_WACOM &&
+	    hdev->product == 0x0358 &&
+	    WACOM_PEN_FIELD(field) &&
+	    wacom_equivalent_usage(usage->hid) == HID_GD_Y) {
+		field->logical_maximum = 43200;
+	}
+
 	switch (usage->hid) {
 	case HID_GD_X:
 		features->x_max = field->logical_maximum;
@@ -415,7 +423,7 @@ static int wacom_set_device_mode(struct hid_device *hdev,
 	u8 *rep_data;
 	struct hid_report *r;
 	struct hid_report_enum *re;
-	int length;
+	u32 length;
 	int error = -ENOMEM, limit = 0;
 
 	if (wacom_wac->mode_report < 0)
@@ -772,6 +780,9 @@ static int wacom_led_control(struct wacom *wacom)
 	unsigned char report_id = WAC_CMD_LED_CONTROL;
 	int buf_size = 9;
 
+	if (!hid_get_drvdata(wacom->hdev))
+		return -ENODEV;
+
 	if (!wacom->led.groups)
 		return -ENOTSUPP;
 
@@ -1124,123 +1135,17 @@ static int wacom_devm_sysfs_create_group(struct wacom *wacom,
 					       group);
 }
 
-enum led_brightness wacom_leds_brightness_get(struct wacom_led *led)
-{
-	struct wacom *wacom = led->wacom;
-
-	if (wacom->led.max_hlv)
-		return led->hlv * LED_FULL / wacom->led.max_hlv;
-
-	if (wacom->led.max_llv)
-		return led->llv * LED_FULL / wacom->led.max_llv;
-
-	/* device doesn't support brightness tuning */
-	return LED_FULL;
-}
-
-static enum led_brightness __wacom_led_brightness_get(struct led_classdev *cdev)
-{
-	struct wacom_led *led = container_of(cdev, struct wacom_led, cdev);
-	struct wacom *wacom = led->wacom;
-
-	if (wacom->led.groups[led->group].select != led->id)
-		return LED_OFF;
-
-	return wacom_leds_brightness_get(led);
-}
-
-static int wacom_led_brightness_set(struct led_classdev *cdev,
-				    enum led_brightness brightness)
-{
-	struct wacom_led *led = container_of(cdev, struct wacom_led, cdev);
-	struct wacom *wacom = led->wacom;
-	int error;
-
-	mutex_lock(&wacom->lock);
-
-	if (!wacom->led.groups || (brightness == LED_OFF &&
-	    wacom->led.groups[led->group].select != led->id)) {
-		error = 0;
-		goto out;
-	}
-
-	led->llv = wacom->led.llv = wacom->led.max_llv * brightness / LED_FULL;
-	led->hlv = wacom->led.hlv = wacom->led.max_hlv * brightness / LED_FULL;
-
-	wacom->led.groups[led->group].select = led->id;
-
-	error = wacom_led_control(wacom);
-
-out:
-	mutex_unlock(&wacom->lock);
-
-	return error;
-}
-
-static void wacom_led_readonly_brightness_set(struct led_classdev *cdev,
-					       enum led_brightness brightness)
-{
-}
-
 static int wacom_led_register_one(struct device *dev, struct wacom *wacom,
 				  struct wacom_led *led, unsigned int group,
 				  unsigned int id, bool read_only)
 {
-	int error;
-	char *name;
-
-	name = devm_kasprintf(dev, GFP_KERNEL,
-			      "%s::wacom-%d.%d",
-			      dev_name(dev),
-			      group,
-			      id);
-	if (!name)
-		return -ENOMEM;
-
-	if (!read_only) {
-		led->trigger.name = name;
-		error = devm_led_trigger_register(dev, &led->trigger);
-		if (error) {
-			hid_err(wacom->hdev,
-				"failed to register LED trigger %s: %d\n",
-				led->cdev.name, error);
-			return error;
-		}
-	}
-
 	led->group = group;
 	led->id = id;
 	led->wacom = wacom;
 	led->llv = wacom->led.llv;
 	led->hlv = wacom->led.hlv;
-	led->cdev.name = name;
-	led->cdev.max_brightness = LED_FULL;
-	led->cdev.flags = LED_HW_PLUGGABLE;
-	led->cdev.brightness_get = __wacom_led_brightness_get;
-	if (!read_only) {
-		led->cdev.brightness_set_blocking = wacom_led_brightness_set;
-		led->cdev.default_trigger = led->cdev.name;
-	} else {
-		led->cdev.brightness_set = wacom_led_readonly_brightness_set;
-	}
-
-	error = devm_led_classdev_register(dev, &led->cdev);
-	if (error) {
-		hid_err(wacom->hdev,
-			"failed to register LED %s: %d\n",
-			led->cdev.name, error);
-		led->cdev.name = NULL;
-		return error;
-	}
 
 	return 0;
-}
-
-static void wacom_led_groups_release_one(void *data)
-{
-	struct wacom_group_leds *group = data;
-
-	devres_release_group(group->dev, group);
 }
 
 static int wacom_led_groups_alloc_and_register_one(struct device *dev,
@@ -1273,74 +1178,12 @@ static int wacom_led_groups_alloc_and_register_one(struct device *dev,
 			goto err;
 	}
 
-	wacom->led.groups[group_id].dev = dev;
-
-	devres_close_group(dev, &wacom->led.groups[group_id]);
-
-	/*
-	 * There is a bug (?) in devm_led_classdev_register() in which its
-	 * increments the refcount of the parent. If the parent is an input
-	 * device, that means the ref count never reaches 0 when
-	 * devm_input_device_release() gets called.
-	 * This means that the LEDs are still there after disconnect.
-	 * Manually force the release of the group so that the leds are released
-	 * once we are done using them.
-	 */
-	error = devm_add_action_or_reset(&wacom->hdev->dev,
-					 wacom_led_groups_release_one,
-					 &wacom->led.groups[group_id]);
-	if (error)
-		return error;
-
+	devres_remove_group(dev, &wacom->led.groups[group_id]);
 	return 0;
 
 err:
 	devres_release_group(dev, &wacom->led.groups[group_id]);
 	return error;
-}
-
-struct wacom_led *wacom_led_find(struct wacom *wacom, unsigned int group_id,
-				 unsigned int id)
-{
-	struct wacom_group_leds *group;
-
-	if (group_id >= wacom->led.count)
-		return NULL;
-
-	group = &wacom->led.groups[group_id];
-
-	if (!group->leds)
-		return NULL;
-
-	id %= group->count;
-
-	return &group->leds[id];
-}
-
-/**
- * wacom_led_next: gives the next available led with a wacom trigger.
- *
- * returns the next available struct wacom_led which has its default trigger
- * or the current one if none is available.
- */
-struct wacom_led *wacom_led_next(struct wacom *wacom, struct wacom_led *cur)
-{
-	struct wacom_led *next_led;
-	int group, next;
-
-	if (!wacom || !cur)
-		return NULL;
-
-	group = cur->group;
-	next = cur->id;
-
-	do {
-		next_led = wacom_led_find(wacom, group, ++next);
-		if (!next_led || next_led == cur)
-			return next_led;
-	} while (next_led->cdev.trigger != &next_led->trigger);
-
-	return next_led;
 }
 
 static void wacom_led_groups_release(void *data)
@@ -1484,8 +1327,7 @@ int wacom_initialize_leds(struct wacom *wacom)
 
 	case INTUOSP2_BT:
 		wacom->led.llv = 50;
-		wacom->led.max_llv = 100;
-		error = wacom_leds_alloc_and_register(wacom, 1, 4, false);
+		error = wacom_led_groups_allocate(wacom, 4);
 		if (error) {
 			hid_err(wacom->hdev,
 				"cannot create leds err: %d\n", error);

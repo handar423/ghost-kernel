@@ -29,7 +29,6 @@
 #include <linux/ip.h>
 #include <linux/ipv6.h>
 #include <linux/mdio.h>
-#include <linux/phy.h>
 #include <net/ip6_checksum.h>
 #include <linux/interrupt.h>
 #include <linux/irqdomain.h>
@@ -1494,18 +1493,82 @@ static void lan78xx_set_msglevel(struct net_device *net, u32 level)
 	dev->msg_enable = level;
 }
 
+static int lan78xx_get_mdix_status(struct net_device *net)
+{
+	struct phy_device *phydev = net->phydev;
+	int buf;
+
+	phy_write(phydev, LAN88XX_EXT_PAGE_ACCESS, LAN88XX_EXT_PAGE_SPACE_1);
+	buf = phy_read(phydev, LAN88XX_EXT_MODE_CTRL);
+	phy_write(phydev, LAN88XX_EXT_PAGE_ACCESS, LAN88XX_EXT_PAGE_SPACE_0);
+
+	return buf;
+}
+
+static void lan78xx_set_mdix_status(struct net_device *net, __u8 mdix_ctrl)
+{
+	struct lan78xx_net *dev = netdev_priv(net);
+	struct phy_device *phydev = net->phydev;
+	int buf;
+
+	if (mdix_ctrl == ETH_TP_MDI) {
+		phy_write(phydev, LAN88XX_EXT_PAGE_ACCESS,
+			  LAN88XX_EXT_PAGE_SPACE_1);
+		buf = phy_read(phydev, LAN88XX_EXT_MODE_CTRL);
+		buf &= ~LAN88XX_EXT_MODE_CTRL_MDIX_MASK_;
+		phy_write(phydev, LAN88XX_EXT_MODE_CTRL,
+			  buf | LAN88XX_EXT_MODE_CTRL_MDI_);
+		phy_write(phydev, LAN88XX_EXT_PAGE_ACCESS,
+			  LAN88XX_EXT_PAGE_SPACE_0);
+	} else if (mdix_ctrl == ETH_TP_MDI_X) {
+		phy_write(phydev, LAN88XX_EXT_PAGE_ACCESS,
+			  LAN88XX_EXT_PAGE_SPACE_1);
+		buf = phy_read(phydev, LAN88XX_EXT_MODE_CTRL);
+		buf &= ~LAN88XX_EXT_MODE_CTRL_MDIX_MASK_;
+		phy_write(phydev, LAN88XX_EXT_MODE_CTRL,
+			  buf | LAN88XX_EXT_MODE_CTRL_MDI_X_);
+		phy_write(phydev, LAN88XX_EXT_PAGE_ACCESS,
+			  LAN88XX_EXT_PAGE_SPACE_0);
+	} else if (mdix_ctrl == ETH_TP_MDI_AUTO) {
+		phy_write(phydev, LAN88XX_EXT_PAGE_ACCESS,
+			  LAN88XX_EXT_PAGE_SPACE_1);
+		buf = phy_read(phydev, LAN88XX_EXT_MODE_CTRL);
+		buf &= ~LAN88XX_EXT_MODE_CTRL_MDIX_MASK_;
+		phy_write(phydev, LAN88XX_EXT_MODE_CTRL,
+			  buf | LAN88XX_EXT_MODE_CTRL_AUTO_MDIX_);
+		phy_write(phydev, LAN88XX_EXT_PAGE_ACCESS,
+			  LAN88XX_EXT_PAGE_SPACE_0);
+	}
+	dev->mdix_ctrl = mdix_ctrl;
+}
+
 static int lan78xx_get_link_ksettings(struct net_device *net,
 				      struct ethtool_link_ksettings *cmd)
 {
 	struct lan78xx_net *dev = netdev_priv(net);
 	struct phy_device *phydev = net->phydev;
 	int ret;
+	int buf;
 
 	ret = usb_autopm_get_interface(dev->intf);
 	if (ret < 0)
 		return ret;
 
-	phy_ethtool_ksettings_get(phydev, cmd);
+	ret = phy_ethtool_ksettings_get(phydev, cmd);
+
+	buf = lan78xx_get_mdix_status(net);
+
+	buf &= LAN88XX_EXT_MODE_CTRL_MDIX_MASK_;
+	if (buf == LAN88XX_EXT_MODE_CTRL_AUTO_MDIX_) {
+		cmd->base.eth_tp_mdix = ETH_TP_MDI_AUTO;
+		cmd->base.eth_tp_mdix_ctrl = ETH_TP_MDI_AUTO;
+	} else if (buf == LAN88XX_EXT_MODE_CTRL_MDI_) {
+		cmd->base.eth_tp_mdix = ETH_TP_MDI;
+		cmd->base.eth_tp_mdix_ctrl = ETH_TP_MDI;
+	} else if (buf == LAN88XX_EXT_MODE_CTRL_MDI_X_) {
+		cmd->base.eth_tp_mdix = ETH_TP_MDI_X;
+		cmd->base.eth_tp_mdix_ctrl = ETH_TP_MDI_X;
+	}
 
 	usb_autopm_put_interface(dev->intf);
 
@@ -1523,6 +1586,9 @@ static int lan78xx_set_link_ksettings(struct net_device *net,
 	ret = usb_autopm_get_interface(dev->intf);
 	if (ret < 0)
 		return ret;
+
+	if (dev->mdix_ctrl != cmd->base.eth_tp_mdix_ctrl)
+		lan78xx_set_mdix_status(net, cmd->base.eth_tp_mdix_ctrl);
 
 	/* change speed & duplex */
 	ret = phy_ethtool_ksettings_set(phydev, cmd);
@@ -1777,6 +1843,12 @@ static int lan78xx_mdio_init(struct lan78xx_net *dev)
 	snprintf(dev->mdiobus->id, MII_BUS_ID_SIZE, "usb-%03d:%03d",
 		 dev->udev->bus->busnum, dev->udev->devnum);
 
+	dev->mdiobus->irq = kzalloc(sizeof(int) * PHY_MAX_ADDR, GFP_KERNEL);
+	if (!dev->mdiobus->irq) {
+		ret = -ENOMEM;
+		goto exit1;
+	}
+
 	switch (dev->chipid) {
 	case ID_REV_CHIP_ID_7800_:
 	case ID_REV_CHIP_ID_7850_:
@@ -1792,11 +1864,13 @@ static int lan78xx_mdio_init(struct lan78xx_net *dev)
 	ret = mdiobus_register(dev->mdiobus);
 	if (ret) {
 		netdev_err(dev->net, "can't register MDIO bus\n");
-		goto exit1;
+		goto exit2;
 	}
 
 	netdev_dbg(dev->net, "registered mdiobus bus %s\n", dev->mdiobus->id);
 	return 0;
+exit2:
+	kfree(dev->mdiobus->irq);
 exit1:
 	mdiobus_free(dev->mdiobus);
 	return ret;
@@ -1805,6 +1879,7 @@ exit1:
 static void lan78xx_remove_mdio(struct lan78xx_net *dev)
 {
 	mdiobus_unregister(dev->mdiobus);
+	kfree(dev->mdiobus->irq);
 	mdiobus_free(dev->mdiobus);
 }
 
@@ -2006,7 +2081,7 @@ static int lan78xx_phy_init(struct lan78xx_net *dev)
 {
 	int ret;
 	u32 mii_adv;
-	struct phy_device *phydev = dev->net->phydev;
+	struct phy_device *phydev;
 
 	phydev = phy_find_first(dev->mdiobus);
 	if (!phydev) {
@@ -2057,9 +2132,6 @@ static int lan78xx_phy_init(struct lan78xx_net *dev)
 		phydev->irq = 0;
 	netdev_dbg(dev->net, "phydev->irq = %d\n", phydev->irq);
 
-	/* set to AUTOMDIX */
-	phydev->mdix = ETH_TP_MDI_AUTO;
-
 	ret = phy_connect_direct(dev->net, phydev,
 				 lan78xx_link_status_change,
 				 dev->interface);
@@ -2068,6 +2140,9 @@ static int lan78xx_phy_init(struct lan78xx_net *dev)
 			   dev->mdiobus->id);
 		return -EIO;
 	}
+
+	/* set to AUTOMDIX */
+	lan78xx_set_mdix_status(dev->net, ETH_TP_MDI_AUTO);
 
 	/* MAC doesn't support 1000T Half */
 	phydev->supported &= ~SUPPORTED_1000baseT_Half;
@@ -2177,6 +2252,11 @@ static int lan78xx_change_mtu(struct net_device *netdev, int new_mtu)
 	int old_rx_urb_size = dev->rx_urb_size;
 	int ret;
 
+	if (new_mtu > MAX_SINGLE_PACKET_SIZE)
+		return -EINVAL;
+
+	if (new_mtu <= 0)
+		return -EINVAL;
 	/* no second zero-length packet read wanted after mtu-sized packets */
 	if ((ll_mtu % dev->maxpacket) == 0)
 		return -EDOM;
@@ -3582,9 +3662,6 @@ static int lan78xx_probe(struct usb_interface *intf,
 
 	if (netdev->mtu > (dev->hard_mtu - netdev->hard_header_len))
 		netdev->mtu = dev->hard_mtu - netdev->hard_header_len;
-
-	/* MTU range: 68 - 9000 */
-	netdev->max_mtu = MAX_SINGLE_PACKET_SIZE;
 
 	dev->ep_blkin = (intf->cur_altsetting)->endpoint + 0;
 	dev->ep_blkout = (intf->cur_altsetting)->endpoint + 1;

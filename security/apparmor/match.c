@@ -4,7 +4,7 @@
  * This file contains AppArmor dfa based regular expression matching engine
  *
  * Copyright (C) 1998-2008 Novell/SUSE
- * Copyright 2009-2012 Canonical Ltd.
+ * Copyright 2009-2010 Canonical Ltd.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -20,37 +20,8 @@
 #include <linux/err.h>
 #include <linux/kref.h>
 
-#include "include/lib.h"
+#include "include/apparmor.h"
 #include "include/match.h"
-
-#define base_idx(X) ((X) & 0xffffff)
-
-static char nulldfa_src[] = {
-	#include "nulldfa.in"
-};
-struct aa_dfa *nulldfa;
-
-int aa_setup_dfa_engine(void)
-{
-	int error;
-
-	nulldfa = aa_dfa_unpack(nulldfa_src, sizeof(nulldfa_src),
-				TO_ACCEPT1_FLAG(YYTD_DATA32) |
-				TO_ACCEPT2_FLAG(YYTD_DATA32));
-	if (!IS_ERR(nulldfa))
-		return 0;
-
-	error = PTR_ERR(nulldfa);
-	nulldfa = NULL;
-
-	return error;
-}
-
-void aa_teardown_dfa_engine(void)
-{
-	aa_put_dfa(nulldfa);
-	nulldfa = NULL;
-}
 
 /**
  * unpack_table - unpack a dfa table (one of accept, default, base, next check)
@@ -59,7 +30,7 @@ void aa_teardown_dfa_engine(void)
  *
  * Returns: pointer to table else NULL on failure
  *
- * NOTE: must be freed by kvfree (not kfree)
+ * NOTE: must be freed by kvfree (not kmalloc)
  */
 static struct table_header *unpack_table(char *blob, size_t bsize)
 {
@@ -73,11 +44,9 @@ static struct table_header *unpack_table(char *blob, size_t bsize)
 	/* loaded td_id's start at 1, subtract 1 now to avoid doing
 	 * it every time we use td_id as an index
 	 */
-	th.td_id = be16_to_cpu(*(__be16 *) (blob)) - 1;
-	if (th.td_id > YYTD_ID_MAX)
-		goto out;
-	th.td_flags = be16_to_cpu(*(__be16 *) (blob + 2));
-	th.td_lolen = be32_to_cpu(*(__be32 *) (blob + 8));
+	th.td_id = be16_to_cpu(*(u16 *) (blob)) - 1;
+	th.td_flags = be16_to_cpu(*(u16 *) (blob + 2));
+	th.td_lolen = be32_to_cpu(*(u32 *) (blob + 8));
 	blob += sizeof(struct table_header);
 
 	if (!(th.td_flags == YYTD_DATA16 || th.td_flags == YYTD_DATA32 ||
@@ -88,30 +57,28 @@ static struct table_header *unpack_table(char *blob, size_t bsize)
 	if (bsize < tsize)
 		goto out;
 
-	table = kvzalloc(tsize, GFP_KERNEL);
+	table = kvmalloc(tsize);
 	if (table) {
-		table->td_id = th.td_id;
-		table->td_flags = th.td_flags;
-		table->td_lolen = th.td_lolen;
+		*table = th;
 		if (th.td_flags == YYTD_DATA8)
 			UNPACK_ARRAY(table->td_data, blob, th.td_lolen,
-				     u8, u8, byte_to_byte);
+				     u8, byte_to_byte);
 		else if (th.td_flags == YYTD_DATA16)
 			UNPACK_ARRAY(table->td_data, blob, th.td_lolen,
-				     u16, __be16, be16_to_cpu);
+				     u16, be16_to_cpu);
 		else if (th.td_flags == YYTD_DATA32)
 			UNPACK_ARRAY(table->td_data, blob, th.td_lolen,
-				     u32, __be32, be32_to_cpu);
+				     u32, be32_to_cpu);
 		else
 			goto fail;
-		/* if table was vmalloced make sure the page tables are synced
-		 * before it is used, as it goes live to all cpus.
-		 */
-		if (is_vmalloc_addr(table))
-			vm_unmap_aliases();
 	}
 
 out:
+	/* if table was vmalloced make sure the page tables are synced
+	 * before it is used, as it goes live to all cpus.
+	 */
+	if (is_vmalloc_addr(table))
+		vm_unmap_aliases();
 	return table;
 fail:
 	kvfree(table);
@@ -170,7 +137,8 @@ static int verify_dfa(struct aa_dfa *dfa, int flags)
 		for (i = 0; i < state_count; i++) {
 			if (DEFAULT_TABLE(dfa)[i] >= state_count)
 				goto out;
-			if (base_idx(BASE_TABLE(dfa)[i]) + 255 >= trans_count) {
+			/* TODO: do check that DEF state recursion terminates */
+			if (BASE_TABLE(dfa)[i] + 255 >= trans_count) {
 				printk(KERN_ERR "AppArmor DFA next/check upper "
 				       "bounds error\n");
 				goto out;
@@ -226,7 +194,7 @@ void aa_dfa_free_kref(struct kref *kref)
  * @flags: flags controlling what type of accept tables are acceptable
  *
  * Unpack a dfa that has been serialized.  To find information on the dfa
- * format look in Documentation/admin-guide/LSM/apparmor.rst
+ * format look in Documentation/security/apparmor.txt
  * Assumes the dfa @blob stream has been aligned on a 8 byte boundary
  *
  * Returns: an unpacked dfa ready for matching or ERR_PTR on failure
@@ -249,14 +217,14 @@ struct aa_dfa *aa_dfa_unpack(void *blob, size_t size, int flags)
 	if (size < sizeof(struct table_set_header))
 		goto fail;
 
-	if (ntohl(*(__be32 *) data) != YYTH_MAGIC)
+	if (ntohl(*(u32 *) data) != YYTH_MAGIC)
 		goto fail;
 
-	hsize = ntohl(*(__be32 *) (data + 4));
+	hsize = ntohl(*(u32 *) (data + 4));
 	if (size < hsize)
 		goto fail;
 
-	dfa->flags = ntohs(*(__be16 *) (data + 12));
+	dfa->flags = ntohs(*(u16 *) (data + 12));
 	data += hsize;
 	size -= hsize;
 
@@ -346,7 +314,7 @@ unsigned int aa_dfa_match_len(struct aa_dfa *dfa, unsigned int start,
 		u8 *equiv = EQUIV_TABLE(dfa);
 		/* default is direct to next state */
 		for (; len; len--) {
-			pos = base_idx(base[state]) + equiv[(u8) *str++];
+			pos = base[state] + equiv[(u8) *str++];
 			if (check[pos] == state)
 				state = next[pos];
 			else
@@ -355,7 +323,7 @@ unsigned int aa_dfa_match_len(struct aa_dfa *dfa, unsigned int start,
 	} else {
 		/* default is direct to next state */
 		for (; len; len--) {
-			pos = base_idx(base[state]) + (u8) *str++;
+			pos = base[state] + (u8) *str++;
 			if (check[pos] == state)
 				state = next[pos];
 			else
@@ -396,7 +364,7 @@ unsigned int aa_dfa_match(struct aa_dfa *dfa, unsigned int start,
 		u8 *equiv = EQUIV_TABLE(dfa);
 		/* default is direct to next state */
 		while (*str) {
-			pos = base_idx(base[state]) + equiv[(u8) *str++];
+			pos = base[state] + equiv[(u8) *str++];
 			if (check[pos] == state)
 				state = next[pos];
 			else
@@ -405,7 +373,7 @@ unsigned int aa_dfa_match(struct aa_dfa *dfa, unsigned int start,
 	} else {
 		/* default is direct to next state */
 		while (*str) {
-			pos = base_idx(base[state]) + (u8) *str++;
+			pos = base[state] + (u8) *str++;
 			if (check[pos] == state)
 				state = next[pos];
 			else
@@ -441,14 +409,14 @@ unsigned int aa_dfa_next(struct aa_dfa *dfa, unsigned int state,
 		u8 *equiv = EQUIV_TABLE(dfa);
 		/* default is direct to next state */
 
-		pos = base_idx(base[state]) + equiv[(u8) c];
+		pos = base[state] + equiv[(u8) c];
 		if (check[pos] == state)
 			state = next[pos];
 		else
 			state = def[state];
 	} else {
 		/* default is direct to next state */
-		pos = base_idx(base[state]) + (u8) c;
+		pos = base[state] + (u8) c;
 		if (check[pos] == state)
 			state = next[pos];
 		else

@@ -46,8 +46,8 @@
 
 #define FUNC(name)		name
 
-#define RFI_TO_KERNEL	RFI
-#define RFI_TO_GUEST	RFI
+#define RFI_TO_KERNEL  RFI
+#define RFI_TO_GUEST   RFI
 
 .macro INTERRUPT_TRAMPOLINE intno
 
@@ -144,7 +144,7 @@ kvmppc_handler_skip_ins:
 	GET_SCRATCH0(r13)
 
 	/* And get back into the code */
-	RFI_TO_KERNEL
+	RFI_TO_GUEST
 #endif
 
 /*

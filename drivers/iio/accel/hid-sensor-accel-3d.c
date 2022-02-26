@@ -93,41 +93,6 @@ static const struct iio_chan_spec accel_3d_channels[] = {
 	IIO_CHAN_SOFT_TIMESTAMP(3)
 };
 
-/* Channel definitions */
-static const struct iio_chan_spec gravity_channels[] = {
-	{
-		.type = IIO_GRAVITY,
-		.modified = 1,
-		.channel2 = IIO_MOD_X,
-		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
-		.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_OFFSET) |
-		BIT(IIO_CHAN_INFO_SCALE) |
-		BIT(IIO_CHAN_INFO_SAMP_FREQ) |
-		BIT(IIO_CHAN_INFO_HYSTERESIS),
-		.scan_index = CHANNEL_SCAN_INDEX_X,
-	}, {
-		.type = IIO_GRAVITY,
-		.modified = 1,
-		.channel2 = IIO_MOD_Y,
-		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
-		.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_OFFSET) |
-		BIT(IIO_CHAN_INFO_SCALE) |
-		BIT(IIO_CHAN_INFO_SAMP_FREQ) |
-		BIT(IIO_CHAN_INFO_HYSTERESIS),
-		.scan_index = CHANNEL_SCAN_INDEX_Y,
-	}, {
-		.type = IIO_GRAVITY,
-		.modified = 1,
-		.channel2 = IIO_MOD_Z,
-		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
-		.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_OFFSET) |
-		BIT(IIO_CHAN_INFO_SCALE) |
-		BIT(IIO_CHAN_INFO_SAMP_FREQ) |
-		BIT(IIO_CHAN_INFO_HYSTERESIS),
-		.scan_index = CHANNEL_SCAN_INDEX_Z,
-	}
-};
-
 /* Adjust channel real bits based on report descriptor */
 static void accel_3d_adjust_channel_bit_mask(struct iio_chan_spec *channels,
 						int channel, int size)
@@ -149,8 +114,6 @@ static int accel_3d_read_raw(struct iio_dev *indio_dev,
 	int report_id = -1;
 	u32 address;
 	int ret_type;
-	struct hid_sensor_hub_device *hsdev =
-					accel_state->common_attributes.hsdev;
 
 	*val = 0;
 	*val2 = 0;
@@ -162,7 +125,8 @@ static int accel_3d_read_raw(struct iio_dev *indio_dev,
 		if (report_id >= 0)
 			*val = sensor_hub_input_attr_get_raw_value(
 					accel_state->common_attributes.hsdev,
-					hsdev->usage, address, report_id,
+					HID_USAGE_SENSOR_ACCEL_3D, address,
+					report_id,
 					SENSOR_HUB_SYNC);
 		else {
 			*val = 0;
@@ -225,6 +189,7 @@ static int accel_3d_write_raw(struct iio_dev *indio_dev,
 }
 
 static const struct iio_info accel_3d_info = {
+	.driver_module = THIS_MODULE,
 	.read_raw = &accel_3d_read_raw,
 	.write_raw = &accel_3d_write_raw,
 };
@@ -248,7 +213,7 @@ static int accel_3d_proc_event(struct hid_sensor_hub_device *hsdev,
 	dev_dbg(&indio_dev->dev, "accel_3d_proc_event\n");
 	if (atomic_read(&accel_state->common_attributes.data_ready)) {
 		if (!accel_state->timestamp)
-			accel_state->timestamp = iio_get_time_ns(indio_dev);
+			accel_state->timestamp = iio_get_time_ns();
 
 		hid_sensor_push_data(indio_dev,
 				     accel_state->accel_val,
@@ -323,7 +288,7 @@ static int accel_3d_parse_report(struct platform_device *pdev,
 			st->accel[2].index, st->accel[2].report_id);
 
 	st->scale_precision = hid_sensor_format_scale(
-				hsdev->usage,
+				HID_USAGE_SENSOR_ACCEL_3D,
 				&st->accel[CHANNEL_SCAN_INDEX_X],
 				&st->scale_pre_decml, &st->scale_post_decml);
 
@@ -346,12 +311,9 @@ static int accel_3d_parse_report(struct platform_device *pdev,
 static int hid_accel_3d_probe(struct platform_device *pdev)
 {
 	int ret = 0;
-	const char *name;
+	static const char *name = "accel_3d";
 	struct iio_dev *indio_dev;
 	struct accel_3d_state *accel_state;
-	const struct iio_chan_spec *channel_spec;
-	int channel_size;
-
 	struct hid_sensor_hub_device *hsdev = pdev->dev.platform_data;
 
 	indio_dev = devm_iio_device_alloc(&pdev->dev,
@@ -365,37 +327,30 @@ static int hid_accel_3d_probe(struct platform_device *pdev)
 	accel_state->common_attributes.hsdev = hsdev;
 	accel_state->common_attributes.pdev = pdev;
 
-	if (hsdev->usage == HID_USAGE_SENSOR_ACCEL_3D) {
-		name = "accel_3d";
-		channel_spec = accel_3d_channels;
-		channel_size = sizeof(accel_3d_channels);
-		indio_dev->num_channels = ARRAY_SIZE(accel_3d_channels);
-	} else {
-		name = "gravity";
-		channel_spec = gravity_channels;
-		channel_size = sizeof(gravity_channels);
-		indio_dev->num_channels = ARRAY_SIZE(gravity_channels);
-	}
-	ret = hid_sensor_parse_common_attributes(hsdev, hsdev->usage,
+	ret = hid_sensor_parse_common_attributes(hsdev,
+					HID_USAGE_SENSOR_ACCEL_3D,
 					&accel_state->common_attributes);
 	if (ret) {
 		dev_err(&pdev->dev, "failed to setup common attributes\n");
 		return ret;
 	}
-	indio_dev->channels = kmemdup(channel_spec, channel_size, GFP_KERNEL);
 
+	indio_dev->channels = kmemdup(accel_3d_channels,
+				      sizeof(accel_3d_channels), GFP_KERNEL);
 	if (!indio_dev->channels) {
 		dev_err(&pdev->dev, "failed to duplicate channels\n");
 		return -ENOMEM;
 	}
+
 	ret = accel_3d_parse_report(pdev, hsdev,
-				(struct iio_chan_spec *)indio_dev->channels,
-				hsdev->usage, accel_state);
+				    (struct iio_chan_spec *)indio_dev->channels,
+				    HID_USAGE_SENSOR_ACCEL_3D, accel_state);
 	if (ret) {
 		dev_err(&pdev->dev, "failed to setup attributes\n");
 		goto error_free_dev_mem;
 	}
 
+	indio_dev->num_channels = ARRAY_SIZE(accel_3d_channels);
 	indio_dev->dev.parent = &pdev->dev;
 	indio_dev->info = &accel_3d_info;
 	indio_dev->name = name;
@@ -424,7 +379,7 @@ static int hid_accel_3d_probe(struct platform_device *pdev)
 	accel_state->callbacks.send_event = accel_3d_proc_event;
 	accel_state->callbacks.capture_sample = accel_3d_capture_sample;
 	accel_state->callbacks.pdev = pdev;
-	ret = sensor_hub_register_callback(hsdev, hsdev->usage,
+	ret = sensor_hub_register_callback(hsdev, HID_USAGE_SENSOR_ACCEL_3D,
 					&accel_state->callbacks);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "callback reg failed\n");
@@ -451,7 +406,7 @@ static int hid_accel_3d_remove(struct platform_device *pdev)
 	struct iio_dev *indio_dev = platform_get_drvdata(pdev);
 	struct accel_3d_state *accel_state = iio_priv(indio_dev);
 
-	sensor_hub_remove_callback(hsdev, hsdev->usage);
+	sensor_hub_remove_callback(hsdev, HID_USAGE_SENSOR_ACCEL_3D);
 	iio_device_unregister(indio_dev);
 	hid_sensor_remove_trigger(&accel_state->common_attributes);
 	iio_triggered_buffer_cleanup(indio_dev);
@@ -465,9 +420,6 @@ static const struct platform_device_id hid_accel_3d_ids[] = {
 		/* Format: HID-SENSOR-usage_id_in_hex_lowercase */
 		.name = "HID-SENSOR-200073",
 	},
-	{	/* gravity sensor */
-		.name = "HID-SENSOR-20007b",
-	},
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(platform, hid_accel_3d_ids);
@@ -476,6 +428,7 @@ static struct platform_driver hid_accel_3d_platform_driver = {
 	.id_table = hid_accel_3d_ids,
 	.driver = {
 		.name	= KBUILD_MODNAME,
+		.owner	= THIS_MODULE,
 		.pm	= &hid_sensor_pm_ops,
 	},
 	.probe		= hid_accel_3d_probe,

@@ -5,7 +5,7 @@
  * GNU General Public License version 2 only.
  *
  * Copyright (c) 2010 by:
- *	 Mauro Carvalho Chehab
+ *	 Mauro Carvalho Chehab <mchehab@redhat.com>
  *
  * Red Hat Inc. http://www.redhat.com
  *
@@ -26,7 +26,7 @@
 #include <linux/edac.h>
 #include <linux/mmzone.h>
 
-#include "edac_module.h"
+#include "edac_core.h"
 
 /*
  * Alter this version for the I7300 module when modifications are made
@@ -304,6 +304,7 @@ static const char *ferr_global_lo_name[] = {
 #define REDMEMA		0xdc
 
 #define REDMEMB		0x7c
+  #define IS_SECOND_CH(v)	((v) * (1 << 17))
 
 #define RECMEMA		0xe0
   #define RECMEMA_BANK(v)	(((v) >> 12) & 7)
@@ -482,9 +483,8 @@ static void i7300_process_fbd_error(struct mem_ctl_info *mci)
 		pci_read_config_dword(pvt->pci_dev_16_1_fsb_addr_map,
 				     REDMEMB, &value);
 		channel = (branch << 1);
-
-		/* Second channel ? */
-		channel += !!(value & BIT(17));
+		if (IS_SECOND_CH(value))
+			channel++;
 
 		/* Clear the error bit */
 		pci_write_config_dword(pvt->pci_dev_16_1_fsb_addr_map,
@@ -943,33 +943,31 @@ static int i7300_get_devices(struct mem_ctl_info *mci)
 
 	/* Attempt to 'get' the MCH register we want */
 	pdev = NULL;
-	while ((pdev = pci_get_device(PCI_VENDOR_ID_INTEL,
-				      PCI_DEVICE_ID_INTEL_I7300_MCH_ERR,
-				      pdev))) {
+	while (!pvt->pci_dev_16_1_fsb_addr_map ||
+	       !pvt->pci_dev_16_2_fsb_err_regs) {
+		pdev = pci_get_device(PCI_VENDOR_ID_INTEL,
+				      PCI_DEVICE_ID_INTEL_I7300_MCH_ERR, pdev);
+		if (!pdev) {
+			/* End of list, leave */
+			i7300_printk(KERN_ERR,
+				"'system address,Process Bus' "
+				"device not found:"
+				"vendor 0x%x device 0x%x ERR funcs "
+				"(broken BIOS?)\n",
+				PCI_VENDOR_ID_INTEL,
+				PCI_DEVICE_ID_INTEL_I7300_MCH_ERR);
+			goto error;
+		}
+
 		/* Store device 16 funcs 1 and 2 */
 		switch (PCI_FUNC(pdev->devfn)) {
 		case 1:
-			if (!pvt->pci_dev_16_1_fsb_addr_map)
-				pvt->pci_dev_16_1_fsb_addr_map =
-							pci_dev_get(pdev);
+			pvt->pci_dev_16_1_fsb_addr_map = pdev;
 			break;
 		case 2:
-			if (!pvt->pci_dev_16_2_fsb_err_regs)
-				pvt->pci_dev_16_2_fsb_err_regs =
-							pci_dev_get(pdev);
+			pvt->pci_dev_16_2_fsb_err_regs = pdev;
 			break;
 		}
-	}
-
-	if (!pvt->pci_dev_16_1_fsb_addr_map ||
-	    !pvt->pci_dev_16_2_fsb_err_regs) {
-		/* At least one device was not found */
-		i7300_printk(KERN_ERR,
-			"'system address,Process Bus' device not found:"
-			"vendor 0x%x device 0x%x ERR funcs (broken BIOS?)\n",
-			PCI_VENDOR_ID_INTEL,
-			PCI_DEVICE_ID_INTEL_I7300_MCH_ERR);
-		goto error;
 	}
 
 	edac_dbg(1, "System Address, processor bus- PCI Bus ID: %s  %x:%x\n",
@@ -1077,6 +1075,7 @@ static int i7300_init_one(struct pci_dev *pdev, const struct pci_device_id *id)
 	mci->edac_ctl_cap = EDAC_FLAG_NONE;
 	mci->edac_cap = EDAC_FLAG_NONE;
 	mci->mod_name = "i7300_edac.c";
+	mci->mod_ver = I7300_REVISION;
 	mci->ctl_name = i7300_devs[0].ctl_name;
 	mci->dev_name = pci_name(pdev);
 	mci->ctl_page_to_phys = NULL;
@@ -1208,7 +1207,7 @@ module_init(i7300_init);
 module_exit(i7300_exit);
 
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Mauro Carvalho Chehab");
+MODULE_AUTHOR("Mauro Carvalho Chehab <mchehab@redhat.com>");
 MODULE_AUTHOR("Red Hat Inc. (http://www.redhat.com)");
 MODULE_DESCRIPTION("MC Driver for Intel I7300 memory controllers - "
 		   I7300_REVISION);

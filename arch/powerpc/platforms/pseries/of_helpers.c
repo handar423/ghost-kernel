@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 #include <linux/string.h>
 #include <linux/err.h>
 #include <linux/slab.h>
@@ -16,24 +15,24 @@
  */
 struct device_node *pseries_of_derive_parent(const char *path)
 {
-	struct device_node *parent;
+	struct device_node *parent = NULL;
 	char *parent_path = "/";
-	const char *tail;
-
-	/* We do not want the trailing '/' character */
-	tail = kbasename(path) - 1;
+	size_t parent_path_len = strrchr(path, '/') - path + 1;
 
 	/* reject if path is "/" */
 	if (!strcmp(path, "/"))
 		return ERR_PTR(-EINVAL);
 
-	if (tail > path) {
-		parent_path = kstrndup(path, tail - path, GFP_KERNEL);
+	if (strrchr(path, '/') != path) {
+		parent_path = kmalloc(parent_path_len, GFP_KERNEL);
 		if (!parent_path)
 			return ERR_PTR(-ENOMEM);
+		strlcpy(parent_path, path, parent_path_len);
 	}
 	parent = of_find_node_by_path(parent_path);
+	if (!parent)
+		return ERR_PTR(-EINVAL);
 	if (strcmp(parent_path, "/"))
 		kfree(parent_path);
-	return parent ? parent : ERR_PTR(-EINVAL);
+	return parent;
 }

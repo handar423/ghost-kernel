@@ -8,6 +8,7 @@
 
 #define YYDEBUG 1
 
+#include <fnmatch.h>
 #include <linux/compiler.h>
 #include <linux/list.h>
 #include <linux/types.h>
@@ -52,8 +53,8 @@ static void inc_group_count(struct list_head *list,
 %token PE_PREFIX_MEM PE_PREFIX_RAW PE_PREFIX_GROUP
 %token PE_ERROR
 %token PE_PMU_EVENT_PRE PE_PMU_EVENT_SUF PE_KERNEL_PMU_EVENT
-%token PE_ARRAY_ALL PE_ARRAY_RANGE
 %token PE_DRV_CFG_TERM
+%token PE_ARRAY_ALL PE_ARRAY_RANGE
 %type <num> PE_VALUE
 %type <num> PE_VALUE_SYM_HW
 %type <num> PE_VALUE_SYM_SW
@@ -72,6 +73,7 @@ static void inc_group_count(struct list_head *list,
 %type <num> value_sym
 %type <head> event_config
 %type <head> opt_event_config
+%type <head> opt_pmu_config
 %type <term> event_term
 %type <head> event_pmu
 %type <head> event_legacy_symbol
@@ -160,7 +162,7 @@ PE_NAME '{' events '}'
 	struct list_head *list = $3;
 
 	inc_group_count(list, _parse_state);
-	parse_events__set_leader($1, list);
+	parse_events__set_leader($1, list, _parse_state);
 	$$ = list;
 }
 |
@@ -169,7 +171,7 @@ PE_NAME '{' events '}'
 	struct list_head *list = $2;
 
 	inc_group_count(list, _parse_state);
-	parse_events__set_leader(NULL, list);
+	parse_events__set_leader(NULL, list, _parse_state);
 	$$ = list;
 }
 
@@ -223,17 +225,26 @@ event_def: event_pmu |
 	   event_bpf_file
 
 event_pmu:
-PE_NAME opt_event_config
+PE_NAME opt_pmu_config
 {
+	struct parse_events_state *parse_state = _parse_state;
+	struct parse_events_error *error = parse_state->error;
 	struct list_head *list, *orig_terms, *terms;
 
 	if (parse_events_copy_term_list($2, &orig_terms))
 		YYABORT;
 
+	if (error)
+		error->idx = @1.first_column;
+
 	ALLOC_LIST(list);
-	if (parse_events_add_pmu(_parse_state, list, $1, $2)) {
+	if (parse_events_add_pmu(_parse_state, list, $1, $2, false, false)) {
 		struct perf_pmu *pmu = NULL;
 		int ok = 0;
+		char *pattern;
+
+		if (asprintf(&pattern, "%s*", $1) < 0)
+			YYABORT;
 
 		while ((pmu = perf_pmu__scan(pmu)) != NULL) {
 			char *name = pmu->name;
@@ -241,14 +252,19 @@ PE_NAME opt_event_config
 			if (!strncmp(name, "uncore_", 7) &&
 			    strncmp($1, "uncore_", 7))
 				name += 7;
-			if (!strncmp($1, name, strlen($1))) {
-				if (parse_events_copy_term_list(orig_terms, &terms))
+			if (!fnmatch(pattern, name, 0)) {
+				if (parse_events_copy_term_list(orig_terms, &terms)) {
+					free(pattern);
 					YYABORT;
-				if (!parse_events_add_pmu(_parse_state, list, pmu->name, terms))
+				}
+				if (!parse_events_add_pmu(_parse_state, list, pmu->name, terms, true, false))
 					ok++;
 				parse_events_terms__delete(terms);
 			}
 		}
+
+		free(pattern);
+
 		if (!ok)
 			YYABORT;
 	}
@@ -448,29 +464,6 @@ PE_RAW opt_event_config
 	$$ = list;
 }
 
-event_bpf_file:
-PE_BPF_OBJECT opt_event_config
-{
-	struct parse_events_state *parse_state = _parse_state;
-	struct parse_events_error *error = parse_state->error;
-	struct list_head *list;
-
-	ALLOC_LIST(list);
-	ABORT_ON(parse_events_load_bpf(parse_state, list, $1, false, $2));
-	parse_events_terms__delete($2);
-	$$ = list;
-}
-|
-PE_BPF_SOURCE opt_event_config
-{
-	struct list_head *list;
-
-	ALLOC_LIST(list);
-	ABORT_ON(parse_events_load_bpf(_parse_state, list, $1, true, $2));
-	parse_events_terms__delete($2);
-	$$ = list;
-}
-
 opt_event_config:
 '/' event_config '/'
 {
@@ -482,6 +475,41 @@ opt_event_config:
 	$$ = NULL;
 }
 |
+{
+	$$ = NULL;
+}
+
+event_bpf_file:
+PE_BPF_OBJECT opt_event_config
+{
+	struct parse_events_state *data = _parse_state;
+	struct parse_events_error *error = data->error;
+	struct list_head *list;
+
+	ALLOC_LIST(list);
+	ABORT_ON(parse_events_load_bpf(data, list, $1, false, $2));
+	parse_events_terms__delete($2);
+	$$ = list;
+}
+|
+PE_BPF_SOURCE opt_event_config
+{
+	struct parse_events_state *data = _parse_state;
+	struct list_head *list;
+
+	ALLOC_LIST(list);
+	ABORT_ON(parse_events_load_bpf(data, list, $1, true, $2));
+	parse_events_terms__delete($2);
+	$$ = list;
+}
+
+opt_pmu_config:
+'/' event_config '/'
+{
+	$$ = $2;
+}
+|
+'/' '/'
 {
 	$$ = NULL;
 }
@@ -584,6 +612,15 @@ PE_TERM
 	$$ = term;
 }
 |
+PE_DRV_CFG_TERM
+{
+	struct parse_events_term *term;
+
+	ABORT_ON(parse_events_term__str(&term, PARSE_EVENTS__TERM_TYPE_DRV_CFG,
+					$1, $1, &@1, NULL));
+	$$ = term;
+}
+|
 PE_NAME array '=' PE_NAME
 {
 	struct parse_events_term *term;
@@ -603,15 +640,6 @@ PE_NAME array '=' PE_VALUE
 	ABORT_ON(parse_events_term__num(&term, PARSE_EVENTS__TERM_TYPE_USER,
 					$1, $4, false, &@1, &@4));
 	term->array = $2;
-	$$ = term;
-}
-|
-PE_DRV_CFG_TERM
-{
-	struct parse_events_term *term;
-
-	ABORT_ON(parse_events_term__str(&term, PARSE_EVENTS__TERM_TYPE_DRV_CFG,
-					$1, $1, &@1, NULL));
 	$$ = term;
 }
 

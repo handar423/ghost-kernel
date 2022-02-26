@@ -1,22 +1,5 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef LINUX_KEXEC_H
 #define LINUX_KEXEC_H
-
-#define IND_DESTINATION_BIT 0
-#define IND_INDIRECTION_BIT 1
-#define IND_DONE_BIT        2
-#define IND_SOURCE_BIT      3
-
-#define IND_DESTINATION  (1 << IND_DESTINATION_BIT)
-#define IND_INDIRECTION  (1 << IND_INDIRECTION_BIT)
-#define IND_DONE         (1 << IND_DONE_BIT)
-#define IND_SOURCE       (1 << IND_SOURCE_BIT)
-#define IND_FLAGS (IND_DESTINATION | IND_INDIRECTION | IND_DONE | IND_SOURCE)
-
-#if !defined(__ASSEMBLY__)
-
-#include <linux/crash_core.h>
-#include <asm/io.h>
 
 #include <uapi/linux/kexec.h>
 
@@ -26,6 +9,7 @@
 #include <linux/ioport.h>
 #include <linux/module.h>
 #include <asm/kexec.h>
+#include <linux/crash_core.h>
 
 /* Verify architecture specific macros are defined */
 
@@ -42,7 +26,7 @@
 #endif
 
 #ifndef KEXEC_CONTROL_MEMORY_GFP
-#define KEXEC_CONTROL_MEMORY_GFP (GFP_KERNEL | __GFP_NORETRY)
+#define KEXEC_CONTROL_MEMORY_GFP GFP_KERNEL
 #endif
 
 #ifndef KEXEC_CONTROL_PAGE_SIZE
@@ -69,6 +53,10 @@
  */
 
 typedef unsigned long kimage_entry_t;
+#define IND_DESTINATION  0x1
+#define IND_INDIRECTION  0x2
+#define IND_DONE         0x4
+#define IND_SOURCE       0x8
 
 struct kexec_segment {
 	/*
@@ -134,36 +122,7 @@ struct kexec_file_ops {
 	kexec_verify_sig_t *verify_sig;
 #endif
 };
-
-/**
- * struct kexec_buf - parameters for finding a place for a buffer in memory
- * @image:	kexec image in which memory to search.
- * @buffer:	Contents which will be copied to the allocated memory.
- * @bufsz:	Size of @buffer.
- * @mem:	On return will have address of the buffer in memory.
- * @memsz:	Size for the buffer in memory.
- * @buf_align:	Minimum alignment needed.
- * @buf_min:	The buffer can't be placed below this address.
- * @buf_max:	The buffer can't be placed above this address.
- * @top_down:	Allocate from top of memory.
- */
-struct kexec_buf {
-	struct kimage *image;
-	void *buffer;
-	unsigned long bufsz;
-	unsigned long mem;
-	unsigned long memsz;
-	unsigned long buf_align;
-	unsigned long buf_min;
-	unsigned long buf_max;
-	bool top_down;
-};
-
-int __weak arch_kexec_walk_mem(struct kexec_buf *kbuf,
-			       int (*func)(struct resource *, void *));
-extern int kexec_add_buffer(struct kexec_buf *kbuf);
-int kexec_locate_mem_hole(struct kexec_buf *kbuf);
-#endif /* CONFIG_KEXEC_FILE */
+#endif
 
 struct kimage {
 	kimage_entry_t head;
@@ -173,7 +132,6 @@ struct kimage {
 	unsigned long start;
 	struct page *control_code_page;
 	struct page *swap_page;
-	void *vmcoreinfo_data_copy; /* locates in the crash memory */
 
 	unsigned long nr_segments;
 	struct kexec_segment segment[KEXEC_SEGMENT_MAX];
@@ -228,6 +186,11 @@ extern asmlinkage long sys_kexec_load(unsigned long entry,
 					struct kexec_segment __user *segments,
 					unsigned long flags);
 extern int kernel_kexec(void);
+extern int kexec_add_buffer(struct kimage *image, char *buffer,
+			    unsigned long bufsz, unsigned long memsz,
+			    unsigned long buf_align, unsigned long buf_min,
+			    unsigned long buf_max, bool top_down,
+			    unsigned long *load_addr);
 extern struct page *kimage_alloc_control_pages(struct kimage *image,
 						unsigned int order);
 extern int kexec_load_purgatory(struct kimage *image, unsigned long min,
@@ -243,7 +206,6 @@ extern void crash_kexec(struct pt_regs *);
 int kexec_should_crash(struct task_struct *);
 int kexec_crash_loaded(void);
 void crash_save_cpu(struct pt_regs *regs, int cpu);
-extern int kimage_crash_copy_vmcoreinfo(struct kimage *image);
 
 extern struct kimage *kexec_image;
 extern struct kimage *kexec_crash_image;
@@ -290,44 +252,6 @@ int __weak arch_kexec_apply_relocations(const Elf_Ehdr *ehdr, Elf_Shdr *sechdrs,
 void arch_kexec_protect_crashkres(void);
 void arch_kexec_unprotect_crashkres(void);
 
-#ifndef page_to_boot_pfn
-static inline unsigned long page_to_boot_pfn(struct page *page)
-{
-	return page_to_pfn(page);
-}
-#endif
-
-#ifndef boot_pfn_to_page
-static inline struct page *boot_pfn_to_page(unsigned long boot_pfn)
-{
-	return pfn_to_page(boot_pfn);
-}
-#endif
-
-#ifndef phys_to_boot_phys
-static inline unsigned long phys_to_boot_phys(phys_addr_t phys)
-{
-	return phys;
-}
-#endif
-
-#ifndef boot_phys_to_phys
-static inline phys_addr_t boot_phys_to_phys(unsigned long boot_phys)
-{
-	return boot_phys;
-}
-#endif
-
-static inline unsigned long virt_to_boot_phys(void *addr)
-{
-	return phys_to_boot_phys(__pa((unsigned long)addr));
-}
-
-static inline void *boot_phys_to_virt(unsigned long entry)
-{
-	return phys_to_virt(boot_phys_to_phys(entry));
-}
-
 #ifndef arch_kexec_post_alloc_pages
 static inline int arch_kexec_post_alloc_pages(void *vaddr, unsigned int pages, gfp_t gfp) { return 0; }
 #endif
@@ -343,9 +267,5 @@ static inline void __crash_kexec(struct pt_regs *regs) { }
 static inline void crash_kexec(struct pt_regs *regs) { }
 static inline int kexec_should_crash(struct task_struct *p) { return 0; }
 static inline int kexec_crash_loaded(void) { return 0; }
-#define kexec_in_progress false
 #endif /* CONFIG_KEXEC_CORE */
-
-#endif /* !defined(__ASSEBMLY__) */
-
 #endif /* LINUX_KEXEC_H */

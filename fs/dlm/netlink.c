@@ -65,14 +65,14 @@ static int user_cmd(struct sk_buff *skb, struct genl_info *info)
 	return 0;
 }
 
-static const struct genl_ops dlm_nl_ops[] = {
+static struct genl_ops dlm_nl_ops[] = {
 	{
 		.cmd	= DLM_CMD_HELLO,
 		.doit	= user_cmd,
 	},
 };
 
-static struct genl_family family __ro_after_init = {
+static struct genl_family family = {
 	.name		= DLM_GENL_NAME,
 	.version	= DLM_GENL_VERSION,
 	.ops		= dlm_nl_ops,

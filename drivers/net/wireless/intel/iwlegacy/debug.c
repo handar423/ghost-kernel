@@ -136,7 +136,7 @@ EXPORT_SYMBOL(il_update_stats);
 #define DEBUGFS_ADD_BOOL(name, parent, ptr) do {			\
 	struct dentry *__tmp;						\
 	__tmp = debugfs_create_bool(#name, S_IWUSR | S_IRUSR,		\
-				    parent, ptr);			\
+				    parent, (void *) ptr);		\
 	if (IS_ERR(__tmp) || !__tmp)					\
 		goto err;						\
 } while (0)

@@ -278,8 +278,8 @@ int __hw_addr_sync_dev(struct netdev_hw_addr_list *list,
 EXPORT_SYMBOL(__hw_addr_sync_dev);
 
 /**
- *  __hw_addr_unsync_dev - Remove synchronized addresses from device
- *  @list: address list to remove synchronized addresses from
+ *  __hw_addr_unsync_dev - Remove synchonized addresses from device
+ *  @list: address list to remove syncronized addresses from
  *  @dev:  device to sync
  *  @unsync: function to call if address should be removed
  *
@@ -744,7 +744,7 @@ int dev_mc_del_global(struct net_device *dev, const unsigned char *addr)
 EXPORT_SYMBOL(dev_mc_del_global);
 
 /**
- *	dev_mc_sync - Synchronize device's multicast list to another device
+ *	dev_mc_sync - Synchronize device's unicast list to another device
  *	@to: destination device
  *	@from: source device
  *
@@ -772,7 +772,7 @@ int dev_mc_sync(struct net_device *to, struct net_device *from)
 EXPORT_SYMBOL(dev_mc_sync);
 
 /**
- *	dev_mc_sync_multiple - Synchronize device's multicast list to another
+ *	dev_mc_sync_multiple - Synchronize device's unicast list to another
  *	device, but allow for multiple calls to sync to multiple devices.
  *	@to: destination device
  *	@from: source device

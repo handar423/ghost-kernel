@@ -1162,8 +1162,8 @@ struct ob_mac_tso_iocb_rsp {
 struct ib_mac_iocb_rsp {
 	u8 opcode;		/* 0x20 */
 	u8 flags1;
-#define IB_MAC_IOCB_RSP_OI	0x01	/* Override intr delay */
-#define IB_MAC_IOCB_RSP_I	0x02	/* Disable Intr Generation */
+#define IB_MAC_IOCB_RSP_OI	0x01	/* Overide intr delay */
+#define IB_MAC_IOCB_RSP_I	0x02	/* Disble Intr Generation */
 #define IB_MAC_CSUM_ERR_MASK 0x1c	/* A mask to use for csum errs */
 #define IB_MAC_IOCB_RSP_TE	0x04	/* Checksum error */
 #define IB_MAC_IOCB_RSP_NU	0x08	/* No checksum rcvd */
@@ -2149,7 +2149,7 @@ struct ql_adapter {
 	struct timer_list timer;
 	atomic_t lb_count;
 	/* Keep local copy of current mac address. */
-	char current_mac_addr[ETH_ALEN];
+	char current_mac_addr[6];
 };
 
 /*
@@ -2206,14 +2206,14 @@ extern char qlge_driver_name[];
 extern const char qlge_driver_version[];
 extern const struct ethtool_ops qlge_ethtool_ops;
 
-int ql_sem_spinlock(struct ql_adapter *qdev, u32 sem_mask);
-void ql_sem_unlock(struct ql_adapter *qdev, u32 sem_mask);
-int ql_read_xgmac_reg(struct ql_adapter *qdev, u32 reg, u32 *data);
-int ql_get_mac_addr_reg(struct ql_adapter *qdev, u32 type, u16 index,
-			u32 *value);
-int ql_get_routing_reg(struct ql_adapter *qdev, u32 index, u32 *value);
-int ql_write_cfg(struct ql_adapter *qdev, void *ptr, int size, u32 bit,
-		 u16 q_id);
+extern int ql_sem_spinlock(struct ql_adapter *qdev, u32 sem_mask);
+extern void ql_sem_unlock(struct ql_adapter *qdev, u32 sem_mask);
+extern int ql_read_xgmac_reg(struct ql_adapter *qdev, u32 reg, u32 *data);
+extern int ql_get_mac_addr_reg(struct ql_adapter *qdev, u32 type, u16 index,
+			       u32 *value);
+extern int ql_get_routing_reg(struct ql_adapter *qdev, u32 index, u32 *value);
+extern int ql_write_cfg(struct ql_adapter *qdev, void *ptr, int size, u32 bit,
+			u16 q_id);
 void ql_queue_fw_error(struct ql_adapter *qdev);
 void ql_mpi_work(struct work_struct *work);
 void ql_mpi_reset_work(struct work_struct *work);
@@ -2233,9 +2233,10 @@ int ql_unpause_mpi_risc(struct ql_adapter *qdev);
 int ql_pause_mpi_risc(struct ql_adapter *qdev);
 int ql_hard_reset_mpi_risc(struct ql_adapter *qdev);
 int ql_soft_reset_mpi_risc(struct ql_adapter *qdev);
-int ql_dump_risc_ram_area(struct ql_adapter *qdev, void *buf, u32 ram_addr,
-			  int word_count);
-int ql_core_dump(struct ql_adapter *qdev, struct ql_mpi_coredump *mpi_coredump);
+int ql_dump_risc_ram_area(struct ql_adapter *qdev, void *buf,
+		u32 ram_addr, int word_count);
+int ql_core_dump(struct ql_adapter *qdev,
+		struct ql_mpi_coredump *mpi_coredump);
 int ql_mb_about_fw(struct ql_adapter *qdev);
 int ql_mb_wol_set_magic(struct ql_adapter *qdev, u32 enable_wol);
 int ql_mb_wol_mode(struct ql_adapter *qdev, u32 wol);
@@ -2261,9 +2262,9 @@ int ql_clean_lb_rx_ring(struct rx_ring *rx_ring, int budget);
 /* #define QL_OB_DUMP */
 
 #ifdef QL_REG_DUMP
-void ql_dump_xgmac_control_regs(struct ql_adapter *qdev);
-void ql_dump_routing_entries(struct ql_adapter *qdev);
-void ql_dump_regs(struct ql_adapter *qdev);
+extern void ql_dump_xgmac_control_regs(struct ql_adapter *qdev);
+extern void ql_dump_routing_entries(struct ql_adapter *qdev);
+extern void ql_dump_regs(struct ql_adapter *qdev);
 #define QL_DUMP_REGS(qdev) ql_dump_regs(qdev)
 #define QL_DUMP_ROUTE(qdev) ql_dump_routing_entries(qdev)
 #define QL_DUMP_XGMAC_CONTROL_REGS(qdev) ql_dump_xgmac_control_regs(qdev)
@@ -2274,26 +2275,26 @@ void ql_dump_regs(struct ql_adapter *qdev);
 #endif
 
 #ifdef QL_STAT_DUMP
-void ql_dump_stat(struct ql_adapter *qdev);
+extern void ql_dump_stat(struct ql_adapter *qdev);
 #define QL_DUMP_STAT(qdev) ql_dump_stat(qdev)
 #else
 #define QL_DUMP_STAT(qdev)
 #endif
 
 #ifdef QL_DEV_DUMP
-void ql_dump_qdev(struct ql_adapter *qdev);
+extern void ql_dump_qdev(struct ql_adapter *qdev);
 #define QL_DUMP_QDEV(qdev) ql_dump_qdev(qdev)
 #else
 #define QL_DUMP_QDEV(qdev)
 #endif
 
 #ifdef QL_CB_DUMP
-void ql_dump_wqicb(struct wqicb *wqicb);
-void ql_dump_tx_ring(struct tx_ring *tx_ring);
-void ql_dump_ricb(struct ricb *ricb);
-void ql_dump_cqicb(struct cqicb *cqicb);
-void ql_dump_rx_ring(struct rx_ring *rx_ring);
-void ql_dump_hw_cb(struct ql_adapter *qdev, int size, u32 bit, u16 q_id);
+extern void ql_dump_wqicb(struct wqicb *wqicb);
+extern void ql_dump_tx_ring(struct tx_ring *tx_ring);
+extern void ql_dump_ricb(struct ricb *ricb);
+extern void ql_dump_cqicb(struct cqicb *cqicb);
+extern void ql_dump_rx_ring(struct rx_ring *rx_ring);
+extern void ql_dump_hw_cb(struct ql_adapter *qdev, int size, u32 bit, u16 q_id);
 #define QL_DUMP_RICB(ricb) ql_dump_ricb(ricb)
 #define QL_DUMP_WQICB(wqicb) ql_dump_wqicb(wqicb)
 #define QL_DUMP_TX_RING(tx_ring) ql_dump_tx_ring(tx_ring)
@@ -2311,9 +2312,9 @@ void ql_dump_hw_cb(struct ql_adapter *qdev, int size, u32 bit, u16 q_id);
 #endif
 
 #ifdef QL_OB_DUMP
-void ql_dump_tx_desc(struct tx_buf_desc *tbd);
-void ql_dump_ob_mac_iocb(struct ob_mac_iocb_req *ob_mac_iocb);
-void ql_dump_ob_mac_rsp(struct ob_mac_iocb_rsp *ob_mac_rsp);
+extern void ql_dump_tx_desc(struct tx_buf_desc *tbd);
+extern void ql_dump_ob_mac_iocb(struct ob_mac_iocb_req *ob_mac_iocb);
+extern void ql_dump_ob_mac_rsp(struct ob_mac_iocb_rsp *ob_mac_rsp);
 #define QL_DUMP_OB_MAC_IOCB(ob_mac_iocb) ql_dump_ob_mac_iocb(ob_mac_iocb)
 #define QL_DUMP_OB_MAC_RSP(ob_mac_rsp) ql_dump_ob_mac_rsp(ob_mac_rsp)
 #else
@@ -2322,14 +2323,14 @@ void ql_dump_ob_mac_rsp(struct ob_mac_iocb_rsp *ob_mac_rsp);
 #endif
 
 #ifdef QL_IB_DUMP
-void ql_dump_ib_mac_rsp(struct ib_mac_iocb_rsp *ib_mac_rsp);
+extern void ql_dump_ib_mac_rsp(struct ib_mac_iocb_rsp *ib_mac_rsp);
 #define QL_DUMP_IB_MAC_RSP(ib_mac_rsp) ql_dump_ib_mac_rsp(ib_mac_rsp)
 #else
 #define QL_DUMP_IB_MAC_RSP(ib_mac_rsp)
 #endif
 
 #ifdef	QL_ALL_DUMP
-void ql_dump_all(struct ql_adapter *qdev);
+extern void ql_dump_all(struct ql_adapter *qdev);
 #define QL_DUMP_ALL(qdev) ql_dump_all(qdev)
 #else
 #define QL_DUMP_ALL(qdev)

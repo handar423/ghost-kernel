@@ -9,6 +9,7 @@
 #include <linux/miscdevice.h>
 #include <linux/init.h>
 #include <linux/wait.h>
+#include <linux/module.h>
 #include <linux/file.h>
 #include <linux/fs.h>
 #include <linux/poll.h>
@@ -17,7 +18,6 @@
 #include <linux/dlm.h>
 #include <linux/dlm_device.h>
 #include <linux/slab.h>
-#include <linux/sched/signal.h>
 
 #include "dlm_internal.h"
 #include "lockspace.h"
@@ -123,8 +123,6 @@ static void compat_input(struct dlm_write_request *kb,
 static void compat_output(struct dlm_lock_result *res,
 			  struct dlm_lock_result32 *res32)
 {
-	memset(res32, 0, sizeof(*res32));
-
 	res32->version[0] = res->version[0];
 	res32->version[1] = res->version[1];
 	res32->version[2] = res->version[2];
@@ -357,10 +355,6 @@ static int dlm_device_register(struct dlm_ls *ls, char *name)
 	error = misc_register(&ls->ls_device);
 	if (error) {
 		kfree(ls->ls_device.name);
-		/* this has to be set to NULL
-		 * to avoid a double-free in dlm_device_deregister
-		 */
-		ls->ls_device.name = NULL;
 	}
 fail:
 	return error;
@@ -368,15 +362,18 @@ fail:
 
 int dlm_device_deregister(struct dlm_ls *ls)
 {
+	int error;
+
 	/* The device is not registered.  This happens when the lockspace
 	   was never used from userspace, or when device_create_lockspace()
 	   calls dlm_release_lockspace() after the register fails. */
 	if (!ls->ls_device.name)
 		return 0;
 
-	misc_deregister(&ls->ls_device);
-	kfree(ls->ls_device.name);
-	return 0;
+	error = misc_deregister(&ls->ls_device);
+	if (!error)
+		kfree(ls->ls_device.name);
+	return error;
 }
 
 static int device_user_purge(struct dlm_user_proc *proc,
@@ -505,6 +502,7 @@ static ssize_t device_write(struct file *file, const char __user *buf,
 {
 	struct dlm_user_proc *proc = file->private_data;
 	struct dlm_write_request *kbuf;
+	sigset_t tmpsig, allsigs;
 	int error;
 
 #ifdef CONFIG_COMPAT
@@ -521,9 +519,14 @@ static ssize_t device_write(struct file *file, const char __user *buf,
 	if (count > sizeof(struct dlm_write_request) + DLM_RESNAME_MAXLEN)
 		return -EINVAL;
 
-	kbuf = memdup_user_nul(buf, count);
-	if (IS_ERR(kbuf))
-		return PTR_ERR(kbuf);
+	kbuf = kzalloc(count + 1, GFP_NOFS);
+	if (!kbuf)
+		return -ENOMEM;
+
+	if (copy_from_user(kbuf, buf, count)) {
+		error = -EFAULT;
+		goto out_free;
+	}
 
 	if (check_version(kbuf)) {
 		error = -EBADE;
@@ -563,6 +566,9 @@ static ssize_t device_write(struct file *file, const char __user *buf,
 		goto out_free;
 	}
 
+	sigfillset(&allsigs);
+	sigprocmask(SIG_BLOCK, &allsigs, &tmpsig);
+
 	error = -EINVAL;
 
 	switch (kbuf->cmd)
@@ -570,7 +576,7 @@ static ssize_t device_write(struct file *file, const char __user *buf,
 	case DLM_USER_LOCK:
 		if (!proc) {
 			log_print("no locking on control device");
-			goto out_free;
+			goto out_sig;
 		}
 		error = device_user_lock(proc, &kbuf->i.lock);
 		break;
@@ -578,7 +584,7 @@ static ssize_t device_write(struct file *file, const char __user *buf,
 	case DLM_USER_UNLOCK:
 		if (!proc) {
 			log_print("no locking on control device");
-			goto out_free;
+			goto out_sig;
 		}
 		error = device_user_unlock(proc, &kbuf->i.lock);
 		break;
@@ -586,7 +592,7 @@ static ssize_t device_write(struct file *file, const char __user *buf,
 	case DLM_USER_DEADLOCK:
 		if (!proc) {
 			log_print("no locking on control device");
-			goto out_free;
+			goto out_sig;
 		}
 		error = device_user_deadlock(proc, &kbuf->i.lock);
 		break;
@@ -594,7 +600,7 @@ static ssize_t device_write(struct file *file, const char __user *buf,
 	case DLM_USER_CREATE_LOCKSPACE:
 		if (proc) {
 			log_print("create/remove only on control device");
-			goto out_free;
+			goto out_sig;
 		}
 		error = device_create_lockspace(&kbuf->i.lspace);
 		break;
@@ -602,7 +608,7 @@ static ssize_t device_write(struct file *file, const char __user *buf,
 	case DLM_USER_REMOVE_LOCKSPACE:
 		if (proc) {
 			log_print("create/remove only on control device");
-			goto out_free;
+			goto out_sig;
 		}
 		error = device_remove_lockspace(&kbuf->i.lspace);
 		break;
@@ -610,7 +616,7 @@ static ssize_t device_write(struct file *file, const char __user *buf,
 	case DLM_USER_PURGE:
 		if (!proc) {
 			log_print("no locking on control device");
-			goto out_free;
+			goto out_sig;
 		}
 		error = device_user_purge(proc, &kbuf->i.purge);
 		break;
@@ -620,6 +626,8 @@ static ssize_t device_write(struct file *file, const char __user *buf,
 			  kbuf->cmd);
 	}
 
+ out_sig:
+	sigprocmask(SIG_SETMASK, &tmpsig, NULL);
  out_free:
 	kfree(kbuf);
 	return error;
@@ -660,10 +668,14 @@ static int device_close(struct inode *inode, struct file *file)
 {
 	struct dlm_user_proc *proc = file->private_data;
 	struct dlm_ls *ls;
+	sigset_t tmpsig, allsigs;
 
 	ls = dlm_find_lockspace_local(proc->lockspace);
 	if (!ls)
 		return -ENOENT;
+
+	sigfillset(&allsigs);
+	sigprocmask(SIG_BLOCK, &allsigs, &tmpsig);
 
 	set_bit(DLM_PROC_FLAGS_CLOSING, &proc->flags);
 
@@ -681,6 +693,9 @@ static int device_close(struct inode *inode, struct file *file)
 
 	/* FIXME: AUTOFREE: if this ls is no longer used do
 	   device_remove_lockspace() */
+
+	sigprocmask(SIG_SETMASK, &tmpsig, NULL);
+	recalc_sigpending();
 
 	return 0;
 }

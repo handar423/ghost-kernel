@@ -23,7 +23,7 @@
 #include <linux/tc_act/tc_gact.h>
 #include <net/tc_act/tc_gact.h>
 
-static unsigned int gact_net_id;
+static int gact_net_id;
 static struct tc_action_ops act_gact_ops;
 
 #ifdef CONFIG_GACT_PROB
@@ -71,7 +71,7 @@ static int tcf_gact_init(struct net *net, struct nlattr *nla,
 	if (nla == NULL)
 		return -EINVAL;
 
-	err = nla_parse_nested(tb, TCA_GACT_MAX, nla, gact_policy, NULL);
+	err = nla_parse_nested(tb, TCA_GACT_MAX, nla, gact_policy);
 	if (err < 0)
 		return err;
 
@@ -87,6 +87,11 @@ static int tcf_gact_init(struct net *net, struct nlattr *nla,
 		p_parm = nla_data(tb[TCA_GACT_PROB]);
 		if (p_parm->ptype >= MAX_RAND)
 			return -EINVAL;
+		if (TC_ACT_EXT_CMP(p_parm->paction, TC_ACT_GOTO_CHAIN)) {
+			NL_SET_ERR_MSG(extack,
+				       "goto chain not allowed on fallback");
+			return -EINVAL;
+		}
 	}
 #endif
 
@@ -99,9 +104,10 @@ static int tcf_gact_init(struct net *net, struct nlattr *nla,
 	} else {
 		if (bind)/* dont override defaults */
 			return 0;
-		tcf_idr_release(*a, bind);
-		if (!ovr)
+		if (!ovr) {
+			tcf_idr_release(*a, bind);
 			return -EEXIST;
+		}
 	}
 
 	gact = to_gact(*a);
@@ -148,7 +154,7 @@ static int tcf_gact(struct sk_buff *skb, const struct tc_action *a,
 }
 
 static void tcf_gact_stats_update(struct tc_action *a, u64 bytes, u32 packets,
-				  u64 lastuse)
+				  u64 lastuse, bool hw)
 {
 	struct tcf_gact *gact = to_gact(a);
 	int action = READ_ONCE(gact->tcf_action);
@@ -158,6 +164,10 @@ static void tcf_gact_stats_update(struct tc_action *a, u64 bytes, u32 packets,
 			   packets);
 	if (action == TC_ACT_SHOT)
 		this_cpu_ptr(gact->common.cpu_qstats)->drops += packets;
+
+	if (hw)
+		_bstats_cpu_update(this_cpu_ptr(gact->common.cpu_bstats_hw),
+				   bytes, packets);
 
 	tm->lastuse = max_t(u64, tm->lastuse, lastuse);
 }

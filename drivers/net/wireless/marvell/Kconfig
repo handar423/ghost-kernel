@@ -11,8 +11,8 @@ config WLAN_VENDOR_MARVELL
 
 if WLAN_VENDOR_MARVELL
 
-source "drivers/net/wireless/marvell/libertas/Kconfig"
-source "drivers/net/wireless/marvell/libertas_tf/Kconfig"
+#source "drivers/net/wireless/marvell/libertas/Kconfig"
+#source "drivers/net/wireless/marvell/libertas_tf/Kconfig"
 source "drivers/net/wireless/marvell/mwifiex/Kconfig"
 
 config MWL8K

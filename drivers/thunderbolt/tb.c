@@ -8,7 +8,7 @@
 #include <linux/slab.h>
 #include <linux/errno.h>
 #include <linux/delay.h>
-#include <linux/platform_data/x86/apple.h>
+#include <linux/dmi.h>
 
 #include "tb.h"
 #include "tb_regs.h"
@@ -404,10 +404,10 @@ static int tb_suspend_noirq(struct tb *tb)
 {
 	struct tb_cm *tcm = tb_priv(tb);
 
-	tb_info(tb, "suspending...\n");
+	tb_dbg(tb, "suspending...\n");
 	tb_switch_suspend(tb->root_switch);
 	tcm->hotplug_active = false; /* signal tb_handle_hotplug to quit */
-	tb_info(tb, "suspend finished\n");
+	tb_dbg(tb, "suspend finished\n");
 
 	return 0;
 }
@@ -417,7 +417,7 @@ static int tb_resume_noirq(struct tb *tb)
 	struct tb_cm *tcm = tb_priv(tb);
 	struct tb_pci_tunnel *tunnel, *n;
 
-	tb_info(tb, "resuming...\n");
+	tb_dbg(tb, "resuming...\n");
 
 	/* remove any pci devices the firmware might have setup */
 	tb_switch_reset(tb, 0);
@@ -432,12 +432,12 @@ static int tb_resume_noirq(struct tb *tb)
 		 * the pcie links need some time to get going.
 		 * 100ms works for me...
 		 */
-		tb_info(tb, "tunnels restarted, sleeping for 100ms\n");
+		tb_dbg(tb, "tunnels restarted, sleeping for 100ms\n");
 		msleep(100);
 	}
 	 /* Allow tb_handle_hotplug to progress events */
 	tcm->hotplug_active = true;
-	tb_info(tb, "resume finished\n");
+	tb_dbg(tb, "resume finished\n");
 
 	return 0;
 }
@@ -455,7 +455,7 @@ struct tb *tb_probe(struct tb_nhi *nhi)
 	struct tb_cm *tcm;
 	struct tb *tb;
 
-	if (!x86_apple_machine)
+	if (!dmi_match(DMI_BOARD_VENDOR, "Apple Inc."))
 		return NULL;
 
 	tb = tb_domain_alloc(nhi, sizeof(*tcm));

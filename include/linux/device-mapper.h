@@ -57,11 +57,14 @@ typedef void (*dm_dtr_fn) (struct dm_target *ti);
  * = 2: The target wants to push back the io
  */
 typedef int (*dm_map_fn) (struct dm_target *ti, struct bio *bio);
+typedef int (*dm_map_request_fn) (struct dm_target *ti, struct request *clone,
+				  union map_info *map_context);
 typedef int (*dm_clone_and_map_request_fn) (struct dm_target *ti,
 					    struct request *rq,
 					    union map_info *map_context,
 					    struct request **clone);
-typedef void (*dm_release_clone_request_fn) (struct request *clone);
+typedef void (*dm_release_clone_request_fn) (struct request *clone,
+					     union map_info *map_context);
 
 /*
  * Returns:
@@ -72,9 +75,9 @@ typedef void (*dm_release_clone_request_fn) (struct request *clone);
  * 2   : The target wants to push back the io
  */
 typedef int (*dm_endio_fn) (struct dm_target *ti,
-			    struct bio *bio, blk_status_t *error);
+			    struct bio *bio, int error);
 typedef int (*dm_request_endio_fn) (struct dm_target *ti,
-				    struct request *clone, blk_status_t error,
+				    struct request *clone, int error,
 				    union map_info *map_context);
 
 typedef void (*dm_presuspend_fn) (struct dm_target *ti);
@@ -88,8 +91,10 @@ typedef void (*dm_status_fn) (struct dm_target *ti, status_type_t status_type,
 
 typedef int (*dm_message_fn) (struct dm_target *ti, unsigned argc, char **argv);
 
-typedef int (*dm_prepare_ioctl_fn) (struct dm_target *ti,
-			    struct block_device **bdev, fmode_t *mode);
+typedef int (*dm_prepare_ioctl_fn) (struct dm_target *ti, struct block_device **bdev);
+
+typedef int (*dm_merge_fn) (struct dm_target *ti, struct bvec_merge_data *bvm,
+			    struct bio_vec *biovec, int max_size);
 
 /*
  * These iteration functions are typically used to check (and combine)
@@ -132,8 +137,10 @@ typedef int (*dm_busy_fn) (struct dm_target *ti);
  */
 typedef long (*dm_dax_direct_access_fn) (struct dm_target *ti, pgoff_t pgoff,
 		long nr_pages, void **kaddr, pfn_t *pfn);
-typedef size_t (*dm_dax_copy_from_iter_fn)(struct dm_target *ti, pgoff_t pgoff,
-		void *addr, size_t bytes, struct iov_iter *i);
+typedef int (*dm_dax_memcpy_fromiovecend_fn)(struct dm_target *ti, pgoff_t pgoff,
+		void *addr, const struct iovec *iov, int offset, int len);
+typedef int (*dm_dax_memcpy_toiovecend_fn)(struct dm_target *ti, pgoff_t pgoff,
+		const struct iovec *iov, void *addr, int offset, int len);
 #define PAGE_SECTORS (PAGE_SIZE / 512)
 
 void dm_error(const char *message);
@@ -167,6 +174,7 @@ struct target_type {
 	dm_ctr_fn ctr;
 	dm_dtr_fn dtr;
 	dm_map_fn map;
+	dm_map_request_fn map_rq;
 	dm_clone_and_map_request_fn clone_and_map_rq;
 	dm_release_clone_request_fn release_clone_rq;
 	dm_endio_fn end_io;
@@ -179,11 +187,13 @@ struct target_type {
 	dm_status_fn status;
 	dm_message_fn message;
 	dm_prepare_ioctl_fn prepare_ioctl;
+	dm_merge_fn merge;
 	dm_busy_fn busy;
 	dm_iterate_devices_fn iterate_devices;
 	dm_io_hints_fn io_hints;
 	dm_dax_direct_access_fn direct_access;
-	dm_dax_copy_from_iter_fn dax_copy_from_iter;
+	dm_dax_memcpy_fromiovecend_fn dax_memcpy_fromiovecend;
+	dm_dax_memcpy_toiovecend_fn dax_memcpy_toiovecend;
 
 	/* For internal device-mapper use. */
 	struct list_head list;
@@ -228,24 +238,6 @@ struct target_type {
  */
 typedef unsigned (*dm_num_write_bios_fn) (struct dm_target *ti, struct bio *bio);
 
-/*
- * A target implements own bio data integrity.
- */
-#define DM_TARGET_INTEGRITY		0x00000010
-#define dm_target_has_integrity(type)	((type)->features & DM_TARGET_INTEGRITY)
-
-/*
- * A target passes integrity data to the lower device.
- */
-#define DM_TARGET_PASSES_INTEGRITY	0x00000020
-#define dm_target_passes_integrity(type) ((type)->features & DM_TARGET_PASSES_INTEGRITY)
-
-/*
- * Indicates that a target supports host-managed zoned block devices.
- */
-#define DM_TARGET_ZONED_HM		0x00000040
-#define dm_target_supports_zoned_hm(type) ((type)->features & DM_TARGET_ZONED_HM)
-
 struct dm_target {
 	struct dm_table *table;
 	struct target_type *type;
@@ -278,12 +270,6 @@ struct dm_target {
 	 * The bio number can be accessed with dm_bio_get_target_bio_nr.
 	 */
 	unsigned num_write_same_bios;
-
-	/*
-	 * The number of WRITE ZEROES bios that will be submitted to the target.
-	 * The bio number can be accessed with dm_bio_get_target_bio_nr.
-	 */
-	unsigned num_write_zeroes_bios;
 
 	/*
 	 * The minimum number of extra bytes allocated in each io for the
@@ -321,6 +307,11 @@ struct dm_target {
 	 * on max_io_len boundary.
 	 */
 	bool split_discard_bios:1;
+
+	/*
+	 * Set if this target does not return zeroes on discarded blocks.
+	 */
+	bool discard_zeroes_data_unsupported:1;
 };
 
 /* Each target can link one of these into the table */
@@ -340,7 +331,6 @@ struct dm_target_io {
 	struct dm_io *io;
 	struct dm_target *ti;
 	unsigned target_bio_nr;
-	unsigned *len_ptr;
 	struct bio clone;
 };
 
@@ -452,9 +442,6 @@ int dm_copy_name_and_uuid(struct mapped_device *md, char *name, char *uuid);
 struct gendisk *dm_disk(struct mapped_device *md);
 int dm_suspended(struct dm_target *ti);
 int dm_noflush_suspending(struct dm_target *ti);
-void dm_accept_partial_bio(struct bio *bio, unsigned n_sectors);
-void dm_remap_zone_report(struct dm_target *ti, struct bio *bio,
-			  sector_t start);
 union map_info *dm_get_rq_mapinfo(struct request *rq);
 
 struct queue_limits *dm_get_queue_limits(struct mapped_device *md);
@@ -582,7 +569,6 @@ do {									\
 /*
  * Definitions of return values from target end_io function.
  */
-#define DM_ENDIO_DONE		0
 #define DM_ENDIO_INCOMPLETE	1
 #define DM_ENDIO_REQUEUE	2
 
@@ -593,7 +579,6 @@ do {									\
 #define DM_MAPIO_REMAPPED	1
 #define DM_MAPIO_REQUEUE	DM_ENDIO_REQUEUE
 #define DM_MAPIO_DELAY_REQUEUE	3
-#define DM_MAPIO_KILL		4
 
 #define dm_sector_div64(x, y)( \
 { \

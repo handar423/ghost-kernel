@@ -28,7 +28,7 @@
 #include <net/netfilter/nf_conntrack_core.h>
 #include <net/netfilter/nf_conntrack_zones.h>
 
-static unsigned int connmark_net_id;
+static int connmark_net_id;
 static struct tc_action_ops act_connmark_ops;
 
 static int tcf_connmark(struct sk_buff *skb, const struct tc_action *a,
@@ -43,7 +43,7 @@ static int tcf_connmark(struct sk_buff *skb, const struct tc_action *a,
 	int proto;
 
 	spin_lock(&ca->tcf_lock);
-	tcf_lastuse_update(&ca->tcf_tm);
+	ca->tcf_tm.lastuse = jiffies;
 	bstats_update(&ca->tcf_bstats, skb);
 
 	if (skb->protocol == htons(ETH_P_IP)) {
@@ -107,8 +107,7 @@ static int tcf_connmark_init(struct net *net, struct nlattr *nla,
 	if (!nla)
 		return -EINVAL;
 
-	ret = nla_parse_nested(tb, TCA_CONNMARK_MAX, nla, connmark_policy,
-			       NULL);
+	ret = nla_parse_nested(tb, TCA_CONNMARK_MAX, nla, connmark_policy);
 	if (ret < 0)
 		return ret;
 
@@ -134,9 +133,10 @@ static int tcf_connmark_init(struct net *net, struct nlattr *nla,
 		ci = to_connmark(*a);
 		if (bind)
 			return 0;
-		tcf_idr_release(*a, bind);
-		if (!ovr)
+		if (!ovr) {
+			tcf_idr_release(*a, bind);
 			return -EEXIST;
+		}
 		/* replacing action and zone */
 		ci->tcf_action = parm->action;
 		ci->zone = parm->zone;
@@ -163,7 +163,9 @@ static inline int tcf_connmark_dump(struct sk_buff *skb, struct tc_action *a,
 	if (nla_put(skb, TCA_CONNMARK_PARMS, sizeof(opt), &opt))
 		goto nla_put_failure;
 
-	tcf_tm_dump(&t, &ci->tcf_tm);
+	t.install = jiffies_to_clock_t(jiffies - ci->tcf_tm.install);
+	t.lastuse = jiffies_to_clock_t(jiffies - ci->tcf_tm.lastuse);
+	t.expires = jiffies_to_clock_t(ci->tcf_tm.expires);
 	if (nla_put_64bit(skb, TCA_CONNMARK_TM, sizeof(t), &t,
 			  TCA_CONNMARK_PAD))
 		goto nla_put_failure;

@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 #include <linux/ceph/ceph_debug.h>
 
 #include <linux/device.h>
@@ -84,7 +83,7 @@ static int mdsc_show(struct seq_file *s, void *p)
 				path = NULL;
 			spin_lock(&req->r_dentry->d_lock);
 			seq_printf(s, " #%llx/%pd (%s)",
-				   ceph_ino(d_inode(req->r_dentry->d_parent)),
+				   ceph_ino(req->r_dentry->d_parent->d_inode),
 				   req->r_dentry,
 				   path ? path : "");
 			spin_unlock(&req->r_dentry->d_lock);
@@ -251,7 +250,7 @@ int ceph_fs_debugfs_init(struct ceph_fs_client *fsc)
 		goto out;
 
 	snprintf(name, sizeof(name), "../../bdi/%s",
-		 dev_name(fsc->sb->s_bdi->dev));
+		 dev_name(fsc->backing_dev_info.dev));
 	fsc->debugfs_bdi =
 		debugfs_create_symlink("bdi",
 				       fsc->client->debugfs_dir,
@@ -260,7 +259,7 @@ int ceph_fs_debugfs_init(struct ceph_fs_client *fsc)
 		goto out;
 
 	fsc->debugfs_mdsmap = debugfs_create_file("mdsmap",
-					0600,
+					0400,
 					fsc->client->debugfs_dir,
 					fsc,
 					&mdsmap_show_fops);
@@ -268,7 +267,7 @@ int ceph_fs_debugfs_init(struct ceph_fs_client *fsc)
 		goto out;
 
 	fsc->debugfs_mds_sessions = debugfs_create_file("mds_sessions",
-					0600,
+					0400,
 					fsc->client->debugfs_dir,
 					fsc,
 					&mds_sessions_show_fops);
@@ -276,7 +275,7 @@ int ceph_fs_debugfs_init(struct ceph_fs_client *fsc)
 		goto out;
 
 	fsc->debugfs_mdsc = debugfs_create_file("mdsc",
-						0600,
+						0400,
 						fsc->client->debugfs_dir,
 						fsc,
 						&mdsc_show_fops);
@@ -292,7 +291,7 @@ int ceph_fs_debugfs_init(struct ceph_fs_client *fsc)
 		goto out;
 
 	fsc->debugfs_dentry_lru = debugfs_create_file("dentry_lru",
-					0600,
+					0400,
 					fsc->client->debugfs_dir,
 					fsc,
 					&dentry_lru_show_fops);

@@ -123,8 +123,8 @@ MODULE_PARM_DESC(nowayout,
 
 static __u16 __iomem *wdtmrctl;
 
-static void wdt_timer_ping(struct timer_list *);
-static DEFINE_TIMER(timer, wdt_timer_ping);
+static void wdt_timer_ping(unsigned long);
+static DEFINE_TIMER(timer, wdt_timer_ping, 0, 0);
 static unsigned long next_heartbeat;
 static unsigned long wdt_is_open;
 static char wdt_expect_close;
@@ -134,7 +134,7 @@ static DEFINE_SPINLOCK(wdt_spinlock);
  *	Whack the dog
  */
 
-static void wdt_timer_ping(struct timer_list *unused)
+static void wdt_timer_ping(unsigned long data)
 {
 	/* If we got a heartbeat pulse within the WDT_US_INTERVAL
 	 * we agree to ping the WDT
@@ -158,11 +158,12 @@ static void wdt_timer_ping(struct timer_list *unused)
 
 static void wdt_config(int writeval)
 {
+	__u16 dummy;
 	unsigned long flags;
 
 	/* buy some time (ping) */
 	spin_lock_irqsave(&wdt_spinlock, flags);
-	readw(wdtmrctl);	/* ensure write synchronization */
+	dummy = readw(wdtmrctl);	/* ensure write synchronization */
 	writew(0xAAAA, wdtmrctl);
 	writew(0x5555, wdtmrctl);
 	/* unlock WDT = make WDT configuration register writable one time */
@@ -432,3 +433,4 @@ MODULE_AUTHOR("Scott and Bill Jennings");
 MODULE_DESCRIPTION(
 	"Driver for watchdog timer in AMD \"Elan\" SC520 uProcessor");
 MODULE_LICENSE("GPL");
+MODULE_ALIAS_MISCDEV(WATCHDOG_MINOR);

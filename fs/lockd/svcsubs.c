@@ -44,7 +44,7 @@ static inline void nlm_debug_print_fh(char *msg, struct nfs_fh *f)
 
 static inline void nlm_debug_print_file(char *msg, struct nlm_file *file)
 {
-	struct inode *inode = file_inode(file->f_file);
+	struct inode *inode = locks_inode(file->f_file);
 
 	dprintk("lockd: %s %s/%ld\n",
 		msg, inode->i_sb->s_id, inode->i_ino);
@@ -164,15 +164,12 @@ nlm_traverse_locks(struct nlm_host *host, struct nlm_file *file,
 {
 	struct inode	 *inode = nlmsvc_file_inode(file);
 	struct file_lock *fl;
-	struct file_lock_context *flctx = inode->i_flctx;
 	struct nlm_host	 *lockhost;
 
-	if (!flctx || list_empty_careful(&flctx->flc_posix))
-		return 0;
 again:
 	file->f_locks = 0;
-	spin_lock(&flctx->flc_lock);
-	list_for_each_entry(fl, &flctx->flc_posix, fl_list) {
+	spin_lock(&inode->i_lock);
+	for (fl = inode->i_flock; fl; fl = fl->fl_next) {
 		if (fl->fl_lmops != &nlmsvc_lock_operations)
 			continue;
 
@@ -183,7 +180,7 @@ again:
 		if (match(lockhost, host)) {
 			struct file_lock lock = *fl;
 
-			spin_unlock(&flctx->flc_lock);
+			spin_unlock(&inode->i_lock);
 			lock.fl_type  = F_UNLCK;
 			lock.fl_start = 0;
 			lock.fl_end   = OFFSET_MAX;
@@ -195,7 +192,7 @@ again:
 			goto again;
 		}
 	}
-	spin_unlock(&flctx->flc_lock);
+	spin_unlock(&inode->i_lock);
 
 	return 0;
 }
@@ -226,21 +223,18 @@ nlm_file_inuse(struct nlm_file *file)
 {
 	struct inode	 *inode = nlmsvc_file_inode(file);
 	struct file_lock *fl;
-	struct file_lock_context *flctx = inode->i_flctx;
 
 	if (file->f_count || !list_empty(&file->f_blocks) || file->f_shares)
 		return 1;
 
-	if (flctx && !list_empty_careful(&flctx->flc_posix)) {
-		spin_lock(&flctx->flc_lock);
-		list_for_each_entry(fl, &flctx->flc_posix, fl_list) {
-			if (fl->fl_lmops == &nlmsvc_lock_operations) {
-				spin_unlock(&flctx->flc_lock);
-				return 1;
-			}
+	spin_lock(&inode->i_lock);
+	for (fl = inode->i_flock; fl; fl = fl->fl_next) {
+		if (fl->fl_lmops == &nlmsvc_lock_operations) {
+			spin_unlock(&inode->i_lock);
+			return 1;
 		}
-		spin_unlock(&flctx->flc_lock);
 	}
+	spin_unlock(&inode->i_lock);
 	file->f_locks = 0;
 	return 0;
 }
@@ -370,7 +364,7 @@ nlmsvc_mark_resources(struct net *net)
 {
 	struct nlm_host hint;
 
-	dprintk("lockd: %s for net %x\n", __func__, net ? net->ns.inum : 0);
+	dprintk("lockd: nlmsvc_mark_resources for net %p\n", net);
 	hint.net = net;
 	nlm_traverse_files(&hint, nlmsvc_mark_host, NULL);
 }
@@ -414,7 +408,7 @@ nlmsvc_match_sb(void *datap, struct nlm_file *file)
 {
 	struct super_block *sb = datap;
 
-	return sb == file_inode(file->f_file)->i_sb;
+	return sb == locks_inode(file->f_file)->i_sb;
 }
 
 /**

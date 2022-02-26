@@ -11,26 +11,7 @@
 #include "qla_def.h"
 #include "qla_gbl.h"
 
-#include <linux/delay.h>
-
 #define TIMEOUT_100_MS 100
-
-static const uint32_t qla8044_reg_tbl[] = {
-	QLA8044_PEG_HALT_STATUS1,
-	QLA8044_PEG_HALT_STATUS2,
-	QLA8044_PEG_ALIVE_COUNTER,
-	QLA8044_CRB_DRV_ACTIVE,
-	QLA8044_CRB_DEV_STATE,
-	QLA8044_CRB_DRV_STATE,
-	QLA8044_CRB_DRV_SCRATCH,
-	QLA8044_CRB_DEV_PART_INFO1,
-	QLA8044_CRB_IDC_VER_MAJOR,
-	QLA8044_FW_VER_MAJOR,
-	QLA8044_FW_VER_MINOR,
-	QLA8044_FW_VER_SUB,
-	QLA8044_CMDPEG_STATE,
-	QLA8044_ASIC_TEMP,
-};
 
 /* 8044 Flash Read/Write functions */
 uint32_t
@@ -282,9 +263,8 @@ qla8044_clear_qsnt_ready(struct scsi_qla_host *vha)
 }
 
 /**
- *
  * qla8044_lock_recovery - Recovers the idc_lock.
- * @ha : Pointer to adapter structure
+ * @vha : Pointer to adapter structure
  *
  * Lock Recovery Register
  * 5-2	Lock recovery owner: Function ID of driver doing lock recovery,
@@ -562,12 +542,12 @@ exit_lock_error:
 /*
  * Address and length are byte address
  */
-uint8_t *
-qla8044_read_optrom_data(struct scsi_qla_host *vha, uint8_t *buf,
+void *
+qla8044_read_optrom_data(struct scsi_qla_host *vha, void *buf,
 	uint32_t offset, uint32_t length)
 {
 	scsi_block_requests(vha->host);
-	if (qla8044_read_flash_data(vha, (uint8_t *)buf, offset, length / 4)
+	if (qla8044_read_flash_data(vha, buf, offset, length / 4)
 	    != QLA_SUCCESS) {
 		ql_log(ql_log_warn, vha,  0xb08d,
 		    "%s: Failed to read from flash\n",
@@ -1641,10 +1621,10 @@ qla8044_set_rst_ready(struct scsi_qla_host *vha)
 
 /**
  * qla8044_need_reset_handler - Code to start reset sequence
- * @ha: pointer to adapter structure
+ * @vha: pointer to adapter structure
  *
  * Note: IDC lock must be held upon entry
- **/
+ */
 static void
 qla8044_need_reset_handler(struct scsi_qla_host *vha)
 {
@@ -1861,8 +1841,8 @@ exit_update_idc_reg:
 
 /**
  * qla8044_need_qsnt_handler - Code to start qsnt
- * @ha: pointer to adapter structure
- **/
+ * @vha: pointer to adapter structure
+ */
 static void
 qla8044_need_qsnt_handler(struct scsi_qla_host *vha)
 {
@@ -2033,10 +2013,10 @@ exit_error:
 
 /**
  * qla4_8xxx_check_temp - Check the ISP82XX temperature.
- * @ha: adapter block pointer.
+ * @vha: adapter block pointer.
  *
  * Note: The caller should not hold the idc lock.
- **/
+ */
 static int
 qla8044_check_temp(struct scsi_qla_host *vha)
 {
@@ -2073,10 +2053,10 @@ int qla8044_read_temperature(scsi_qla_host_t *vha)
 
 /**
  * qla8044_check_fw_alive  - Check firmware health
- * @ha: Pointer to host adapter structure.
+ * @vha: Pointer to host adapter structure.
  *
  * Context: Interrupt
- **/
+ */
 int
 qla8044_check_fw_alive(struct scsi_qla_host *vha)
 {
@@ -2372,7 +2352,7 @@ qla8044_minidump_process_rdmem(struct scsi_qla_host *vha,
 
 	if (r_addr & 0xf) {
 		ql_dbg(ql_dbg_p3p, vha, 0xb0f1,
-		    "[%s]: Read addr 0x%x not 16 bytes aligned\n",
+		    "[%s]: Read addr 0x%x not 16 bytes alligned\n",
 		    __func__, r_addr);
 		return QLA_FUNCTION_FAILED;
 	}
@@ -3010,10 +2990,9 @@ qla8044_minidump_process_rddfe(struct scsi_qla_host *vha,
 	uint16_t count;
 	uint32_t poll, mask, modify_mask;
 	uint32_t wait_count = 0;
-
 	uint32_t *data_ptr = *d_ptr;
-
 	struct qla8044_minidump_entry_rddfe *rddfe;
+
 	rddfe = (struct qla8044_minidump_entry_rddfe *) entry_hdr;
 
 	addr1 = rddfe->addr_1;
@@ -3800,7 +3779,7 @@ qla8044_write_flash_dword_mode(scsi_qla_host_t *vha, uint32_t *dwptr,
 }
 
 int
-qla8044_write_optrom_data(struct scsi_qla_host *vha, uint8_t *buf,
+qla8044_write_optrom_data(struct scsi_qla_host *vha, void *buf,
 			  uint32_t offset, uint32_t length)
 {
 	int rval = QLA_FUNCTION_FAILED, i, burst_iter_count;
@@ -3881,7 +3860,7 @@ out:
 #define PF_BITS_MASK		(0xF << 16)
 /**
  * qla8044_intr_handler() - Process interrupts for the ISP8044
- * @irq:
+ * @irq: interrupt number
  * @dev_id: SCSI driver HA context
  *
  * Called by system whenever the host adapter generates an interrupt.

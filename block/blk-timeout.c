@@ -32,7 +32,7 @@ static int __init fail_io_timeout_debugfs(void)
 	struct dentry *dir = fault_create_debugfs_attr("fail_io_timeout",
 						NULL, &fail_io_timeout);
 
-	return PTR_ERR_OR_ZERO(dir);
+	return IS_ERR(dir) ? PTR_ERR(dir) : 0;
 }
 
 late_initcall(fail_io_timeout_debugfs);
@@ -83,12 +83,12 @@ void blk_delete_timer(struct request *req)
 static void blk_rq_timed_out(struct request *req)
 {
 	struct request_queue *q = req->q;
-	enum blk_eh_timer_return ret = BLK_EH_RESET_TIMER;
+	enum blk_eh_timer_return ret;
 
-	if (q->rq_timed_out_fn)
-		ret = q->rq_timed_out_fn(req);
+	ret = q->rq_timed_out_fn(req);
 	switch (ret) {
 	case BLK_EH_HANDLED:
+		/* Can we use req->errors here? */
 		__blk_complete_request(req);
 		break;
 	case BLK_EH_RESET_TIMER:
@@ -186,14 +186,12 @@ unsigned long blk_rq_timeout(unsigned long timeout)
  * Notes:
  *    Each request has its own timer, and as it is added to the queue, we
  *    set up the timer. When the request completes, we cancel the timer.
+ *    Queue lock must be held for the non-mq case, mq case doesn't care.
  */
 void blk_add_timer(struct request *req)
 {
 	struct request_queue *q = req->q;
 	unsigned long expiry;
-
-	if (!q->mq_ops)
-		lockdep_assert_held(q->queue_lock);
 
 	/* blk-mq has its own handler, so we don't need ->rq_timed_out_fn */
 	if (!q->mq_ops && !q->rq_timed_out_fn)
@@ -208,7 +206,7 @@ void blk_add_timer(struct request *req)
 	if (!req->timeout)
 		req->timeout = q->rq_timeout;
 
-	WRITE_ONCE(req->deadline, jiffies + req->timeout);
+	req->deadline = jiffies + req->timeout;
 
 	/*
 	 * Only the non-mq case needs to add the request to a protected list.

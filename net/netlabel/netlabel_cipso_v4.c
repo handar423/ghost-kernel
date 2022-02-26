@@ -23,7 +23,8 @@
  * the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program;  if not, see <http://www.gnu.org/licenses/>.
+ * along with this program;  if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
  *
  */
 
@@ -101,7 +102,7 @@ static int netlbl_cipsov4_add_common(struct genl_info *info,
 
 	if (nla_validate_nested(info->attrs[NLBL_CIPSOV4_A_TAGLST],
 				NLBL_CIPSOV4_A_MAX,
-				netlbl_cipsov4_genl_policy, NULL) != 0)
+				netlbl_cipsov4_genl_policy) != 0)
 		return -EINVAL;
 
 	nla_for_each_nested(nla, info->attrs[NLBL_CIPSOV4_A_TAGLST], nla_rem)
@@ -148,7 +149,7 @@ static int netlbl_cipsov4_add_std(struct genl_info *info,
 
 	if (nla_validate_nested(info->attrs[NLBL_CIPSOV4_A_MLSLVLLST],
 				NLBL_CIPSOV4_A_MAX,
-				netlbl_cipsov4_genl_policy, NULL) != 0)
+				netlbl_cipsov4_genl_policy) != 0)
 		return -EINVAL;
 
 	doi_def = kmalloc(sizeof(*doi_def), GFP_KERNEL);
@@ -170,10 +171,10 @@ static int netlbl_cipsov4_add_std(struct genl_info *info,
 			    info->attrs[NLBL_CIPSOV4_A_MLSLVLLST],
 			    nla_a_rem)
 		if (nla_type(nla_a) == NLBL_CIPSOV4_A_MLSLVL) {
-			if (nla_validate_nested(nla_a, NLBL_CIPSOV4_A_MAX,
-						netlbl_cipsov4_genl_policy,
-						NULL) != 0)
-				goto add_std_failure;
+			if (nla_validate_nested(nla_a,
+					    NLBL_CIPSOV4_A_MAX,
+					    netlbl_cipsov4_genl_policy) != 0)
+					goto add_std_failure;
 			nla_for_each_nested(nla_b, nla_a, nla_b_rem)
 				switch (nla_type(nla_b)) {
 				case NLBL_CIPSOV4_A_MLSLVLLOC:
@@ -236,7 +237,7 @@ static int netlbl_cipsov4_add_std(struct genl_info *info,
 	if (info->attrs[NLBL_CIPSOV4_A_MLSCATLST]) {
 		if (nla_validate_nested(info->attrs[NLBL_CIPSOV4_A_MLSCATLST],
 					NLBL_CIPSOV4_A_MAX,
-					netlbl_cipsov4_genl_policy, NULL) != 0)
+					netlbl_cipsov4_genl_policy) != 0)
 			goto add_std_failure;
 
 		nla_for_each_nested(nla_a,
@@ -244,9 +245,8 @@ static int netlbl_cipsov4_add_std(struct genl_info *info,
 				    nla_a_rem)
 			if (nla_type(nla_a) == NLBL_CIPSOV4_A_MLSCAT) {
 				if (nla_validate_nested(nla_a,
-							NLBL_CIPSOV4_A_MAX,
-							netlbl_cipsov4_genl_policy,
-							NULL) != 0)
+					      NLBL_CIPSOV4_A_MAX,
+					      netlbl_cipsov4_genl_policy) != 0)
 					goto add_std_failure;
 				nla_for_each_nested(nla_b, nla_a, nla_b_rem)
 					switch (nla_type(nla_b)) {
@@ -318,7 +318,8 @@ static int netlbl_cipsov4_add_std(struct genl_info *info,
 	return 0;
 
 add_std_failure:
-	cipso_v4_doi_free(doi_def);
+	if (doi_def)
+		cipso_v4_doi_free(doi_def);
 	return ret_val;
 }
 
@@ -581,6 +582,7 @@ list_start:
 
 		break;
 	}
+	cipso_v4_doi_putdef(doi_def);
 	rcu_read_unlock();
 
 	genlmsg_end(ans_skb, data);
@@ -589,12 +591,14 @@ list_start:
 list_retry:
 	/* XXX - this limit is a guesstimate */
 	if (nlsze_mult < 4) {
+		cipso_v4_doi_putdef(doi_def);
 		rcu_read_unlock();
 		kfree_skb(ans_skb);
 		nlsze_mult *= 2;
 		goto list_start;
 	}
 list_failure_lock:
+	cipso_v4_doi_putdef(doi_def);
 	rcu_read_unlock();
 list_failure:
 	kfree_skb(ans_skb);
@@ -761,7 +765,7 @@ static const struct genl_ops netlbl_cipsov4_ops[] = {
 	},
 };
 
-static struct genl_family netlbl_cipsov4_gnl_family __ro_after_init = {
+static struct genl_family netlbl_cipsov4_gnl_family = {
 	.hdrsize = 0,
 	.name = NETLBL_NLTYPE_CIPSOV4_NAME,
 	.version = NETLBL_PROTO_VERSION,

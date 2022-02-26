@@ -13,8 +13,6 @@
  *
  */
 
-#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
-
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/errno.h>
@@ -27,7 +25,6 @@
 #include <linux/init.h>
 #include <linux/device.h>
 #include <linux/hardirq.h>
-#include <linux/of_device.h>
 #include <asm/prom.h>
 #include <asm/machdep.h>
 #include <asm/irq.h>
@@ -83,9 +80,14 @@ static int is_pmu_based;
 #define CPUFREQ_LOW                   1
 
 static struct cpufreq_frequency_table pmac_cpu_freqs[] = {
-	{0, CPUFREQ_HIGH,	0},
-	{0, CPUFREQ_LOW,	0},
-	{0, 0,			CPUFREQ_TABLE_END},
+	{CPUFREQ_HIGH, 		0},
+	{CPUFREQ_LOW,		0},
+	{0,			CPUFREQ_TABLE_END},
+};
+
+static struct freq_attr* pmac_cpu_freqs_attr[] = {
+	&cpufreq_freq_attr_scaling_available_freqs,
+	NULL,
 };
 
 static inline void local_delay(unsigned long ms)
@@ -300,7 +302,7 @@ static int pmu_set_cpu_speed(int low_speed)
  		_set_L3CR(save_l3cr);
 
 	/* Restore userland MMU context */
-	switch_mmu_context(NULL, current->active_mm, NULL);
+	switch_mmu_context(NULL, current->active_mm);
 
 #ifdef DEBUG_FREQ
 	printk(KERN_DEBUG "HID1, after: %x\n", mfspr(SPRN_HID1));
@@ -333,11 +335,21 @@ static int pmu_set_cpu_speed(int low_speed)
 	return 0;
 }
 
-static int do_set_cpu_speed(struct cpufreq_policy *policy, int speed_mode)
+static int do_set_cpu_speed(struct cpufreq_policy *policy, int speed_mode,
+		int notify)
 {
+	struct cpufreq_freqs freqs;
 	unsigned long l3cr;
 	static unsigned long prev_l3cr;
 
+	freqs.old = cur_freq;
+	freqs.new = (speed_mode == CPUFREQ_HIGH) ? hi_freq : low_freq;
+
+	if (freqs.old == freqs.new)
+		return 0;
+
+	if (notify)
+		cpufreq_notify_transition(policy, &freqs, CPUFREQ_PRECHANGE);
 	if (speed_mode == CPUFREQ_LOW &&
 	    cpu_has_feature(CPU_FTR_L3CR)) {
 		l3cr = _get_L3CR();
@@ -353,6 +365,8 @@ static int do_set_cpu_speed(struct cpufreq_policy *policy, int speed_mode)
 		if ((prev_l3cr & L3CR_L3E) && l3cr != prev_l3cr)
 			_set_L3CR(prev_l3cr);
 	}
+	if (notify)
+		cpufreq_notify_transition(policy, &freqs, CPUFREQ_POSTCHANGE);
 	cur_freq = (speed_mode == CPUFREQ_HIGH) ? hi_freq : low_freq;
 
 	return 0;
@@ -363,12 +377,23 @@ static unsigned int pmac_cpufreq_get_speed(unsigned int cpu)
 	return cur_freq;
 }
 
-static int pmac_cpufreq_target(	struct cpufreq_policy *policy,
-					unsigned int index)
+static int pmac_cpufreq_verify(struct cpufreq_policy *policy)
 {
+	return cpufreq_frequency_table_verify(policy, pmac_cpu_freqs);
+}
+
+static int pmac_cpufreq_target(	struct cpufreq_policy *policy,
+					unsigned int target_freq,
+					unsigned int relation)
+{
+	unsigned int    newstate = 0;
 	int		rc;
 
-	rc = do_set_cpu_speed(policy, index);
+	if (cpufreq_frequency_table_target(policy, pmac_cpu_freqs,
+			target_freq, relation, &newstate))
+		return -EINVAL;
+
+	rc = do_set_cpu_speed(policy, newstate, 1);
 
 	ppc_proc_freq = cur_freq * 1000ul;
 	return rc;
@@ -376,7 +401,14 @@ static int pmac_cpufreq_target(	struct cpufreq_policy *policy,
 
 static int pmac_cpufreq_cpu_init(struct cpufreq_policy *policy)
 {
-	return cpufreq_generic_init(policy, pmac_cpu_freqs, transition_latency);
+	if (policy->cpu != 0)
+		return -ENODEV;
+
+	policy->cpuinfo.transition_latency	= transition_latency;
+	policy->cur = cur_freq;
+
+	cpufreq_frequency_table_get_attr(pmac_cpu_freqs, policy->cpu);
+	return cpufreq_frequency_table_cpuinfo(policy, pmac_cpu_freqs);
 }
 
 static u32 read_gpio(struct device_node *np)
@@ -410,7 +442,7 @@ static int pmac_cpufreq_suspend(struct cpufreq_policy *policy)
 	no_schedule = 1;
 	sleep_freq = cur_freq;
 	if (cur_freq == low_freq && !is_pmu_based)
-		do_set_cpu_speed(policy, CPUFREQ_HIGH);
+		do_set_cpu_speed(policy, CPUFREQ_HIGH, 0);
 	return 0;
 }
 
@@ -427,7 +459,7 @@ static int pmac_cpufreq_resume(struct cpufreq_policy *policy)
 	 * probably high speed due to our suspend() routine
 	 */
 	do_set_cpu_speed(policy, sleep_freq == low_freq ?
-			 CPUFREQ_LOW : CPUFREQ_HIGH);
+			 CPUFREQ_LOW : CPUFREQ_HIGH, 0);
 
 	ppc_proc_freq = cur_freq * 1000ul;
 
@@ -436,16 +468,16 @@ static int pmac_cpufreq_resume(struct cpufreq_policy *policy)
 }
 
 static struct cpufreq_driver pmac_cpufreq_driver = {
-	.verify 	= cpufreq_generic_frequency_table_verify,
-	.target_index	= pmac_cpufreq_target,
+	.verify 	= pmac_cpufreq_verify,
+	.target 	= pmac_cpufreq_target,
 	.get		= pmac_cpufreq_get_speed,
 	.init		= pmac_cpufreq_cpu_init,
 	.suspend	= pmac_cpufreq_suspend,
 	.resume		= pmac_cpufreq_resume,
-	.flags		= CPUFREQ_PM_NO_WARN |
-			  CPUFREQ_NO_AUTO_DYNAMIC_SWITCHING,
-	.attr		= cpufreq_generic_attr,
+	.flags		= CPUFREQ_PM_NO_WARN,
+	.attr		= pmac_cpu_freqs_attr,
 	.name		= "powermac",
+	.owner		= THIS_MODULE,
 };
 
 
@@ -484,13 +516,13 @@ static int pmac_cpufreq_init_MacRISC3(struct device_node *cpunode)
 		freqs = of_get_property(cpunode, "bus-frequencies", &lenp);
 		lenp /= sizeof(u32);
 		if (freqs == NULL || lenp != 2) {
-			pr_err("bus-frequencies incorrect or missing\n");
+			printk(KERN_ERR "cpufreq: bus-frequencies incorrect or missing\n");
 			return 1;
 		}
 		ratio = of_get_property(cpunode, "processor-to-bus-ratio*2",
 						NULL);
 		if (ratio == NULL) {
-			pr_err("processor-to-bus-ratio*2 missing\n");
+			printk(KERN_ERR "cpufreq: processor-to-bus-ratio*2 missing\n");
 			return 1;
 		}
 
@@ -553,7 +585,7 @@ static int pmac_cpufreq_init_7447A(struct device_node *cpunode)
 	if (volt_gpio_np)
 		voltage_gpio = read_gpio(volt_gpio_np);
 	if (!voltage_gpio){
-		pr_err("missing cpu-vcore-select gpio\n");
+		printk(KERN_ERR "cpufreq: missing cpu-vcore-select gpio\n");
 		return 1;
 	}
 
@@ -614,11 +646,11 @@ static int __init pmac_cpufreq_setup(void)
 	struct device_node	*cpunode;
 	const u32		*value;
 
-	if (strstr(boot_command_line, "nocpufreq"))
+	if (strstr(cmd_line, "nocpufreq"))
 		return 0;
 
-	/* Get first CPU node */
-	cpunode = of_cpu_device_node_get(0);
+	/* Assume only one CPU */
+	cpunode = of_find_node_by_type(NULL, "cpu");
 	if (!cpunode)
 		goto out;
 
@@ -627,16 +659,14 @@ static int __init pmac_cpufreq_setup(void)
 	if (!value)
 		goto out;
 	cur_freq = (*value) / 1000;
+	transition_latency = CPUFREQ_ETERNAL;
 
 	/*  Check for 7447A based MacRISC3 */
 	if (of_machine_is_compatible("MacRISC3") &&
 	    of_get_property(cpunode, "dynamic-power-step", NULL) &&
 	    PVR_VER(mfspr(SPRN_PVR)) == 0x8003) {
 		pmac_cpufreq_init_7447A(cpunode);
-
-		/* Allow dynamic switching */
 		transition_latency = 8000000;
-		pmac_cpufreq_driver.flags &= ~CPUFREQ_NO_AUTO_DYNAMIC_SWITCHING;
 	/* Check for other MacRISC3 machines */
 	} else if (of_machine_is_compatible("PowerBook3,4") ||
 		   of_machine_is_compatible("PowerBook3,5") ||
@@ -680,9 +710,9 @@ out:
 	pmac_cpu_freqs[CPUFREQ_HIGH].frequency = hi_freq;
 	ppc_proc_freq = cur_freq * 1000ul;
 
-	pr_info("Registering PowerMac CPU frequency driver\n");
-	pr_info("Low: %d Mhz, High: %d Mhz, Boot: %d Mhz\n",
-		low_freq/1000, hi_freq/1000, cur_freq/1000);
+	printk(KERN_INFO "Registering PowerMac CPU frequency driver\n");
+	printk(KERN_INFO "Low: %d Mhz, High: %d Mhz, Boot: %d Mhz\n",
+	       low_freq/1000, hi_freq/1000, cur_freq/1000);
 
 	return cpufreq_register_driver(&pmac_cpufreq_driver);
 }

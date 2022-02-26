@@ -89,8 +89,6 @@ static int tee_tg_check(const struct xt_tgchk_param *par)
 		return -EINVAL;
 
 	if (info->oif[0]) {
-		int ret;
-
 		if (info->oif[sizeof(info->oif)-1] != '\0')
 			return -EINVAL;
 
@@ -103,15 +101,10 @@ static int tee_tg_check(const struct xt_tgchk_param *par)
 		priv->notifier.notifier_call = tee_netdev_event;
 		info->priv    = priv;
 
-		ret = register_netdevice_notifier(&priv->notifier);
-		if (ret) {
-			kfree(priv);
-			return ret;
-		}
+		register_netdevice_notifier_rh(&priv->notifier);
 	} else
 		info->priv = NULL;
 
-	static_key_slow_inc(&xt_tee_enabled);
 	return 0;
 }
 
@@ -120,10 +113,9 @@ static void tee_tg_destroy(const struct xt_tgdtor_param *par)
 	struct xt_tee_tginfo *info = par->targinfo;
 
 	if (info->priv) {
-		unregister_netdevice_notifier(&info->priv->notifier);
+		unregister_netdevice_notifier_rh(&info->priv->notifier);
 		kfree(info->priv);
 	}
-	static_key_slow_dec(&xt_tee_enabled);
 }
 
 static struct xt_target tee_tg_reg[] __read_mostly = {
@@ -133,7 +125,6 @@ static struct xt_target tee_tg_reg[] __read_mostly = {
 		.family     = NFPROTO_IPV4,
 		.target     = tee_tg4,
 		.targetsize = sizeof(struct xt_tee_tginfo),
-		.usersize   = offsetof(struct xt_tee_tginfo, priv),
 		.checkentry = tee_tg_check,
 		.destroy    = tee_tg_destroy,
 		.me         = THIS_MODULE,
@@ -145,7 +136,6 @@ static struct xt_target tee_tg_reg[] __read_mostly = {
 		.family     = NFPROTO_IPV6,
 		.target     = tee_tg6,
 		.targetsize = sizeof(struct xt_tee_tginfo),
-		.usersize   = offsetof(struct xt_tee_tginfo, priv),
 		.checkentry = tee_tg_check,
 		.destroy    = tee_tg_destroy,
 		.me         = THIS_MODULE,

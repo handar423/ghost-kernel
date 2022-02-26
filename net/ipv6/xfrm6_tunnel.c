@@ -12,10 +12,11 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; if not, see <http://www.gnu.org/licenses/>.
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  *
  * Authors	Mitsuru KANDA  <mk@linux-ipv6.org>
- *		YOSHIFUJI Hideaki <yoshfuji@linux-ipv6.org>
+ * 		YOSHIFUJI Hideaki <yoshfuji@linux-ipv6.org>
  *
  * Based on net/ipv4/xfrm4_tunnel.c
  *
@@ -44,7 +45,7 @@ struct xfrm6_tunnel_net {
 	u32 spi;
 };
 
-static unsigned int xfrm6_tunnel_net_id __read_mostly;
+static int xfrm6_tunnel_net_id __read_mostly;
 static inline struct xfrm6_tunnel_net *xfrm6_tunnel_pernet(struct net *net)
 {
 	return net_generic(net, xfrm6_tunnel_net_id);
@@ -59,7 +60,7 @@ struct xfrm6_tunnel_spi {
 	struct hlist_node	list_byspi;
 	xfrm_address_t		addr;
 	u32			spi;
-	refcount_t		refcnt;
+	atomic_t		refcnt;
 	struct rcu_head		rcu_head;
 };
 
@@ -110,6 +111,7 @@ __be32 xfrm6_tunnel_spi_lookup(struct net *net, const xfrm_address_t *saddr)
 	rcu_read_unlock_bh();
 	return htonl(spi);
 }
+
 EXPORT_SYMBOL(xfrm6_tunnel_spi_lookup);
 
 static int __xfrm6_tunnel_spi_check(struct net *net, u32 spi)
@@ -160,7 +162,7 @@ alloc_spi:
 
 	memcpy(&x6spi->addr, saddr, sizeof(x6spi->addr));
 	x6spi->spi = spi;
-	refcount_set(&x6spi->refcnt, 1);
+	atomic_set(&x6spi->refcnt, 1);
 
 	hlist_add_head_rcu(&x6spi->list_byspi, &xfrm6_tn->spi_byspi[index]);
 
@@ -178,7 +180,7 @@ __be32 xfrm6_tunnel_alloc_spi(struct net *net, xfrm_address_t *saddr)
 	spin_lock_bh(&xfrm6_tunnel_spi_lock);
 	x6spi = __xfrm6_tunnel_spi_lookup(net, saddr);
 	if (x6spi) {
-		refcount_inc(&x6spi->refcnt);
+		atomic_inc(&x6spi->refcnt);
 		spi = x6spi->spi;
 	} else
 		spi = __xfrm6_tunnel_alloc_spi(net, saddr);
@@ -186,6 +188,7 @@ __be32 xfrm6_tunnel_alloc_spi(struct net *net, xfrm_address_t *saddr)
 
 	return htonl(spi);
 }
+
 EXPORT_SYMBOL(xfrm6_tunnel_alloc_spi);
 
 static void x6spi_destroy_rcu(struct rcu_head *head)
@@ -207,7 +210,7 @@ static void xfrm6_tunnel_free_spi(struct net *net, xfrm_address_t *saddr)
 				  list_byaddr)
 	{
 		if (xfrm6_addr_equal(&x6spi->addr, saddr)) {
-			if (refcount_dec_and_test(&x6spi->refcnt)) {
+			if (atomic_dec_and_test(&x6spi->refcnt)) {
 				hlist_del_rcu(&x6spi->list_byaddr);
 				hlist_del_rcu(&x6spi->list_byspi);
 				call_rcu(&x6spi->rcu_head, x6spi_destroy_rcu);
@@ -338,14 +341,6 @@ static int __net_init xfrm6_tunnel_net_init(struct net *net)
 
 static void __net_exit xfrm6_tunnel_net_exit(struct net *net)
 {
-	struct xfrm6_tunnel_net *xfrm6_tn = xfrm6_tunnel_pernet(net);
-	unsigned int i;
-
-	for (i = 0; i < XFRM6_TUNNEL_SPI_BYADDR_HSIZE; i++)
-		WARN_ON_ONCE(!hlist_empty(&xfrm6_tn->spi_byaddr[i]));
-
-	for (i = 0; i < XFRM6_TUNNEL_SPI_BYSPI_HSIZE; i++)
-		WARN_ON_ONCE(!hlist_empty(&xfrm6_tn->spi_byspi[i]));
 }
 
 static struct pernet_operations xfrm6_tunnel_net_ops = {
@@ -396,6 +391,10 @@ static void __exit xfrm6_tunnel_fini(void)
 	xfrm6_tunnel_deregister(&xfrm6_tunnel_handler, AF_INET6);
 	xfrm_unregister_type(&xfrm6_tunnel_type, AF_INET6);
 	unregister_pernet_subsys(&xfrm6_tunnel_net_ops);
+	/* Someone maybe has gotten the xfrm6_tunnel_spi.
+	 * So need to wait it.
+	 */
+	rcu_barrier();
 	kmem_cache_destroy(xfrm6_tunnel_spi_kmem);
 }
 

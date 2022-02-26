@@ -21,6 +21,10 @@
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 #include <linux/delay.h>
@@ -46,7 +50,7 @@
 #include <linux/mutex.h>
 #include <linux/io.h>
 #include <media/v4l2-common.h>
-#include <media/i2c/bt819.h>
+#include <media/bt819.h>
 
 #include "videocodec.h"
 #include "zoran.h"
@@ -69,7 +73,7 @@ MODULE_PARM_DESC(card, "Card type");
  */
 
 static unsigned long vidmem;	/* default = 0 - Video memory base address */
-module_param_hw(vidmem, ulong, iomem, 0444);
+module_param(vidmem, ulong, 0444);
 MODULE_PARM_DESC(vidmem, "Default video memory base address");
 
 /*
@@ -130,7 +134,7 @@ MODULE_VERSION(ZORAN_VERSION);
 	.vendor = PCI_VENDOR_ID_ZORAN, .device = PCI_DEVICE_ID_ZORAN_36057, \
 	.subvendor = (subven), .subdevice = (subdev), .driver_data = (data) }
 
-static const struct pci_device_id zr36067_pci_tbl[] = {
+static struct pci_device_id zr36067_pci_tbl[] = {
 	ZR_DEVICE(PCI_VENDOR_ID_MIRO, PCI_DEVICE_ID_MIRO_DC10PLUS, DC10plus),
 	ZR_DEVICE(PCI_VENDOR_ID_MIRO, PCI_DEVICE_ID_MIRO_DC30PLUS, DC30plus),
 	ZR_DEVICE(PCI_VENDOR_ID_ELECTRONICDESIGNGMBH, PCI_DEVICE_ID_LML_33R10, LML33R10),
@@ -1045,9 +1049,8 @@ static int zr36057_init (struct zoran *zr)
 	/*
 	 *   Now add the template and register the device unit.
 	 */
-	*zr->video_dev = zoran_template;
-	zr->video_dev->v4l2_dev = &zr->v4l2_dev;
-	zr->video_dev->lock = &zr->lock;
+	memcpy(zr->video_dev, &zoran_template, sizeof(zoran_template));
+	zr->video_dev->parent = &zr->pci_dev->dev;
 	strcpy(zr->video_dev->name, ZR_DEVNAME(zr));
 	/* It's not a mem2mem device, but you can both capture and output from
 	   one and the same device. This should really be split up into two
@@ -1113,7 +1116,6 @@ static void zoran_remove(struct pci_dev *pdev)
 	pci_disable_device(zr->pci_dev);
 	video_unregister_device(zr->video_dev);
 exit_free:
-	v4l2_ctrl_handler_free(&zr->hdl);
 	v4l2_device_unregister(&zr->v4l2_dev);
 	kfree(zr);
 }
@@ -1217,11 +1219,9 @@ static int zoran_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	zr->pci_dev = pdev;
 	zr->id = nr;
 	snprintf(ZR_DEVNAME(zr), sizeof(ZR_DEVNAME(zr)), "MJPEG[%u]", zr->id);
-	if (v4l2_ctrl_handler_init(&zr->hdl, 10))
-		goto zr_unreg;
-	zr->v4l2_dev.ctrl_handler = &zr->hdl;
 	spin_lock_init(&zr->spinlock);
-	mutex_init(&zr->lock);
+	mutex_init(&zr->resource_lock);
+	mutex_init(&zr->other_lock);
 	if (pci_enable_device(pdev))
 		goto zr_unreg;
 	zr->revision = zr->pci_dev->revision;
@@ -1293,7 +1293,7 @@ static int zoran_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	}
 
 	result = request_irq(zr->pci_dev->irq, zoran_irq,
-			     IRQF_SHARED, ZR_DEVNAME(zr), zr);
+			     IRQF_SHARED | IRQF_DISABLED, ZR_DEVNAME(zr), zr);
 	if (result < 0) {
 		if (result == -EINVAL) {
 			dprintk(1,
@@ -1443,7 +1443,6 @@ zr_free_irq:
 zr_unmap:
 	iounmap(zr->zr36057_mem);
 zr_unreg:
-	v4l2_ctrl_handler_free(&zr->hdl);
 	v4l2_device_unregister(&zr->v4l2_dev);
 zr_free_mem:
 	kfree(zr);

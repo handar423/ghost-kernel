@@ -343,13 +343,7 @@ static int rmi_f12_probe(struct rmi_function *fn)
 
 	f12->has_dribble = !!(buf & BIT(3));
 
-	if (fn->dev.of_node) {
-		ret = rmi_2d_sensor_of_probe(&fn->dev, &f12->sensor_pdata);
-		if (ret)
-			return ret;
-	} else {
-		f12->sensor_pdata = pdata->sensor_pdata;
-	}
+	f12->sensor_pdata = pdata->sensor_pdata;
 
 	ret = rmi_read_register_desc(rmi_dev, query_addr,
 					&f12->query_reg_desc);

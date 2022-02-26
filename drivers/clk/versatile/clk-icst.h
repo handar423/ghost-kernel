@@ -1,4 +1,5 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+#include <asm/hardware/icst.h>
+
 /**
  * struct clk_icst_desc - descriptor for the ICST VCO
  * @params: ICST parameters
@@ -14,6 +15,4 @@ struct clk_icst_desc {
 
 struct clk *icst_clk_register(struct device *dev,
 			      const struct clk_icst_desc *desc,
-			      const char *name,
-			      const char *parent_name,
 			      void __iomem *base);

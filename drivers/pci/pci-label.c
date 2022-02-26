@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * Purpose: Export the firmware instance and label associated with
  * a pci device to sysfs
@@ -44,11 +43,9 @@ static size_t find_smbios_instance_string(struct pci_dev *pdev, char *buf,
 {
 	const struct dmi_device *dmi;
 	struct dmi_dev_onboard *donboard;
-	int domain_nr;
 	int bus;
 	int devfn;
 
-	domain_nr = pci_domain_nr(pdev->bus);
 	bus = pdev->bus->number;
 	devfn = pdev->devfn;
 
@@ -56,9 +53,8 @@ static size_t find_smbios_instance_string(struct pci_dev *pdev, char *buf,
 	while ((dmi = dmi_find_device(DMI_DEV_TYPE_DEV_ONBOARD,
 				      NULL, dmi)) != NULL) {
 		donboard = dmi->device_data;
-		if (donboard && donboard->segment == domain_nr &&
-				donboard->bus == bus &&
-				donboard->devfn == devfn) {
+		if (donboard && donboard->bus == bus &&
+					donboard->devfn == devfn) {
 			if (buf) {
 				if (attribute == SMBIOS_ATTR_INSTANCE_SHOW)
 					return scnprintf(buf, PAGE_SIZE,
@@ -124,7 +120,7 @@ static struct attribute *smbios_attributes[] = {
 	NULL,
 };
 
-static const struct attribute_group smbios_attr_group = {
+static struct attribute_group smbios_attr_group = {
 	.attrs = smbios_attributes,
 	.is_visible = smbios_instance_string_exist,
 };
@@ -165,8 +161,8 @@ static void dsm_label_utf16s_to_utf8s(union acpi_object *obj, char *buf)
 	buf[len] = '\n';
 }
 
-static int dsm_get_label(struct device *dev, char *buf,
-			 enum acpi_attr_enum attr)
+static int
+dsm_get_label(struct device *dev, char *buf, enum acpi_attr_enum attr)
 {
 	acpi_handle handle;
 	union acpi_object *obj, *tmp;
@@ -176,7 +172,7 @@ static int dsm_get_label(struct device *dev, char *buf,
 	if (!handle)
 		return -1;
 
-	obj = acpi_evaluate_dsm(handle, &pci_acpi_dsm_guid, 0x2,
+	obj = acpi_evaluate_dsm(handle, pci_acpi_dsm_uuid, 0x2,
 				DEVICE_LABEL_DSM, NULL);
 	if (!obj)
 		return -1;
@@ -208,7 +204,8 @@ static int dsm_get_label(struct device *dev, char *buf,
 	return len;
 }
 
-static bool device_has_dsm(struct device *dev)
+static bool
+device_has_dsm(struct device *dev)
 {
 	acpi_handle handle;
 
@@ -216,7 +213,7 @@ static bool device_has_dsm(struct device *dev)
 	if (!handle)
 		return false;
 
-	return !!acpi_check_dsm(handle, &pci_acpi_dsm_guid, 0x2,
+	return !!acpi_check_dsm(handle, pci_acpi_dsm_uuid, 0x2,
 				1 << DEVICE_LABEL_DSM);
 }
 
@@ -233,14 +230,14 @@ static umode_t acpi_index_string_exist(struct kobject *kobj,
 	return 0;
 }
 
-static ssize_t acpilabel_show(struct device *dev,
-			      struct device_attribute *attr, char *buf)
+static ssize_t
+acpilabel_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	return dsm_get_label(dev, buf, ACPI_ATTR_LABEL_SHOW);
 }
 
-static ssize_t acpiindex_show(struct device *dev,
-			      struct device_attribute *attr, char *buf)
+static ssize_t
+acpiindex_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	return dsm_get_label(dev, buf, ACPI_ATTR_INDEX_SHOW);
 }
@@ -261,7 +258,7 @@ static struct attribute *acpi_attributes[] = {
 	NULL,
 };
 
-static const struct attribute_group acpi_attr_group = {
+static struct attribute_group acpi_attr_group = {
 	.attrs = acpi_attributes,
 	.is_visible = acpi_index_string_exist,
 };

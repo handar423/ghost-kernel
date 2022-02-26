@@ -15,7 +15,7 @@
  * See "Documentation/ABI/testing/sysfs-class-net-grcan" for information on the
  * sysfs interface.
  *
- * See "Documentation/admin-guide/kernel-parameters.rst" for information on the module
+ * See "Documentation/kernel-parameters.txt" for information on the module
  * parameters.
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -34,7 +34,10 @@
 #include <linux/io.h>
 #include <linux/can/dev.h>
 #include <linux/spinlock.h>
+
 #include <linux/of_platform.h>
+#include <asm/prom.h>
+
 #include <linux/of_irq.h>
 
 #include <linux/dma-mapping.h>
@@ -807,10 +810,10 @@ static irqreturn_t grcan_interrupt(int irq, void *dev_id)
  * is not ONGOING (TX might be stuck in ONGOING due to a harwrware bug
  * for single shot)
  */
-static void grcan_running_reset(struct timer_list *t)
+static void grcan_running_reset(unsigned long data)
 {
-	struct grcan_priv *priv = from_timer(priv, t, rr_timer);
-	struct net_device *dev = priv->dev;
+	struct net_device *dev = (struct net_device *)data;
+	struct grcan_priv *priv = netdev_priv(dev);
 	struct grcan_registers __iomem *regs = priv->regs;
 	unsigned long flags;
 
@@ -898,10 +901,10 @@ static inline void grcan_reset_timer(struct timer_list *timer, __u32 bitrate)
 }
 
 /* Disable channels and schedule a running reset */
-static void grcan_initiate_running_reset(struct timer_list *t)
+static void grcan_initiate_running_reset(unsigned long data)
 {
-	struct grcan_priv *priv = from_timer(priv, t, hang_timer);
-	struct net_device *dev = priv->dev;
+	struct net_device *dev = (struct net_device *)data;
+	struct grcan_priv *priv = netdev_priv(dev);
 	struct grcan_registers __iomem *regs = priv->regs;
 	unsigned long flags;
 
@@ -1216,12 +1219,11 @@ static int grcan_receive(struct net_device *dev, int budget)
 				cf->data[i] = (u8)(slot[j] >> shift);
 			}
 		}
+		netif_receive_skb(skb);
 
 		/* Update statistics and read pointer */
 		stats->rx_packets++;
 		stats->rx_bytes += cf->can_dlc;
-		netif_receive_skb(skb);
-
 		rd = grcan_ring_add(rd, GRCAN_MSG_SIZE, dma->rx.size);
 	}
 
@@ -1579,7 +1581,6 @@ static const struct net_device_ops grcan_netdev_ops = {
 	.ndo_open	= grcan_open,
 	.ndo_stop	= grcan_close,
 	.ndo_start_xmit	= grcan_start_xmit,
-	.ndo_change_mtu = can_change_mtu,
 };
 
 static int grcan_setup_netdev(struct platform_device *ofdev,
@@ -1626,8 +1627,13 @@ static int grcan_setup_netdev(struct platform_device *ofdev,
 	spin_lock_init(&priv->lock);
 
 	if (priv->need_txbug_workaround) {
-		timer_setup(&priv->rr_timer, grcan_running_reset, 0);
-		timer_setup(&priv->hang_timer, grcan_initiate_running_reset, 0);
+		init_timer(&priv->rr_timer);
+		priv->rr_timer.function = grcan_running_reset;
+		priv->rr_timer.data = (unsigned long)dev;
+
+		init_timer(&priv->hang_timer);
+		priv->hang_timer.function = grcan_initiate_running_reset;
+		priv->hang_timer.data = (unsigned long)dev;
 	}
 
 	netif_napi_add(dev, &priv->napi, grcan_poll, GRCAN_NAPI_WEIGHT);
@@ -1640,7 +1646,7 @@ static int grcan_setup_netdev(struct platform_device *ofdev,
 	if (err)
 		goto exit_free_candev;
 
-	platform_set_drvdata(ofdev, dev);
+	dev_set_drvdata(&ofdev->dev, dev);
 
 	/* Reset device to allow bit-timing to be set. No need to call
 	 * grcan_reset at this stage. That is done in grcan_open.
@@ -1677,9 +1683,10 @@ static int grcan_probe(struct platform_device *ofdev)
 	}
 
 	res = platform_get_resource(ofdev, IORESOURCE_MEM, 0);
-	base = devm_ioremap_resource(&ofdev->dev, res);
-	if (IS_ERR(base)) {
-		err = PTR_ERR(base);
+	base = devm_request_and_ioremap(&ofdev->dev, res);
+	if (!base) {
+		dev_err(&ofdev->dev, "couldn't map IO resource\n");
+		err = -EADDRNOTAVAIL;
 		goto exit_error;
 	}
 
@@ -1709,19 +1716,20 @@ exit_error:
 
 static int grcan_remove(struct platform_device *ofdev)
 {
-	struct net_device *dev = platform_get_drvdata(ofdev);
+	struct net_device *dev = dev_get_drvdata(&ofdev->dev);
 	struct grcan_priv *priv = netdev_priv(dev);
 
 	unregister_candev(dev); /* Will in turn call grcan_close */
 
 	irq_dispose_mapping(dev->irq);
+	dev_set_drvdata(&ofdev->dev, NULL);
 	netif_napi_del(&priv->napi);
 	free_candev(dev);
 
 	return 0;
 }
 
-static const struct of_device_id grcan_match[] = {
+static struct of_device_id grcan_match[] = {
 	{.name = "GAISLER_GRCAN"},
 	{.name = "01_03d"},
 	{.name = "GAISLER_GRHCAN"},
@@ -1734,6 +1742,7 @@ MODULE_DEVICE_TABLE(of, grcan_match);
 static struct platform_driver grcan_driver = {
 	.driver = {
 		.name = DRV_NAME,
+		.owner = THIS_MODULE,
 		.of_match_table = grcan_match,
 	},
 	.probe = grcan_probe,

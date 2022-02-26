@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * xfrm4_state.c
  *
@@ -17,7 +16,7 @@
 
 static int xfrm4_init_flags(struct xfrm_state *x)
 {
-	if (xs_net(x)->ipv4.sysctl_ip_no_pmtu_disc)
+	if (xs_net(x)->sysctl_ip_no_pmtu_disc)
 		x->props.flags |= XFRM_STATE_NOPMTUDISC;
 	return 0;
 }
@@ -91,3 +90,11 @@ void __init xfrm4_state_init(void)
 {
 	xfrm_state_register_afinfo(&xfrm4_state_afinfo);
 }
+
+#if 0
+void __exit xfrm4_state_fini(void)
+{
+	xfrm_state_unregister_afinfo(&xfrm4_state_afinfo);
+}
+#endif  /*  0  */
+

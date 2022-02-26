@@ -14,7 +14,7 @@
 #include <linux/init.h>
 #include <linux/debugfs.h>
 #include <asm/mce.h>
-#include <linux/uaccess.h>
+#include <asm/uaccess.h>
 
 #include "mce-internal.h"
 
@@ -204,7 +204,7 @@ static int error_context(struct mce *m)
 	return IN_KERNEL;
 }
 
-static int mce_severity_amd_smca(struct mce *m, enum context err_ctx)
+static int mce_severity_amd_smca(struct mce *m, int err_ctx)
 {
 	u32 addr = MSR_AMD64_SMCA_MCx_CONFIG(m->bank);
 	u32 low, high;
@@ -310,7 +310,7 @@ static int mce_severity_intel(struct mce *m, int tolerant, char **msg, bool is_e
 			*msg = s->msg;
 		s->covered = 1;
 		if (s->sev >= MCE_UC_SEVERITY && ctx == IN_KERNEL) {
-			if (tolerant < 1)
+			if (panic_on_oops || tolerant < 1)
 				return MCE_PANIC_SEVERITY;
 		}
 		return s->sev;

@@ -103,7 +103,7 @@ struct image_header_t {
 
 struct validate_flash_t {
 	int		status;		/* Return status */
-	void		*buf;		/* Candidate image buffer */
+	void		*buf;		/* Candiate image buffer */
 	uint32_t	buf_size;	/* Image size */
 	uint32_t	result;		/* Update results token */
 };
@@ -425,7 +425,7 @@ static int alloc_image_buf(char *buffer, size_t count)
 
 	memcpy(&image_header, (void *)buffer, sizeof(struct image_header_t));
 	image_data.size = be32_to_cpu(image_header.size);
-	pr_debug("FLASH: Candidate image size = %u\n", image_data.size);
+	pr_debug("FLASH: Candiate image size = %u\n", image_data.size);
 
 	if (image_data.size > MAX_IMAGE_SIZE) {
 		pr_warn("FLASH: Too large image\n");
@@ -520,7 +520,7 @@ out:
  *   update_flash	: Flash new firmware image
  *
  */
-static const struct bin_attribute image_data_attr = {
+static struct bin_attribute image_data_attr = {
 	.attr = {.name = "image", .mode = 0200},
 	.size = MAX_IMAGE_SIZE,	/* Limit image size */
 	.write = image_data_write,

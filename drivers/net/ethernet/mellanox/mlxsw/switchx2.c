@@ -427,12 +427,13 @@ static int mlxsw_sx_port_get_phys_port_name(struct net_device *dev, char *name,
 }
 
 static const struct net_device_ops mlxsw_sx_port_netdev_ops = {
+	.ndo_size		= sizeof(struct net_device_ops),
 	.ndo_open		= mlxsw_sx_port_open,
 	.ndo_stop		= mlxsw_sx_port_stop,
 	.ndo_start_xmit		= mlxsw_sx_port_xmit,
-	.ndo_change_mtu		= mlxsw_sx_port_change_mtu,
+	.extended.ndo_change_mtu = mlxsw_sx_port_change_mtu,
 	.ndo_get_stats64	= mlxsw_sx_port_get_stats64,
-	.ndo_get_phys_port_name = mlxsw_sx_port_get_phys_port_name,
+	.extended.ndo_get_phys_port_name = mlxsw_sx_port_get_phys_port_name,
 };
 
 static void mlxsw_sx_port_get_drvinfo(struct net_device *dev,
@@ -789,7 +790,7 @@ mlxsw_sx_port_get_link_ksettings(struct net_device *dev,
 	u32 supported, advertising, lp_advertising;
 	int err;
 
-	mlxsw_reg_ptys_eth_pack(ptys_pl, mlxsw_sx_port->local_port, 0);
+	mlxsw_reg_ptys_eth_pack(ptys_pl, mlxsw_sx_port->local_port, 0, false);
 	err = mlxsw_reg_query(mlxsw_sx->core, MLXSW_REG(ptys), ptys_pl);
 	if (err) {
 		netdev_err(dev, "Failed to get proto");
@@ -879,7 +880,7 @@ mlxsw_sx_port_set_link_ksettings(struct net_device *dev,
 		mlxsw_sx_to_ptys_advert_link(advertising) :
 		mlxsw_sx_to_ptys_speed(speed);
 
-	mlxsw_reg_ptys_eth_pack(ptys_pl, mlxsw_sx_port->local_port, 0);
+	mlxsw_reg_ptys_eth_pack(ptys_pl, mlxsw_sx_port->local_port, 0, false);
 	err = mlxsw_reg_query(mlxsw_sx->core, MLXSW_REG(ptys), ptys_pl);
 	if (err) {
 		netdev_err(dev, "Failed to get proto");
@@ -897,7 +898,7 @@ mlxsw_sx_port_set_link_ksettings(struct net_device *dev,
 		return 0;
 
 	mlxsw_reg_ptys_eth_pack(ptys_pl, mlxsw_sx_port->local_port,
-				eth_proto_new);
+				eth_proto_new, true);
 	err = mlxsw_reg_write(mlxsw_sx->core, MLXSW_REG(ptys), ptys_pl);
 	if (err) {
 		netdev_err(dev, "Failed to set proto admin");
@@ -1029,7 +1030,7 @@ mlxsw_sx_port_speed_by_width_set(struct mlxsw_sx_port *mlxsw_sx_port, u8 width)
 
 	eth_proto_admin = mlxsw_sx_to_ptys_upper_speed(upper_speed);
 	mlxsw_reg_ptys_eth_pack(ptys_pl, mlxsw_sx_port->local_port,
-				eth_proto_admin);
+				eth_proto_admin, true);
 	return mlxsw_reg_write(mlxsw_sx->core, MLXSW_REG(ptys), ptys_pl);
 }
 
@@ -1084,8 +1085,8 @@ static int __mlxsw_sx_port_eth_create(struct mlxsw_sx *mlxsw_sx, u8 local_port,
 	dev->features |= NETIF_F_NETNS_LOCAL | NETIF_F_LLTX | NETIF_F_SG |
 			 NETIF_F_VLAN_CHALLENGED;
 
-	dev->min_mtu = 0;
-	dev->max_mtu = ETH_MAX_MTU;
+	dev->extended->min_mtu = 0;
+	dev->extended->max_mtu = ETH_MAX_MTU;
 
 	/* Each packet needs to have a Tx header (metadata) on top all other
 	 * headers.
@@ -1149,7 +1150,7 @@ static int __mlxsw_sx_port_eth_create(struct mlxsw_sx *mlxsw_sx, u8 local_port,
 	}
 
 	mlxsw_core_port_eth_set(mlxsw_sx->core, mlxsw_sx_port->local_port,
-				mlxsw_sx_port, dev, false, 0);
+				mlxsw_sx_port, dev, module + 1, false, 0);
 	mlxsw_sx->ports[local_port] = mlxsw_sx_port;
 	return 0;
 
@@ -1706,7 +1707,6 @@ static const struct mlxsw_config_profile mlxsw_sx_config_profile = {
 			.type		= MLXSW_PORT_SWID_TYPE_IB,
 		}
 	},
-	.resource_query_enable		= 0,
 };
 
 static struct mlxsw_driver mlxsw_sx_driver = {

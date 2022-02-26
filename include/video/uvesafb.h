@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _UVESAFB_H
 #define _UVESAFB_H
 
@@ -135,7 +134,6 @@ struct uvesafb_par {
 
 	int mode_idx;
 	struct vbe_crtc_ib crtc;
-	int mtrr_handle;
 };
 
 #endif /* _UVESAFB_H */

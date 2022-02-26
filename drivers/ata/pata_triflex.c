@@ -207,10 +207,10 @@ static const struct pci_device_id triflex[] = {
 	{ },
 };
 
-#ifdef CONFIG_PM_SLEEP
+#ifdef CONFIG_PM
 static int triflex_ata_pci_device_suspend(struct pci_dev *pdev, pm_message_t mesg)
 {
-	struct ata_host *host = pci_get_drvdata(pdev);
+	struct ata_host *host = dev_get_drvdata(&pdev->dev);
 	int rc = 0;
 
 	rc = ata_host_suspend(host, mesg);
@@ -233,7 +233,7 @@ static struct pci_driver triflex_pci_driver = {
 	.id_table	= triflex,
 	.probe 		= triflex_init_one,
 	.remove		= ata_pci_remove_one,
-#ifdef CONFIG_PM_SLEEP
+#ifdef CONFIG_PM
 	.suspend	= triflex_ata_pci_device_suspend,
 	.resume		= ata_pci_device_resume,
 #endif

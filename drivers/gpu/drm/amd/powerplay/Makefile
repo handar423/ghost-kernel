@@ -26,6 +26,7 @@ subdir-ccflags-y += \
 		-I$(FULL_AMD_PATH)/include  \
 		-I$(FULL_AMD_PATH)/powerplay/smumgr\
 		-I$(FULL_AMD_PATH)/powerplay/hwmgr
+subdir-ccflags-y += -include drm/drm_backport.h
 
 AMD_PP_PATH = ../powerplay
 

@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * Interface between ext4 and JBD
  */
@@ -44,11 +43,7 @@ static int ext4_journal_check_start(struct super_block *sb)
 	journal_t *journal;
 
 	might_sleep();
-
-	if (unlikely(ext4_forced_shutdown(EXT4_SB(sb))))
-		return -EIO;
-
-	if (sb_rdonly(sb))
+	if (sb->s_flags & MS_RDONLY)
 		return -EROFS;
 	WARN_ON(sb->s_writers.frozen == SB_FREEZE_COMPLETE);
 	journal = EXT4_SB(sb)->s_journal;
@@ -166,13 +161,6 @@ int __ext4_journal_get_write_access(const char *where, unsigned int line,
 	might_sleep();
 
 	if (ext4_handle_valid(handle)) {
-		struct super_block *sb;
-
-		sb = handle->h_transaction->t_journal->j_private;
-		if (unlikely(ext4_forced_shutdown(EXT4_SB(sb)))) {
-			jbd2_journal_abort_handle(handle);
-			return -EIO;
-		}
 		err = jbd2_journal_get_write_access(handle, bh);
 		if (err)
 			ext4_journal_abort_handle(where, line, __func__, bh,

@@ -231,7 +231,7 @@ static int isdn_timer_cnt2 = 0;
 static int isdn_timer_cnt3 = 0;
 
 static void
-isdn_timer_funct(struct timer_list *unused)
+isdn_timer_funct(ulong dummy)
 {
 	int tf = dev->tflags;
 	if (tf & ISDN_TIMER_FAST) {
@@ -777,8 +777,7 @@ isdn_readbchan(int di, int channel, u_char *buf, u_char *fp, int len, wait_queue
 		return 0;
 	if (skb_queue_empty(&dev->drv[di]->rpqueue[channel])) {
 		if (sleep)
-			wait_event_interruptible(*sleep,
-				!skb_queue_empty(&dev->drv[di]->rpqueue[channel]));
+			interruptible_sleep_on(sleep);
 		else
 			return 0;
 	}
@@ -1073,8 +1072,7 @@ isdn_read(struct file *file, char __user *buf, size_t count, loff_t *off)
 				retval = -EAGAIN;
 				goto out;
 			}
-			wait_event_interruptible(dev->info_waitq,
-						 file->private_data);
+			interruptible_sleep_on(&(dev->info_waitq));
 		}
 		p = isdn_statstr();
 		file->private_data = NULL;
@@ -1130,8 +1128,7 @@ isdn_read(struct file *file, char __user *buf, size_t count, loff_t *off)
 				retval = -EAGAIN;
 				goto out;
 			}
-			wait_event_interruptible(dev->drv[drvidx]->st_waitq,
-						 dev->drv[drvidx]->stavail);
+			interruptible_sleep_on(&(dev->drv[drvidx]->st_waitq));
 		}
 		if (dev->drv[drvidx]->interface->readstat) {
 			if (count > dev->drv[drvidx]->stavail)
@@ -1191,8 +1188,8 @@ isdn_write(struct file *file, const char __user *buf, size_t count, loff_t *off)
 			goto out;
 		}
 		chidx = isdn_minor2chan(minor);
-		wait_event_interruptible(dev->drv[drvidx]->snd_waitq[chidx],
-			(retval = isdn_writebuf_stub(drvidx, chidx, buf, count)));
+		while ((retval = isdn_writebuf_stub(drvidx, chidx, buf, count)) == 0)
+			interruptible_sleep_on(&dev->drv[drvidx]->snd_waitq[chidx]);
 		goto out;
 	}
 	if (minor <= ISDN_MINOR_CTRLMAX) {
@@ -1304,6 +1301,9 @@ isdn_ioctl(struct file *file, uint cmd, ulong arg)
 			if (arg) {
 				ulong __user *p = argp;
 				int i;
+				if (!access_ok(VERIFY_WRITE, p,
+					       sizeof(ulong) * ISDN_MAX_CHANNELS * 2))
+					return -EFAULT;
 				for (i = 0; i < ISDN_MAX_CHANNELS; i++) {
 					put_user(dev->ibytes[i], p++);
 					put_user(dev->obytes[i], p++);
@@ -1376,7 +1376,6 @@ isdn_ioctl(struct file *file, uint cmd, ulong arg)
 			if (arg) {
 				if (copy_from_user(bname, argp, sizeof(bname) - 1))
 					return -EFAULT;
-				bname[sizeof(bname)-1] = 0;
 			} else
 				return -EINVAL;
 			ret = mutex_lock_interruptible(&dev->mtx);
@@ -1538,6 +1537,11 @@ isdn_ioctl(struct file *file, uint cmd, ulong arg)
 				char __user *p = argp;
 				int i;
 
+				if (!access_ok(VERIFY_WRITE, argp,
+					       (ISDN_MODEM_NUMREG + ISDN_MSNLEN + ISDN_LMSNLEN)
+					       * ISDN_MAX_CHANNELS))
+					return -EFAULT;
+
 				for (i = 0; i < ISDN_MAX_CHANNELS; i++) {
 					if (copy_to_user(p, dev->mdm.info[i].emu.profile,
 							 ISDN_MODEM_NUMREG))
@@ -1559,6 +1563,11 @@ isdn_ioctl(struct file *file, uint cmd, ulong arg)
 			if (arg) {
 				char __user *p = argp;
 				int i;
+
+				if (!access_ok(VERIFY_READ, argp,
+					       (ISDN_MODEM_NUMREG + ISDN_MSNLEN + ISDN_LMSNLEN)
+					       * ISDN_MAX_CHANNELS))
+					return -EFAULT;
 
 				for (i = 0; i < ISDN_MAX_CHANNELS; i++) {
 					if (copy_from_user(dev->mdm.info[i].emu.profile, p,
@@ -1605,6 +1614,8 @@ isdn_ioctl(struct file *file, uint cmd, ulong arg)
 						int j = 0;
 
 						while (1) {
+							if (!access_ok(VERIFY_READ, p, 1))
+								return -EFAULT;
 							get_user(bname[j], p++);
 							switch (bname[j]) {
 							case '\0':
@@ -1671,6 +1682,9 @@ isdn_ioctl(struct file *file, uint cmd, ulong arg)
 					drvidx = 0;
 				if (drvidx == -1)
 					return -ENODEV;
+				if (!access_ok(VERIFY_WRITE, argp,
+					       sizeof(isdn_ioctl_struct)))
+					return -EFAULT;
 				c.driver = drvidx;
 				c.command = ISDN_CMD_IOCTL;
 				c.arg = cmd;
@@ -2294,7 +2308,8 @@ static int __init isdn_init(void)
 		printk(KERN_WARNING "isdn: Could not allocate device-struct.\n");
 		return -EIO;
 	}
-	timer_setup(&dev->timer, isdn_timer_funct, 0);
+	init_timer(&dev->timer);
+	dev->timer.function = isdn_timer_funct;
 	spin_lock_init(&dev->lock);
 	spin_lock_init(&dev->timerlock);
 #ifdef MODULE
@@ -2363,7 +2378,7 @@ static void __exit isdn_exit(void)
 	}
 	isdn_tty_exit();
 	unregister_chrdev(ISDN_MAJOR, "isdn");
-	del_timer_sync(&dev->timer);
+	del_timer(&dev->timer);
 	/* call vfree with interrupts enabled, else it will hang */
 	vfree(dev);
 	printk(KERN_NOTICE "ISDN-subsystem unloaded\n");

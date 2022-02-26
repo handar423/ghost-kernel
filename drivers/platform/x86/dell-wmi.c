@@ -37,7 +37,6 @@
 #include <linux/string.h>
 #include <linux/dmi.h>
 #include <linux/wmi.h>
-#include <acpi/video.h>
 #include "dell-smbios.h"
 #include "dell-wmi-descriptor.h"
 
@@ -48,6 +47,7 @@ MODULE_LICENSE("GPL");
 
 #define DELL_EVENT_GUID "9DBB5994-A997-11DA-B012-B622A1EF5492"
 
+static int acpi_video;
 static bool wmi_requires_smbios_request;
 
 MODULE_ALIAS("wmi:"DELL_EVENT_GUID);
@@ -261,6 +261,9 @@ static const u16 bios_to_linux_keycode[256] = {
  * override them.
  */
 static const struct key_entry dell_wmi_keymap_type_0010[] = {
+	/* Mic mute */
+	{ KE_KEY, 0x150, { KEY_MICMUTE } },
+
 	/* Fn-lock */
 	{ KE_IGNORE, 0x151, { KEY_RESERVED } },
 
@@ -330,16 +333,11 @@ static void dell_wmi_process_key(struct wmi_device *wdev, int type, int code)
 
 	/* Don't report brightness notifications that will also come via ACPI */
 	if ((key->keycode == KEY_BRIGHTNESSUP ||
-	     key->keycode == KEY_BRIGHTNESSDOWN) &&
-	    acpi_video_handles_brightness_key_presses())
+	     key->keycode == KEY_BRIGHTNESSDOWN) && acpi_video)
 		return;
 
 	if (type == 0x0000 && code == 0xe025 && !wmi_requires_smbios_request)
 		return;
-
-	if (key->keycode == KEY_KBDILLUMTOGGLE)
-		dell_laptop_call_notifier(
-			DELL_LAPTOP_KBD_BACKLIGHT_BRIGHTNESS_CHANGED, NULL);
 
 	sparse_keymap_report_entry(priv->input_dev, key, 1, true);
 }
@@ -699,6 +697,8 @@ static int __init dell_wmi_init(void)
 {
 	int err;
 
+	acpi_video = acpi_video_backlight_support();
+
 	dmi_check_system(dell_wmi_smbios_list);
 
 	if (wmi_requires_smbios_request) {
@@ -711,7 +711,7 @@ static int __init dell_wmi_init(void)
 
 	return wmi_driver_register(&dell_wmi_driver);
 }
-module_init(dell_wmi_init);
+late_initcall(dell_wmi_init);
 
 static void __exit dell_wmi_exit(void)
 {

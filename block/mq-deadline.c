@@ -122,7 +122,7 @@ static void deadline_remove_request(struct request_queue *q, struct request *rq)
 }
 
 static void dd_request_merged(struct request_queue *q, struct request *req,
-			      enum elv_merge type)
+			      int type)
 {
 	struct deadline_data *dd = q->elevator->elevator_data;
 
@@ -284,7 +284,7 @@ dispatch_request:
 	dd->batching++;
 	deadline_move_request(dd, rq);
 done:
-	rq->rq_flags |= RQF_STARTED;
+	rq->cmd_flags |= REQ_STARTED;
 	return rq;
 }
 
@@ -400,7 +400,7 @@ static void dd_insert_request(struct blk_mq_hw_ctx *hctx, struct request *rq,
 
 	blk_mq_sched_request_inserted(rq);
 
-	if (at_head || blk_rq_is_passthrough(rq)) {
+	if (at_head || rq->cmd_type != REQ_TYPE_FS) {
 		if (at_head)
 			list_add(&rq->queuelist, &dd->dispatch);
 		else
@@ -457,12 +457,13 @@ deadline_var_show(int var, char *page)
 	return sprintf(page, "%d\n", var);
 }
 
-static void
-deadline_var_store(int *var, const char *page)
+static ssize_t
+deadline_var_store(int *var, const char *page, size_t count)
 {
 	char *p = (char *) page;
 
 	*var = simple_strtol(p, &p, 10);
+	return count;
 }
 
 #define SHOW_FUNCTION(__FUNC, __VAR, __CONV)				\
@@ -486,7 +487,7 @@ static ssize_t __FUNC(struct elevator_queue *e, const char *page, size_t count)	
 {									\
 	struct deadline_data *dd = e->elevator_data;			\
 	int __data;							\
-	deadline_var_store(&__data, (page));				\
+	int ret = deadline_var_store(&__data, (page), count);		\
 	if (__data < (MIN))						\
 		__data = (MIN);						\
 	else if (__data > (MAX))					\
@@ -495,7 +496,7 @@ static ssize_t __FUNC(struct elevator_queue *e, const char *page, size_t count)	
 		*(__PTR) = msecs_to_jiffies(__data);			\
 	else								\
 		*(__PTR) = __data;					\
-	return count;							\
+	return ret;							\
 }
 STORE_FUNCTION(deadline_read_expire_store, &dd->fifo_expire[READ], 0, INT_MAX, 1);
 STORE_FUNCTION(deadline_write_expire_store, &dd->fifo_expire[WRITE], 0, INT_MAX, 1);
@@ -636,35 +637,42 @@ static const struct blk_mq_debugfs_attr deadline_queue_debugfs_attrs[] = {
 #undef DEADLINE_QUEUE_DDIR_ATTRS
 #endif
 
-static struct elevator_type mq_deadline = {
-	.ops.mq = {
-		.insert_requests	= dd_insert_requests,
-		.dispatch_request	= dd_dispatch_request,
-		.next_request		= elv_rb_latter_request,
-		.former_request		= elv_rb_former_request,
-		.bio_merge		= dd_bio_merge,
-		.request_merge		= dd_request_merge,
-		.requests_merged	= dd_merged_requests,
-		.request_merged		= dd_request_merged,
-		.has_work		= dd_has_work,
-		.init_sched		= dd_init_queue,
-		.exit_sched		= dd_exit_queue,
-	},
+static struct elevator_mq_ops dd_ops = {
+	.insert_requests	= dd_insert_requests,
+	.dispatch_request	= dd_dispatch_request,
+	.next_request		= elv_rb_latter_request,
+	.former_request		= elv_rb_former_request,
+	.bio_merge		= dd_bio_merge,
+	.request_merge		= dd_request_merge,
+	.requests_merged	= dd_merged_requests,
+	.request_merged		= dd_request_merged,
+	.has_work		= dd_has_work,
+	.init_sched		= dd_init_queue,
+	.exit_sched		= dd_exit_queue,
+};
 
-	.uses_mq	= true,
-#ifdef CONFIG_BLK_DEBUG_FS
-	.queue_debugfs_attrs = deadline_queue_debugfs_attrs,
-#endif
+static struct elevator_type mq_deadline = {
 	.elevator_attrs = deadline_attrs,
 	.elevator_name = "mq-deadline",
-	.elevator_alias = "deadline",
 	.elevator_owner = THIS_MODULE,
 };
 MODULE_ALIAS("mq-deadline-iosched");
 
 static int __init deadline_init(void)
 {
-	return elv_register(&mq_deadline);
+	int ret = elv_register(&mq_deadline);
+	struct elevator_type_aux *aux;
+
+	if (ret)
+		return ret;
+
+	aux = elevator_aux_find(&mq_deadline);
+	memcpy(&aux->ops.mq, &dd_ops, sizeof(struct elevator_mq_ops));
+	aux->uses_mq = true;
+	aux->elevator_alias = "deadline",
+	aux->queue_debugfs_attrs = deadline_queue_debugfs_attrs;
+
+	return 0;
 }
 
 static void __exit deadline_exit(void)

@@ -37,6 +37,7 @@
 #include <linux/netdevice.h>
 #include <linux/hippidevice.h>
 #include <linux/skbuff.h>
+#include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/mm.h>
 #include <linux/slab.h>
@@ -46,7 +47,7 @@
 #include <asm/byteorder.h>
 #include <asm/io.h>
 #include <asm/irq.h>
-#include <linux/uaccess.h>
+#include <asm/uaccess.h>
 
 #define rr_if_busy(dev)     netif_queue_stopped(dev)
 #define rr_if_running(dev)  netif_running(dev)
@@ -60,8 +61,7 @@ MODULE_AUTHOR("Jes Sorensen <jes@wildopensource.com>");
 MODULE_DESCRIPTION("Essential RoadRunner HIPPI driver");
 MODULE_LICENSE("GPL");
 
-static const char version[] =
-"rrunner.c: v0.50 11/11/2002  Jes Sorensen (jes@wildopensource.com)\n";
+static char version[] = "rrunner.c: v0.50 11/11/2002  Jes Sorensen (jes@wildopensource.com)\n";
 
 
 static const struct net_device_ops rr_netdev_ops = {
@@ -69,6 +69,7 @@ static const struct net_device_ops rr_netdev_ops = {
 	.ndo_stop		= rr_close,
 	.ndo_do_ioctl		= rr_ioctl,
 	.ndo_start_xmit		= rr_start_xmit,
+	.ndo_change_mtu		= hippi_change_mtu,
 	.ndo_set_mac_address	= hippi_mac_addr,
 };
 
@@ -212,8 +213,10 @@ static int rr_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 				    rrpriv->tx_ring_dma);
 	if (rrpriv->regs)
 		pci_iounmap(pdev, rrpriv->regs);
-	if (pdev)
+	if (pdev) {
 		pci_release_regions(pdev);
+		pci_set_drvdata(pdev, NULL);
+	}
  out2:
 	free_netdev(dev);
  out3:
@@ -241,6 +244,7 @@ static void rr_remove_one(struct pci_dev *pdev)
 	pci_iounmap(pdev, rr->regs);
 	pci_release_regions(pdev);
 	pci_disable_device(pdev);
+	pci_set_drvdata(pdev, NULL);
 	free_netdev(dev);
 }
 
@@ -962,8 +966,8 @@ static void rx_int(struct net_device *dev, u32 rxlimit, u32 index)
 								    pkt_len,
 								    PCI_DMA_FROMDEVICE);
 
-					skb_put_data(skb, rx_skb->data,
-						     pkt_len);
+					memcpy(skb_put(skb, pkt_len),
+					       rx_skb->data, pkt_len);
 
 					pci_dma_sync_single_for_device(rrpriv->pci_dev,
 								       desc->addr.addrlo,
@@ -1146,10 +1150,10 @@ static inline void rr_raz_rx(struct rr_private *rrpriv,
 	}
 }
 
-static void rr_timer(struct timer_list *t)
+static void rr_timer(unsigned long data)
 {
-	struct rr_private *rrpriv = from_timer(rrpriv, t, timer);
-	struct net_device *dev = pci_get_drvdata(rrpriv->pci_dev);
+	struct net_device *dev = (struct net_device *)data;
+	struct rr_private *rrpriv = netdev_priv(dev);
 	struct rr_regs __iomem *regs = rrpriv->regs;
 	unsigned long flags;
 
@@ -1229,8 +1233,10 @@ static int rr_open(struct net_device *dev)
 
 	/* Set the timer to switch to check for link beat and perhaps switch
 	   to an alternate media type. */
-	timer_setup(&rrpriv->timer, rr_timer, 0);
+	init_timer(&rrpriv->timer);
 	rrpriv->timer.expires = RUN_AT(5*HZ);           /* 5 sec. watchdog */
+	rrpriv->timer.data = (unsigned long)dev;
+	rrpriv->timer.function = rr_timer;               /* timer handler */
 	add_timer(&rrpriv->timer);
 
 	netif_start_queue(dev);
@@ -1379,8 +1385,8 @@ static int rr_close(struct net_device *dev)
 			    rrpriv->info_dma);
 	rrpriv->info = NULL;
 
-	spin_unlock_irqrestore(&rrpriv->lock, flags);
 	free_irq(pdev->irq, dev);
+	spin_unlock_irqrestore(&rrpriv->lock, flags);
 
 	return 0;
 }
@@ -1420,7 +1426,7 @@ static netdev_tx_t rr_start_xmit(struct sk_buff *skb,
 		skb = new_skb;
 	}
 
-	ifield = skb_push(skb, 8);
+	ifield = (u32 *)skb_push(skb, 8);
 
 	ifield[0] = 0;
 	ifield[1] = hcb->ifield;
@@ -1614,14 +1620,17 @@ static int rr_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 			return -EPERM;
 		}
 
-		image = memdup_user(rq->ifr_data, EEPROM_BYTES);
-		if (IS_ERR(image))
-			return PTR_ERR(image);
+		image = kmalloc(EEPROM_WORDS * sizeof(u32), GFP_KERNEL);
+		oldimage = kmalloc(EEPROM_WORDS * sizeof(u32), GFP_KERNEL);
+		if (!image || !oldimage) {
+			error = -ENOMEM;
+			goto wf_out;
+		}
 
-		oldimage = kmalloc(EEPROM_BYTES, GFP_KERNEL);
-		if (!oldimage) {
-			kfree(image);
-			return -ENOMEM;
+		error = copy_from_user(image, rq->ifr_data, EEPROM_BYTES);
+		if (error) {
+			error = -EFAULT;
+			goto wf_out;
 		}
 
 		if (rrpriv->fw_running){
@@ -1677,4 +1686,15 @@ static struct pci_driver rr_driver = {
 	.remove		= rr_remove_one,
 };
 
-module_pci_driver(rr_driver);
+static int __init rr_init_module(void)
+{
+	return pci_register_driver(&rr_driver);
+}
+
+static void __exit rr_cleanup_module(void)
+{
+	pci_unregister_driver(&rr_driver);
+}
+
+module_init(rr_init_module);
+module_exit(rr_cleanup_module);

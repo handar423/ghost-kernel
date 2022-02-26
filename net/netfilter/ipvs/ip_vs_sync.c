@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * IPVS         An implementation of the IP virtual server support for the
  *              LINUX operating system.  IPVS is now implemented as a module
@@ -49,6 +48,7 @@
 #include <linux/kthread.h>
 #include <linux/wait.h>
 #include <linux/kernel.h>
+#include <linux/sched/signal.h>
 
 #include <asm/unaligned.h>		/* Used for ntoh_seq and hton_seq */
 
@@ -194,7 +194,7 @@ union ip_vs_sync_conn {
 #define IPVS_OPT_F_PARAM	(1 << (IPVS_OPT_PARAM-1))
 
 struct ip_vs_sync_thread_data {
-	struct netns_ipvs *ipvs;
+	struct net *net;
 	struct socket *sock;
 	char *buf;
 	int id;
@@ -263,11 +263,6 @@ struct ip_vs_sync_mesg {
 	/* ip_vs_sync_conn entries start here */
 };
 
-union ipvs_sockaddr {
-	struct sockaddr_in	in;
-	struct sockaddr_in6	in6;
-};
-
 struct ip_vs_sync_buff {
 	struct list_head        list;
 	unsigned long           firstuse;
@@ -284,7 +279,6 @@ struct ip_vs_sync_buff {
  */
 static void ntoh_seq(struct ip_vs_seq *no, struct ip_vs_seq *ho)
 {
-	memset(ho, 0, sizeof(*ho));
 	ho->init_seq       = get_unaligned_be32(&no->init_seq);
 	ho->delta          = get_unaligned_be32(&no->delta);
 	ho->previous_delta = get_unaligned_be32(&no->previous_delta);
@@ -436,16 +430,6 @@ ip_vs_sync_buff_create_v0(struct netns_ipvs *ipvs, unsigned int len)
 	return sb;
 }
 
-/* Check if connection is controlled by persistence */
-static inline bool in_persistence(struct ip_vs_conn *cp)
-{
-	for (cp = cp->control; cp; cp = cp->control) {
-		if (cp->flags & IP_VS_CONN_F_TEMPLATE)
-			return true;
-	}
-	return false;
-}
-
 /* Check if conn should be synced.
  * pkts: conn packets, use sysctl_sync_threshold to avoid packet check
  * - (1) sync_refresh_period: reduce sync rate. Additionally, retry
@@ -458,7 +442,7 @@ static inline bool in_persistence(struct ip_vs_conn *cp)
 static int ip_vs_sync_conn_needed(struct netns_ipvs *ipvs,
 				  struct ip_vs_conn *cp, int pkts)
 {
-	unsigned long orig = READ_ONCE(cp->sync_endtime);
+	unsigned long orig = ACCESS_ONCE(cp->sync_endtime);
 	unsigned long now = jiffies;
 	unsigned long n = (now + cp->timeout) & ~3UL;
 	unsigned int sync_refresh_period;
@@ -468,8 +452,6 @@ static int ip_vs_sync_conn_needed(struct netns_ipvs *ipvs,
 	/* Check if we sync in current state */
 	if (unlikely(cp->flags & IP_VS_CONN_F_TEMPLATE))
 		force = 0;
-	else if (unlikely(sysctl_sync_persist_mode(ipvs) && in_persistence(cp)))
-		return 0;
 	else if (likely(cp->protocol == IPPROTO_TCP)) {
 		if (!((1 << cp->state) &
 		      ((1 << IP_VS_TCP_S_ESTABLISHED) |
@@ -484,10 +466,9 @@ static int ip_vs_sync_conn_needed(struct netns_ipvs *ipvs,
 	} else if (unlikely(cp->protocol == IPPROTO_SCTP)) {
 		if (!((1 << cp->state) &
 		      ((1 << IP_VS_SCTP_S_ESTABLISHED) |
-		       (1 << IP_VS_SCTP_S_SHUTDOWN_SENT) |
-		       (1 << IP_VS_SCTP_S_SHUTDOWN_RECEIVED) |
-		       (1 << IP_VS_SCTP_S_SHUTDOWN_ACK_SENT) |
-		       (1 << IP_VS_SCTP_S_CLOSED))))
+		       (1 << IP_VS_SCTP_S_CLOSED) |
+		       (1 << IP_VS_SCTP_S_SHUT_ACK_CLI) |
+		       (1 << IP_VS_SCTP_S_SHUT_ACK_SER))))
 			return 0;
 		force = cp->state != cp->old_state;
 		if (force && cp->state != IP_VS_SCTP_S_ESTABLISHED)
@@ -521,7 +502,7 @@ static int ip_vs_sync_conn_needed(struct netns_ipvs *ipvs,
 		if (!(cp->flags & IP_VS_CONN_F_TEMPLATE) &&
 		    pkts % sync_period != sysctl_sync_threshold(ipvs))
 			return 0;
-	} else if (!sync_refresh_period &&
+	} else if (sync_refresh_period <= 0 &&
 		   pkts != sysctl_sync_threshold(ipvs))
 		return 0;
 
@@ -535,9 +516,10 @@ set:
  *      Version 0 , could be switched in by sys_ctl.
  *      Add an ip_vs_conn information into the current sync_buff.
  */
-static void ip_vs_sync_conn_v0(struct netns_ipvs *ipvs, struct ip_vs_conn *cp,
+static void ip_vs_sync_conn_v0(struct net *net, struct ip_vs_conn *cp,
 			       int pkts)
 {
+	struct netns_ipvs *ipvs = net_ipvs(net);
 	struct ip_vs_sync_mesg_v0 *m;
 	struct ip_vs_sync_conn_v0 *s;
 	struct ip_vs_sync_buff *buff;
@@ -616,7 +598,7 @@ static void ip_vs_sync_conn_v0(struct netns_ipvs *ipvs, struct ip_vs_conn *cp,
 			pkts = atomic_add_return(1, &cp->in_pkts);
 		else
 			pkts = sysctl_sync_threshold(ipvs);
-		ip_vs_sync_conn(ipvs, cp, pkts);
+		ip_vs_sync_conn(net, cp->control, pkts);
 	}
 }
 
@@ -625,8 +607,9 @@ static void ip_vs_sync_conn_v0(struct netns_ipvs *ipvs, struct ip_vs_conn *cp,
  *      Called by ip_vs_in.
  *      Sending Version 1 messages
  */
-void ip_vs_sync_conn(struct netns_ipvs *ipvs, struct ip_vs_conn *cp, int pkts)
+void ip_vs_sync_conn(struct net *net, struct ip_vs_conn *cp, int pkts)
 {
+	struct netns_ipvs *ipvs = net_ipvs(net);
 	struct ip_vs_sync_mesg *m;
 	union ip_vs_sync_conn *s;
 	struct ip_vs_sync_buff *buff;
@@ -637,7 +620,7 @@ void ip_vs_sync_conn(struct netns_ipvs *ipvs, struct ip_vs_conn *cp, int pkts)
 
 	/* Handle old version of the protocol */
 	if (sysctl_sync_ver(ipvs) == 0) {
-		ip_vs_sync_conn_v0(ipvs, cp, pkts);
+		ip_vs_sync_conn_v0(net, cp, pkts);
 		return;
 	}
 	/* Do not sync ONE PACKET */
@@ -784,21 +767,21 @@ control:
  *  fill_param used by version 1
  */
 static inline int
-ip_vs_conn_fill_param_sync(struct netns_ipvs *ipvs, int af, union ip_vs_sync_conn *sc,
+ip_vs_conn_fill_param_sync(struct net *net, int af, union ip_vs_sync_conn *sc,
 			   struct ip_vs_conn_param *p,
 			   __u8 *pe_data, unsigned int pe_data_len,
 			   __u8 *pe_name, unsigned int pe_name_len)
 {
 #ifdef CONFIG_IP_VS_IPV6
 	if (af == AF_INET6)
-		ip_vs_conn_fill_param(ipvs, af, sc->v6.protocol,
+		ip_vs_conn_fill_param(net, af, sc->v6.protocol,
 				      (const union nf_inet_addr *)&sc->v6.caddr,
 				      sc->v6.cport,
 				      (const union nf_inet_addr *)&sc->v6.vaddr,
 				      sc->v6.vport, p);
 	else
 #endif
-		ip_vs_conn_fill_param(ipvs, af, sc->v4.protocol,
+		ip_vs_conn_fill_param(net, af, sc->v4.protocol,
 				      (const union nf_inet_addr *)&sc->v4.caddr,
 				      sc->v4.cport,
 				      (const union nf_inet_addr *)&sc->v4.vaddr,
@@ -837,7 +820,7 @@ ip_vs_conn_fill_param_sync(struct netns_ipvs *ipvs, int af, union ip_vs_sync_con
  *  Param: ...
  *         timeout is in sec.
  */
-static void ip_vs_proc_conn(struct netns_ipvs *ipvs, struct ip_vs_conn_param *param,
+static void ip_vs_proc_conn(struct net *net, struct ip_vs_conn_param *param,
 			    unsigned int flags, unsigned int state,
 			    unsigned int protocol, unsigned int type,
 			    const union nf_inet_addr *daddr, __be16 dport,
@@ -846,11 +829,12 @@ static void ip_vs_proc_conn(struct netns_ipvs *ipvs, struct ip_vs_conn_param *pa
 {
 	struct ip_vs_dest *dest;
 	struct ip_vs_conn *cp;
+	struct netns_ipvs *ipvs = net_ipvs(net);
 
 	if (!(flags & IP_VS_CONN_F_TEMPLATE)) {
 		cp = ip_vs_conn_in_get(param);
 		if (cp && ((cp->dport != dport) ||
-			   !ip_vs_addr_equal(cp->daf, &cp->daddr, daddr))) {
+			   !ip_vs_addr_equal(cp->af, &cp->daddr, daddr))) {
 			if (!(flags & IP_VS_CONN_F_INACTIVE)) {
 				ip_vs_conn_expire_now(cp);
 				__ip_vs_conn_put(cp);
@@ -898,31 +882,21 @@ static void ip_vs_proc_conn(struct netns_ipvs *ipvs, struct ip_vs_conn_param *pa
 		 * but still handled.
 		 */
 		rcu_read_lock();
-		/* This function is only invoked by the synchronization
-		 * code. We do not currently support heterogeneous pools
-		 * with synchronization, so we can make the assumption that
-		 * the svc_af is the same as the dest_af
-		 */
-		dest = ip_vs_find_dest(ipvs, type, type, daddr, dport,
-				       param->vaddr, param->vport, protocol,
-				       fwmark, flags);
+		dest = ip_vs_find_dest(net, type, daddr, dport, param->vaddr,
+				       param->vport, protocol, fwmark, flags);
 
-		cp = ip_vs_conn_new(param, type, daddr, dport, flags, dest,
-				    fwmark);
+		cp = ip_vs_conn_new(param, daddr, dport, flags, dest, fwmark);
 		rcu_read_unlock();
 		if (!cp) {
-			kfree(param->pe_data);
+			if (param->pe_data)
+				kfree(param->pe_data);
 			IP_VS_DBG(2, "BACKUP, add new conn. failed\n");
 			return;
 		}
-		if (!(flags & IP_VS_CONN_F_TEMPLATE))
-			kfree(param->pe_data);
 	}
 
-	if (opt) {
-		cp->in_seq = opt->in_seq;
-		cp->out_seq = opt->out_seq;
-	}
+	if (opt)
+		memcpy(&cp->in_seq, opt, sizeof(*opt));
 	atomic_set(&cp->in_pkts, sysctl_sync_threshold(ipvs));
 	cp->state = state;
 	cp->old_state = cp->state;
@@ -942,7 +916,7 @@ static void ip_vs_proc_conn(struct netns_ipvs *ipvs, struct ip_vs_conn_param *pa
 	} else {
 		struct ip_vs_proto_data *pd;
 
-		pd = ip_vs_proto_data_get(ipvs, protocol);
+		pd = ip_vs_proto_data_get(net, protocol);
 		if (!(flags & IP_VS_CONN_F_TEMPLATE) && pd && pd->timeout_table)
 			cp->timeout = pd->timeout_table[state];
 		else
@@ -954,7 +928,7 @@ static void ip_vs_proc_conn(struct netns_ipvs *ipvs, struct ip_vs_conn_param *pa
 /*
  *  Process received multicast message for Version 0
  */
-static void ip_vs_process_message_v0(struct netns_ipvs *ipvs, const char *buffer,
+static void ip_vs_process_message_v0(struct net *net, const char *buffer,
 				     const size_t buflen)
 {
 	struct ip_vs_sync_mesg_v0 *m = (struct ip_vs_sync_mesg_v0 *)buffer;
@@ -1010,14 +984,14 @@ static void ip_vs_process_message_v0(struct netns_ipvs *ipvs, const char *buffer
 			}
 		}
 
-		ip_vs_conn_fill_param(ipvs, AF_INET, s->protocol,
+		ip_vs_conn_fill_param(net, AF_INET, s->protocol,
 				      (const union nf_inet_addr *)&s->caddr,
 				      s->cport,
 				      (const union nf_inet_addr *)&s->vaddr,
 				      s->vport, &param);
 
 		/* Send timeout as Zero */
-		ip_vs_proc_conn(ipvs, &param, flags, state, s->protocol, AF_INET,
+		ip_vs_proc_conn(net, &param, flags, state, s->protocol, AF_INET,
 				(union nf_inet_addr *)&s->daddr, s->dport,
 				0, 0, opt);
 	}
@@ -1068,7 +1042,7 @@ static int ip_vs_proc_str(__u8 *p, unsigned int plen, unsigned int *data_len,
 /*
  *   Process a Version 1 sync. connection
  */
-static inline int ip_vs_proc_sync_conn(struct netns_ipvs *ipvs, __u8 *p, __u8 *msg_end)
+static inline int ip_vs_proc_sync_conn(struct net *net, __u8 *p, __u8 *msg_end)
 {
 	struct ip_vs_sync_conn_options opt;
 	union  ip_vs_sync_conn *s;
@@ -1172,27 +1146,26 @@ static inline int ip_vs_proc_sync_conn(struct netns_ipvs *ipvs, __u8 *p, __u8 *m
 			state = 0;
 		}
 	}
-	if (ip_vs_conn_fill_param_sync(ipvs, af, s, &param, pe_data,
+	if (ip_vs_conn_fill_param_sync(net, af, s, &param, pe_data,
 				       pe_data_len, pe_name, pe_name_len)) {
 		retc = 50;
 		goto out;
 	}
 	/* If only IPv4, just silent skip IPv6 */
 	if (af == AF_INET)
-		ip_vs_proc_conn(ipvs, &param, flags, state, s->v4.protocol, af,
+		ip_vs_proc_conn(net, &param, flags, state, s->v4.protocol, af,
 				(union nf_inet_addr *)&s->v4.daddr, s->v4.dport,
 				ntohl(s->v4.timeout), ntohl(s->v4.fwmark),
 				(opt_flags & IPVS_OPT_F_SEQ_DATA ? &opt : NULL)
 				);
 #ifdef CONFIG_IP_VS_IPV6
 	else
-		ip_vs_proc_conn(ipvs, &param, flags, state, s->v6.protocol, af,
+		ip_vs_proc_conn(net, &param, flags, state, s->v6.protocol, af,
 				(union nf_inet_addr *)&s->v6.daddr, s->v6.dport,
 				ntohl(s->v6.timeout), ntohl(s->v6.fwmark),
 				(opt_flags & IPVS_OPT_F_SEQ_DATA ? &opt : NULL)
 				);
 #endif
-	ip_vs_pe_put(param.pe);
 	return 0;
 	/* Error exit */
 out:
@@ -1205,9 +1178,10 @@ out:
  *      ip_vs_conn entries.
  *      Handles Version 0 & 1
  */
-static void ip_vs_process_message(struct netns_ipvs *ipvs, __u8 *buffer,
+static void ip_vs_process_message(struct net *net, __u8 *buffer,
 				  const size_t buflen)
 {
+	struct netns_ipvs *ipvs = net_ipvs(net);
 	struct ip_vs_sync_mesg *m2 = (struct ip_vs_sync_mesg *)buffer;
 	__u8 *p, *msg_end;
 	int i, nr_conns;
@@ -1257,7 +1231,7 @@ static void ip_vs_process_message(struct netns_ipvs *ipvs, __u8 *buffer,
 				return;
 			}
 			/* Process a single sync_conn */
-			retc = ip_vs_proc_sync_conn(ipvs, p, msg_end);
+			retc = ip_vs_proc_sync_conn(net, p, msg_end);
 			if (retc < 0) {
 				IP_VS_ERR_RL("BACKUP, Dropping buffer, Err: %d in decoding\n",
 					     retc);
@@ -1268,7 +1242,7 @@ static void ip_vs_process_message(struct netns_ipvs *ipvs, __u8 *buffer,
 		}
 	} else {
 		/* Old type of message */
-		ip_vs_process_message_v0(ipvs, buffer, buflen);
+		ip_vs_process_message_v0(net, buffer, buflen);
 		return;
 	}
 }
@@ -1306,14 +1280,6 @@ static void set_mcast_loop(struct sock *sk, u_char loop)
 	/* setsockopt(sock, SOL_IP, IP_MULTICAST_LOOP, &loop, sizeof(loop)); */
 	lock_sock(sk);
 	inet->mc_loop = loop ? 1 : 0;
-#ifdef CONFIG_IP_VS_IPV6
-	if (sk->sk_family == AF_INET6) {
-		struct ipv6_pinfo *np = inet6_sk(sk);
-
-		/* IPV6_MULTICAST_LOOP */
-		np->mc_loop = loop ? 1 : 0;
-	}
-#endif
 	release_sock(sk);
 }
 
@@ -1327,14 +1293,6 @@ static void set_mcast_ttl(struct sock *sk, u_char ttl)
 	/* setsockopt(sock, SOL_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl)); */
 	lock_sock(sk);
 	inet->mc_ttl = ttl;
-#ifdef CONFIG_IP_VS_IPV6
-	if (sk->sk_family == AF_INET6) {
-		struct ipv6_pinfo *np = inet6_sk(sk);
-
-		/* IPV6_MULTICAST_HOPS */
-		np->mcast_hops = ttl;
-	}
-#endif
 	release_sock(sk);
 }
 
@@ -1346,29 +1304,15 @@ static void set_mcast_pmtudisc(struct sock *sk, int val)
 	/* setsockopt(sock, SOL_IP, IP_MTU_DISCOVER, &val, sizeof(val)); */
 	lock_sock(sk);
 	inet->pmtudisc = val;
-#ifdef CONFIG_IP_VS_IPV6
-	if (sk->sk_family == AF_INET6) {
-		struct ipv6_pinfo *np = inet6_sk(sk);
-
-		/* IPV6_MTU_DISCOVER */
-		np->pmtudisc = val;
-	}
-#endif
 	release_sock(sk);
 }
 
 /*
  *      Specifiy default interface for outgoing multicasts
  */
-static int set_mcast_if(struct sock *sk, char *ifname)
+static int set_mcast_if(struct sock *sk, struct net_device *dev)
 {
-	struct net_device *dev;
 	struct inet_sock *inet = inet_sk(sk);
-	struct net *net = sock_net(sk);
-
-	dev = __dev_get_by_name(net, ifname);
-	if (!dev)
-		return -ENODEV;
 
 	if (sk->sk_bound_dev_if && dev->ifindex != sk->sk_bound_dev_if)
 		return -EINVAL;
@@ -1376,14 +1320,6 @@ static int set_mcast_if(struct sock *sk, char *ifname)
 	lock_sock(sk);
 	inet->mc_index = dev->ifindex;
 	/*  inet->mc_addr  = 0; */
-#ifdef CONFIG_IP_VS_IPV6
-	if (sk->sk_family == AF_INET6) {
-		struct ipv6_pinfo *np = inet6_sk(sk);
-
-		/* IPV6_MULTICAST_IF */
-		np->mcast_oif = dev->ifindex;
-	}
-#endif
 	release_sock(sk);
 
 	return 0;
@@ -1396,19 +1332,14 @@ static int set_mcast_if(struct sock *sk, char *ifname)
  *      in the in_addr structure passed in as a parameter.
  */
 static int
-join_mcast_group(struct sock *sk, struct in_addr *addr, char *ifname)
+join_mcast_group(struct sock *sk, struct in_addr *addr, struct net_device *dev)
 {
-	struct net *net = sock_net(sk);
 	struct ip_mreqn mreq;
-	struct net_device *dev;
 	int ret;
 
 	memset(&mreq, 0, sizeof(mreq));
 	memcpy(&mreq.imr_multiaddr, addr, sizeof(struct in_addr));
 
-	dev = __dev_get_by_name(net, ifname);
-	if (!dev)
-		return -ENODEV;
 	if (sk->sk_bound_dev_if && dev->ifindex != sk->sk_bound_dev_if)
 		return -EINVAL;
 
@@ -1421,38 +1352,11 @@ join_mcast_group(struct sock *sk, struct in_addr *addr, char *ifname)
 	return ret;
 }
 
-#ifdef CONFIG_IP_VS_IPV6
-static int join_mcast_group6(struct sock *sk, struct in6_addr *addr,
-			     char *ifname)
+
+static int bind_mcastif_addr(struct socket *sock, struct net_device *dev)
 {
-	struct net *net = sock_net(sk);
-	struct net_device *dev;
-	int ret;
-
-	dev = __dev_get_by_name(net, ifname);
-	if (!dev)
-		return -ENODEV;
-	if (sk->sk_bound_dev_if && dev->ifindex != sk->sk_bound_dev_if)
-		return -EINVAL;
-
-	lock_sock(sk);
-	ret = ipv6_sock_mc_join(sk, dev->ifindex, addr);
-	release_sock(sk);
-
-	return ret;
-}
-#endif
-
-static int bind_mcastif_addr(struct socket *sock, char *ifname)
-{
-	struct net *net = sock_net(sock->sk);
-	struct net_device *dev;
 	__be32 addr;
 	struct sockaddr_in sin;
-
-	dev = __dev_get_by_name(net, ifname);
-	if (!dev)
-		return -ENODEV;
 
 	addr = inet_select_addr(dev, 0, RT_SCOPE_UNIVERSE);
 	if (!addr)
@@ -1460,7 +1364,7 @@ static int bind_mcastif_addr(struct socket *sock, char *ifname)
 		       "multicast interface.\n");
 
 	IP_VS_DBG(7, "binding socket with (%s) %pI4\n",
-		  ifname, &addr);
+		  dev->name, &addr);
 
 	/* Now bind the socket with the address of multicast interface */
 	sin.sin_family	     = AF_INET;
@@ -1470,133 +1374,123 @@ static int bind_mcastif_addr(struct socket *sock, char *ifname)
 	return sock->ops->bind(sock, (struct sockaddr*)&sin, sizeof(sin));
 }
 
-static void get_mcast_sockaddr(union ipvs_sockaddr *sa, int *salen,
-			       struct ipvs_sync_daemon_cfg *c, int id)
-{
-	if (AF_INET6 == c->mcast_af) {
-		sa->in6 = (struct sockaddr_in6) {
-			.sin6_family = AF_INET6,
-			.sin6_port = htons(c->mcast_port + id),
-		};
-		sa->in6.sin6_addr = c->mcast_group.in6;
-		*salen = sizeof(sa->in6);
-	} else {
-		sa->in = (struct sockaddr_in) {
-			.sin_family = AF_INET,
-			.sin_port = htons(c->mcast_port + id),
-		};
-		sa->in.sin_addr = c->mcast_group.in;
-		*salen = sizeof(sa->in);
-	}
-}
-
 /*
  *      Set up sending multicast socket over UDP
  */
-static struct socket *make_send_sock(struct netns_ipvs *ipvs, int id)
+static int make_send_sock(struct netns_ipvs *ipvs, int id,
+			  struct net_device *dev, struct socket **sock_ret)
 {
 	/* multicast addr */
-	union ipvs_sockaddr mcast_addr;
+	struct sockaddr_in mcast_addr = {
+		.sin_family		= AF_INET,
+		.sin_port		= cpu_to_be16(IP_VS_SYNC_PORT + id),
+		.sin_addr.s_addr	= cpu_to_be32(IP_VS_SYNC_GROUP),
+	};
 	struct socket *sock;
-	int result, salen;
+	int result;
 
-	/* First create a socket */
-	result = sock_create_kern(ipvs->net, ipvs->mcfg.mcast_af, SOCK_DGRAM,
-				  IPPROTO_UDP, &sock);
+	/* First create a socket move it to right name space later */
+	result = sock_create_kern(PF_INET, SOCK_DGRAM, IPPROTO_UDP, &sock);
 	if (result < 0) {
 		pr_err("Error during creation of socket; terminating\n");
-		return ERR_PTR(result);
+		goto error;
 	}
-	result = set_mcast_if(sock->sk, ipvs->mcfg.mcast_ifn);
+	/*
+	 * Kernel sockets that are a part of a namespace, should not
+	 * hold a reference to a namespace in order to allow to stop it.
+	 * After sk_change_net should be released using sk_release_kernel.
+	 */
+
+	sk_change_net(sock->sk, ipvs->net);
+	*sock_ret = sock;
+	result = set_mcast_if(sock->sk, dev);
 	if (result < 0) {
 		pr_err("Error setting outbound mcast interface\n");
 		goto error;
 	}
 
 	set_mcast_loop(sock->sk, 0);
-	set_mcast_ttl(sock->sk, ipvs->mcfg.mcast_ttl);
+	set_mcast_ttl(sock->sk, 1);
 	/* Allow fragmentation if MTU changes */
 	set_mcast_pmtudisc(sock->sk, IP_PMTUDISC_DONT);
 	result = sysctl_sync_sock_size(ipvs);
 	if (result > 0)
 		set_sock_size(sock->sk, 1, result);
 
-	if (AF_INET == ipvs->mcfg.mcast_af)
-		result = bind_mcastif_addr(sock, ipvs->mcfg.mcast_ifn);
-	else
-		result = 0;
+	result = bind_mcastif_addr(sock, dev);
 	if (result < 0) {
 		pr_err("Error binding address of the mcast interface\n");
 		goto error;
 	}
 
-	get_mcast_sockaddr(&mcast_addr, &salen, &ipvs->mcfg, id);
 	result = sock->ops->connect(sock, (struct sockaddr *) &mcast_addr,
-				    salen, 0);
+			sizeof(struct sockaddr), 0);
 	if (result < 0) {
 		pr_err("Error connecting to the multicast addr\n");
 		goto error;
 	}
 
-	return sock;
+	return 0;
 
 error:
-	sock_release(sock);
-	return ERR_PTR(result);
+	return result;
 }
 
 
 /*
  *      Set up receiving multicast socket over UDP
  */
-static struct socket *make_receive_sock(struct netns_ipvs *ipvs, int id,
-					int ifindex)
+static int make_receive_sock(struct netns_ipvs *ipvs, int id,
+			     struct net_device *dev, struct socket **sock_ret)
 {
 	/* multicast addr */
-	union ipvs_sockaddr mcast_addr;
+	struct sockaddr_in mcast_addr = {
+		.sin_family		= AF_INET,
+		.sin_port		= cpu_to_be16(IP_VS_SYNC_PORT + id),
+		.sin_addr.s_addr	= cpu_to_be32(IP_VS_SYNC_GROUP),
+	};
 	struct socket *sock;
-	int result, salen;
+	int result;
 
 	/* First create a socket */
-	result = sock_create_kern(ipvs->net, ipvs->bcfg.mcast_af, SOCK_DGRAM,
-				  IPPROTO_UDP, &sock);
+	result = sock_create_kern(PF_INET, SOCK_DGRAM, IPPROTO_UDP, &sock);
 	if (result < 0) {
 		pr_err("Error during creation of socket; terminating\n");
-		return ERR_PTR(result);
+		goto error;
 	}
+	/*
+	 * Kernel sockets that are a part of a namespace, should not
+	 * hold a reference to a namespace in order to allow to stop it.
+	 * After sk_change_net should be released using sk_release_kernel.
+	 */
+	sk_change_net(sock->sk, ipvs->net);
+	*sock_ret = sock;
 	/* it is equivalent to the REUSEADDR option in user-space */
 	sock->sk->sk_reuse = SK_CAN_REUSE;
 	result = sysctl_sync_sock_size(ipvs);
 	if (result > 0)
 		set_sock_size(sock->sk, 0, result);
 
-	get_mcast_sockaddr(&mcast_addr, &salen, &ipvs->bcfg, id);
-	sock->sk->sk_bound_dev_if = ifindex;
-	result = sock->ops->bind(sock, (struct sockaddr *)&mcast_addr, salen);
+	result = sock->ops->bind(sock, (struct sockaddr *) &mcast_addr,
+			sizeof(struct sockaddr));
 	if (result < 0) {
 		pr_err("Error binding to the multicast addr\n");
 		goto error;
 	}
 
 	/* join the multicast group */
-#ifdef CONFIG_IP_VS_IPV6
-	if (ipvs->bcfg.mcast_af == AF_INET6)
-		result = join_mcast_group6(sock->sk, &mcast_addr.in6.sin6_addr,
-					   ipvs->bcfg.mcast_ifn);
-	else
-#endif
-		result = join_mcast_group(sock->sk, &mcast_addr.in.sin_addr,
-					  ipvs->bcfg.mcast_ifn);
+	result = join_mcast_group(sock->sk,
+			(struct in_addr *) &mcast_addr.sin_addr,
+			dev);
 	if (result < 0) {
 		pr_err("Error joining to the multicast group\n");
 		goto error;
 	}
 
-	return sock;
+	return 0;
 
 error:
-	sock_release(sock);
-	return ERR_PTR(result);
+	return result;
 }
 
 
@@ -1687,7 +1581,7 @@ next_sync_buff(struct netns_ipvs *ipvs, struct ipvs_master_sync_state *ms)
 static int sync_thread_master(void *data)
 {
 	struct ip_vs_sync_thread_data *tinfo = data;
-	struct netns_ipvs *ipvs = tinfo->ipvs;
+	struct netns_ipvs *ipvs = net_ipvs(tinfo->net);
 	struct ipvs_master_sync_state *ms = &ipvs->ms[tinfo->id];
 	struct sock *sk = tinfo->sock->sk;
 	struct ip_vs_sync_buff *sb;
@@ -1705,12 +1599,12 @@ static int sync_thread_master(void *data)
 			continue;
 		}
 		while (ip_vs_send_sync_msg(tinfo->sock, sb->mesg) < 0) {
-			/* (Ab)use interruptible sleep to avoid increasing
-			 * the load avg.
-			 */
+			int ret = 0;
+
 			__wait_event_interruptible(*sk_sleep(sk),
 						   sock_writeable(sk) ||
-						   kthread_should_stop());
+						   kthread_should_stop(),
+						   ret);
 			if (unlikely(kthread_should_stop()))
 				goto done;
 		}
@@ -1733,7 +1627,7 @@ done:
 		ip_vs_sync_buff_release(sb);
 
 	/* release the sending multicast socket */
-	sock_release(tinfo->sock);
+	sk_release_kernel(tinfo->sock->sk);
 	kfree(tinfo);
 
 	return 0;
@@ -1743,7 +1637,7 @@ done:
 static int sync_thread_backup(void *data)
 {
 	struct ip_vs_sync_thread_data *tinfo = data;
-	struct netns_ipvs *ipvs = tinfo->ipvs;
+	struct netns_ipvs *ipvs = net_ipvs(tinfo->net);
 	int len;
 
 	pr_info("sync thread started: state = BACKUP, mcast_ifn = %s, "
@@ -1765,12 +1659,12 @@ static int sync_thread_backup(void *data)
 				break;
 			}
 
-			ip_vs_process_message(ipvs, tinfo->buf, len);
+			ip_vs_process_message(tinfo->net, tinfo->buf, len);
 		}
 	}
 
 	/* release the sending multicast socket */
-	sock_release(tinfo->sock);
+	sk_release_kernel(tinfo->sock->sk);
 	kfree(tinfo->buf);
 	kfree(tinfo);
 
@@ -1781,19 +1675,30 @@ static int sync_thread_backup(void *data)
 int start_sync_thread(struct netns_ipvs *ipvs, struct ipvs_sync_daemon_cfg *c,
 		      int state)
 {
-	struct ip_vs_sync_thread_data *tinfo;
+	struct ip_vs_sync_thread_data *tinfo = NULL;
 	struct task_struct **array = NULL, *task;
-	struct socket *sock;
 	struct net_device *dev;
 	char *name;
 	int (*threadfn)(void *data);
-	int id, count, hlen;
+	int id = 0, count, hlen;
 	int result = -ENOMEM;
 	u16 mtu, min_mtu;
 
 	IP_VS_DBG(7, "%s(): pid %d\n", __func__, task_pid_nr(current));
-	IP_VS_DBG(7, "Each ip_vs_sync_conn entry needs %zd bytes\n",
+	IP_VS_DBG(7, "Each ip_vs_sync_conn entry needs %Zd bytes\n",
 		  sizeof(struct ip_vs_sync_conn_v0));
+
+	/* Do not hold one mutex and then to block on another */
+	for (;;) {
+		rtnl_lock();
+		if (mutex_trylock(&ipvs->sync_mutex))
+			break;
+		rtnl_unlock();
+		mutex_lock(&ipvs->sync_mutex);
+		if (rtnl_trylock())
+			break;
+		mutex_unlock(&ipvs->sync_mutex);
+	}
 
 	if (!ipvs->sync_state) {
 		count = clamp(sysctl_sync_ports(ipvs), 1, IPVS_SYNC_PORTS_MAX);
@@ -1801,23 +1706,13 @@ int start_sync_thread(struct netns_ipvs *ipvs, struct ipvs_sync_daemon_cfg *c,
 	} else
 		count = ipvs->threads_mask + 1;
 
-	if (c->mcast_af == AF_UNSPEC) {
-		c->mcast_af = AF_INET;
-		c->mcast_group.ip = cpu_to_be32(IP_VS_SYNC_GROUP);
-	}
-	if (!c->mcast_port)
-		c->mcast_port = IP_VS_SYNC_PORT;
-	if (!c->mcast_ttl)
-		c->mcast_ttl = 1;
-
 	dev = __dev_get_by_name(ipvs->net, c->mcast_ifn);
 	if (!dev) {
 		pr_err("Unknown mcast interface: %s\n", c->mcast_ifn);
-		return -ENODEV;
+		result = -ENODEV;
+		goto out_early;
 	}
-	hlen = (AF_INET6 == c->mcast_af) ?
-	       sizeof(struct ipv6hdr) + sizeof(struct udphdr) :
-	       sizeof(struct iphdr) + sizeof(struct udphdr);
+	hlen = sizeof(struct iphdr) + sizeof(struct udphdr);
 	mtu = (state == IP_VS_STATE_BACKUP) ?
 		  clamp(dev->mtu, 1500U, 65535U) : 1500U;
 	min_mtu = (state == IP_VS_STATE_BACKUP) ? 1024 : 1;
@@ -1830,27 +1725,31 @@ int start_sync_thread(struct netns_ipvs *ipvs, struct ipvs_sync_daemon_cfg *c,
 		c->sync_maxlen = mtu - hlen;
 
 	if (state == IP_VS_STATE_MASTER) {
+		result = -EEXIST;
 		if (ipvs->ms)
-			return -EEXIST;
+			goto out_early;
 
 		ipvs->mcfg = *c;
 		name = "ipvs-m:%d:%d";
 		threadfn = sync_thread_master;
 	} else if (state == IP_VS_STATE_BACKUP) {
+		result = -EEXIST;
 		if (ipvs->backup_threads)
-			return -EEXIST;
+			goto out_early;
 
 		ipvs->bcfg = *c;
 		name = "ipvs-b:%d:%d";
 		threadfn = sync_thread_backup;
 	} else {
-		return -EINVAL;
+		result = -EINVAL;
+		goto out_early;
 	}
 
 	if (state == IP_VS_STATE_MASTER) {
 		struct ipvs_master_sync_state *ms;
 
-		ipvs->ms = kcalloc(count, sizeof(ipvs->ms[0]), GFP_KERNEL);
+		result = -ENOMEM;
+		ipvs->ms = kzalloc(count * sizeof(ipvs->ms[0]), GFP_KERNEL);
 		if (!ipvs->ms)
 			goto out;
 		ms = ipvs->ms;
@@ -1863,41 +1762,40 @@ int start_sync_thread(struct netns_ipvs *ipvs, struct ipvs_sync_daemon_cfg *c,
 			ms->ipvs = ipvs;
 		}
 	} else {
-		array = kcalloc(count, sizeof(struct task_struct *),
+		array = kzalloc(count * sizeof(struct task_struct *),
 				GFP_KERNEL);
+		result = -ENOMEM;
 		if (!array)
 			goto out;
 	}
 
-	tinfo = NULL;
 	for (id = 0; id < count; id++) {
-		if (state == IP_VS_STATE_MASTER)
-			sock = make_send_sock(ipvs, id);
-		else
-			sock = make_receive_sock(ipvs, id, dev->ifindex);
-		if (IS_ERR(sock)) {
-			result = PTR_ERR(sock);
-			goto outtinfo;
-		}
+		result = -ENOMEM;
 		tinfo = kmalloc(sizeof(*tinfo), GFP_KERNEL);
 		if (!tinfo)
-			goto outsocket;
-		tinfo->ipvs = ipvs;
-		tinfo->sock = sock;
+			goto out;
+		tinfo->net = ipvs->net;
+		tinfo->sock = NULL;
 		if (state == IP_VS_STATE_BACKUP) {
 			tinfo->buf = kmalloc(ipvs->bcfg.sync_maxlen,
 					     GFP_KERNEL);
 			if (!tinfo->buf)
-				goto outtinfo;
+				goto out;
 		} else {
 			tinfo->buf = NULL;
 		}
 		tinfo->id = id;
+		if (state == IP_VS_STATE_MASTER)
+			result = make_send_sock(ipvs, id, dev, &tinfo->sock);
+		else
+			result = make_receive_sock(ipvs, id, dev, &tinfo->sock);
+		if (result < 0)
+			goto out;
 
 		task = kthread_run(threadfn, tinfo, name, ipvs->gen, id);
 		if (IS_ERR(task)) {
 			result = PTR_ERR(task);
-			goto outtinfo;
+			goto out;
 		}
 		tinfo = NULL;
 		if (state == IP_VS_STATE_MASTER)
@@ -1914,20 +1812,20 @@ int start_sync_thread(struct netns_ipvs *ipvs, struct ipvs_sync_daemon_cfg *c,
 	ipvs->sync_state |= state;
 	spin_unlock_bh(&ipvs->sync_buff_lock);
 
+	mutex_unlock(&ipvs->sync_mutex);
+	rtnl_unlock();
+
 	/* increase the module use count */
 	ip_vs_use_count_inc();
 
 	return 0;
 
-outsocket:
-	sock_release(sock);
-
-outtinfo:
-	if (tinfo) {
-		sock_release(tinfo->sock);
-		kfree(tinfo->buf);
-		kfree(tinfo);
-	}
+out:
+	/* We do not need RTNL lock anymore, release it here so that
+	 * sock_release below and in the kthreads can use rtnl_lock
+	 * to leave the mcast group.
+	 */
+	rtnl_unlock();
 	count = id;
 	while (count-- > 0) {
 		if (state == IP_VS_STATE_MASTER)
@@ -1935,19 +1833,30 @@ outtinfo:
 		else
 			kthread_stop(array[count]);
 	}
-	kfree(array);
-
-out:
 	if (!(ipvs->sync_state & IP_VS_STATE_MASTER)) {
 		kfree(ipvs->ms);
 		ipvs->ms = NULL;
 	}
+	mutex_unlock(&ipvs->sync_mutex);
+	if (tinfo) {
+		if (tinfo->sock)
+			sk_release_kernel(tinfo->sock->sk);
+		kfree(tinfo->buf);
+		kfree(tinfo);
+	}
+	kfree(array);
+	return result;
+
+out_early:
+	mutex_unlock(&ipvs->sync_mutex);
+	rtnl_unlock();
 	return result;
 }
 
 
-int stop_sync_thread(struct netns_ipvs *ipvs, int state)
+int stop_sync_thread(struct net *net, int state)
 {
+	struct netns_ipvs *ipvs = net_ipvs(net);
 	struct task_struct **array;
 	int id;
 	int retc = -EINVAL;
@@ -2013,24 +1922,27 @@ int stop_sync_thread(struct netns_ipvs *ipvs, int state)
 /*
  * Initialize data struct for each netns
  */
-int __net_init ip_vs_sync_net_init(struct netns_ipvs *ipvs)
+int __net_init ip_vs_sync_net_init(struct net *net)
 {
+	struct netns_ipvs *ipvs = net_ipvs(net);
+
 	__mutex_init(&ipvs->sync_mutex, "ipvs->sync_mutex", &__ipvs_sync_key);
 	spin_lock_init(&ipvs->sync_lock);
 	spin_lock_init(&ipvs->sync_buff_lock);
 	return 0;
 }
 
-void ip_vs_sync_net_cleanup(struct netns_ipvs *ipvs)
+void ip_vs_sync_net_cleanup(struct net *net)
 {
 	int retc;
+	struct netns_ipvs *ipvs = net_ipvs(net);
 
 	mutex_lock(&ipvs->sync_mutex);
-	retc = stop_sync_thread(ipvs, IP_VS_STATE_MASTER);
+	retc = stop_sync_thread(net, IP_VS_STATE_MASTER);
 	if (retc && retc != -ESRCH)
 		pr_err("Failed to stop Master Daemon\n");
 
-	retc = stop_sync_thread(ipvs, IP_VS_STATE_BACKUP);
+	retc = stop_sync_thread(net, IP_VS_STATE_BACKUP);
 	if (retc && retc != -ESRCH)
 		pr_err("Failed to stop Backup Daemon\n");
 	mutex_unlock(&ipvs->sync_mutex);

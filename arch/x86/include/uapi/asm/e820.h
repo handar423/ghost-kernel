@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 #ifndef _UAPI_ASM_X86_E820_H
 #define _UAPI_ASM_X86_E820_H
 #define E820MAP	0x2d0		/* our map */
@@ -22,6 +21,11 @@
  * this size.
  */
 
+/*
+ * Odd: 'make headers_check' complains about numa.h if I try
+ * to collapse the next two #ifdef lines to a single line:
+ *	#if defined(__KERNEL__) && defined(CONFIG_EFI)
+ */
 #ifndef __KERNEL__
 #define E820_X_MAX E820MAX
 #endif

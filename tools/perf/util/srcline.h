@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef PERF_SRCLINE_H
 #define PERF_SRCLINE_H
 
@@ -11,9 +10,10 @@ struct symbol;
 
 extern bool srcline_full_filename;
 char *get_srcline(struct dso *dso, u64 addr, struct symbol *sym,
-		  bool show_sym, bool show_addr);
+		  bool show_sym, bool show_addr, u64 ip);
 char *__get_srcline(struct dso *dso, u64 addr, struct symbol *sym,
-		  bool show_sym, bool show_addr, bool unwind_inlines);
+		  bool show_sym, bool show_addr, bool unwind_inlines,
+		  u64 ip);
 void free_srcline(char *srcline);
 
 /* insert the srcline into the DSO, which will take ownership */

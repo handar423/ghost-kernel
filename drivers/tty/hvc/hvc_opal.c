@@ -1,8 +1,22 @@
-// SPDX-License-Identifier: GPL-2.0+
 /*
  * opal driver interface to hvc_console.c
  *
  * Copyright 2011 Benjamin Herrenschmidt <benh@kernel.crashing.org>, IBM Corp.
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
+ *
  */
 
 #undef DEBUG
@@ -28,7 +42,7 @@
 
 static const char hvc_opal_name[] = "hvc_opal";
 
-static const struct of_device_id hvc_opal_match[] = {
+static struct of_device_id hvc_opal_match[] = {
 	{ .name = "serial", .compatible = "ibm,opal-console-raw" },
 	{ .name = "serial", .compatible = "ibm,opal-console-hvsi" },
 	{ },
@@ -165,8 +179,8 @@ static int hvc_opal_probe(struct platform_device *dev)
 		proto = HV_PROTOCOL_HVSI;
 		ops = &hvc_opal_hvsi_ops;
 	} else {
-		pr_err("hvc_opal: Unknown protocol for %pOF\n",
-		       dev->dev.of_node);
+		pr_err("hvc_opal: Unknown protocol for %s\n",
+		       dev->dev.of_node->full_name);
 		return -ENXIO;
 	}
 
@@ -190,26 +204,20 @@ static int hvc_opal_probe(struct platform_device *dev)
 		/* Instanciate now to establish a mapping index==vtermno */
 		hvc_instantiate(termno, termno, ops);
 	} else {
-		pr_err("hvc_opal: Device %pOF has duplicate terminal number #%d\n",
-		       dev->dev.of_node, termno);
+		pr_err("hvc_opal: Device %s has duplicate terminal number #%d\n",
+		       dev->dev.of_node->full_name, termno);
 		return -ENXIO;
 	}
 
-	pr_info("hvc%d: %s protocol on %pOF%s\n", termno,
+	pr_info("hvc%d: %s protocol on %s%s\n", termno,
 		proto == HV_PROTOCOL_RAW ? "raw" : "hvsi",
-		dev->dev.of_node,
+		dev->dev.of_node->full_name,
 		boot ? " (boot console)" : "");
 
-	irq = irq_of_parse_and_map(dev->dev.of_node, 0);
+	irq = opal_event_request(ilog2(OPAL_EVENT_CONSOLE_INPUT));
 	if (!irq) {
-		pr_info("hvc%d: No interrupts property, using OPAL event\n",
-				termno);
-		irq = opal_event_request(ilog2(OPAL_EVENT_CONSOLE_INPUT));
-	}
-
-	if (!irq) {
-		pr_err("hvc_opal: Unable to map interrupt for device %pOF\n",
-			dev->dev.of_node);
+		pr_err("hvc_opal: Unable to map interrupt for device %s\n",
+			dev->dev.of_node->full_name);
 		return irq;
 	}
 
@@ -244,6 +252,7 @@ static struct platform_driver hvc_opal_driver = {
 	.remove		= hvc_opal_remove,
 	.driver		= {
 		.name	= hvc_opal_name,
+		.owner	= THIS_MODULE,
 		.of_match_table	= hvc_opal_match,
 	}
 };
@@ -256,7 +265,13 @@ static int __init hvc_opal_init(void)
 	/* Register as a vio device to receive callbacks */
 	return platform_driver_register(&hvc_opal_driver);
 }
-device_initcall(hvc_opal_init);
+module_init(hvc_opal_init);
+
+static void __exit hvc_opal_exit(void)
+{
+	platform_driver_unregister(&hvc_opal_driver);
+}
+module_exit(hvc_opal_exit);
 
 static void udbg_opal_putc(char c)
 {
@@ -323,13 +338,22 @@ static void udbg_init_opal_common(void)
 
 void __init hvc_opal_init_early(void)
 {
-	struct device_node *stdout_node = of_node_get(of_stdout);
+	struct device_node *stdout_node = NULL;
 	const __be32 *termno;
+	const char *name = NULL;
 	const struct hv_ops *ops;
 	u32 index;
 
-	/* If the console wasn't in /chosen, try /ibm,opal */
-	if (!stdout_node) {
+	/* find the boot console from /chosen/stdout */
+	if (of_chosen)
+		name = of_get_property(of_chosen, "linux,stdout-path", NULL);
+	if (name) {
+		stdout_node = of_find_node_by_path(name);
+		if (!stdout_node) {
+			pr_err("hvc_opal: Failed to locate default console!\n");
+			return;
+		}
+	} else {
 		struct device_node *opal, *np;
 
 		/* Current OPAL takeover doesn't provide the stdout

@@ -189,6 +189,7 @@ static const struct be_ethtool_stat et_tx_stats[] = {
 	 * packet data. This counter is applicable only for Lancer adapters.
 	 */
 	{DRVSTAT_TX_INFO(tx_internal_parity_err)},
+	{DRVSTAT_TX_INFO(tx_sge_err)},
 	{DRVSTAT_TX_INFO(tx_bytes)},
 	{DRVSTAT_TX_INFO(tx_pkts)},
 	{DRVSTAT_TX_INFO(tx_vxlan_offload_pkts)},
@@ -332,8 +333,8 @@ static int be_get_coalesce(struct net_device *netdev,
 	et->tx_coalesce_usecs_high = aic->max_eqd;
 	et->tx_coalesce_usecs_low = aic->min_eqd;
 
-	et->use_adaptive_rx_coalesce = aic->enable;
-	et->use_adaptive_tx_coalesce = aic->enable;
+	et->use_adaptive_rx_coalesce = adapter->aic_enabled;
+	et->use_adaptive_tx_coalesce = adapter->aic_enabled;
 
 	return 0;
 }
@@ -349,8 +350,9 @@ static int be_set_coalesce(struct net_device *netdev,
 	struct be_eq_obj *eqo;
 	int i;
 
+	adapter->aic_enabled = et->use_adaptive_rx_coalesce;
+
 	for_all_evt_queues(adapter, eqo, i) {
-		aic->enable = et->use_adaptive_rx_coalesce;
 		aic->max_eqd = min(et->rx_coalesce_usecs_high, BE_MAX_EQD);
 		aic->min_eqd = min(et->rx_coalesce_usecs_low, aic->max_eqd);
 		aic->et_eqd = min(et->rx_coalesce_usecs, aic->max_eqd);
@@ -574,6 +576,7 @@ static u32 convert_to_et_setting(struct be_adapter *adapter, u32 if_speeds)
 				break;
 			}
 		}
+		/* fall through */
 	case PHY_TYPE_SFP_PLUS_10GB:
 	case PHY_TYPE_XFP_10GB:
 	case PHY_TYPE_SFP_1GB:
@@ -893,7 +896,7 @@ static void be_self_test(struct net_device *netdev, struct ethtool_test *test,
 			 u64 *data)
 {
 	struct be_adapter *adapter = netdev_priv(netdev);
-	int status;
+	int status, cnt;
 	u8 link_status = 0;
 
 	if (adapter->function_caps & BE_FUNCTION_CAPS_SUPER_NIC) {
@@ -903,6 +906,9 @@ static void be_self_test(struct net_device *netdev, struct ethtool_test *test,
 	}
 
 	memset(data, 0, sizeof(u64) * ETHTOOL_TESTS_NUM);
+
+	/* check link status before offline tests */
+	link_status = netif_carrier_ok(netdev);
 
 	if (test->flags & ETH_TEST_FL_OFFLINE) {
 		if (be_loopback_test(adapter, BE_MAC_LOOPBACK, &data[0]) != 0)
@@ -924,13 +930,26 @@ static void be_self_test(struct net_device *netdev, struct ethtool_test *test,
 		test->flags |= ETH_TEST_FL_FAILED;
 	}
 
-	status = be_cmd_link_status_query(adapter, NULL, &link_status, 0);
-	if (status) {
-		test->flags |= ETH_TEST_FL_FAILED;
-		data[4] = -1;
-	} else if (!link_status) {
+	/* link status was down prior to test */
+	if (!link_status) {
 		test->flags |= ETH_TEST_FL_FAILED;
 		data[4] = 1;
+		return;
+	}
+
+	for (cnt = 10; cnt; cnt--) {
+		status = be_cmd_link_status_query(adapter, NULL, &link_status,
+						  0);
+		if (status) {
+			test->flags |= ETH_TEST_FL_FAILED;
+			data[4] = -1;
+			break;
+		}
+
+		if (link_status)
+			break;
+
+		msleep_interruptible(500);
 	}
 }
 
@@ -1103,7 +1122,7 @@ static int be_get_rxnfc(struct net_device *netdev, struct ethtool_rxnfc *cmd,
 		cmd->data = be_get_rss_hash_opts(adapter, cmd->flow_type);
 		break;
 	case ETHTOOL_GRXRINGS:
-		cmd->data = adapter->num_rx_qs - 1;
+		cmd->data = adapter->num_rx_qs;
 		break;
 	default:
 		return -EINVAL;

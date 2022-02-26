@@ -40,10 +40,10 @@ static int bcm87xx_of_reg_init(struct phy_device *phydev)
 	const __be32 *paddr_end;
 	int len, ret;
 
-	if (!phydev->mdio.dev.of_node)
+	if (!phydev->mdio_dev.of_node)
 		return 0;
 
-	paddr = of_get_property(phydev->mdio.dev.of_node,
+	paddr = of_get_property(phydev->mdio_dev.of_node,
 				"broadcom,c45-reg-init", &len);
 	if (!paddr)
 		return 0;
@@ -201,6 +201,7 @@ static struct phy_driver bcm87xx_driver[] = {
 	.config_intr	= bcm87xx_config_intr,
 	.did_interrupt	= bcm87xx_did_interrupt,
 	.match_phy_device = bcm8706_match_phy_device,
+	.driver		= { .owner = THIS_MODULE },
 }, {
 	.phy_id		= PHY_ID_BCM8727,
 	.phy_id_mask	= 0xffffffff,
@@ -213,8 +214,21 @@ static struct phy_driver bcm87xx_driver[] = {
 	.config_intr	= bcm87xx_config_intr,
 	.did_interrupt	= bcm87xx_did_interrupt,
 	.match_phy_device = bcm8727_match_phy_device,
+	.driver		= { .owner = THIS_MODULE },
 } };
 
-module_phy_driver(bcm87xx_driver);
+static int __init bcm87xx_init(void)
+{
+	return phy_drivers_register(bcm87xx_driver,
+		ARRAY_SIZE(bcm87xx_driver));
+}
+module_init(bcm87xx_init);
+
+static void __exit bcm87xx_exit(void)
+{
+	phy_drivers_unregister(bcm87xx_driver,
+		ARRAY_SIZE(bcm87xx_driver));
+}
+module_exit(bcm87xx_exit);
 
 MODULE_LICENSE("GPL");

@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * builtin-diff.c
  *
@@ -367,7 +366,6 @@ static struct perf_tool tool = {
 	.exit	= perf_event__process_exit,
 	.fork	= perf_event__process_fork,
 	.lost	= perf_event__process_lost,
-	.namespaces = perf_event__process_namespaces,
 	.ordered_events = true,
 	.ordering_requires_timestamps = true,
 };
@@ -696,7 +694,7 @@ static void hists__process(struct hists *hists)
 	hists__output_resort(hists, NULL);
 
 	hists__fprintf(hists, !quiet, 0, 0, 0, stdout,
-		       symbol_conf.use_callchain);
+		       !symbol_conf.use_callchain);
 }
 
 static void data__fprintf(void)

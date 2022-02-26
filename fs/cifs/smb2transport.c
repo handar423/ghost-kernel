@@ -457,7 +457,7 @@ smb3_calc_signature(struct smb_rqst *rqst, struct TCP_Server_Info *server)
 		cifs_dbg(VFS, "%s: Could not init cmac aes\n", __func__);
 		return rc;
 	}
-	
+
 	rc = __cifs_calc_signature(rqst, server, sigptr,
 				   &server->secmech.sdesccmacaes->shash);
 
@@ -563,6 +563,7 @@ smb2_mid_entry_alloc(const struct smb2_sync_hdr *shdr,
 
 	temp = mempool_alloc(cifs_mid_poolp, GFP_NOFS);
 	memset(temp, 0, sizeof(struct mid_q_entry));
+	kref_init(&temp->refcount);
 	temp->mid = le64_to_cpu(shdr->MessageId);
 	temp->pid = current->pid;
 	temp->command = shdr->Command; /* Always LE */

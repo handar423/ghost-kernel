@@ -1,22 +1,5 @@
-/* Intel(R) Ethernet Switch Host Interface Driver
- * Copyright(c) 2013 - 2017 Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * The full GNU General Public License is included in this distribution in
- * the file called "COPYING".
- *
- * Contact Information:
- * e1000-devel Mailing List <e1000-devel@lists.sourceforge.net>
- * Intel Corporation, 5200 N.E. Elam Young Parkway, Hillsboro, OR 97124-6497
- */
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright(c) 2013 - 2018 Intel Corporation. */
 
 #ifndef _FM10K_H_
 #define _FM10K_H_
@@ -242,7 +225,9 @@ struct fm10k_iov_data {
 	struct fm10k_vf_info	vf_info[0];
 };
 
-struct fm10k_udp_port {
+#define fm10k_vxlan_port_for_each(vp, intfc) \
+	list_for_each_entry(vp, &(intfc)->vxlan_port, list)
+struct fm10k_vxlan_port {
 	struct list_head	list;
 	sa_family_t		sa_family;
 	__be16			port;
@@ -390,9 +375,8 @@ struct fm10k_intfc {
 	u32 reta[FM10K_RETA_SIZE];
 	u32 rssrk[FM10K_RSSRK_SIZE];
 
-	/* UDP encapsulation port tracking information */
+	/* VXLAN port tracking information */
 	struct list_head vxlan_port;
-	struct list_head geneve_port;
 
 	/* MAC/VLAN update queue */
 	struct list_head macvlan_requests;
@@ -500,7 +484,6 @@ extern char fm10k_driver_name[];
 extern const char fm10k_driver_version[];
 int fm10k_init_queueing_scheme(struct fm10k_intfc *interface);
 void fm10k_clear_queueing_scheme(struct fm10k_intfc *interface);
-__be16 fm10k_tx_encap_offload(struct sk_buff *skb);
 netdev_tx_t fm10k_xmit_frame_ring(struct sk_buff *skb,
 				  struct fm10k_ring *tx_ring);
 void fm10k_tx_timeout_reset(struct fm10k_intfc *interface);
@@ -521,9 +504,6 @@ void fm10k_update_stats(struct fm10k_intfc *interface);
 void fm10k_service_event_schedule(struct fm10k_intfc *interface);
 void fm10k_macvlan_schedule(struct fm10k_intfc *interface);
 void fm10k_update_rx_drop_en(struct fm10k_intfc *interface);
-#ifdef CONFIG_NET_POLL_CONTROLLER
-void fm10k_netpoll(struct net_device *netdev);
-#endif
 
 /* Netdev */
 struct net_device *fm10k_alloc_netdev(const struct fm10k_info *info);
@@ -562,8 +542,7 @@ s32 fm10k_iov_update_pvid(struct fm10k_intfc *interface, u16 glort, u16 pvid);
 int fm10k_ndo_set_vf_mac(struct net_device *netdev, int vf_idx, u8 *mac);
 int fm10k_ndo_set_vf_vlan(struct net_device *netdev,
 			  int vf_idx, u16 vid, u8 qos, __be16 vlan_proto);
-int fm10k_ndo_set_vf_bw(struct net_device *netdev, int vf_idx,
-			int __always_unused min_rate, int max_rate);
+int fm10k_ndo_set_vf_bw(struct net_device *netdev, int vf_idx, int rate);
 int fm10k_ndo_get_vf_config(struct net_device *netdev,
 			    int vf_idx, struct ifla_vf_info *ivi);
 

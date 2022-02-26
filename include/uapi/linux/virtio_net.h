@@ -1,5 +1,5 @@
-#ifndef _UAPI_LINUX_VIRTIO_NET_H
-#define _UAPI_LINUX_VIRTIO_NET_H
+#ifndef _LINUX_VIRTIO_NET_H
+#define _LINUX_VIRTIO_NET_H
 /* This header is BSD licensed so anyone can use the definitions to implement
  * compatible drivers/servers.
  *
@@ -34,7 +34,6 @@
 /* The feature bitmap for virtio net */
 #define VIRTIO_NET_F_CSUM	0	/* Host handles pkts w/ partial csum */
 #define VIRTIO_NET_F_GUEST_CSUM	1	/* Guest handles pkts w/ partial csum */
-#define VIRTIO_NET_F_CTRL_GUEST_OFFLOADS 2 /* Dynamic offload configuration. */
 #define VIRTIO_NET_F_MTU	3	/* Initial MTU advice */
 #define VIRTIO_NET_F_MAC	5	/* Host has given MAC address. */
 #define VIRTIO_NET_F_GUEST_TSO4	7	/* Guest can handle TSOv4 in. */
@@ -57,6 +56,9 @@
 					 * Steering */
 #define VIRTIO_NET_F_CTRL_MAC_ADDR 23	/* Set MAC address */
 
+#define VIRTIO_NET_F_STANDBY	  62	/* Act as standby for another device
+					 * with the same MAC.
+					 */
 #ifndef VIRTIO_NET_NO_LEGACY
 #define VIRTIO_NET_F_GSO	6	/* Host handles pkts w/ any GSO type */
 #endif /* VIRTIO_NET_NO_LEGACY */
@@ -66,7 +68,7 @@
 
 struct virtio_net_config {
 	/* The config defining mac address (if VIRTIO_NET_F_MAC) */
-	__u8 mac[ETH_ALEN];
+	__u8 mac[6];
 	/* See VIRTIO_NET_F_STATUS and VIRTIO_NET_S_* above */
 	__u16 status;
 	/* Maximum number of each of transmit and receive queues;
@@ -230,19 +232,4 @@ struct virtio_net_ctrl_mq {
  #define VIRTIO_NET_CTRL_MQ_VQ_PAIRS_MIN        1
  #define VIRTIO_NET_CTRL_MQ_VQ_PAIRS_MAX        0x8000
 
-/*
- * Control network offloads
- *
- * Reconfigures the network offloads that Guest can handle.
- *
- * Available with the VIRTIO_NET_F_CTRL_GUEST_OFFLOADS feature bit.
- *
- * Command data format matches the feature bit mask exactly.
- *
- * See VIRTIO_NET_F_GUEST_* for the list of offloads
- * that can be enabled/disabled.
- */
-#define VIRTIO_NET_CTRL_GUEST_OFFLOADS   5
-#define VIRTIO_NET_CTRL_GUEST_OFFLOADS_SET        0
-
-#endif /* _UAPI_LINUX_VIRTIO_NET_H */
+#endif /* _LINUX_VIRTIO_NET_H */

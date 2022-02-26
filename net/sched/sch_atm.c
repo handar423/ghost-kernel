@@ -221,7 +221,7 @@ static int atm_tc_change(struct Qdisc *sch, u32 classid, u32 parent,
 	if (opt == NULL)
 		return -EINVAL;
 
-	error = nla_parse_nested(tb, TCA_ATM_MAX, opt, atm_policy, NULL);
+	error = nla_parse_nested(tb, TCA_ATM_MAX, opt, atm_policy);
 	if (error < 0)
 		return error;
 
@@ -501,7 +501,7 @@ static void sch_atm_dequeue(unsigned long data)
 			ATM_SKB(skb)->vcc = flow->vcc;
 			memcpy(skb_push(skb, flow->hdr_len), flow->hdr,
 			       flow->hdr_len);
-			refcount_add(skb->truesize,
+			atomic_add(skb->truesize,
 				   &sk_atm(flow->vcc)->sk_wmem_alloc);
 			/* atm.atm_options are already set by atm_tc_enqueue */
 			flow->vcc->send(flow->vcc, skb);

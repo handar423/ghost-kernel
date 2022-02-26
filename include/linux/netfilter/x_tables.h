@@ -1,16 +1,12 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _X_TABLES_H
 #define _X_TABLES_H
 
 
 #include <linux/netdevice.h>
-#include <linux/static_key.h>
-#include <linux/netfilter.h>
+#include <linux/locallock.h>
 #include <uapi/linux/netfilter/x_tables.h>
 
-/* Test a struct->invflags and a boolean for inequality */
-#define NF_INVF(ptr, flag, boolean)					\
-	((boolean) ^ !!((ptr)->invflags & (flag)))
+#include <linux/rh_kabi.h>
 
 /**
  * struct xt_action_param - parameters for matches/targets
@@ -19,9 +15,14 @@
  * @target:	the target extension
  * @matchinfo:	per-match data
  * @targetinfo:	per-target data
- * @state:	pointer to hook state this packet came from
+ * @net		network namespace through which the action was invoked
+ * @in:		input netdevice
+ * @out:	output netdevice
  * @fragoff:	packet is a fragment, this is the data offset
  * @thoff:	position of transport header relative to skb->data
+ * @hook:	hook number given packet came from
+ * @family:	Actual NFPROTO_* through which the function is invoked
+ * 		(helpful when match->family == NFPROTO_UNSPEC)
  *
  * Fields written to by extensions:
  *
@@ -35,45 +36,48 @@ struct xt_action_param {
 	union {
 		const void *matchinfo, *targinfo;
 	};
-	const struct nf_hook_state *state;
+	const struct net_device *in, *out;
 	int fragoff;
 	unsigned int thoff;
+	unsigned int hooknum;
+	u_int8_t family;
 	bool hotdrop;
+	RH_KABI_EXTEND(struct net *net)
 };
 
 static inline struct net *xt_net(const struct xt_action_param *par)
 {
-	return par->state->net;
+	return par->net;
 }
 
-static inline struct net_device *xt_in(const struct xt_action_param *par)
+static inline const struct net_device *xt_in(const struct xt_action_param *par)
 {
-	return par->state->in;
+	return par->in;
 }
 
 static inline const char *xt_inname(const struct xt_action_param *par)
 {
-	return par->state->in->name;
+	return par->in->name;
 }
 
-static inline struct net_device *xt_out(const struct xt_action_param *par)
+static inline const struct net_device *xt_out(const struct xt_action_param *par)
 {
-	return par->state->out;
+	return par->out;
 }
 
 static inline const char *xt_outname(const struct xt_action_param *par)
 {
-	return par->state->out->name;
+	return par->out->name;
 }
 
 static inline unsigned int xt_hooknum(const struct xt_action_param *par)
 {
-	return par->state->hook;
+	return par->hooknum;
 }
 
 static inline u_int8_t xt_family(const struct xt_action_param *par)
 {
-	return par->state->pf;
+	return par->family;
 }
 
 /**
@@ -97,7 +101,7 @@ struct xt_mtchk_param {
 	void *matchinfo;
 	unsigned int hook_mask;
 	u_int8_t family;
-	bool nft_compat;
+	RH_KABI_EXTEND(bool nft_compat)
 };
 
 /**
@@ -128,7 +132,7 @@ struct xt_tgchk_param {
 	void *targinfo;
 	unsigned int hook_mask;
 	u_int8_t family;
-	bool nft_compat;
+	RH_KABI_EXTEND(bool nft_compat)
 };
 
 /* Target destructor parameters */
@@ -168,7 +172,6 @@ struct xt_match {
 
 	const char *table;
 	unsigned int matchsize;
-	unsigned int usersize;
 #ifdef CONFIG_COMPAT
 	unsigned int compatsize;
 #endif
@@ -209,7 +212,6 @@ struct xt_target {
 
 	const char *table;
 	unsigned int targetsize;
-	unsigned int usersize;
 #ifdef CONFIG_COMPAT
 	unsigned int compatsize;
 #endif
@@ -217,6 +219,11 @@ struct xt_target {
 	unsigned short proto;
 
 	unsigned short family;
+
+	RH_KABI_RESERVE(1)
+	RH_KABI_RESERVE(2)
+	RH_KABI_RESERVE(3)
+	RH_KABI_RESERVE(4)
 };
 
 /* Furniture shopping... */
@@ -234,9 +241,6 @@ struct xt_table {
 
 	u_int8_t af;		/* address/protocol family */
 	int priority;		/* hook order */
-
-	/* called when table is needed in the given netns */
-	int (*table_init)(struct net *net);
 
 	/* A unique name... */
 	const char name[XT_TABLE_MAXNAMELEN];
@@ -262,6 +266,7 @@ struct xt_table_info {
 	 * @stacksize jumps (number of user chains) can possibly be made.
 	 */
 	unsigned int stacksize;
+	unsigned int __percpu *stackptr;
 	void ***jumpstack;
 
 	unsigned char entries[0] __aligned(8);
@@ -285,17 +290,12 @@ unsigned int *xt_alloc_entry_offsets(unsigned int size);
 bool xt_find_jump_offset(const unsigned int *offsets,
 			 unsigned int target, unsigned int size);
 
+int xt_check_proc_name(const char *name, unsigned int size);
+
 int xt_check_match(struct xt_mtchk_param *, unsigned int size, u_int8_t proto,
 		   bool inv_proto);
 int xt_check_target(struct xt_tgchk_param *, unsigned int size, u_int8_t proto,
 		    bool inv_proto);
-
-int xt_match_to_user(const struct xt_entry_match *m,
-		     struct xt_entry_match __user *u);
-int xt_target_to_user(const struct xt_entry_target *t,
-		      struct xt_entry_target __user *u);
-int xt_data_to_user(void __user *dst, const void *src,
-		    int usersize, int size, int aligned_size);
 
 void *xt_copy_counters_from_user(const void __user *user, unsigned int len,
 				 struct xt_counters_info *info, bool compat);
@@ -338,11 +338,7 @@ void xt_free_table_info(struct xt_table_info *info);
  */
 DECLARE_PER_CPU(seqcount_t, xt_recseq);
 
-/* xt_tee_enabled - true if x_tables needs to handle reentrancy
- *
- * Enabled if current ip(6)tables ruleset has at least one -j TEE rule.
- */
-extern struct static_key xt_tee_enabled;
+DECLARE_LOCAL_IRQ_LOCK(xt_write_lock);
 
 /**
  * xt_write_recseq_begin - start of a write section
@@ -358,6 +354,9 @@ static inline unsigned int xt_write_recseq_begin(void)
 {
 	unsigned int addend;
 
+	/* RT protection */
+	local_lock(xt_write_lock);
+
 	/*
 	 * Low order bit of sequence is set if we already
 	 * called xt_write_recseq_begin().
@@ -370,7 +369,7 @@ static inline unsigned int xt_write_recseq_begin(void)
 	 * since addend is most likely 1
 	 */
 	__this_cpu_add(xt_recseq.sequence, addend);
-	smp_wmb();
+	smp_mb();
 
 	return addend;
 }
@@ -388,6 +387,7 @@ static inline void xt_write_recseq_end(unsigned int addend)
 	/* this is kind of a write_seqcount_end(), but addend is 0 or 1 */
 	smp_wmb();
 	__this_cpu_add(xt_recseq.sequence, addend);
+	local_unlock(xt_write_lock);
 }
 
 /*
@@ -426,7 +426,7 @@ static inline struct xt_counters *
 xt_get_this_cpu_counter(struct xt_counters *cnt)
 {
 	if (nr_cpu_ids > 1)
-		return this_cpu_ptr((void __percpu *) (unsigned long) cnt->pcnt);
+		return this_cpu_ptr((void __percpu *) cnt->pcnt);
 
 	return cnt;
 }
@@ -435,12 +435,13 @@ static inline struct xt_counters *
 xt_get_per_cpu_counter(struct xt_counters *cnt, unsigned int cpu)
 {
 	if (nr_cpu_ids > 1)
-		return per_cpu_ptr((void __percpu *) (unsigned long) cnt->pcnt, cpu);
+		return per_cpu_ptr((void __percpu *) cnt->pcnt, cpu);
 
 	return cnt;
 }
 
-struct nf_hook_ops *xt_hook_ops_alloc(const struct xt_table *, nf_hookfn *);
+struct nf_hook_ops *xt_hook_link(const struct xt_table *, nf_hookfn *);
+void xt_hook_unlink(const struct xt_table *, struct nf_hook_ops *);
 
 #ifdef CONFIG_COMPAT
 #include <net/compat.h>

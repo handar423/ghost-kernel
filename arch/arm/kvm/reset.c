@@ -27,13 +27,13 @@
 #include <asm/kvm_arm.h>
 #include <asm/kvm_coproc.h>
 
-#include <kvm/arm_arch_timer.h>
-
 /******************************************************************************
- * Cortex-A15 and Cortex-A7 Reset Values
+ * Cortex-A15 Reset Values
  */
 
-static struct kvm_regs cortexa_regs_reset = {
+static const int a15_max_cpu_idx = 3;
+
+static struct kvm_regs a15_regs_reset = {
 	.usr_regs.ARM_cpsr = SVC_MODE | PSR_A_BIT | PSR_I_BIT | PSR_F_BIT,
 };
 
@@ -47,16 +47,17 @@ static struct kvm_regs cortexa_regs_reset = {
  * @vcpu: The VCPU pointer
  *
  * This function finds the right table above and sets the registers on the
- * virtual CPU struct to their architecturally defined reset values.
+ * virtual CPU struct to their architectually defined reset values.
  */
 int kvm_reset_vcpu(struct kvm_vcpu *vcpu)
 {
-	struct kvm_regs *reset_regs;
+	struct kvm_regs *cpu_reset;
 
 	switch (vcpu->arch.target) {
-	case KVM_ARM_TARGET_CORTEX_A7:
 	case KVM_ARM_TARGET_CORTEX_A15:
-		reset_regs = &cortexa_regs_reset;
+		if (vcpu->vcpu_id > a15_max_cpu_idx)
+			return -EINVAL;
+		cpu_reset = &a15_regs_reset;
 		vcpu->arch.midr = read_cpuid_id();
 		break;
 	default:
@@ -64,11 +65,10 @@ int kvm_reset_vcpu(struct kvm_vcpu *vcpu)
 	}
 
 	/* Reset core registers */
-	memcpy(&vcpu->arch.ctxt.gp_regs, reset_regs, sizeof(vcpu->arch.ctxt.gp_regs));
+	memcpy(&vcpu->arch.regs, cpu_reset, sizeof(vcpu->arch.regs));
 
 	/* Reset CP15 registers */
 	kvm_reset_coprocs(vcpu);
 
-	/* Reset arch_timer context */
-	return kvm_timer_vcpu_reset(vcpu);
+	return 0;
 }

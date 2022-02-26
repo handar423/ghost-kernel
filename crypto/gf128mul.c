@@ -44,7 +44,7 @@
  ---------------------------------------------------------------------------
  Issue 31/01/2006
 
- This file provides fast multiplication in GF(2^128) as required by several
+ This file provides fast multiplication in GF(128) as required by several
  cryptographic authentication modes
 */
 
@@ -129,12 +129,42 @@
 static const u16 gf128mul_table_le[256] = gf128mul_dat(xda_le);
 static const u16 gf128mul_table_be[256] = gf128mul_dat(xda_be);
 
-/*
- * The following functions multiply a field element by x^8 in
- * the polynomial field representation.  They use 64-bit word operations
- * to gain speed but compensate for machine endianness and hence work
+/* These functions multiply a field element by x, by x^4 and by x^8
+ * in the polynomial field representation. It uses 32-bit word operations
+ * to gain speed but compensates for machine endianess and hence works
  * correctly on both styles of machine.
  */
+
+static void gf128mul_x_lle(be128 *r, const be128 *x)
+{
+	u64 a = be64_to_cpu(x->a);
+	u64 b = be64_to_cpu(x->b);
+	u64 _tt = gf128mul_table_le[(b << 7) & 0xff];
+
+	r->b = cpu_to_be64((b >> 1) | (a << 63));
+	r->a = cpu_to_be64((a >> 1) ^ (_tt << 48));
+}
+
+static void gf128mul_x_bbe(be128 *r, const be128 *x)
+{
+	u64 a = be64_to_cpu(x->a);
+	u64 b = be64_to_cpu(x->b);
+	u64 _tt = gf128mul_table_be[a >> 63];
+
+	r->a = cpu_to_be64((a << 1) | (b >> 63));
+	r->b = cpu_to_be64((b << 1) ^ _tt);
+}
+
+void gf128mul_x_ble(be128 *r, const be128 *x)
+{
+	u64 a = le64_to_cpu(x->a);
+	u64 b = le64_to_cpu(x->b);
+	u64 _tt = gf128mul_table_be[b >> 63];
+
+	r->a = cpu_to_le64((a << 1) ^ _tt);
+	r->b = cpu_to_le64((b << 1) | (a >> 63));
+}
+EXPORT_SYMBOL(gf128mul_x_ble);
 
 static void gf128mul_x8_lle(be128 *x)
 {
@@ -247,7 +277,7 @@ EXPORT_SYMBOL(gf128mul_bbe);
 
 /*      This version uses 64k bytes of table space.
     A 16 byte buffer has to be multiplied by a 16 byte key
-    value in GF(2^128).  If we consider a GF(2^128) value in
+    value in GF(128).  If we consider a GF(128) value in
     the buffer's lowest byte, we can construct a table of
     the 256 16 byte values that result from the 256 values
     of this byte.  This requires 4096 bytes. But we also
@@ -259,6 +289,48 @@ EXPORT_SYMBOL(gf128mul_bbe);
  * t[1][BYTE] contains g*x^8*BYTE
  *  ..
  * t[15][BYTE] contains g*x^120*BYTE */
+struct gf128mul_64k *gf128mul_init_64k_lle(const be128 *g)
+{
+	struct gf128mul_64k *t;
+	int i, j, k;
+
+	t = kzalloc(sizeof(*t), GFP_KERNEL);
+	if (!t)
+		goto out;
+
+	for (i = 0; i < 16; i++) {
+		t->t[i] = kzalloc(sizeof(*t->t[i]), GFP_KERNEL);
+		if (!t->t[i]) {
+			gf128mul_free_64k(t);
+			t = NULL;
+			goto out;
+		}
+	}
+
+	t->t[0]->t[128] = *g;
+	for (j = 64; j > 0; j >>= 1)
+		gf128mul_x_lle(&t->t[0]->t[j], &t->t[0]->t[j + j]);
+
+	for (i = 0;;) {
+		for (j = 2; j < 256; j += j)
+			for (k = 1; k < j; ++k)
+				be128_xor(&t->t[i]->t[j + k],
+					  &t->t[i]->t[j], &t->t[i]->t[k]);
+
+		if (++i >= 16)
+			break;
+
+		for (j = 128; j > 0; j >>= 1) {
+			t->t[i]->t[j] = t->t[i - 1]->t[j];
+			gf128mul_x8_lle(&t->t[i]->t[j]);
+		}
+	}
+
+out:
+	return t;
+}
+EXPORT_SYMBOL(gf128mul_init_64k_lle);
+
 struct gf128mul_64k *gf128mul_init_64k_bbe(const be128 *g)
 {
 	struct gf128mul_64k *t;
@@ -306,12 +378,25 @@ void gf128mul_free_64k(struct gf128mul_64k *t)
 	int i;
 
 	for (i = 0; i < 16; i++)
-		kzfree(t->t[i]);
-	kzfree(t);
+		kfree(t->t[i]);
+	kfree(t);
 }
 EXPORT_SYMBOL(gf128mul_free_64k);
 
-void gf128mul_64k_bbe(be128 *a, const struct gf128mul_64k *t)
+void gf128mul_64k_lle(be128 *a, struct gf128mul_64k *t)
+{
+	u8 *ap = (u8 *)a;
+	be128 r[1];
+	int i;
+
+	*r = t->t[0]->t[ap[0]];
+	for (i = 1; i < 16; ++i)
+		be128_xor(r, r, &t->t[i]->t[ap[i]]);
+	*a = *r;
+}
+EXPORT_SYMBOL(gf128mul_64k_lle);
+
+void gf128mul_64k_bbe(be128 *a, struct gf128mul_64k *t)
 {
 	u8 *ap = (u8 *)a;
 	be128 r[1];
@@ -326,7 +411,7 @@ EXPORT_SYMBOL(gf128mul_64k_bbe);
 
 /*      This version uses 4k bytes of table space.
     A 16 byte buffer has to be multiplied by a 16 byte key
-    value in GF(2^128).  If we consider a GF(2^128) value in a
+    value in GF(128).  If we consider a GF(128) value in a
     single byte, we can construct a table of the 256 16 byte
     values that result from the 256 values of this byte.
     This requires 4096 bytes. If we take the highest byte in
@@ -384,7 +469,7 @@ out:
 }
 EXPORT_SYMBOL(gf128mul_init_4k_bbe);
 
-void gf128mul_4k_lle(be128 *a, const struct gf128mul_4k *t)
+void gf128mul_4k_lle(be128 *a, struct gf128mul_4k *t)
 {
 	u8 *ap = (u8 *)a;
 	be128 r[1];
@@ -399,7 +484,7 @@ void gf128mul_4k_lle(be128 *a, const struct gf128mul_4k *t)
 }
 EXPORT_SYMBOL(gf128mul_4k_lle);
 
-void gf128mul_4k_bbe(be128 *a, const struct gf128mul_4k *t)
+void gf128mul_4k_bbe(be128 *a, struct gf128mul_4k *t)
 {
 	u8 *ap = (u8 *)a;
 	be128 r[1];

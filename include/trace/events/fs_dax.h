@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #undef TRACE_SYSTEM
 #define TRACE_SYSTEM fs_dax
 
@@ -29,7 +28,7 @@ DECLARE_EVENT_CLASS(dax_pmd_fault_class,
 		__entry->vm_start = vmf->vma->vm_start;
 		__entry->vm_end = vmf->vma->vm_end;
 		__entry->vm_flags = vmf->vma->vm_flags;
-		__entry->address = vmf->address;
+		__entry->address = (unsigned long)vmf->virtual_address;
 		__entry->flags = vmf->flags;
 		__entry->pgoff = vmf->pgoff;
 		__entry->max_pgoff = max_pgoff;
@@ -62,8 +61,7 @@ DEFINE_PMD_FAULT_EVENT(dax_pmd_fault_done);
 
 DECLARE_EVENT_CLASS(dax_pmd_load_hole_class,
 	TP_PROTO(struct inode *inode, struct vm_fault *vmf,
-		struct page *zero_page,
-		void *radix_entry),
+		struct page *zero_page, void *radix_entry),
 	TP_ARGS(inode, vmf, zero_page, radix_entry),
 	TP_STRUCT__entry(
 		__field(unsigned long, ino)
@@ -77,7 +75,7 @@ DECLARE_EVENT_CLASS(dax_pmd_load_hole_class,
 		__entry->dev = inode->i_sb->s_dev;
 		__entry->ino = inode->i_ino;
 		__entry->vm_flags = vmf->vma->vm_flags;
-		__entry->address = vmf->address;
+		__entry->address = (unsigned long)vmf->virtual_address;
 		__entry->zero_page = zero_page;
 		__entry->radix_entry = radix_entry;
 	),
@@ -120,7 +118,7 @@ DECLARE_EVENT_CLASS(dax_pmd_insert_mapping_class,
 		__entry->dev = inode->i_sb->s_dev;
 		__entry->ino = inode->i_ino;
 		__entry->vm_flags = vmf->vma->vm_flags;
-		__entry->address = vmf->address;
+		__entry->address = (unsigned long)vmf->virtual_address;
 		__entry->write = vmf->flags & FAULT_FLAG_WRITE;
 		__entry->length = length;
 		__entry->pfn_val = pfn.val;
@@ -166,7 +164,7 @@ DECLARE_EVENT_CLASS(dax_pte_fault_class,
 		__entry->dev = inode->i_sb->s_dev;
 		__entry->ino = inode->i_ino;
 		__entry->vm_flags = vmf->vma->vm_flags;
-		__entry->address = vmf->address;
+		__entry->address = (unsigned long)vmf->virtual_address;
 		__entry->flags = vmf->flags;
 		__entry->pgoff = vmf->pgoff;
 		__entry->result = result;
@@ -209,7 +207,7 @@ TRACE_EVENT(dax_insert_mapping,
 		__entry->dev = inode->i_sb->s_dev;
 		__entry->ino = inode->i_ino;
 		__entry->vm_flags = vmf->vma->vm_flags;
-		__entry->address = vmf->address;
+		__entry->address = (unsigned long)vmf->virtual_address;
 		__entry->write = vmf->flags & FAULT_FLAG_WRITE;
 		__entry->radix_entry = radix_entry;
 	),

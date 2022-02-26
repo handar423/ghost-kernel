@@ -41,7 +41,7 @@ static int masquerade_tg_check(const struct xt_tgchk_param *par)
 		pr_debug("bad rangesize %u\n", mr->rangesize);
 		return -EINVAL;
 	}
-	return nf_ct_netns_get(par->net, par->family);
+	return 0;
 }
 
 static unsigned int
@@ -59,11 +59,6 @@ masquerade_tg(struct sk_buff *skb, const struct xt_action_param *par)
 				      xt_out(par));
 }
 
-static void masquerade_tg_destroy(const struct xt_tgdtor_param *par)
-{
-	nf_ct_netns_put(par->net, par->family);
-}
-
 static struct xt_target masquerade_tg_reg __read_mostly = {
 	.name		= "MASQUERADE",
 	.family		= NFPROTO_IPV4,
@@ -72,7 +67,6 @@ static struct xt_target masquerade_tg_reg __read_mostly = {
 	.table		= "nat",
 	.hooks		= 1 << NF_INET_POST_ROUTING,
 	.checkentry	= masquerade_tg_check,
-	.destroy	= masquerade_tg_destroy,
 	.me		= THIS_MODULE,
 };
 
@@ -81,9 +75,12 @@ static int __init masquerade_tg_init(void)
 	int ret;
 
 	ret = xt_register_target(&masquerade_tg_reg);
+	if (ret)
+		return ret;
 
-	if (ret == 0)
-		nf_nat_masquerade_ipv4_register_notifier();
+	ret = nf_nat_masquerade_ipv4_register_notifier();
+	if (ret)
+		xt_unregister_target(&masquerade_tg_reg);
 
 	return ret;
 }

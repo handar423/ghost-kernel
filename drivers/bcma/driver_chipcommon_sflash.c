@@ -146,6 +146,7 @@ int bcma_sflash_init(struct bcma_drv_cc *cc)
 		return -ENOTSUPP;
 	}
 
+	sflash->window = BCMA_SOC_FLASH2;
 	sflash->blocksize = e->blocksize;
 	sflash->numblocks = e->numblocks;
 	sflash->size = sflash->blocksize * sflash->numblocks;

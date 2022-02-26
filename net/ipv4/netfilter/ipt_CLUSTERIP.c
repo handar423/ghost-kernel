@@ -22,7 +22,6 @@
 #include <linux/icmp.h>
 #include <linux/if_arp.h>
 #include <linux/seq_file.h>
-#include <linux/refcount.h>
 #include <linux/netfilter_arp.h>
 #include <linux/netfilter/x_tables.h>
 #include <linux/netfilter_ipv4/ip_tables.h>
@@ -41,8 +40,8 @@ MODULE_DESCRIPTION("Xtables: CLUSTERIP target");
 
 struct clusterip_config {
 	struct list_head list;			/* list of all configs */
-	refcount_t refcount;			/* reference count */
-	refcount_t entries;			/* number of entries/rules
+	atomic_t refcount;			/* reference count */
+	atomic_t entries;			/* number of entries/rules
 						 * referencing us */
 
 	__be32 clusterip;			/* the IP address */
@@ -66,7 +65,7 @@ struct clusterip_config {
 static const struct file_operations clusterip_proc_fops;
 #endif
 
-static unsigned int clusterip_net_id __read_mostly;
+static int clusterip_net_id __read_mostly;
 
 struct clusterip_net {
 	struct list_head configs;
@@ -81,7 +80,7 @@ struct clusterip_net {
 static inline void
 clusterip_config_get(struct clusterip_config *c)
 {
-	refcount_inc(&c->refcount);
+	atomic_inc(&c->refcount);
 }
 
 
@@ -93,7 +92,7 @@ static void clusterip_config_rcu_free(struct rcu_head *head)
 static inline void
 clusterip_config_put(struct clusterip_config *c)
 {
-	if (refcount_dec_and_test(&c->refcount))
+	if (atomic_dec_and_test(&c->refcount))
 		call_rcu_bh(&c->rcu, clusterip_config_rcu_free);
 }
 
@@ -106,12 +105,12 @@ clusterip_config_entry_put(struct net *net, struct clusterip_config *c)
 	struct clusterip_net *cn = net_generic(net, clusterip_net_id);
 
 	local_bh_disable();
-	if (refcount_dec_and_lock(&c->entries, &cn->lock)) {
+	if (atomic_dec_and_lock(&c->entries, &cn->lock)) {
 		list_del_rcu(&c->list);
 		spin_unlock(&cn->lock);
 		local_bh_enable();
 
-		unregister_netdevice_notifier(&c->notifier);
+		unregister_netdevice_notifier_rh(&c->notifier);
 
 		/* In case anyone still accesses the file, the open/close
 		 * functions are also incrementing the refcount on their own,
@@ -152,10 +151,10 @@ clusterip_config_find_get(struct net *net, __be32 clusterip, int entry)
 			c = NULL;
 		else
 #endif
-		if (unlikely(!refcount_inc_not_zero(&c->refcount)))
+		if (unlikely(!atomic_inc_not_zero(&c->refcount)))
 			c = NULL;
 		else if (entry)
-			refcount_inc(&c->entries);
+			atomic_inc(&c->entries);
 	}
 	rcu_read_unlock_bh();
 
@@ -227,8 +226,8 @@ clusterip_config_init(struct net *net, const struct ipt_clusterip_tgt_info *i,
 	clusterip_config_init_nodelist(c, i);
 	c->hash_mode = i->hash_mode;
 	c->hash_initval = i->hash_initval;
-	refcount_set(&c->refcount, 1);
-	refcount_set(&c->entries, 1);
+	atomic_set(&c->refcount, 1);
+	atomic_set(&c->entries, 1);
 
 	spin_lock_bh(&cn->lock);
 	if (__clusterip_config_find(net, ip)) {
@@ -258,7 +257,7 @@ clusterip_config_init(struct net *net, const struct ipt_clusterip_tgt_info *i,
 #endif
 
 	c->notifier.notifier_call = clusterip_netdev_event;
-	err = register_netdevice_notifier(&c->notifier);
+	err = register_netdevice_notifier_rh(&c->notifier);
 	if (!err)
 		return c;
 
@@ -484,17 +483,10 @@ static int clusterip_tg_check(const struct xt_tgchk_param *par)
 	}
 	cipinfo->config = config;
 
-	ret = nf_ct_netns_get(par->net, par->family);
+	ret = nf_ct_l3proto_try_module_get(par->family);
 	if (ret < 0)
 		pr_info("cannot load conntrack support for proto=%u\n",
 			par->family);
-
-	if (!par->net->xt.clusterip_deprecated_warning) {
-		pr_info("ipt_CLUSTERIP is deprecated and it will removed soon, "
-			"use xt_cluster instead\n");
-		par->net->xt.clusterip_deprecated_warning = true;
-	}
-
 	return ret;
 }
 
@@ -509,7 +501,7 @@ static void clusterip_tg_destroy(const struct xt_tgdtor_param *par)
 
 	clusterip_config_put(cipinfo->config);
 
-	nf_ct_netns_put(par->net, par->family);
+	nf_ct_l3proto_module_put(par->family);
 }
 
 #ifdef CONFIG_COMPAT
@@ -533,7 +525,6 @@ static struct xt_target clusterip_tg_reg __read_mostly = {
 	.checkentry	= clusterip_tg_check,
 	.destroy	= clusterip_tg_destroy,
 	.targetsize	= sizeof(struct ipt_clusterip_tgt_info),
-	.usersize	= offsetof(struct ipt_clusterip_tgt_info, config),
 #ifdef CONFIG_COMPAT
 	.compatsize	= sizeof(struct compat_ipt_clusterip_tgt_info),
 #endif /* CONFIG_COMPAT */
@@ -558,14 +549,14 @@ static void arp_print(struct arp_payload *payload)
 {
 #define HBUFFERLEN 30
 	char hbuffer[HBUFFERLEN];
-	int j, k;
+	int j,k;
 
-	for (k = 0, j = 0; k < HBUFFERLEN - 3 && j < ETH_ALEN; j++) {
+	for (k=0, j=0; k < HBUFFERLEN-3 && j < ETH_ALEN; j++) {
 		hbuffer[k++] = hex_asc_hi(payload->src_hw[j]);
 		hbuffer[k++] = hex_asc_lo(payload->src_hw[j]);
-		hbuffer[k++] = ':';
+		hbuffer[k++]=':';
 	}
-	hbuffer[--k] = '\0';
+	hbuffer[--k]='\0';
 
 	pr_debug("src %pI4@%s, dst %pI4\n",
 		 &payload->src_ip, hbuffer, &payload->dst_ip);
@@ -573,14 +564,16 @@ static void arp_print(struct arp_payload *payload)
 #endif
 
 static unsigned int
-arp_mangle(void *priv,
+arp_mangle(const struct nf_hook_ops *ops,
 	   struct sk_buff *skb,
+	   const struct net_device *in,
+	   const struct net_device *out,
 	   const struct nf_hook_state *state)
 {
 	struct arphdr *arp = arp_hdr(skb);
 	struct arp_payload *payload;
 	struct clusterip_config *c;
-	struct net *net = state->net;
+	struct net *net = dev_net(in ? in : out);
 
 	/* we don't care about non-ethernet and non-ipv4 ARP */
 	if (arp->ar_hrd != htons(ARPHRD_ETHER) ||
@@ -625,7 +618,7 @@ arp_mangle(void *priv,
 	return NF_ACCEPT;
 }
 
-static const struct nf_hook_ops cip_arp_ops = {
+static struct nf_hook_ops cip_arp_ops __read_mostly = {
 	.hook = arp_mangle,
 	.pf = NFPROTO_ARP,
 	.hooknum = NF_ARP_OUT,
@@ -789,20 +782,14 @@ static const struct file_operations clusterip_proc_fops = {
 static int clusterip_net_init(struct net *net)
 {
 	struct clusterip_net *cn = net_generic(net, clusterip_net_id);
-	int ret;
 
 	INIT_LIST_HEAD(&cn->configs);
 
 	spin_lock_init(&cn->lock);
 
-	ret = nf_register_net_hook(net, &cip_arp_ops);
-	if (ret < 0)
-		return ret;
-
 #ifdef CONFIG_PROC_FS
 	cn->procdir = proc_mkdir("ipt_CLUSTERIP", net->proc_net);
 	if (!cn->procdir) {
-		nf_unregister_net_hook(net, &cip_arp_ops);
 		pr_err("Unable to proc dir entry\n");
 		return -ENOMEM;
 	}
@@ -813,13 +800,11 @@ static int clusterip_net_init(struct net *net)
 
 static void clusterip_net_exit(struct net *net)
 {
-	struct clusterip_net *cn = net_generic(net, clusterip_net_id);
 #ifdef CONFIG_PROC_FS
+	struct clusterip_net *cn = net_generic(net, clusterip_net_id);
 	proc_remove(cn->procdir);
 	cn->procdir = NULL;
 #endif
-	nf_unregister_net_hook(net, &cip_arp_ops);
-	WARN_ON_ONCE(!list_empty(&cn->configs));
 }
 
 static struct pernet_operations clusterip_net_ops = {
@@ -841,11 +826,17 @@ static int __init clusterip_tg_init(void)
 	if (ret < 0)
 		goto cleanup_subsys;
 
+	ret = nf_register_hook(&cip_arp_ops);
+	if (ret < 0)
+		goto cleanup_target;
+
 	pr_info("ClusterIP Version %s loaded successfully\n",
 		CLUSTERIP_VERSION);
 
 	return 0;
 
+cleanup_target:
+	xt_unregister_target(&clusterip_tg_reg);
 cleanup_subsys:
 	unregister_pernet_subsys(&clusterip_net_ops);
 	return ret;
@@ -855,6 +846,7 @@ static void __exit clusterip_tg_exit(void)
 {
 	pr_info("ClusterIP Version %s unloading\n", CLUSTERIP_VERSION);
 
+	nf_unregister_hook(&cip_arp_ops);
 	xt_unregister_target(&clusterip_tg_reg);
 	unregister_pernet_subsys(&clusterip_net_ops);
 

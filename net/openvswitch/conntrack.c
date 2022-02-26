@@ -203,7 +203,7 @@ static void __ovs_ct_update_key(struct sw_flow_key *key, u8 state,
 	key->ct_orig_proto = 0;
 }
 
-/* Update 'key' based on skb->_nfct.  If 'post_ct' is true, then OVS has
+/* Update 'key' based on skb->nfct.  If 'post_ct' is true, then OVS has
  * previously sent the packet to conntrack via the ct action.  If
  * 'keep_nat_flags' is true, the existing NAT flags retained, else they are
  * initialized from the connection status.
@@ -472,13 +472,13 @@ static int handle_fragments(struct net *net, struct sw_flow_key *key,
 			    u16 zone, struct sk_buff *skb)
 {
 	struct ovs_skb_cb ovs_cb = *OVS_CB(skb);
-	int err;
 
 	if (key->eth.type == htons(ETH_P_IP)) {
 		enum ip_defrag_users user = IP_DEFRAG_CONNTRACK_IN + zone;
+		int err;
 
 		memset(IPCB(skb), 0, sizeof(struct inet_skb_parm));
-		err = ip_defrag(net, skb, user);
+		err = ip_defrag(skb, user);
 		if (err)
 			return err;
 
@@ -486,16 +486,28 @@ static int handle_fragments(struct net *net, struct sw_flow_key *key,
 #if IS_ENABLED(CONFIG_NF_DEFRAG_IPV6)
 	} else if (key->eth.type == htons(ETH_P_IPV6)) {
 		enum ip6_defrag_users user = IP6_DEFRAG_CONNTRACK_IN + zone;
+		struct sk_buff *reasm;
 
 		memset(IP6CB(skb), 0, sizeof(struct inet6_skb_parm));
-		err = nf_ct_frag6_gather(net, skb, user);
-		if (err) {
-			if (err != -EINPROGRESS)
-				kfree_skb(skb);
-			return err;
+		reasm = nf_ct_frag6_gather(skb, user);
+		if (!reasm)
+			return -EINPROGRESS;
+
+		if (skb == reasm) {
+			kfree_skb(skb);
+			return -EINVAL;
 		}
 
-		key->ip.proto = ipv6_hdr(skb)->nexthdr;
+		/* Don't free 'skb' even though it is one of the original
+		 * fragments, as we're going to morph it into the head.
+		 */
+		skb_get(skb);
+		nf_ct_frag6_consume_orig(reasm);
+
+		key->ip.proto = ipv6_hdr(reasm)->nexthdr;
+		skb_morph(skb, reasm);
+		skb->next = reasm->next;
+		consume_skb(reasm);
 		ovs_cb.mru = IP6CB(skb)->frag_max_size;
 #endif
 	} else {
@@ -542,7 +554,8 @@ ovs_ct_expect_find(struct net *net, const struct nf_conntrack_zone *zone,
 		if (h) {
 			struct nf_conn *ct = nf_ct_tuplehash_to_ctrack(h);
 
-			nf_ct_delete(ct, 0, 0);
+			if (del_timer(&ct->timeout))
+				nf_ct_delete(ct, 0, 0);
 			nf_conntrack_put(&ct->ct_general);
 		}
 	}
@@ -568,19 +581,19 @@ ovs_ct_get_info(const struct nf_conntrack_tuple_hash *h)
 
 /* Find an existing connection which this packet belongs to without
  * re-attributing statistics or modifying the connection state.  This allows an
- * skb->_nfct lost due to an upcall to be recovered during actions execution.
+ * skb->nfct lost due to an upcall to be recovered during actions execution.
  *
  * Must be called with rcu_read_lock.
  *
- * On success, populates skb->_nfct and returns the connection.  Returns NULL
- * if there is no existing entry.
+ * On success, populates skb->nfct and skb->nfctinfo, and returns the
+ * connection.  Returns NULL if there is no existing entry.
  */
 static struct nf_conn *
 ovs_ct_find_existing(struct net *net, const struct nf_conntrack_zone *zone,
 		     u8 l3num, struct sk_buff *skb, bool natted)
 {
-	const struct nf_conntrack_l3proto *l3proto;
-	const struct nf_conntrack_l4proto *l4proto;
+	struct nf_conntrack_l3proto *l3proto;
+	struct nf_conntrack_l4proto *l4proto;
 	struct nf_conntrack_tuple tuple;
 	struct nf_conntrack_tuple_hash *h;
 	struct nf_conn *ct;
@@ -639,7 +652,7 @@ struct nf_conn *ovs_ct_executed(struct net *net,
 	struct nf_conn *ct = NULL;
 
 	/* If no ct, check if we have evidence that an existing conntrack entry
-	 * might be found for this skb.  This happens when we lose a skb->_nfct
+	 * might be found for this skb.  This happens when we lose a skb->nfct
 	 * due to an upcall, or if the direction is being forced.  If the
 	 * connection was not confirmed, it is not cached and needs to be run
 	 * through conntrack again.
@@ -657,7 +670,7 @@ struct nf_conn *ovs_ct_executed(struct net *net,
 	return ct;
 }
 
-/* Determine whether skb->_nfct is equal to the result of conntrack lookup. */
+/* Determine whether skb->nfct is equal to the result of conntrack lookup. */
 static bool skb_nfct_cached(struct net *net,
 			    const struct sw_flow_key *key,
 			    const struct ovs_conntrack_info *info,
@@ -693,7 +706,8 @@ static bool skb_nfct_cached(struct net *net,
 		 * the reference.
 		 */
 		if (nf_ct_is_confirmed(ct))
-			nf_ct_delete(ct, 0, 0);
+			if (del_timer(&ct->timeout))
+				nf_ct_delete(ct, 0, 0);
 
 		nf_conntrack_put(&ct->ct_general);
 		nf_ct_set(skb, NULL, 0);
@@ -752,7 +766,6 @@ static int ovs_ct_nat_execute(struct sk_buff *skb, struct nf_conn *ct,
 			}
 		}
 		/* Non-ICMP, fall thru to initialize if needed. */
-		/* fall through */
 	case IP_CT_NEW:
 		/* Seen it before?  This can happen for loopback, retrans,
 		 * or local packets.
@@ -847,6 +860,11 @@ static int ovs_ct_nat(struct net *net, struct sw_flow_key *key,
 	enum nf_nat_manip_type maniptype;
 	int err;
 
+	if (nf_ct_is_untracked(ct)) {
+		/* A NAT action may only be performed on tracked packets. */
+		return NF_ACCEPT;
+	}
+
 	/* Add NAT extension if not confirmed yet. */
 	if (!nf_ct_is_confirmed(ct) && !nf_ct_nat_ext_add(ct))
 		return NF_ACCEPT;   /* Can't NAT. */
@@ -879,6 +897,17 @@ static int ovs_ct_nat(struct net *net, struct sw_flow_key *key,
 	}
 	err = ovs_ct_nat_execute(skb, ct, ctinfo, &info->range, maniptype);
 
+	if (err == NF_ACCEPT &&
+	    ct->status & IPS_SRC_NAT && ct->status & IPS_DST_NAT) {
+		if (maniptype == NF_NAT_MANIP_SRC)
+			maniptype = NF_NAT_MANIP_DST;
+		else
+			maniptype = NF_NAT_MANIP_SRC;
+
+		err = ovs_ct_nat_execute(skb, ct, ctinfo, &info->range,
+					 maniptype);
+	}
+
 	/* Mark NAT done if successful and update the flow key. */
 	if (err == NF_ACCEPT)
 		ovs_nat_update_key(key, skb, maniptype);
@@ -898,7 +927,7 @@ static int ovs_ct_nat(struct net *net, struct sw_flow_key *key,
 /* Pass 'skb' through conntrack in 'net', using zone configured in 'info', if
  * not done already.  Update key with new CT state after passing the packet
  * through conntrack.
- * Note that if the packet is deemed invalid by conntrack, skb->_nfct will be
+ * Note that if the packet is deemed invalid by conntrack, skb->nfct will be
  * set to NULL and 0 will be returned.
  */
 static int __ovs_ct_lookup(struct net *net, struct sw_flow_key *key,
@@ -926,8 +955,12 @@ static int __ovs_ct_lookup(struct net *net, struct sw_flow_key *key,
 			nf_ct_set(skb, tmpl, IP_CT_NEW);
 		}
 
-		err = nf_conntrack_in(net, info->family,
-				      NF_INET_PRE_ROUTING, skb);
+		/* Repeat if requested, see nf_iterate(). */
+		do {
+			err = nf_conntrack_in(net, info->family,
+					      NF_INET_PRE_ROUTING, skb);
+		} while (err == NF_REPEAT);
+
 		if (err != NF_ACCEPT)
 			return -ENOENT;
 
@@ -970,6 +1003,12 @@ static int __ovs_ct_lookup(struct net *net, struct sw_flow_key *key,
 							    GFP_ATOMIC);
 			if (err)
 				return err;
+
+			/* helper installed, add seqadj if NAT is required */
+			if (info->nat && !nfct_seqadj(ct)) {
+				if (!nfct_seqadj_ext_add(ct))
+					return -EINVAL;
+			}
 		}
 
 		/* Call the helper only if:
@@ -1098,6 +1137,36 @@ static int ovs_ct_commit(struct net *net, struct sw_flow_key *key,
 	return 0;
 }
 
+/* Trim the skb to the length specified by the IP/IPv6 header,
+ * removing any trailing lower-layer padding. This prepares the skb
+ * for higher-layer processing that assumes skb->len excludes padding
+ * (such as nf_ip_checksum). The caller needs to pull the skb to the
+ * network header, and ensure ip_hdr/ipv6_hdr points to valid data.
+ */
+static int ovs_skb_network_trim(struct sk_buff *skb)
+{
+	unsigned int len;
+	int err;
+
+	switch (skb->protocol) {
+	case htons(ETH_P_IP):
+		len = ntohs(ip_hdr(skb)->tot_len);
+		break;
+	case htons(ETH_P_IPV6):
+		len = sizeof(struct ipv6hdr)
+			+ ntohs(ipv6_hdr(skb)->payload_len);
+		break;
+	default:
+		len = skb->len;
+	}
+
+	err = pskb_trim_rcsum(skb, len);
+	if (err)
+		kfree_skb(skb);
+
+	return err;
+}
+
 /* Returns 0 on success, -EINPROGRESS if 'skb' is stolen, or other nonzero
  * value if 'skb' is freed.
  */
@@ -1111,6 +1180,10 @@ int ovs_ct_execute(struct net *net, struct sk_buff *skb,
 	/* The conntrack module expects to be working at L3. */
 	nh_ofs = skb_network_offset(skb);
 	skb_pull_rcsum(skb, nh_ofs);
+
+	err = ovs_skb_network_trim(skb);
+	if (err)
+		return err;
 
 	if (key->ip.frag != OVS_FRAG_TYPE_NONE) {
 		err = handle_fragments(net, key, info->zone.id, skb);
@@ -1146,6 +1219,7 @@ static int ovs_ct_add_helper(struct ovs_conntrack_info *info, const char *name,
 {
 	struct nf_conntrack_helper *helper;
 	struct nf_conn_help *help;
+	int ret = 0;
 
 	helper = nf_conntrack_helper_try_module_get(name, info->family,
 						    key->ip.proto);
@@ -1160,9 +1234,21 @@ static int ovs_ct_add_helper(struct ovs_conntrack_info *info, const char *name,
 		return -ENOMEM;
 	}
 
+#ifdef CONFIG_NF_NAT_NEEDED
+	if (info->nat) {
+		ret = nf_nat_helper_try_module_get(name, info->family,
+						   key->ip.proto);
+		if (ret) {
+			nf_conntrack_helper_put(helper);
+			OVS_NLERR(log, "Failed to load \"%s\" NAT helper, error: %d",
+				  name, ret);
+			return ret;
+		}
+	}
+#endif
 	rcu_assign_pointer(help->helper, helper);
 	info->helper = helper;
-	return 0;
+	return ret;
 }
 
 #ifdef CONFIG_NF_NAT_NEEDED
@@ -1615,8 +1701,13 @@ void ovs_ct_free_action(const struct nlattr *a)
 
 static void __ovs_ct_free_action(struct ovs_conntrack_info *ct_info)
 {
-	if (ct_info->helper)
+	if (ct_info->helper) {
+#ifdef CONFIG_NF_NAT_NEEDED
+		if (ct_info->nat)
+			nf_nat_helper_put(ct_info->helper);
+#endif
 		nf_conntrack_helper_put(ct_info->helper);
+	}
 	if (ct_info->ct)
 		nf_ct_tmpl_free(ct_info->ct);
 }

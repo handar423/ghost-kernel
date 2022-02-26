@@ -43,8 +43,6 @@ static void wacom_report_numbered_buttons(struct input_dev *input_dev,
 
 static int wacom_numbered_button_to_key(int n);
 
-static void wacom_update_led(struct wacom *wacom, int button_count, int mask,
-			     int group);
 /*
  * Percent of battery capacity for Graphire.
  * 8th value means AC online and show 100% capacity.
@@ -1921,10 +1919,7 @@ static void wacom_wac_pad_event(struct hid_device *hdev, struct hid_field *field
 	struct wacom *wacom = hid_get_drvdata(hdev);
 	struct wacom_wac *wacom_wac = &wacom->wacom_wac;
 	struct input_dev *input = wacom_wac->pad_input;
-	struct wacom_features *features = &wacom_wac->features;
 	unsigned equivalent_usage = wacom_equivalent_usage(usage->hid);
-	int i;
-	bool is_touch_on = value;
 	bool do_report = false;
 
 	/*
@@ -1969,32 +1964,26 @@ static void wacom_wac_pad_event(struct hid_device *hdev, struct hid_field *field
 		break;
 
 	case WACOM_HID_WD_MUTE_DEVICE:
-		if (wacom_wac->shared->touch_input && value) {
-			wacom_wac->shared->is_touch_on = !wacom_wac->shared->is_touch_on;
-			is_touch_on = wacom_wac->shared->is_touch_on;
-		}
-
-		/* fall through*/
 	case WACOM_HID_WD_TOUCHONOFF:
 		if (wacom_wac->shared->touch_input) {
+			bool *is_touch_on = &wacom_wac->shared->is_touch_on;
+
+			if (equivalent_usage == WACOM_HID_WD_MUTE_DEVICE && value)
+				*is_touch_on = !(*is_touch_on);
+			else if (equivalent_usage == WACOM_HID_WD_TOUCHONOFF)
+				*is_touch_on = value;
+
 			input_report_switch(wacom_wac->shared->touch_input,
-					    SW_MUTE_DEVICE, !is_touch_on);
+					    SW_MUTE_DEVICE, !(*is_touch_on));
 			input_sync(wacom_wac->shared->touch_input);
 		}
 		break;
-
 	case WACOM_HID_WD_MODE_CHANGE:
 		if (wacom_wac->is_direct_mode != value) {
 			wacom_wac->is_direct_mode = value;
 			wacom_schedule_work(&wacom->wacom_wac, WACOM_WORKER_MODE_CHANGE);
 		}
 		break;
-
-	case WACOM_HID_WD_BUTTONCENTER:
-		for (i = 0; i < wacom->led.count; i++)
-			wacom_update_led(wacom, features->numbered_buttons,
-					 value, i);
-		 /* fall through*/
 	default:
 		do_report = true;
 		break;
@@ -2223,11 +2212,11 @@ static void wacom_wac_pen_event(struct hid_device *hdev, struct hid_field *field
 	if (!usage->type || delay_pen_events(wacom_wac))
 		return;
 
-	/* send pen events only when the pen is in range */
-	if (wacom_wac->hid_data.inrange_state)
-		input_event(input, usage->type, usage->code, value);
-	else if (wacom_wac->shared->stylus_in_proximity && !wacom_wac->hid_data.sense_state)
-		input_event(input, usage->type, usage->code, 0);
+	/* send pen events only when the pen is in/entering/leaving proximity */
+	if (!wacom_wac->hid_data.inrange_state && !wacom_wac->tool[0])
+		return;
+
+	input_event(input, usage->type, usage->code, value);
 }
 
 static void wacom_wac_pen_pre_report(struct hid_device *hdev,
@@ -2242,11 +2231,11 @@ static void wacom_wac_pen_report(struct hid_device *hdev,
 	struct wacom *wacom = hid_get_drvdata(hdev);
 	struct wacom_wac *wacom_wac = &wacom->wacom_wac;
 	struct input_dev *input = wacom_wac->pen_input;
-	bool range = wacom_wac->hid_data.inrange_state;
-	bool sense = wacom_wac->hid_data.sense_state;
+	bool prox = wacom_wac->hid_data.inrange_state;
+	bool range = wacom_wac->hid_data.sense_state;
 
-	if (!wacom_wac->tool[0] && range) { /* first in range */
-		/* Going into range select tool */
+	if (!wacom_wac->tool[0] && prox) { /* first in prox */
+		/* Going into proximity select tool */
 		if (wacom_wac->hid_data.invert_state)
 			wacom_wac->tool[0] = BTN_TOOL_RUBBER;
 		else if (wacom_wac->id[0])
@@ -2256,7 +2245,7 @@ static void wacom_wac_pen_report(struct hid_device *hdev,
 	}
 
 	/* keep pen state for touch events */
-	wacom_wac->shared->stylus_in_proximity = sense;
+	wacom_wac->shared->stylus_in_proximity = range;
 
 	if (!delay_pen_events(wacom_wac) && wacom_wac->tool[0]) {
 		int id = wacom_wac->id[0];
@@ -2281,10 +2270,10 @@ static void wacom_wac_pen_report(struct hid_device *hdev,
 		 */
 		input_report_key(input, BTN_TOUCH,
 				wacom_wac->hid_data.tipswitch);
-		input_report_key(input, wacom_wac->tool[0], sense);
+		input_report_key(input, wacom_wac->tool[0], prox);
 		if (wacom_wac->serial[0]) {
 			input_event(input, EV_MSC, MSC_SERIAL, wacom_wac->serial[0]);
-			input_report_abs(input, ABS_MISC, sense ? id : 0);
+			input_report_abs(input, ABS_MISC, prox ? id : 0);
 		}
 
 		wacom_wac->hid_data.tipswitch = false;
@@ -2292,7 +2281,7 @@ static void wacom_wac_pen_report(struct hid_device *hdev,
 		input_sync(input);
 	}
 
-	if (!sense) {
+	if (!prox) {
 		wacom_wac->tool[0] = 0;
 		wacom_wac->id[0] = 0;
 		wacom_wac->serial[0] = 0;
@@ -3609,104 +3598,10 @@ static void wacom_setup_numbered_buttons(struct input_dev *input_dev,
 	}
 }
 
-static void wacom_24hd_update_leds(struct wacom *wacom, int mask, int group)
-{
-	struct wacom_led *led;
-	int i;
-	bool updated = false;
-
-	/*
-	 * 24HD has LED group 1 to the left and LED group 0 to the right.
-	 * So group 0 matches the second half of the buttons and thus the mask
-	 * needs to be shifted.
-	 */
-	if (group == 0)
-		mask >>= 8;
-
-	for (i = 0; i < 3; i++) {
-		led = wacom_led_find(wacom, group, i);
-		if (!led) {
-			hid_err(wacom->hdev, "can't find LED %d in group %d\n",
-				i, group);
-			continue;
-		}
-		if (!updated && mask & BIT(i)) {
-			led->held = true;
-			led_trigger_event(&led->trigger, LED_FULL);
-		} else {
-			led->held = false;
-		}
-	}
-}
-
-static bool wacom_is_led_toggled(struct wacom *wacom, int button_count,
-				 int mask, int group)
-{
-	int button_per_group;
-
-	/*
-	 * 21UX2 has LED group 1 to the left and LED group 0
-	 * to the right. We need to reverse the group to match this
-	 * historical behavior.
-	 */
-	if (wacom->wacom_wac.features.type == WACOM_21UX2)
-		group = 1 - group;
-
-	button_per_group = button_count/wacom->led.count;
-
-	return mask & (1 << (group * button_per_group));
-}
-
-static void wacom_update_led(struct wacom *wacom, int button_count, int mask,
-			     int group)
-{
-	struct wacom_led *led, *next_led;
-	int cur;
-	bool pressed;
-
-	if (wacom->wacom_wac.features.type == WACOM_24HD)
-		return wacom_24hd_update_leds(wacom, mask, group);
-
-	pressed = wacom_is_led_toggled(wacom, button_count, mask, group);
-	cur = wacom->led.groups[group].select;
-
-	led = wacom_led_find(wacom, group, cur);
-	if (!led) {
-		hid_err(wacom->hdev, "can't find current LED %d in group %d\n",
-			cur, group);
-		return;
-	}
-
-	if (!pressed) {
-		led->held = false;
-		return;
-	}
-
-	if (led->held && pressed)
-		return;
-
-	next_led = wacom_led_next(wacom, led);
-	if (!next_led) {
-		hid_err(wacom->hdev, "can't find next LED in group %d\n",
-			group);
-		return;
-	}
-	if (next_led == led)
-		return;
-
-	next_led->held = true;
-	led_trigger_event(&next_led->trigger,
-			  wacom_leds_brightness_get(next_led));
-}
-
 static void wacom_report_numbered_buttons(struct input_dev *input_dev,
 				int button_count, int mask)
 {
-	struct wacom *wacom = input_get_drvdata(input_dev);
 	int i;
-
-	for (i = 0; i < wacom->led.count; i++)
-		wacom_update_led(wacom,  button_count, mask, i);
 
 	for (i = 0; i < button_count; i++) {
 		int key = wacom_numbered_button_to_key(i);

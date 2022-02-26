@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0+
 /*
  * Copyright (C) 2001 Anton Blanchard <anton@au.ibm.com>, IBM
  * Copyright (C) 2001 Paul Mackerras <paulus@au.ibm.com>, IBM
@@ -7,6 +6,20 @@
  *
  * Additional Author(s):
  *  Ryan S. Arnold <rsa@us.ibm.com>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ * 
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ * 
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
 #include <linux/console.h>
@@ -16,8 +29,8 @@
 #include <linux/kernel.h>
 #include <linux/kthread.h>
 #include <linux/list.h>
+#include <linux/module.h>
 #include <linux/major.h>
-#include <linux/atomic.h>
 #include <linux/sysrq.h>
 #include <linux/tty.h>
 #include <linux/tty_flip.h>
@@ -28,7 +41,7 @@
 #include <linux/slab.h>
 #include <linux/serial_core.h>
 
-#include <linux/uaccess.h>
+#include <asm/uaccess.h>
 
 #include "hvc_console.h"
 
@@ -56,9 +69,6 @@ static struct task_struct *hvc_task;
 
 /* Picks up late kicks after list walk but before schedule() */
 static int hvc_kicked;
-
-/* hvc_init is triggered from hvc_alloc, i.e. only when actually used */
-static atomic_t hvc_needs_init __read_mostly = ATOMIC_INIT(-1);
 
 static int hvc_init(void);
 
@@ -305,8 +315,7 @@ static int hvc_install(struct tty_driver *driver, struct tty_struct *tty)
 	int rc;
 
 	/* Auto increments kref reference if found. */
-	hp = hvc_get_by_index(tty->index);
-	if (!hp)
+	if (!(hp = hvc_get_by_index(tty->index)))
 		return -ENODEV;
 
 	tty->driver_data = hp;
@@ -786,7 +795,7 @@ static int hvc_tiocmset(struct tty_struct *tty,
 }
 
 #ifdef CONFIG_CONSOLE_POLL
-static int hvc_poll_init(struct tty_driver *driver, int line, char *options)
+int hvc_poll_init(struct tty_driver *driver, int line, char *options)
 {
 	return 0;
 }
@@ -800,7 +809,7 @@ static int hvc_poll_get_char(struct tty_driver *driver, int line)
 
 	n = hp->ops->get_chars(hp->vtermno, &ch, 1);
 
-	if (n <= 0)
+	if (n == 0)
 		return NO_POLL_CHAR;
 
 	return ch;
@@ -849,7 +858,7 @@ struct hvc_struct *hvc_alloc(uint32_t vtermno, int data,
 	int i;
 
 	/* We wait until a driver actually comes along */
-	if (atomic_inc_not_zero(&hvc_needs_init)) {
+	if (!hvc_driver) {
 		int err = hvc_init();
 		if (err)
 			return ERR_PTR(err);
@@ -991,3 +1000,19 @@ put_tty:
 out:
 	return err;
 }
+
+/* This isn't particularly necessary due to this being a console driver
+ * but it is nice to be thorough.
+ */
+static void __exit hvc_exit(void)
+{
+	if (hvc_driver) {
+		kthread_stop(hvc_task);
+
+		tty_unregister_driver(hvc_driver);
+		/* return tty_struct instances allocated in hvc_init(). */
+		put_tty_driver(hvc_driver);
+		unregister_console(&hvc_console);
+	}
+}
+module_exit(hvc_exit);

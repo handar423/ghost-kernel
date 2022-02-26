@@ -11,7 +11,6 @@
 #include <asm/unaligned.h>
 #include <net/tcp.h>
 #include <net/netns/generic.h>
-#include <linux/proc_fs.h>
 
 #include <linux/netfilter_ipv4/ip_tables.h>
 #include <linux/netfilter/x_tables.h>
@@ -24,7 +23,7 @@
 #include <net/netfilter/nf_conntrack_synproxy.h>
 #include <net/netfilter/nf_conntrack_zones.h>
 
-unsigned int synproxy_net_id;
+int synproxy_net_id;
 EXPORT_SYMBOL_GPL(synproxy_net_id);
 
 bool
@@ -66,8 +65,8 @@ synproxy_parse_options(const struct sk_buff *skb, unsigned int doff,
 			case TCPOPT_WINDOW:
 				if (opsize == TCPOLEN_WINDOW) {
 					opts->wscale = *ptr;
-					if (opts->wscale > TCP_MAX_WSCALE)
-						opts->wscale = TCP_MAX_WSCALE;
+					if (opts->wscale > 14)
+						opts->wscale = 14;
 					opts->options |= XT_SYNPROXY_OPT_WSCALE;
 				}
 				break;
@@ -152,7 +151,7 @@ void synproxy_init_timestamp_cookie(const struct xt_synproxy_info *info,
 				    struct synproxy_options *opts)
 {
 	opts->tsecr = opts->tsval;
-	opts->tsval = tcp_time_stamp_raw() & ~0x3f;
+	opts->tsval = tcp_time_stamp & ~0x3f;
 
 	if (opts->options & XT_SYNPROXY_OPT_WSCALE) {
 		opts->tsval |= opts->wscale;
@@ -188,7 +187,7 @@ unsigned int synproxy_tstamp_adjust(struct sk_buff *skb,
 				    const struct nf_conn_synproxy *synproxy)
 {
 	unsigned int optoff, optend;
-	__be32 *ptr, old;
+	u32 *ptr, old;
 
 	if (synproxy->tsoff == 0)
 		return 1;
@@ -216,18 +215,18 @@ unsigned int synproxy_tstamp_adjust(struct sk_buff *skb,
 			if (op[0] == TCPOPT_TIMESTAMP &&
 			    op[1] == TCPOLEN_TIMESTAMP) {
 				if (CTINFO2DIR(ctinfo) == IP_CT_DIR_REPLY) {
-					ptr = (__be32 *)&op[2];
+					ptr = (u32 *)&op[2];
 					old = *ptr;
 					*ptr = htonl(ntohl(*ptr) -
 						     synproxy->tsoff);
 				} else {
-					ptr = (__be32 *)&op[6];
+					ptr = (u32 *)&op[6];
 					old = *ptr;
 					*ptr = htonl(ntohl(*ptr) +
 						     synproxy->tsoff);
 				}
 				inet_proto_csum_replace4(&th->check, skb,
-							 old, *ptr, false);
+							 old, *ptr, 0);
 				return 1;
 			}
 			optoff += op[1];
@@ -287,9 +286,9 @@ static int synproxy_cpu_seq_show(struct seq_file *seq, void *v)
 	struct synproxy_stats *stats = v;
 
 	if (v == SEQ_START_TOKEN) {
-		seq_puts(seq, "entries\t\tsyn_received\t"
-			      "cookie_invalid\tcookie_valid\t"
-			      "cookie_retrans\tconn_reopened\n");
+		seq_printf(seq, "entries\t\tsyn_received\t"
+				"cookie_invalid\tcookie_valid\t"
+				"cookie_retrans\tconn_reopened\n");
 		return 0;
 	}
 

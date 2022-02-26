@@ -14,8 +14,8 @@
  */
 
 #include "bnx2fc.h"
-static void bnx2fc_upld_timer(struct timer_list *t);
-static void bnx2fc_ofld_timer(struct timer_list *t);
+static void bnx2fc_upld_timer(unsigned long data);
+static void bnx2fc_ofld_timer(unsigned long data);
 static int bnx2fc_init_tgt(struct bnx2fc_rport *tgt,
 			   struct fcoe_port *port,
 			   struct fc_rport_priv *rdata);
@@ -27,10 +27,10 @@ static void bnx2fc_free_session_resc(struct bnx2fc_hba *hba,
 			      struct bnx2fc_rport *tgt);
 static void bnx2fc_free_conn_id(struct bnx2fc_hba *hba, u32 conn_id);
 
-static void bnx2fc_upld_timer(struct timer_list *t)
+static void bnx2fc_upld_timer(unsigned long data)
 {
 
-	struct bnx2fc_rport *tgt = from_timer(tgt, t, upld_timer);
+	struct bnx2fc_rport *tgt = (struct bnx2fc_rport *)data;
 
 	BNX2FC_TGT_DBG(tgt, "upld_timer - Upload compl not received!!\n");
 	/* fake upload completion */
@@ -40,10 +40,10 @@ static void bnx2fc_upld_timer(struct timer_list *t)
 	wake_up_interruptible(&tgt->upld_wait);
 }
 
-static void bnx2fc_ofld_timer(struct timer_list *t)
+static void bnx2fc_ofld_timer(unsigned long data)
 {
 
-	struct bnx2fc_rport *tgt = from_timer(tgt, t, ofld_timer);
+	struct bnx2fc_rport *tgt = (struct bnx2fc_rport *)data;
 
 	BNX2FC_TGT_DBG(tgt, "entered bnx2fc_ofld_timer\n");
 	/* NOTE: This function should never be called, as
@@ -65,7 +65,7 @@ static void bnx2fc_ofld_timer(struct timer_list *t)
 
 static void bnx2fc_ofld_wait(struct bnx2fc_rport *tgt)
 {
-	timer_setup(&tgt->ofld_timer, bnx2fc_ofld_timer, 0);
+	setup_timer(&tgt->ofld_timer, bnx2fc_ofld_timer, (unsigned long)tgt);
 	mod_timer(&tgt->ofld_timer, jiffies + BNX2FC_FW_TIMEOUT);
 
 	wait_event_interruptible(tgt->ofld_wait,
@@ -81,6 +81,7 @@ static void bnx2fc_offload_session(struct fcoe_port *port,
 					struct bnx2fc_rport *tgt,
 					struct fc_rport_priv *rdata)
 {
+	struct fc_lport *lport = rdata->local_port;
 	struct fc_rport *rport = rdata->rport;
 	struct bnx2fc_interface *interface = port->priv;
 	struct bnx2fc_hba *hba = interface->hba;
@@ -160,7 +161,7 @@ ofld_err:
 tgt_init_err:
 	if (tgt->fcoe_conn_id != -1)
 		bnx2fc_free_conn_id(hba, tgt->fcoe_conn_id);
-	fc_rport_logoff(rdata);
+	lport->tt.rport_logoff(rdata);
 }
 
 void bnx2fc_flush_active_ios(struct bnx2fc_rport *tgt)
@@ -187,7 +188,7 @@ void bnx2fc_flush_active_ios(struct bnx2fc_rport *tgt)
 				/* Handle eh_abort timeout */
 				BNX2FC_IO_DBG(io_req, "eh_abort for IO "
 					      "cleaned up\n");
-				complete(&io_req->tm_done);
+				complete(&io_req->abts_done);
 			}
 			kref_put(&io_req->refcount,
 				 bnx2fc_cmd_release); /* drop timer hold */
@@ -210,8 +211,8 @@ void bnx2fc_flush_active_ios(struct bnx2fc_rport *tgt)
 		list_del_init(&io_req->link);
 		io_req->on_tmf_queue = 0;
 		BNX2FC_IO_DBG(io_req, "tm_queue cleanup\n");
-		if (io_req->wait_for_comp)
-			complete(&io_req->tm_done);
+		if (io_req->wait_for_abts_comp)
+			complete(&io_req->abts_done);
 	}
 
 	list_for_each_entry_safe(io_req, tmp, &tgt->els_queue, link) {
@@ -251,8 +252,8 @@ void bnx2fc_flush_active_ios(struct bnx2fc_rport *tgt)
 				/* Handle eh_abort timeout */
 				BNX2FC_IO_DBG(io_req, "eh_abort for IO "
 					      "in retire_q\n");
-				if (io_req->wait_for_comp)
-					complete(&io_req->tm_done);
+				if (io_req->wait_for_abts_comp)
+					complete(&io_req->abts_done);
 			}
 			kref_put(&io_req->refcount, bnx2fc_cmd_release);
 		}
@@ -277,7 +278,7 @@ void bnx2fc_flush_active_ios(struct bnx2fc_rport *tgt)
 
 static void bnx2fc_upld_wait(struct bnx2fc_rport *tgt)
 {
-	timer_setup(&tgt->upld_timer, bnx2fc_upld_timer, 0);
+	setup_timer(&tgt->upld_timer, bnx2fc_upld_timer, (unsigned long)tgt);
 	mod_timer(&tgt->upld_timer, jiffies + BNX2FC_FW_TIMEOUT);
 	wait_event_interruptible(tgt->upld_wait,
 				 (test_bit(

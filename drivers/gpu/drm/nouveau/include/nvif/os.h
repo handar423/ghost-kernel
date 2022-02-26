@@ -32,6 +32,4 @@
 
 #include <asm/unaligned.h>
 
-#include <soc/tegra/fuse.h>
-#include <soc/tegra/pmc.h>
 #endif

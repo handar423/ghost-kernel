@@ -1,15 +1,14 @@
-// SPDX-License-Identifier: GPL-2.0
 #include "../perf.h"
 #include "util.h"
 #include "debug.h"
 #include <api/fs/fs.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include <sys/utsname.h>
 #include <dirent.h>
 #include <fcntl.h>
 #include <inttypes.h>
 #include <signal.h>
+#include <sys/utsname.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -38,7 +37,26 @@ void perf_set_multithreaded(void)
 }
 
 unsigned int page_size;
-int cacheline_size;
+
+#ifdef _SC_LEVEL1_DCACHE_LINESIZE
+#define cache_line_size(cacheline_sizep) *cacheline_sizep = sysconf(_SC_LEVEL1_DCACHE_LINESIZE)
+#else
+static void cache_line_size(int *cacheline_sizep)
+{
+	if (sysfs__read_int("devices/system/cpu/cpu0/cache/index0/coherency_line_size", cacheline_sizep))
+		pr_debug("cannot determine cache line size");
+}
+#endif
+
+int cacheline_size(void)
+{
+	static int size;
+
+	if (!size)
+		cache_line_size(&size);
+
+	return size;
+}
 
 int sysctl_perf_event_max_stack = PERF_MAX_STACK_DEPTH;
 int sysctl_perf_event_max_contexts_per_stack = PERF_MAX_CONTEXTS_PER_STACK;
@@ -158,17 +176,13 @@ out:
 	return list;
 }
 
-static int slow_copyfile(const char *from, const char *to, struct nsinfo *nsi)
+static int slow_copyfile(const char *from, const char *to)
 {
 	int err = -1;
 	char *line = NULL;
 	size_t n;
-	FILE *from_fp, *to_fp;
-	struct nscookie nsc;
+	FILE *from_fp = fopen(from, "r"), *to_fp;
 
-	nsinfo__mountns_enter(nsi, &nsc);
-	from_fp = fopen(from, "r");
-	nsinfo__mountns_exit(&nsc);
 	if (from_fp == NULL)
 		goto out;
 
@@ -189,7 +203,7 @@ out:
 	return err;
 }
 
-static int copyfile_offset(int ifd, loff_t off_in, int ofd, loff_t off_out, u64 size)
+int copyfile_offset(int ifd, loff_t off_in, int ofd, loff_t off_out, u64 size)
 {
 	void *ptr;
 	loff_t pgoff;
@@ -210,28 +224,22 @@ static int copyfile_offset(int ifd, loff_t off_in, int ofd, loff_t off_out, u64 
 
 		size -= ret;
 		off_in += ret;
-		off_out -= ret;
+		off_out += ret;
 	}
 	munmap(ptr, off_in + size);
 
 	return size ? -1 : 0;
 }
 
-static int copyfile_mode_ns(const char *from, const char *to, mode_t mode,
-			    struct nsinfo *nsi)
+int copyfile_mode(const char *from, const char *to, mode_t mode)
 {
 	int fromfd, tofd;
 	struct stat st;
-	int err;
+	int err = -1;
 	char *tmp = NULL, *ptr = NULL;
-	struct nscookie nsc;
 
-	nsinfo__mountns_enter(nsi, &nsc);
-	err = stat(from, &st);
-	nsinfo__mountns_exit(&nsc);
-	if (err)
+	if (stat(from, &st))
 		goto out;
-	err = -1;
 
 	/* extra 'x' at the end is to reserve space for '.' */
 	if (asprintf(&tmp, "%s.XXXXXXx", to) < 0) {
@@ -252,13 +260,11 @@ static int copyfile_mode_ns(const char *from, const char *to, mode_t mode,
 		goto out_close_to;
 
 	if (st.st_size == 0) { /* /proc? do it slowly... */
-		err = slow_copyfile(from, tmp, nsi);
+		err = slow_copyfile(from, tmp);
 		goto out_close_to;
 	}
 
-	nsinfo__mountns_enter(nsi, &nsc);
 	fromfd = open(from, O_RDONLY);
-	nsinfo__mountns_exit(&nsc);
 	if (fromfd < 0)
 		goto out_close_to;
 
@@ -273,16 +279,6 @@ out_close_to:
 out:
 	free(tmp);
 	return err;
-}
-
-int copyfile_ns(const char *from, const char *to, struct nsinfo *nsi)
-{
-	return copyfile_mode_ns(from, to, 0755, nsi);
-}
-
-int copyfile_mode(const char *from, const char *to, mode_t mode)
-{
-	return copyfile_mode_ns(from, to, mode, NULL);
 }
 
 int copyfile(const char *from, const char *to)
@@ -340,35 +336,15 @@ size_t hex_width(u64 v)
 	return n;
 }
 
-static int hex(char ch)
-{
-	if ((ch >= '0') && (ch <= '9'))
-		return ch - '0';
-	if ((ch >= 'a') && (ch <= 'f'))
-		return ch - 'a' + 10;
-	if ((ch >= 'A') && (ch <= 'F'))
-		return ch - 'A' + 10;
-	return -1;
-}
-
 /*
  * While we find nice hex chars, build a long_val.
  * Return number of chars processed.
  */
 int hex2u64(const char *ptr, u64 *long_val)
 {
-	const char *p = ptr;
-	*long_val = 0;
+	char *p;
 
-	while (*p) {
-		const int hex_val = hex(*p);
-
-		if (hex_val < 0)
-			break;
-
-		*long_val = (*long_val << 4) | hex_val;
-		p++;
-	}
+	*long_val = strtoull(ptr, &p, 16);
 
 	return p - ptr;
 }
@@ -381,90 +357,6 @@ int perf_event_paranoid(void)
 		return INT_MAX;
 
 	return value;
-}
-static int
-fetch_ubuntu_kernel_version(unsigned int *puint)
-{
-	ssize_t len;
-	size_t line_len = 0;
-	char *ptr, *line = NULL;
-	int version, patchlevel, sublevel, err;
-	FILE *vsig;
-
-	if (!puint)
-		return 0;
-
-	vsig = fopen("/proc/version_signature", "r");
-	if (!vsig) {
-		pr_debug("Open /proc/version_signature failed: %s\n",
-			 strerror(errno));
-		return -1;
-	}
-
-	len = getline(&line, &line_len, vsig);
-	fclose(vsig);
-	err = -1;
-	if (len <= 0) {
-		pr_debug("Reading from /proc/version_signature failed: %s\n",
-			 strerror(errno));
-		goto errout;
-	}
-
-	ptr = strrchr(line, ' ');
-	if (!ptr) {
-		pr_debug("Parsing /proc/version_signature failed: %s\n", line);
-		goto errout;
-	}
-
-	err = sscanf(ptr + 1, "%d.%d.%d",
-		     &version, &patchlevel, &sublevel);
-	if (err != 3) {
-		pr_debug("Unable to get kernel version from /proc/version_signature '%s'\n",
-			 line);
-		goto errout;
-	}
-
-	*puint = (version << 16) + (patchlevel << 8) + sublevel;
-	err = 0;
-errout:
-	free(line);
-	return err;
-}
-
-int
-fetch_kernel_version(unsigned int *puint, char *str,
-		     size_t str_size)
-{
-	struct utsname utsname;
-	int version, patchlevel, sublevel, err;
-	bool int_ver_ready = false;
-
-	if (access("/proc/version_signature", R_OK) == 0)
-		if (!fetch_ubuntu_kernel_version(puint))
-			int_ver_ready = true;
-
-	if (uname(&utsname))
-		return -1;
-
-	if (str && str_size) {
-		strncpy(str, utsname.release, str_size);
-		str[str_size - 1] = '\0';
-	}
-
-	if (!puint || int_ver_ready)
-		return 0;
-
-	err = sscanf(utsname.release, "%d.%d.%d",
-		     &version, &patchlevel, &sublevel);
-
-	if (err != 3) {
-		pr_debug("Unable to get kernel version from uname '%s'\n",
-			 utsname.release);
-		return -1;
-	}
-
-	*puint = (version << 16) + (patchlevel << 8) + sublevel;
-	return 0;
 }
 
 const char *perf_tip(const char *dirpath)
@@ -493,4 +385,33 @@ out:
 	strlist__delete(tips);
 
 	return tip;
+}
+
+int
+fetch_kernel_version(unsigned int *puint, char *str,
+		     size_t str_size)
+{
+	struct utsname utsname;
+	int version, patchlevel, sublevel, err;
+
+	if (uname(&utsname))
+		return -1;
+
+	if (str && str_size) {
+		strncpy(str, utsname.release, str_size);
+		str[str_size - 1] = '\0';
+	}
+
+	err = sscanf(utsname.release, "%d.%d.%d",
+		     &version, &patchlevel, &sublevel);
+
+	if (err != 3) {
+		pr_debug("Unablt to get kernel version from uname '%s'\n",
+			 utsname.release);
+		return -1;
+	}
+
+	if (puint)
+		*puint = (version << 16) + (patchlevel << 8) + sublevel;
+	return 0;
 }

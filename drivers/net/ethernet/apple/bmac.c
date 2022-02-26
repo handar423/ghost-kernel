@@ -157,7 +157,7 @@ static irqreturn_t bmac_misc_intr(int irq, void *dev_id);
 static irqreturn_t bmac_txdma_intr(int irq, void *dev_id);
 static irqreturn_t bmac_rxdma_intr(int irq, void *dev_id);
 static void bmac_set_timeout(struct net_device *dev);
-static void bmac_tx_timeout(struct timer_list *t);
+static void bmac_tx_timeout(unsigned long data);
 static int bmac_output(struct sk_buff *skb, struct net_device *dev);
 static void bmac_start(struct net_device *dev);
 
@@ -483,8 +483,8 @@ static int bmac_suspend(struct macio_dev *mdev, pm_message_t state)
        		bmwrite(dev, TXCFG, (config & ~TxMACEnable));
 		bmwrite(dev, INTDISABLE, DisableAll); /* disable all intrs */
        		/* disable rx and tx dma */
-		rd->control = cpu_to_le32(DBDMA_CLEAR(RUN|PAUSE|FLUSH|WAKE));	/* clear run bit */
-		td->control = cpu_to_le32(DBDMA_CLEAR(RUN|PAUSE|FLUSH|WAKE));	/* clear run bit */
+       		st_le32(&rd->control, DBDMA_CLEAR(RUN|PAUSE|FLUSH|WAKE));	/* clear run bit */
+       		st_le32(&td->control, DBDMA_CLEAR(RUN|PAUSE|FLUSH|WAKE));	/* clear run bit */
        		/* free some skb's */
        		for (i=0; i<N_RX_RING; i++) {
        			if (bp->rx_bufs[i] != NULL) {
@@ -555,6 +555,8 @@ static inline void bmac_set_timeout(struct net_device *dev)
 	if (bp->timeout_active)
 		del_timer(&bp->tx_timeout);
 	bp->tx_timeout.expires = jiffies + TX_TIMEOUT;
+	bp->tx_timeout.function = bmac_tx_timeout;
+	bp->tx_timeout.data = (unsigned long) dev;
 	add_timer(&bp->tx_timeout);
 	bp->timeout_active = 1;
 	spin_unlock_irqrestore(&bp->lock, flags);
@@ -697,8 +699,8 @@ static irqreturn_t bmac_rxdma_intr(int irq, void *dev_id)
 
 	while (1) {
 		cp = &bp->rx_cmds[i];
-		stat = le16_to_cpu(cp->xfer_status);
-		residual = le16_to_cpu(cp->res_count);
+		stat = ld_le16(&cp->xfer_status);
+		residual = ld_le16(&cp->res_count);
 		if ((stat & ACTIVE) == 0)
 			break;
 		nb = RX_BUFLEN - residual - 2;
@@ -726,8 +728,8 @@ static irqreturn_t bmac_rxdma_intr(int irq, void *dev_id)
 				skb_reserve(bp->rx_bufs[i], 2);
 		}
 		bmac_construct_rxbuff(skb, &bp->rx_cmds[i]);
-		cp->res_count = cpu_to_le16(0);
-		cp->xfer_status = cpu_to_le16(0);
+		st_le16(&cp->res_count, 0);
+		st_le16(&cp->xfer_status, 0);
 		last = i;
 		if (++i >= N_RX_RING) i = 0;
 	}
@@ -767,7 +769,7 @@ static irqreturn_t bmac_txdma_intr(int irq, void *dev_id)
 
 	while (1) {
 		cp = &bp->tx_cmds[bp->tx_empty];
-		stat = le16_to_cpu(cp->xfer_status);
+		stat = ld_le16(&cp->xfer_status);
 		if (txintcount < 10) {
 			XXDEBUG(("bmac_txdma_xfer_stat=%#0x\n", stat));
 		}
@@ -1014,6 +1016,7 @@ static void bmac_set_multicast(struct net_device *dev)
 static void bmac_set_multicast(struct net_device *dev)
 {
 	struct netdev_hw_addr *ha;
+	int i;
 	unsigned short rx_cfg;
 	u32 crc;
 
@@ -1027,11 +1030,13 @@ static void bmac_set_multicast(struct net_device *dev)
 		rx_cfg |= RxPromiscEnable;
 		bmwrite(dev, RXCFG, rx_cfg);
 	} else {
-		u16 hash_table[4] = { 0 };
+		u16 hash_table[4];
 
 		rx_cfg = bmread(dev, RXCFG);
 		rx_cfg &= ~RxPromiscEnable;
 		bmwrite(dev, RXCFG, rx_cfg);
+
+		for(i = 0; i < 4; i++) hash_table[i] = 0;
 
 		netdev_for_each_mc_addr(ha, dev) {
 			crc = ether_crc_le(6, ha->addr);
@@ -1216,7 +1221,8 @@ static void bmac_reset_and_enable(struct net_device *dev)
 	 */
 	skb = netdev_alloc_skb(dev, ETHERMINPACKET);
 	if (skb != NULL) {
-		data = skb_put_zero(skb, ETHERMINPACKET);
+		data = skb_put(skb, ETHERMINPACKET);
+		memset(data, 0, ETHERMINPACKET);
 		memcpy(data, dev->dev_addr, ETH_ALEN);
 		memcpy(data + ETH_ALEN, dev->dev_addr, ETH_ALEN);
 		bmac_transmit_packet(skb, dev);
@@ -1234,6 +1240,7 @@ static const struct net_device_ops bmac_netdev_ops = {
 	.ndo_start_xmit		= bmac_output,
 	.ndo_set_rx_mode	= bmac_set_multicast,
 	.ndo_set_mac_address	= bmac_set_address,
+	.ndo_change_mtu		= eth_change_mtu,
 	.ndo_validate_addr	= eth_validate_addr,
 };
 
@@ -1319,7 +1326,7 @@ static int bmac_probe(struct macio_dev *mdev, const struct of_device_id *match)
 	bp->queue = (struct sk_buff_head *)(bp->rx_cmds + N_RX_RING + 1);
 	skb_queue_head_init(bp->queue);
 
-	timer_setup(&bp->tx_timeout, bmac_tx_timeout, 0);
+	init_timer(&bp->tx_timeout);
 
 	ret = request_irq(dev->irq, bmac_misc_intr, 0, "BMAC-misc", dev);
 	if (ret) {
@@ -1407,8 +1414,8 @@ static int bmac_close(struct net_device *dev)
 	bmwrite(dev, INTDISABLE, DisableAll); /* disable all intrs */
 
 	/* disable rx and tx dma */
-	rd->control = cpu_to_le32(DBDMA_CLEAR(RUN|PAUSE|FLUSH|WAKE));	/* clear run bit */
-	td->control = cpu_to_le32(DBDMA_CLEAR(RUN|PAUSE|FLUSH|WAKE));	/* clear run bit */
+	st_le32(&rd->control, DBDMA_CLEAR(RUN|PAUSE|FLUSH|WAKE));	/* clear run bit */
+	st_le32(&td->control, DBDMA_CLEAR(RUN|PAUSE|FLUSH|WAKE));	/* clear run bit */
 
 	/* free some skb's */
 	XXDEBUG(("bmac: free rx bufs\n"));
@@ -1469,10 +1476,10 @@ bmac_output(struct sk_buff *skb, struct net_device *dev)
 	return NETDEV_TX_OK;
 }
 
-static void bmac_tx_timeout(struct timer_list *t)
+static void bmac_tx_timeout(unsigned long data)
 {
-	struct bmac_data *bp = from_timer(bp, t, tx_timeout);
-	struct net_device *dev = macio_get_drvdata(bp->mdev);
+	struct net_device *dev = (struct net_device *) data;
+	struct bmac_data *bp = netdev_priv(dev);
 	volatile struct dbdma_regs __iomem *td = bp->tx_dma;
 	volatile struct dbdma_regs __iomem *rd = bp->rx_dma;
 	volatile struct dbdma_cmd *cp;
@@ -1489,7 +1496,7 @@ static void bmac_tx_timeout(struct timer_list *t)
 
 	cp = &bp->tx_cmds[bp->tx_empty];
 /*	XXDEBUG((KERN_DEBUG "bmac: tx dmastat=%x %x runt=%d pr=%x fs=%x fc=%x\n", */
-/* 	   le32_to_cpu(td->status), le16_to_cpu(cp->xfer_status), bp->tx_bad_runt, */
+/* 	   ld_le32(&td->status), ld_le16(&cp->xfer_status), bp->tx_bad_runt, */
 /* 	   mb->pr, mb->xmtfs, mb->fifofc)); */
 
 	/* turn off both tx and rx and reset the chip */
@@ -1502,7 +1509,7 @@ static void bmac_tx_timeout(struct timer_list *t)
 	bmac_enable_and_reset_chip(dev);
 
 	/* restart rx dma */
-	cp = bus_to_virt(le32_to_cpu(rd->cmdptr));
+	cp = bus_to_virt(ld_le32(&rd->cmdptr));
 	out_le32(&rd->control, DBDMA_CLEAR(RUN|PAUSE|FLUSH|WAKE|ACTIVE|DEAD));
 	out_le16(&cp->xfer_status, 0);
 	out_le32(&rd->cmdptr, virt_to_bus(cp));
@@ -1549,10 +1556,10 @@ static void dump_dbdma(volatile struct dbdma_cmd *cp,int count)
 		ip = (int*)(cp+i);
 
 		printk("dbdma req 0x%x addr 0x%x baddr 0x%x xfer/res 0x%x\n",
-		       le32_to_cpup(ip+0),
-		       le32_to_cpup(ip+1),
-		       le32_to_cpup(ip+2),
-		       le32_to_cpup(ip+3));
+		       ld_le32(ip+0),
+		       ld_le32(ip+1),
+		       ld_le32(ip+2),
+		       ld_le32(ip+3));
 	}
 
 }
@@ -1617,7 +1624,7 @@ static int bmac_remove(struct macio_dev *mdev)
 	return 0;
 }
 
-static const struct of_device_id bmac_match[] =
+static struct of_device_id bmac_match[] =
 {
 	{
 	.name 		= "bmac",

@@ -1,18 +1,22 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef LINUX_HARDIRQ_H
 #define LINUX_HARDIRQ_H
 
-#include <linux/preempt.h>
+#include <linux/preempt_mask.h>
 #include <linux/lockdep.h>
 #include <linux/ftrace_irq.h>
 #include <linux/vtime.h>
 #include <asm/hardirq.h>
 
 
+#if defined(CONFIG_SMP) || defined(CONFIG_GENERIC_HARDIRQS)
 extern void synchronize_irq(unsigned int irq);
 extern bool synchronize_hardirq(unsigned int irq);
+#else
+# define synchronize_irq(irq)	barrier()
+# define synchronize_hardirq(irq)	barrier()
+#endif
 
-#if defined(CONFIG_TINY_RCU)
+#if defined(CONFIG_TINY_RCU) || defined(CONFIG_TINY_PREEMPT_RCU)
 
 static inline void rcu_nmi_enter(void)
 {
@@ -36,7 +40,7 @@ extern void rcu_nmi_exit(void);
 #define __irq_enter()					\
 	do {						\
 		account_irq_enter_time(current);	\
-		preempt_count_add(HARDIRQ_OFFSET);	\
+		add_preempt_count(HARDIRQ_OFFSET);	\
 		trace_hardirq_enter();			\
 	} while (0)
 
@@ -52,7 +56,7 @@ extern void irq_enter(void);
 	do {						\
 		trace_hardirq_exit();			\
 		account_irq_exit_time(current);		\
-		preempt_count_sub(HARDIRQ_OFFSET);	\
+		sub_preempt_count(HARDIRQ_OFFSET);	\
 	} while (0)
 
 /*
@@ -62,11 +66,10 @@ extern void irq_exit(void);
 
 #define nmi_enter()						\
 	do {							\
-		printk_nmi_enter();				\
 		lockdep_off();					\
 		ftrace_nmi_enter();				\
 		BUG_ON(in_nmi());				\
-		preempt_count_add(NMI_OFFSET + HARDIRQ_OFFSET);	\
+		add_preempt_count(NMI_OFFSET + HARDIRQ_OFFSET);	\
 		rcu_nmi_enter();				\
 		trace_hardirq_enter();				\
 	} while (0)
@@ -76,10 +79,9 @@ extern void irq_exit(void);
 		trace_hardirq_exit();				\
 		rcu_nmi_exit();					\
 		BUG_ON(!in_nmi());				\
-		preempt_count_sub(NMI_OFFSET + HARDIRQ_OFFSET);	\
+		sub_preempt_count(NMI_OFFSET + HARDIRQ_OFFSET);	\
 		ftrace_nmi_exit();				\
 		lockdep_on();					\
-		printk_nmi_exit();				\
 	} while (0)
 
 #endif /* LINUX_HARDIRQ_H */

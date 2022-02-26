@@ -1,8 +1,8 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __ASM_BARRIER_H
 #define __ASM_BARRIER_H
 
 #ifndef __ASSEMBLY__
+#include <asm/outercache.h>
 
 #define nop() __asm__ __volatile__("mov\tr0,r0\t@ nop\n\t");
 
@@ -37,18 +37,12 @@
 #define dmb(x) __asm__ __volatile__ ("" : : : "memory")
 #endif
 
-#ifdef CONFIG_ARM_HEAVY_MB
-extern void (*soc_mb)(void);
-extern void arm_heavy_mb(void);
-#define __arm_heavy_mb(x...) do { dsb(x); arm_heavy_mb(); } while (0)
-#else
-#define __arm_heavy_mb(x...) dsb(x)
-#endif
-
-#if defined(CONFIG_ARM_DMA_MEM_BUFFERABLE) || defined(CONFIG_SMP)
-#define mb()		__arm_heavy_mb()
+#ifdef CONFIG_ARCH_HAS_BARRIERS
+#include <mach/barriers.h>
+#elif defined(CONFIG_ARM_DMA_MEM_BUFFERABLE) || defined(CONFIG_SMP)
+#define mb()		do { dsb(); outer_sync(); } while (0)
 #define rmb()		dsb()
-#define wmb()		__arm_heavy_mb(st)
+#define wmb()		do { dsb(st); outer_sync(); } while (0)
 #define dma_rmb()	dmb(osh)
 #define dma_wmb()	dmb(oshst)
 #else
@@ -59,11 +53,20 @@ extern void arm_heavy_mb(void);
 #define dma_wmb()	barrier()
 #endif
 
-#define __smp_mb()	dmb(ish)
-#define __smp_rmb()	__smp_mb()
-#define __smp_wmb()	dmb(ishst)
+#ifndef CONFIG_SMP
+#define smp_mb()	barrier()
+#define smp_rmb()	barrier()
+#define smp_wmb()	barrier()
+#else
+#define smp_mb()	dmb(ish)
+#define smp_rmb()	smp_mb()
+#define smp_wmb()	dmb(ishst)
+#endif
 
-#include <asm-generic/barrier.h>
+#define read_barrier_depends()		do { } while(0)
+#define smp_read_barrier_depends()	do { } while(0)
+
+#define smp_store_mb(var, value)	do { WRITE_ONCE(var, value); smp_mb(); } while (0)
 
 #endif /* !__ASSEMBLY__ */
 #endif /* __ASM_BARRIER_H */

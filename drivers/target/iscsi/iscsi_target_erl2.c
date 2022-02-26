@@ -17,7 +17,6 @@
  * GNU General Public License for more details.
  ******************************************************************************/
 
-#include <linux/slab.h>
 #include <scsi/iscsi_proto.h>
 #include <target/target_core_base.h>
 #include <target/target_core_fabric.h>
@@ -47,11 +46,13 @@ void iscsit_create_conn_recovery_datain_values(
 		if ((cmd->next_burst_len +
 		     conn->conn_ops->MaxRecvDataSegmentLength) <
 		     conn->sess->sess_ops->MaxBurstLength) {
+			gmb();
 			cmd->read_data_done +=
 			       conn->conn_ops->MaxRecvDataSegmentLength;
 			cmd->next_burst_len +=
 			       conn->conn_ops->MaxRecvDataSegmentLength;
 		} else {
+			gmb();
 			cmd->read_data_done +=
 				(conn->sess->sess_ops->MaxBurstLength -
 				cmd->next_burst_len);
@@ -125,7 +126,7 @@ struct iscsi_conn_recovery *iscsit_get_inactive_connection_recovery_entry(
 	return NULL;
 }
 
-void iscsit_free_connection_recovery_entires(struct iscsi_session *sess)
+void iscsit_free_connection_recovery_entries(struct iscsi_session *sess)
 {
 	struct iscsi_cmd *cmd, *cmd_tmp;
 	struct iscsi_conn_recovery *cr, *cr_tmp;

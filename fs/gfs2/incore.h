@@ -44,7 +44,6 @@ struct gfs2_log_header_host {
 	u32 lh_flags;		/* GFS2_LOG_HEAD_... */
 	u32 lh_tail;		/* Block number of log tail */
 	u32 lh_blkno;
-	u32 lh_hash;
 };
 
 /*
@@ -73,7 +72,6 @@ struct gfs2_bitmap {
 	u32 bi_offset;
 	u32 bi_start;
 	u32 bi_len;
-	u32 bi_blocks;
 };
 
 struct gfs2_rgrpd {
@@ -106,40 +104,31 @@ struct gfs2_rgrpd {
 
 struct gfs2_rbm {
 	struct gfs2_rgrpd *rgd;
+	struct gfs2_bitmap *bi;	/* Bitmap must belong to the rgd */
 	u32 offset;		/* The offset is bitmap relative */
-	int bii;		/* Bitmap index */
 };
-
-static inline struct gfs2_bitmap *rbm_bi(const struct gfs2_rbm *rbm)
-{
-	return rbm->rgd->rd_bits + rbm->bii;
-}
 
 static inline u64 gfs2_rbm_to_block(const struct gfs2_rbm *rbm)
 {
-	return rbm->rgd->rd_data0 + (rbm_bi(rbm)->bi_start * GFS2_NBBY) +
-		rbm->offset;
+	return rbm->rgd->rd_data0 + (rbm->bi->bi_start * GFS2_NBBY) + rbm->offset;
 }
 
 static inline bool gfs2_rbm_eq(const struct gfs2_rbm *rbm1,
 			       const struct gfs2_rbm *rbm2)
 {
-	return (rbm1->rgd == rbm2->rgd) && (rbm1->bii == rbm2->bii) &&
+	return (rbm1->rgd == rbm2->rgd) && (rbm1->bi == rbm2->bi) && 
 	       (rbm1->offset == rbm2->offset);
 }
 
 enum gfs2_state_bits {
 	BH_Pinned = BH_PrivateStart,
 	BH_Escaped = BH_PrivateStart + 1,
-	BH_Zeronew = BH_PrivateStart + 2,
 };
 
 BUFFER_FNS(Pinned, pinned)
 TAS_BUFFER_FNS(Pinned, pinned)
 BUFFER_FNS(Escaped, escaped)
 TAS_BUFFER_FNS(Escaped, escaped)
-BUFFER_FNS(Zeronew, zeronew)
-TAS_BUFFER_FNS(Zeronew, zeronew)
 
 struct gfs2_bufdata {
 	struct buffer_head *bd_bh;
@@ -203,15 +192,11 @@ enum {
 	DFL_DLM_RECOVERY	= 6,
 };
 
-/*
- * We are using struct lm_lockname as an rhashtable key.  Avoid holes within
- * the struct; padding at the end is fine.
- */
 struct lm_lockname {
-	u64 ln_number;
 	struct gfs2_sbd *ln_sbd;
+	u64 ln_number;
 	unsigned int ln_type;
-};
+} __packed __aligned(sizeof(int));
 
 #define lm_name_equal(name1, name2) \
         (((name1)->ln_number == (name2)->ln_number) &&	\
@@ -226,7 +211,7 @@ struct gfs2_glock_operations {
 	int (*go_demote_ok) (const struct gfs2_glock *gl);
 	int (*go_lock) (struct gfs2_holder *gh);
 	void (*go_unlock) (struct gfs2_holder *gh);
-	void (*go_dump)(struct seq_file *seq, const struct gfs2_glock *gl);
+	int (*go_dump)(struct seq_file *seq, const struct gfs2_glock *gl);
 	void (*go_callback)(struct gfs2_glock *gl, bool remote);
 	const int go_type;
 	const unsigned long go_flags;
@@ -248,7 +233,7 @@ enum {
 };
 
 struct gfs2_lkstats {
-	u64 stats[GFS2_NR_LKSTATS];
+	s64 stats[GFS2_NR_LKSTATS];
 };
 
 enum {
@@ -279,6 +264,7 @@ struct gfs2_qadata { /* quota allocation data */
 	struct gfs2_quota_data *qa_qd[2 * GFS2_MAXQUOTAS];
 	struct gfs2_holder qa_qd_ghs[2 * GFS2_MAXQUOTAS];
 	unsigned int qa_qd_num;
+	int qa_ref;
 };
 
 /* Resource group multi-block reservation, in order of appearance:
@@ -336,6 +322,7 @@ enum {
 };
 
 struct gfs2_glock {
+	struct hlist_bl_node gl_list;
 	unsigned long gl_flags;		/* GLF_... */
 	struct lm_lockname gl_name;
 
@@ -364,15 +351,7 @@ struct gfs2_glock {
 	atomic_t gl_ail_count;
 	atomic_t gl_revokes;
 	struct delayed_work gl_work;
-	union {
-		/* For inode and iopen glocks only */
-		struct work_struct gl_delete;
-		/* For rgrp glocks only */
-		struct {
-			loff_t start;
-			loff_t end;
-		} gl_vm;
-	};
+	struct work_struct gl_delete;
 	struct rcu_head gl_rcu;
 	struct rhash_head gl_node;
 };
@@ -478,7 +457,6 @@ struct gfs2_quota_data {
 enum {
 	TR_TOUCHED = 1,
 	TR_ATTACHED = 2,
-	TR_ALLOCED = 3,
 };
 
 struct gfs2_trans {
@@ -487,6 +465,9 @@ struct gfs2_trans {
 	unsigned int tr_blocks;
 	unsigned int tr_revokes;
 	unsigned int tr_reserved;
+
+	struct gfs2_holder tr_t_gh;
+
 	unsigned long tr_flags;
 
 	unsigned int tr_num_buf_new;
@@ -572,7 +553,7 @@ struct gfs2_args {
 	unsigned int ar_errors:2;               /* errors=withdraw | panic */
 	unsigned int ar_nobarrier:1;            /* do not send barriers */
 	unsigned int ar_rgrplvb:1;		/* use lvbs for rgrp info */
-	unsigned int ar_loccookie:1;		/* use location based readdir
+	unsigned int ar_loccookie;		/* use location based readdir
 						   cookies */
 	int ar_commit;				/* Commit interval */
 	int ar_statfs_quantum;			/* The fast statfs interval */
@@ -607,12 +588,6 @@ enum {
 	SDF_RORECOVERY		= 7, /* read only recovery */
 	SDF_SKIP_DLM_UNLOCK	= 8,
 	SDF_FORCE_AIL_FLUSH     = 9,
-};
-
-enum gfs2_freeze_state {
-	SFS_UNFROZEN		= 0,
-	SFS_STARTING_FREEZE	= 1,
-	SFS_FROZEN		= 2,
 };
 
 #define GFS2_FSNAME_LEN		256
@@ -700,8 +675,6 @@ struct gfs2_sbd {
 	u32 sd_max_dirres;	/* Max blocks needed to add a directory entry */
 	u32 sd_max_height;	/* Max height of a file's metadata tree */
 	u64 sd_heightsize[GFS2_MAX_META_HEIGHT + 1];
-	u32 sd_max_jheight; /* Max height of journaled file's meta tree */
-	u64 sd_jheightsize[GFS2_MAX_META_HEIGHT + 1];
 	u32 sd_max_dents_per_leaf; /* Max number of dirents in a leaf block */
 
 	struct gfs2_args sd_args;	/* Mount arguments */
@@ -712,9 +685,9 @@ struct gfs2_sbd {
 	struct lm_lockstruct sd_lockstruct;
 	struct gfs2_holder sd_live_gh;
 	struct gfs2_glock *sd_rename_gl;
-	struct gfs2_glock *sd_freeze_gl;
-	struct work_struct sd_freeze_work;
+	struct gfs2_glock *sd_trans_gl;
 	wait_queue_head_t sd_glock_wait;
+	wait_queue_head_t sd_async_glock_wait;
 	atomic_t sd_glock_disposal;
 	struct completion sd_locking_init;
 	struct completion sd_wdack;
@@ -786,8 +759,6 @@ struct gfs2_sbd {
 
 	/* Log stuff */
 
-	struct address_space sd_aspace;
-
 	spinlock_t sd_log_lock;
 
 	struct gfs2_trans *sd_log_tr;
@@ -819,10 +790,8 @@ struct gfs2_sbd {
 	wait_queue_head_t sd_log_flush_wait;
 	int sd_log_error;
 
-	atomic_t sd_reserving_log;
-	wait_queue_head_t sd_reserving_log_wait;
-
 	unsigned int sd_log_flush_head;
+	u64 sd_log_flush_wrapped;
 
 	spinlock_t sd_ail_lock;
 	struct list_head sd_ail1_list;
@@ -830,10 +799,8 @@ struct gfs2_sbd {
 
 	/* For quiescing the filesystem */
 	struct gfs2_holder sd_freeze_gh;
-	atomic_t sd_freeze_state;
-	struct mutex sd_freeze_mutex;
 
-	char sd_fsname[GFS2_FSNAME_LEN + 3 * sizeof(int) + 2];
+	char sd_fsname[GFS2_FSNAME_LEN];
 	char sd_table_name[GFS2_FSNAME_LEN];
 	char sd_proto_name[GFS2_FSNAME_LEN];
 
@@ -860,6 +827,11 @@ static inline void gfs2_sbstats_inc(const struct gfs2_glock *gl, int which)
 }
 
 extern struct gfs2_rgrpd *gfs2_glock2rgrp(struct gfs2_glock *gl);
+
+static inline unsigned gfs2_max_stuffed_size(const struct gfs2_inode *ip)
+{
+	return GFS2_SB(&ip->i_inode)->sd_sb.sb_bsize - sizeof(struct gfs2_dinode);
+}
 
 #endif /* __INCORE_DOT_H__ */
 

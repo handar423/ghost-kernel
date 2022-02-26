@@ -27,8 +27,11 @@
 typedef struct snd_seq_real_time snd_seq_real_time_t;
 typedef union snd_seq_timestamp snd_seq_timestamp_t;
 
+/* maximum number of events dequeued per schedule interval */
+#define SNDRV_SEQ_MAX_DEQUEUE		50
+
 /* maximum number of queues */
-#define SNDRV_SEQ_MAX_QUEUES		32
+#define SNDRV_SEQ_MAX_QUEUES		8
 
 /* max number of concurrent clients */
 #define SNDRV_SEQ_MAX_CLIENTS 		192
@@ -38,6 +41,9 @@ typedef union snd_seq_timestamp snd_seq_timestamp_t;
 
 /* max number of events in memory pool */
 #define SNDRV_SEQ_MAX_EVENTS		2000
+
+/* default number of events in memory chunk */
+#define SNDRV_SEQ_DEFAULT_CHUNK_EVENTS	64
 
 /* default number of events in memory pool */
 #define SNDRV_SEQ_DEFAULT_EVENTS	500
@@ -49,8 +55,7 @@ typedef union snd_seq_timestamp snd_seq_timestamp_t;
 #define SNDRV_SEQ_DEFAULT_CLIENT_EVENTS	200
 
 /* max delivery path length */
-/* NOTE: this shouldn't be greater than MAX_LOCKDEP_SUBCLASSES */
-#define SNDRV_SEQ_MAX_HOPS		8
+#define SNDRV_SEQ_MAX_HOPS		10
 
 /* max size of event size */
 #define SNDRV_SEQ_MAX_EVENT_LEN		0x3fffffff
@@ -73,7 +78,8 @@ __printf(3, 4)
 int snd_seq_create_kernel_client(struct snd_card *card, int client_index,
 				 const char *name_fmt, ...);
 int snd_seq_delete_kernel_client(int client);
-int snd_seq_kernel_client_enqueue(int client, struct snd_seq_event *ev, int atomic, int hop);
+int snd_seq_kernel_client_enqueue(int client, struct snd_seq_event *ev,
+				  struct file *file, bool blocking);
 int snd_seq_kernel_client_dispatch(int client, struct snd_seq_event *ev, int atomic, int hop);
 int snd_seq_kernel_client_ctl(int client, unsigned int cmd, void *arg);
 

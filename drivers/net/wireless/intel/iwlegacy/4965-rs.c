@@ -2154,11 +2154,13 @@ il4965_rs_initialize_lq(struct il_priv *il, struct ieee80211_conf *conf,
 	u8 use_green;
 	u8 active_tbl = 0;
 	u8 valid_tx_ant;
+	struct il_station_priv *sta_priv;
 
 	if (!sta || !lq_sta)
 		return;
 
 	use_green = il4965_rs_use_green(il, sta);
+	sta_priv = (void *)sta->drv_priv;
 
 	i = lq_sta->last_txrate_idx;
 
@@ -2223,10 +2225,6 @@ il4965_rs_get_rate(void *il_r, struct ieee80211_sta *sta, void *il_sta,
 		D_RATE("Rate scaling not initialized yet.\n");
 		il_sta = NULL;
 	}
-
-	/* Send management frames and NO_ACK data using lowest rate. */
-	if (rate_control_send_low(sta, il_sta, txrc))
-		return;
 
 	if (!lq_sta)
 		return;

@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /* This is included from relocs_32/64.c */
 
 #define ElfW(type)		_ElfW(ELF_BITS, type)
@@ -73,8 +72,8 @@ static const char * const sym_regex_kernel[S_NSYMTYPES] = {
 	"__per_cpu_load|"
 	"init_per_cpu__.*|"
 	"__end_rodata_hpage_align|"
-#endif
 	"__vvar_page|"
+#endif
 	"_end)$"
 };
 
@@ -699,7 +698,7 @@ static void walk_relocs(int (*process)(struct section *sec, Elf_Rel *rel,
  *
  */
 static int per_cpu_shndx	= -1;
-static Elf_Addr per_cpu_load_addr;
+Elf_Addr per_cpu_load_addr;
 
 static void percpu_init(void)
 {
@@ -770,9 +769,12 @@ static int do_reloc64(struct section *sec, Elf_Rel *rel, ElfW(Sym) *sym,
 		break;
 
 	case R_X86_64_PC32:
+	case R_X86_64_PLT32:
 		/*
 		 * PC relative relocations don't need to be adjusted unless
 		 * referencing a percpu symbol.
+		 *
+		 * NB: R_X86_64_PLT32 can be treated as R_X86_64_PC32.
 		 */
 		if (is_percpu_sym(sym, symname))
 			add_reloc(&relocs32neg, offset);
@@ -993,12 +995,11 @@ static void emit_relocs(int as_text, int use_real_mode)
 		die("Segment relocations found but --realmode not specified\n");
 
 	/* Order the relocations for more efficient processing */
+	sort_relocs(&relocs16);
 	sort_relocs(&relocs32);
 #if ELF_BITS == 64
 	sort_relocs(&relocs32neg);
 	sort_relocs(&relocs64);
-#else
-	sort_relocs(&relocs16);
 #endif
 
 	/* Print the relocations */
@@ -1045,29 +1046,6 @@ static void emit_relocs(int as_text, int use_real_mode)
 	}
 }
 
-/*
- * As an aid to debugging problems with different linkers
- * print summary information about the relocs.
- * Since different linkers tend to emit the sections in
- * different orders we use the section names in the output.
- */
-static int do_reloc_info(struct section *sec, Elf_Rel *rel, ElfW(Sym) *sym,
-				const char *symname)
-{
-	printf("%s\t%s\t%s\t%s\n",
-		sec_name(sec->shdr.sh_info),
-		rel_type(ELF_R_TYPE(rel->r_info)),
-		symname,
-		sec_name(sym->st_shndx));
-	return 0;
-}
-
-static void print_reloc_info(void)
-{
-	printf("reloc section\treloc type\tsymbol\tsymbol section\n");
-	walk_relocs(do_reloc_info);
-}
-
 #if ELF_BITS == 64
 # define process process_64
 #else
@@ -1075,8 +1053,7 @@ static void print_reloc_info(void)
 #endif
 
 void process(FILE *fp, int use_real_mode, int as_text,
-	     int show_absolute_syms, int show_absolute_relocs,
-	     int show_reloc_info)
+	     int show_absolute_syms, int show_absolute_relocs)
 {
 	regex_init(use_real_mode);
 	read_ehdr(fp);
@@ -1092,10 +1069,6 @@ void process(FILE *fp, int use_real_mode, int as_text,
 	}
 	if (show_absolute_relocs) {
 		print_absolute_relocs();
-		return;
-	}
-	if (show_reloc_info) {
-		print_reloc_info();
 		return;
 	}
 	emit_relocs(as_text, use_real_mode);

@@ -16,6 +16,7 @@
 #include <linux/device-mapper.h>
 #include <crypto/hash.h>
 
+#define DM_VERITY_IO_VEC_INLINE		16
 #define DM_VERITY_MAX_LEVELS		63
 
 enum verity_mode {
@@ -29,18 +30,15 @@ enum verity_block_type {
 	DM_VERITY_BLOCK_TYPE_METADATA
 };
 
-struct dm_verity_fec;
-
 struct dm_verity {
 	struct dm_dev *data_dev;
 	struct dm_dev *hash_dev;
 	struct dm_target *ti;
 	struct dm_bufio_client *bufio;
 	char *alg_name;
-	struct crypto_ahash *tfm;
+	struct crypto_shash *tfm;
 	u8 *root_digest;	/* digest of the root block */
 	u8 *salt;		/* salt: its size is salt_size */
-	u8 *zero_digest;	/* digest for a zero block */
 	unsigned salt_size;
 	sector_t data_start;	/* data offset in 512-byte sectors */
 	sector_t hash_start;	/* hash start in blocks */
@@ -52,17 +50,17 @@ struct dm_verity {
 	unsigned char levels;	/* the number of tree levels */
 	unsigned char version;
 	unsigned digest_size;	/* digest size for the current hash algorithm */
-	unsigned int ahash_reqsize;/* the size of temporary space for crypto */
+	unsigned shash_descsize;/* the size of temporary space for crypto */
 	int hash_failed;	/* set to 1 if hash of any block failed */
 	enum verity_mode mode;	/* mode for handling verification errors */
 	unsigned corrupted_errs;/* Number of errors for corrupted blocks */
+
+	mempool_t *vec_mempool;	/* mempool of bio vector */
 
 	struct workqueue_struct *verify_wq;
 
 	/* starting blocks for each tree level. 0 is the lowest level. */
 	sector_t hash_level_block[DM_VERITY_MAX_LEVELS];
-
-	struct dm_verity_fec *fec;	/* forward error correction */
 };
 
 struct dm_verity_io {
@@ -74,56 +72,48 @@ struct dm_verity_io {
 	sector_t block;
 	unsigned n_blocks;
 
-	struct bvec_iter iter;
+	/* saved bio vector */
+	struct bio_vec *io_vec;
+	unsigned io_vec_size;
 
 	struct work_struct work;
+
+	/* A space for short vectors; longer vectors are allocated separately. */
+	struct bio_vec io_vec_inline[DM_VERITY_IO_VEC_INLINE];
 
 	/*
 	 * Three variably-size fields follow this struct:
 	 *
-	 * u8 hash_req[v->ahash_reqsize];
+	 * u8 hash_desc[v->shash_descsize];
 	 * u8 real_digest[v->digest_size];
 	 * u8 want_digest[v->digest_size];
 	 *
-	 * To access them use: verity_io_hash_req(), verity_io_real_digest()
-	 * and verity_io_want_digest().
+	 * To access them use: io_hash_desc(), io_real_digest() and io_want_digest().
 	 */
 };
 
-static inline struct ahash_request *verity_io_hash_req(struct dm_verity *v,
+static inline struct shash_desc *verity_io_hash_desc(struct dm_verity *v,
 						     struct dm_verity_io *io)
 {
-	return (struct ahash_request *)(io + 1);
+	return (struct shash_desc *)(io + 1);
 }
 
 static inline u8 *verity_io_real_digest(struct dm_verity *v,
 					struct dm_verity_io *io)
 {
-	return (u8 *)(io + 1) + v->ahash_reqsize;
+	return (u8 *)(io + 1) + v->shash_descsize;
 }
 
 static inline u8 *verity_io_want_digest(struct dm_verity *v,
 					struct dm_verity_io *io)
 {
-	return (u8 *)(io + 1) + v->ahash_reqsize + v->digest_size;
+	return (u8 *)(io + 1) + v->shash_descsize + v->digest_size;
 }
 
-static inline u8 *verity_io_digest_end(struct dm_verity *v,
-				       struct dm_verity_io *io)
-{
-	return verity_io_want_digest(v, io) + v->digest_size;
-}
-
-extern int verity_for_bv_block(struct dm_verity *v, struct dm_verity_io *io,
-			       struct bvec_iter *iter,
-			       int (*process)(struct dm_verity *v,
-					      struct dm_verity_io *io,
-					      u8 *data, size_t len));
-
-extern int verity_hash(struct dm_verity *v, struct ahash_request *req,
+extern int verity_hash(struct dm_verity *v, struct shash_desc *desc,
 		       const u8 *data, size_t len, u8 *digest);
 
 extern int verity_hash_for_block(struct dm_verity *v, struct dm_verity_io *io,
-				 sector_t block, u8 *digest, bool *is_zero);
+				 sector_t block, u8 *digest);
 
 #endif /* DM_VERITY_H */

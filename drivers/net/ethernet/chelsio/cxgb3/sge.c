@@ -298,7 +298,7 @@ static void free_tx_desc(struct adapter *adapter, struct sge_txq *q,
 			if (need_unmap)
 				unmap_skb(d->skb, q, cidx, pdev);
 			if (d->eop) {
-				dev_consume_skb_any(d->skb);
+				kfree_skb(d->skb);
 				d->skb = NULL;
 			}
 		}
@@ -620,7 +620,7 @@ static void *alloc_ring(struct pci_dev *pdev, size_t nelem, size_t elem_size,
 {
 	size_t len = nelem * elem_size;
 	void *s = NULL;
-	void *p = dma_alloc_coherent(&pdev->dev, len, phys, GFP_KERNEL);
+	void *p = dma_zalloc_coherent(&pdev->dev, len, phys, GFP_KERNEL);
 
 	if (!p)
 		return NULL;
@@ -633,7 +633,6 @@ static void *alloc_ring(struct pci_dev *pdev, size_t nelem, size_t elem_size,
 		}
 		*(void **)metadata = s;
 	}
-	memset(p, 0, len);
 	return p;
 }
 
@@ -1231,7 +1230,7 @@ static void write_tx_pkt_wr(struct adapter *adap, struct sk_buff *skb,
 			cpl->wr.wr_lo = htonl(V_WR_LEN(flits) | V_WR_GEN(gen) |
 					      V_WR_TID(q->token));
 			wr_gen2(d, gen);
-			dev_consume_skb_any(skb);
+			kfree_skb(skb);
 			return;
 		}
 
@@ -1277,7 +1276,7 @@ netdev_tx_t t3_eth_xmit(struct sk_buff *skb, struct net_device *dev)
 	 * anything shorter than an Ethernet header.
 	 */
 	if (unlikely(skb->len < ETH_HLEN)) {
-		dev_kfree_skb_any(skb);
+		dev_kfree_skb(skb);
 		return NETDEV_TX_OK;
 	}
 
@@ -1431,7 +1430,7 @@ static inline int check_desc_avail(struct adapter *adap, struct sge_txq *q,
 		struct sge_qset *qs = txq_to_qset(q, qid);
 
 		set_bit(qid, &qs->txq_stopped);
-		smp_mb__after_atomic();
+		smp_mb__after_clear_bit();
 
 		if (should_restart_tx(q) &&
 		    test_and_clear_bit(qid, &qs->txq_stopped))
@@ -1544,7 +1543,7 @@ static void restart_ctrlq(unsigned long data)
 
 	if (!skb_queue_empty(&q->sendq)) {
 		set_bit(TXQ_CTRL, &qs->txq_stopped);
-		smp_mb__after_atomic();
+		smp_mb__after_clear_bit();
 
 		if (should_restart_tx(q) &&
 		    test_and_clear_bit(TXQ_CTRL, &qs->txq_stopped))
@@ -1756,7 +1755,7 @@ again:	reclaim_completed_tx(adap, q, TX_RECLAIM_CHUNK);
 
 		if (unlikely(q->size - q->in_use < ndesc)) {
 			set_bit(TXQ_OFLD, &qs->txq_stopped);
-			smp_mb__after_atomic();
+			smp_mb__after_clear_bit();
 
 			if (should_restart_tx(q) &&
 			    test_and_clear_bit(TXQ_OFLD, &qs->txq_stopped))
@@ -1909,7 +1908,7 @@ static int ofld_poll(struct napi_struct *napi, int budget)
 		__skb_queue_head_init(&queue);
 		skb_queue_splice_init(&q->rx_queue, &queue);
 		if (skb_queue_empty(&queue)) {
-			napi_complete_done(napi, work_done);
+			napi_complete(napi);
 			spin_unlock_irq(&q->lock);
 			return work_done;
 		}
@@ -2348,7 +2347,7 @@ static int process_responses(struct adapter *adap, struct sge_qset *qs,
 			if (!skb)
 				goto no_mem;
 
-			__skb_put_data(skb, r, AN_PKT_SIZE);
+			memcpy(__skb_put(skb, AN_PKT_SIZE), r, AN_PKT_SIZE);
 			skb->data[0] = CPL_ASYNC_NOTIF;
 			rss_hi = htonl(CPL_ASYNC_NOTIF << 24);
 			q->async_notif++;
@@ -2480,7 +2479,7 @@ static int napi_rx_handler(struct napi_struct *napi, int budget)
 	int work_done = process_responses(adap, qs, budget);
 
 	if (likely(work_done < budget)) {
-		napi_complete_done(napi, work_done);
+		napi_complete(napi);
 
 		/*
 		 * Because we don't atomically flush the following

@@ -161,7 +161,7 @@ static int rds_rdma_listen_init(void)
 		return ret;
 	}
 
-	sin.sin_family = AF_INET;
+	sin.sin_family = AF_INET,
 	sin.sin_addr.s_addr = (__force u32)htonl(INADDR_ANY);
 	sin.sin_port = (__force u16)htons(RDS_PORT);
 
@@ -206,13 +206,18 @@ static int rds_rdma_init(void)
 {
 	int ret;
 
-	ret = rds_ib_init();
+	ret = rds_rdma_listen_init();
 	if (ret)
 		goto out;
 
-	ret = rds_rdma_listen_init();
+	ret = rds_ib_init();
 	if (ret)
-		rds_ib_exit();
+		goto err_ib_init;
+
+	goto out;
+
+err_ib_init:
+	rds_rdma_listen_stop();
 out:
 	return ret;
 }

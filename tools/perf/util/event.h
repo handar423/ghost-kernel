@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __PERF_RECORD_H
 #define __PERF_RECORD_H
 
@@ -38,13 +37,6 @@ struct comm_event {
 	struct perf_event_header header;
 	u32 pid, tid;
 	char comm[16];
-};
-
-struct namespaces_event {
-	struct perf_event_header header;
-	u32 pid, tid;
-	u64 nr_namespaces;
-	struct perf_ns_link_info link_info[];
 };
 
 struct fork_event {
@@ -205,6 +197,7 @@ struct perf_sample {
 	u32 flags;
 	u16 insn_len;
 	u8  cpumode;
+	u16 misc;
 	char insn[MAX_INSN];
 	void *raw_data;
 	struct ip_callchain *callchain;
@@ -624,7 +617,6 @@ union perf_event {
 	struct mmap_event		mmap;
 	struct mmap2_event		mmap2;
 	struct comm_event		comm;
-	struct namespaces_event		namespaces;
 	struct fork_event		fork;
 	struct lost_event		lost;
 	struct lost_samples_event	lost_samples;
@@ -729,10 +721,6 @@ int perf_event__process_switch(struct perf_tool *tool,
 			       union perf_event *event,
 			       struct perf_sample *sample,
 			       struct machine *machine);
-int perf_event__process_namespaces(struct perf_tool *tool,
-				   union perf_event *event,
-				   struct perf_sample *sample,
-				   struct machine *machine);
 int perf_event__process_mmap(struct perf_tool *tool,
 			     union perf_event *event,
 			     struct perf_sample *sample,
@@ -749,6 +737,10 @@ int perf_event__process_exit(struct perf_tool *tool,
 			     union perf_event *event,
 			     struct perf_sample *sample,
 			     struct machine *machine);
+int perf_tool__process_synth_event(struct perf_tool *tool,
+				   union perf_event *event,
+				   struct machine *machine,
+				   perf_event__handler_t process);
 int perf_event__process(struct perf_tool *tool,
 			union perf_event *event,
 			struct perf_sample *sample,
@@ -774,19 +766,12 @@ size_t perf_event__sample_event_size(const struct perf_sample *sample, u64 type,
 				     u64 read_format);
 int perf_event__synthesize_sample(union perf_event *event, u64 type,
 				  u64 read_format,
-				  const struct perf_sample *sample,
-				  bool swapped);
+				  const struct perf_sample *sample);
 
 pid_t perf_event__synthesize_comm(struct perf_tool *tool,
 				  union perf_event *event, pid_t pid,
 				  perf_event__handler_t process,
 				  struct machine *machine);
-
-int perf_event__synthesize_namespaces(struct perf_tool *tool,
-				      union perf_event *event,
-				      pid_t pid, pid_t tgid,
-				      perf_event__handler_t process,
-				      struct machine *machine);
 
 int perf_event__synthesize_mmap_events(struct perf_tool *tool,
 				       union perf_event *event,
@@ -795,6 +780,10 @@ int perf_event__synthesize_mmap_events(struct perf_tool *tool,
 				       struct machine *machine,
 				       bool mmap_data,
 				       unsigned int proc_map_timeout);
+
+int perf_event__synthesize_extra_kmaps(struct perf_tool *tool,
+				       perf_event__handler_t process,
+				       struct machine *machine);
 
 size_t perf_event__fprintf_comm(union perf_event *event, FILE *fp);
 size_t perf_event__fprintf_mmap(union perf_event *event, FILE *fp);
@@ -805,7 +794,6 @@ size_t perf_event__fprintf_itrace_start(union perf_event *event, FILE *fp);
 size_t perf_event__fprintf_switch(union perf_event *event, FILE *fp);
 size_t perf_event__fprintf_thread_map(union perf_event *event, FILE *fp);
 size_t perf_event__fprintf_cpu_map(union perf_event *event, FILE *fp);
-size_t perf_event__fprintf_namespaces(union perf_event *event, FILE *fp);
 size_t perf_event__fprintf(union perf_event *event, FILE *fp);
 
 int kallsyms__get_function_start(const char *kallsyms_filename,

@@ -98,7 +98,6 @@ static int level_mask = LOG_ERROR;
 
 module_param(level_mask, int, 0644);
 
-#ifndef MODULE
 static int __init fas216_log_setup(char *str)
 {
 	char *s;
@@ -139,7 +138,6 @@ static int __init fas216_log_setup(char *str)
 }
 
 __setup("fas216_logging=", fas216_log_setup);
-#endif
 
 static inline unsigned char fas216_readb(FAS216_Info *info, unsigned int reg)
 {
@@ -1822,8 +1820,7 @@ static void fas216_allocate_tag(FAS216_Info *info, struct scsi_cmnd *SCpnt)
 			SCpnt->tag = SCpnt->device->current_tag;
 	} else
 #endif
-		set_bit(SCpnt->device->id * 8 +
-			(u8)(SCpnt->device->lun & 0x7), info->busyluns);
+		set_bit(SCpnt->device->id * 8 + SCpnt->device->lun, info->busyluns);
 
 	info->stats.removes += 1;
 	switch (SCpnt->cmnd[0]) {
@@ -2170,8 +2167,7 @@ static void fas216_done(FAS216_Info *info, unsigned int result)
 	 * status.
 	 */
 	info->device[SCpnt->device->id].parity_check = 0;
-	clear_bit(SCpnt->device->id * 8 +
-		  (u8)(SCpnt->device->lun & 0x7), info->busyluns);
+	clear_bit(SCpnt->device->id * 8 + SCpnt->device->lun, info->busyluns);
 
 	fn = (void (*)(FAS216_Info *, struct scsi_cmnd *, unsigned int))SCpnt->host_scribble;
 	fn(info, SCpnt, result);
@@ -2318,9 +2314,9 @@ DEF_SCSI_QCMD(fas216_noqueue_command)
  * Error handler timeout function.  Indicate that we timed out,
  * and wake up any error handler process so it can continue.
  */
-static void fas216_eh_timer(struct timer_list *t)
+static void fas216_eh_timer(unsigned long data)
 {
-	FAS216_Info *info = from_timer(info, t, eh_timer);
+	FAS216_Info *info = (FAS216_Info *)data;
 
 	fas216_log(info, LOG_ERROR, "error handling timed out\n");
 
@@ -2398,8 +2394,7 @@ static enum res_find fas216_find_command(FAS216_Info *info,
 		 * been set.
 		 */
 		info->origSCpnt = NULL;
-		clear_bit(SCpnt->device->id * 8 +
-			  (u8)(SCpnt->device->lun & 0x7), info->busyluns);
+		clear_bit(SCpnt->device->id * 8 + SCpnt->device->lun, info->busyluns);
 		printk("waiting for execution ");
 		res = res_success;
 	} else
@@ -2849,7 +2844,9 @@ int fas216_init(struct Scsi_Host *host)
 	info->rst_dev_status = -1;
 	info->rst_bus_status = -1;
 	init_waitqueue_head(&info->eh_wait);
-	timer_setup(&info->eh_timer, fas216_eh_timer, 0);
+	init_timer(&info->eh_timer);
+	info->eh_timer.data  = (unsigned long)info;
+	info->eh_timer.function = fas216_eh_timer;
 	
 	spin_lock_init(&info->host_lock);
 
@@ -2990,17 +2987,17 @@ void fas216_print_devices(FAS216_Info *info, struct seq_file *m)
 	struct fas216_device *dev;
 	struct scsi_device *scd;
 
-	seq_puts(m, "Device/Lun TaggedQ       Parity   Sync\n");
+	seq_printf(m, "Device/Lun TaggedQ       Parity   Sync\n");
 
 	shost_for_each_device(scd, info->host) {
 		dev = &info->device[scd->id];
-		seq_printf(m, "     %d/%llu   ", scd->id, scd->lun);
+		seq_printf(m, "     %d/%d   ", scd->id, scd->lun);
 		if (scd->tagged_supported)
 			seq_printf(m, "%3sabled(%3d) ",
 				     scd->simple_tags ? "en" : "dis",
 				     scd->current_tag);
 		else
-			seq_puts(m, "unsupported   ");
+			seq_printf(m, "unsupported   ");
 
 		seq_printf(m, "%3sabled ", dev->parity_enabled ? "en" : "dis");
 
@@ -3008,7 +3005,7 @@ void fas216_print_devices(FAS216_Info *info, struct seq_file *m)
 			seq_printf(m, "offset %d, %d ns\n",
 				     dev->sof, dev->period * 4);
 		else
-			seq_puts(m, "async\n");
+			seq_printf(m, "async\n");
 	}
 }
 

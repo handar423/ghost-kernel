@@ -20,6 +20,7 @@
  */
 
 #include <linux/module.h>
+#include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/i2c.h>
 #include <linux/mutex.h>
@@ -203,7 +204,7 @@ static ssize_t tsl2550_store_power_state(struct device *dev,
 	unsigned long val = simple_strtoul(buf, NULL, 10);
 	int ret;
 
-	if (val > 1)
+	if (val < 0 || val > 1)
 		return -EINVAL;
 
 	mutex_lock(&data->update_lock);
@@ -235,7 +236,7 @@ static ssize_t tsl2550_store_operating_mode(struct device *dev,
 	unsigned long val = simple_strtoul(buf, NULL, 10);
 	int ret;
 
-	if (val > 1)
+	if (val < 0 || val > 1)
 		return -EINVAL;
 
 	if (data->power_state == 0)
@@ -443,16 +444,10 @@ static const struct i2c_device_id tsl2550_id[] = {
 };
 MODULE_DEVICE_TABLE(i2c, tsl2550_id);
 
-static const struct of_device_id tsl2550_of_match[] = {
-	{ .compatible = "taos,tsl2550" },
-	{ }
-};
-MODULE_DEVICE_TABLE(of, tsl2550_of_match);
-
 static struct i2c_driver tsl2550_driver = {
 	.driver = {
 		.name	= TSL2550_DRV_NAME,
-		.of_match_table = tsl2550_of_match,
+		.owner	= THIS_MODULE,
 		.pm	= TSL2550_PM_OPS,
 	},
 	.probe	= tsl2550_probe,

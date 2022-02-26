@@ -17,9 +17,9 @@
 #include <linux/mm.h>
 #include <linux/slab.h>
 #include <linux/sched.h>
-#include <linux/sched/task.h>
-#include <linux/sched/task_stack.h>
-#include <linux/thread_info.h>
+#include <linux/atomic.h>
+#include <linux/jump_label.h>
+#include <asm/thread_info.h>
 #include <asm/sections.h>
 
 /*
@@ -105,13 +105,13 @@ static inline const char *check_kernel_text_object(const void *ptr,
 	 * __pa() is not just the reverse of __va(). This can be detected
 	 * and checked:
 	 */
-	textlow_linear = (unsigned long)lm_alias(textlow);
+	textlow_linear = (unsigned long)__va(__pa(textlow));
 	/* No different mapping: we're done. */
 	if (textlow_linear == textlow)
 		return NULL;
 
 	/* Check the secondary mapping... */
-	texthigh_linear = (unsigned long)lm_alias(texthigh);
+	texthigh_linear = (unsigned long)__va(__pa(texthigh));
 	if (overlaps(ptr, n, textlow_linear, texthigh_linear))
 		return "<linear kernel text>";
 
@@ -121,7 +121,7 @@ static inline const char *check_kernel_text_object(const void *ptr,
 static inline const char *check_bogus_address(const void *ptr, unsigned long n)
 {
 	/* Reject if object wraps past end of memory. */
-	if ((unsigned long)ptr + n < (unsigned long)ptr)
+	if (ptr + n < ptr)
 		return "<wrapped address>";
 
 	/* Reject if NULL or ZERO-allocation. */
@@ -200,6 +200,14 @@ static inline const char *check_heap_object(const void *ptr, unsigned long n,
 {
 	struct page *page;
 
+	/*
+	 * Some architectures (arm64) return true for virt_addr_valid() on
+	 * vmalloced addresses. Work around this by checking for vmalloc
+	 * first.
+	 */
+	if (is_vmalloc_addr(ptr))
+		return NULL;
+
 	if (!virt_addr_valid(ptr))
 		return NULL;
 
@@ -213,6 +221,8 @@ static inline const char *check_heap_object(const void *ptr, unsigned long n,
 	return check_page_span(ptr, n, page, to_user);
 }
 
+static struct static_key bypass_usercopy_checks = STATIC_KEY_INIT_FALSE;
+
 /*
  * Validates that the given object is:
  * - not bogus address
@@ -222,6 +232,9 @@ static inline const char *check_heap_object(const void *ptr, unsigned long n,
 void __check_object_size(const void *ptr, unsigned long n, bool to_user)
 {
 	const char *err;
+
+	if (static_key_enabled(&bypass_usercopy_checks))
+		return;
 
 	/* Skip all tests if size is zero. */
 	if (!n)
@@ -264,3 +277,22 @@ report:
 	report_usercopy(ptr, n, to_user, err);
 }
 EXPORT_SYMBOL(__check_object_size);
+
+
+static bool enable_checks __initdata = true;
+
+static int __init parse_hardened_usercopy(char *str)
+{
+	return strtobool(str, &enable_checks);
+}
+
+__setup("hardened_usercopy=", parse_hardened_usercopy);
+
+static int __init set_hardened_usercopy(void)
+{
+	if (enable_checks == false)
+		static_key_slow_inc(&bypass_usercopy_checks);
+	return 1;
+}
+
+late_initcall(set_hardened_usercopy);

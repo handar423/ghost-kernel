@@ -18,7 +18,6 @@
 #include <linux/skbuff.h>
 #include <linux/timer.h>
 #include <linux/in.h>
-#include <linux/refcount.h>
 #include <uapi/linux/igmp.h>
 
 static inline struct igmphdr *igmp_hdr(const struct sk_buff *skb)
@@ -37,6 +36,10 @@ static inline struct igmpv3_query *
 {
 	return (struct igmpv3_query *)skb_transport_header(skb);
 }
+
+extern int sysctl_igmp_max_memberships;
+extern int sysctl_igmp_max_msf;
+extern int sysctl_igmp_qrv;
 
 struct ip_sf_socklist {
 	unsigned int		sl_max;
@@ -82,10 +85,9 @@ struct ip_mc_list {
 		struct ip_mc_list *next;
 		struct ip_mc_list __rcu *next_rcu;
 	};
-	struct ip_mc_list __rcu *next_hash;
 	struct timer_list	timer;
 	int			users;
-	refcount_t		refcnt;
+	atomic_t		refcnt;
 	spinlock_t		lock;
 	char			tm_running;
 	char			reporter;
@@ -106,9 +108,11 @@ struct ip_mc_list {
 #define IGMPV3_QQIC(value) IGMPV3_EXP(0x80, 4, 3, value)
 #define IGMPV3_MRC(value) IGMPV3_EXP(0x80, 4, 3, value)
 
-extern int ip_check_mc_rcu(struct in_device *dev, __be32 mc_addr, __be32 src_addr, u8 proto);
+extern int ip_check_mc_rcu(struct in_device *dev, __be32 mc_addr, __be32 src_addr, u16 proto);
 extern int igmp_rcv(struct sk_buff *);
 extern int ip_mc_join_group(struct sock *sk, struct ip_mreqn *imr);
+extern int ip_mc_join_group_ssm(struct sock *sk, struct ip_mreqn *imr,
+				unsigned int mode);
 extern int ip_mc_leave_group(struct sock *sk, struct ip_mreqn *imr);
 extern void ip_mc_drop_socket(struct sock *sk);
 extern int ip_mc_source(int add, int omode, struct sock *sk,
@@ -118,8 +122,7 @@ extern int ip_mc_msfget(struct sock *sk, struct ip_msfilter *msf,
 		struct ip_msfilter __user *optval, int __user *optlen);
 extern int ip_mc_gsfget(struct sock *sk, struct group_filter *gsf,
 		struct group_filter __user *optval, int __user *optlen);
-extern int ip_mc_sf_allow(struct sock *sk, __be32 local, __be32 rmt,
-			  int dif, int sdif);
+extern int ip_mc_sf_allow(struct sock *sk, __be32 local, __be32 rmt, int dif);
 extern void ip_mc_init_dev(struct in_device *);
 extern void ip_mc_destroy_dev(struct in_device *);
 extern void ip_mc_up(struct in_device *);

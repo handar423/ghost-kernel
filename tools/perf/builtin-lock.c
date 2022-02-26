@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 #include <errno.h>
 #include <inttypes.h>
 #include "builtin.h"
@@ -862,7 +861,6 @@ static int __cmd_report(bool display_info)
 	struct perf_tool eops = {
 		.sample		 = process_sample_event,
 		.comm		 = perf_event__process_comm,
-		.namespaces	 = perf_event__process_namespaces,
 		.ordered_events	 = true,
 	};
 	struct perf_data data = {

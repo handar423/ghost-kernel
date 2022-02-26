@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 #ifndef _UAPI_ASM_PARISC_SIGNAL_H
 #define _UAPI_ASM_PARISC_SIGNAL_H
 
@@ -9,12 +8,12 @@
 #define SIGTRAP		 5
 #define SIGABRT		 6
 #define SIGIOT		 6
-#define SIGSTKFLT	 7
+#define SIGEMT		 7
 #define SIGFPE		 8
 #define SIGKILL		 9
 #define SIGBUS		10
 #define SIGSEGV		11
-#define SIGXCPU		12
+#define SIGSYS		12 /* Linux doesn't use this */
 #define SIGPIPE		13
 #define SIGALRM		14
 #define SIGTERM		15
@@ -33,12 +32,16 @@
 #define SIGTTIN		27
 #define SIGTTOU		28
 #define SIGURG		29
-#define SIGXFSZ		30
-#define SIGUNUSED	31
-#define SIGSYS		31 /* Linux doesn't use this */
+#define SIGLOST		30 /* Linux doesn't use this either */
+#define	SIGUNUSED	31
+#define SIGRESERVE	SIGUNUSED
+
+#define SIGXCPU		33
+#define SIGXFSZ		34
+#define SIGSTKFLT	36
 
 /* These should not be considered constants from userland.  */
-#define SIGRTMIN	32
+#define SIGRTMIN	37
 #define SIGRTMAX	_NSIG /* it's 44 under HP/UX */
 
 /*
@@ -66,6 +69,8 @@
 #define SA_NOMASK	SA_NODEFER
 #define SA_ONESHOT	SA_RESETHAND
 
+#define SA_RESTORER	0x04000000 /* obsolete -- ignored */
+
 #define MINSIGSTKSZ	2048
 #define SIGSTKSZ	8192
 
@@ -86,7 +91,7 @@
 struct siginfo;
 
 /* Type of a signal handler.  */
-#if defined(__LP64__)
+#ifdef CONFIG_64BIT
 /* function pointers on 64-bit parisc are pointers to little structs and the
  * compiler doesn't support code which changes or tests the address of
  * the function in the little struct.  This is really ugly -PB

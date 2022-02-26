@@ -35,11 +35,12 @@
 #include <linux/if_arp.h>
 #include <linux/skbuff.h>
 #include <net/sock.h>
-#include <linux/uaccess.h>
+#include <asm/uaccess.h>
 #include <linux/mm.h>
 #include <linux/interrupt.h>
 #include <linux/notifier.h>
 #include <linux/stat.h>
+#include <linux/netfilter.h>
 #include <linux/module.h>
 #include <linux/lapb.h>
 #include <linux/init.h>
@@ -306,7 +307,7 @@ static const struct net_device_ops lapbeth_netdev_ops = {
 static void lapbeth_setup(struct net_device *dev)
 {
 	dev->netdev_ops	     = &lapbeth_netdev_ops;
-	dev->needs_free_netdev = true;
+	dev->destructor	     = free_netdev;
 	dev->type            = ARPHRD_X25;
 	dev->hard_header_len = 3;
 	dev->mtu             = 1000;
@@ -324,8 +325,8 @@ static int lapbeth_new_device(struct net_device *dev)
 
 	ASSERT_RTNL();
 
-	ndev = alloc_netdev(sizeof(*lapbeth), "lapb%d", NET_NAME_UNKNOWN,
-			    lapbeth_setup);
+	ndev = alloc_netdev(sizeof(*lapbeth), "lapb%d", 
+			   lapbeth_setup);
 	if (!ndev)
 		goto out;
 
@@ -346,6 +347,7 @@ out:
 fail:
 	dev_put(dev);
 	free_netdev(ndev);
+	kfree(lapbeth);
 	goto out;
 }
 
@@ -417,7 +419,7 @@ static int __init lapbeth_init_driver(void)
 {
 	dev_add_pack(&lapbeth_packet_type);
 
-	register_netdevice_notifier(&lapbeth_dev_notifier);
+	register_netdevice_notifier_rh(&lapbeth_dev_notifier);
 
 	printk(banner);
 
@@ -431,7 +433,7 @@ static void __exit lapbeth_cleanup_driver(void)
 	struct list_head *entry, *tmp;
 
 	dev_remove_pack(&lapbeth_packet_type);
-	unregister_netdevice_notifier(&lapbeth_dev_notifier);
+	unregister_netdevice_notifier_rh(&lapbeth_dev_notifier);
 
 	rtnl_lock();
 	list_for_each_safe(entry, tmp, &lapbeth_devices) {

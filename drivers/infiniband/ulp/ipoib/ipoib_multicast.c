@@ -64,9 +64,6 @@ struct ipoib_mcast_iter {
 	unsigned int       send_only;
 };
 
-/* join state that allows creating mcg with sendonly member request */
-#define SENDONLY_FULLMEMBER_JOIN	8
-
 /*
  * This should be called with the priv->lock held
  */
@@ -140,7 +137,7 @@ static struct ipoib_mcast *ipoib_mcast_alloc(struct net_device *dev,
 {
 	struct ipoib_mcast *mcast;
 
-	mcast = kzalloc(sizeof *mcast, can_sleep ? GFP_KERNEL : GFP_ATOMIC);
+	mcast = kzalloc(sizeof(*mcast), can_sleep ? GFP_KERNEL : GFP_ATOMIC);
 	if (!mcast)
 		return NULL;
 
@@ -334,15 +331,6 @@ void ipoib_mcast_carrier_on_task(struct work_struct *work)
 		ipoib_dbg(priv, "Keeping carrier off until IB port is active\n");
 		return;
 	}
-	/*
-	 * Check if can send sendonly MCG's with sendonly-fullmember join state.
-	 * It done here after the successfully join to the broadcast group,
-	 * because the broadcast group must always be joined first and is always
-	 * re-joined if the SM changes substantially.
-	 */
-	priv->sm_fullmember_sendonly_support =
-		ib_sa_sendonly_fullmem_support(&ipoib_sa_client,
-					       priv->ca, priv->port);
 	/*
 	 * Take rtnl_lock to avoid racing with ipoib_stop() and
 	 * turning the carrier back on while a device is being
@@ -538,9 +526,7 @@ static int ipoib_mcast_join(struct net_device *dev, struct ipoib_mcast *mcast)
 		 * most closely emulates the behavior, from a user space
 		 * application perspective, of Ethernet multicast operation.
 		 */
-		if (test_bit(IPOIB_MCAST_FLAG_SENDONLY, &mcast->flags) &&
-		    priv->sm_fullmember_sendonly_support)
-			/* SM supports sendonly-fullmember, otherwise fallback to full-member */
+		if (test_bit(IPOIB_MCAST_FLAG_SENDONLY, &mcast->flags))
 			rec.join_state = SENDONLY_FULLMEMBER_JOIN;
 	}
 	spin_unlock_irq(&priv->lock);
@@ -822,6 +808,7 @@ void ipoib_mcast_send(struct net_device *dev, u8 *daddr, struct sk_buff *skb)
 			if (neigh && list_empty(&neigh->list)) {
 				kref_get(&mcast->ah->ref);
 				neigh->ah	= mcast->ah;
+				neigh->ah->valid = 1;
 				list_add_tail(&neigh->list, &mcast->neigh_list);
 			}
 		}
@@ -886,7 +873,6 @@ void ipoib_mcast_restart_task(struct work_struct *work)
 	struct netdev_hw_addr *ha;
 	struct ipoib_mcast *mcast, *tmcast;
 	LIST_HEAD(remove_list);
-	unsigned long flags;
 	struct ib_sa_mcmember_rec rec;
 
 	if (!test_bit(IPOIB_FLAG_OPER_UP, &priv->flags))
@@ -898,9 +884,8 @@ void ipoib_mcast_restart_task(struct work_struct *work)
 
 	ipoib_dbg_mcast(priv, "restarting multicast task\n");
 
-	local_irq_save(flags);
-	netif_addr_lock(dev);
-	spin_lock(&priv->lock);
+	netif_addr_lock_bh(dev);
+	spin_lock_irq(&priv->lock);
 
 	/*
 	 * Unfortunately, the networking core only gives us a list of all of
@@ -919,7 +904,7 @@ void ipoib_mcast_restart_task(struct work_struct *work)
 		if (!ipoib_mcast_addr_is_valid(ha->addr, dev->broadcast))
 			continue;
 
-		memcpy(mgid.raw, ha->addr + 4, sizeof mgid);
+		memcpy(mgid.raw, ha->addr + 4, sizeof(mgid));
 
 		mcast = __ipoib_mcast_find(dev, &mgid);
 		if (!mcast || test_bit(IPOIB_MCAST_FLAG_SENDONLY, &mcast->flags)) {
@@ -978,9 +963,8 @@ void ipoib_mcast_restart_task(struct work_struct *work)
 		}
 	}
 
-	spin_unlock(&priv->lock);
-	netif_addr_unlock(dev);
-	local_irq_restore(flags);
+	spin_unlock_irq(&priv->lock);
+	netif_addr_unlock_bh(dev);
 
 	ipoib_mcast_remove_list(&remove_list);
 
@@ -988,9 +972,9 @@ void ipoib_mcast_restart_task(struct work_struct *work)
 	 * Double check that we are still up
 	 */
 	if (test_bit(IPOIB_FLAG_OPER_UP, &priv->flags)) {
-		spin_lock_irqsave(&priv->lock, flags);
+		spin_lock_irq(&priv->lock);
 		__ipoib_mcast_schedule_join_thread(priv, NULL, 0);
-		spin_unlock_irqrestore(&priv->lock, flags);
+		spin_unlock_irq(&priv->lock);
 	}
 }
 
@@ -1000,7 +984,7 @@ struct ipoib_mcast_iter *ipoib_mcast_iter_init(struct net_device *dev)
 {
 	struct ipoib_mcast_iter *iter;
 
-	iter = kmalloc(sizeof *iter, GFP_KERNEL);
+	iter = kmalloc(sizeof(*iter), GFP_KERNEL);
 	if (!iter)
 		return NULL;
 

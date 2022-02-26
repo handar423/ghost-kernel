@@ -1,17 +1,18 @@
 # SPDX-License-Identifier: GPL-2.0
 # List of programs to build
 hostprogs-y := test_lru_dist
-hostprogs-y += sock_example
-hostprogs-y += fds_example
-hostprogs-y += sockex1
-hostprogs-y += sockex2
-hostprogs-y += sockex3
+#hostprogs-y += sock_example
+#hostprogs-y += fds_example
+#hostprogs-y += sockex1
+#hostprogs-y += sockex2
+#hostprogs-y += sockex3
 hostprogs-y += tracex1
 hostprogs-y += tracex2
 hostprogs-y += tracex3
 hostprogs-y += tracex4
 hostprogs-y += tracex5
 hostprogs-y += tracex6
+hostprogs-y += tracex7
 hostprogs-y += test_probe_write_user
 hostprogs-y += trace_output
 hostprogs-y += lathist
@@ -19,27 +20,28 @@ hostprogs-y += offwaketime
 hostprogs-y += spintest
 hostprogs-y += map_perf_test
 hostprogs-y += test_overhead
-hostprogs-y += test_cgrp2_array_pin
-hostprogs-y += test_cgrp2_attach
-hostprogs-y += test_cgrp2_attach2
-hostprogs-y += test_cgrp2_sock
-hostprogs-y += test_cgrp2_sock2
-hostprogs-y += xdp1
-hostprogs-y += xdp2
-hostprogs-y += xdp_router_ipv4
-hostprogs-y += test_current_task_under_cgroup
+#hostprogs-y += test_cgrp2_array_pin
+#hostprogs-y += test_cgrp2_attach
+#hostprogs-y += test_cgrp2_attach2
+#hostprogs-y += test_cgrp2_sock
+#hostprogs-y += test_cgrp2_sock2
+#hostprogs-y += xdp1
+#hostprogs-y += xdp2
+#hostprogs-y += xdp_router_ipv4
+#hostprogs-y += test_current_task_under_cgroup
 hostprogs-y += trace_event
-hostprogs-y += sampleip
-hostprogs-y += tc_l2_redirect
-hostprogs-y += lwt_len_hist
-hostprogs-y += xdp_tx_iptunnel
+#hostprogs-y += sampleip
+#hostprogs-y += tc_l2_redirect
+#hostprogs-y += lwt_len_hist
+#hostprogs-y += xdp_tx_iptunnel
 hostprogs-y += test_map_in_map
-hostprogs-y += per_socket_stats_example
-hostprogs-y += load_sock_ops
-hostprogs-y += xdp_redirect
-hostprogs-y += xdp_redirect_map
-hostprogs-y += xdp_redirect_cpu
-hostprogs-y += xdp_monitor
+#hostprogs-y += per_socket_stats_example
+#hostprogs-y += load_sock_ops
+#hostprogs-y += xdp_redirect
+#hostprogs-y += xdp_redirect_map
+#hostprogs-y += xdp_redirect_cpu
+#hostprogs-y += xdp_monitor
+#hostprogs-y += xdp_rxq_info
 hostprogs-y += syscall_tp
 
 # Libbpf dependencies
@@ -58,6 +60,7 @@ tracex3-objs := bpf_load.o $(LIBBPF) tracex3_user.o
 tracex4-objs := bpf_load.o $(LIBBPF) tracex4_user.o
 tracex5-objs := bpf_load.o $(LIBBPF) tracex5_user.o
 tracex6-objs := bpf_load.o $(LIBBPF) tracex6_user.o
+tracex7-objs := bpf_load.o $(LIBBPF) tracex7_user.o
 load_sock_ops-objs := bpf_load.o $(LIBBPF) load_sock_ops.o
 test_probe_write_user-objs := bpf_load.o $(LIBBPF) test_probe_write_user_user.o
 trace_output-objs := bpf_load.o $(LIBBPF) trace_output_user.o
@@ -88,25 +91,27 @@ xdp_redirect-objs := bpf_load.o $(LIBBPF) xdp_redirect_user.o
 xdp_redirect_map-objs := bpf_load.o $(LIBBPF) xdp_redirect_map_user.o
 xdp_redirect_cpu-objs := bpf_load.o $(LIBBPF) xdp_redirect_cpu_user.o
 xdp_monitor-objs := bpf_load.o $(LIBBPF) xdp_monitor_user.o
+xdp_rxq_info-objs := bpf_load.o $(LIBBPF) xdp_rxq_info_user.o
 syscall_tp-objs := bpf_load.o $(LIBBPF) syscall_tp_user.o
 
 # Tell kbuild to always build the programs
 always := $(hostprogs-y)
-always += sockex1_kern.o
-always += sockex2_kern.o
-always += sockex3_kern.o
+#always += sockex1_kern.o
+#always += sockex2_kern.o
+#always += sockex3_kern.o
 always += tracex1_kern.o
 always += tracex2_kern.o
 always += tracex3_kern.o
 always += tracex4_kern.o
 always += tracex5_kern.o
 always += tracex6_kern.o
-always += sock_flags_kern.o
+always += tracex7_kern.o
+#always += sock_flags_kern.o
 always += test_probe_write_user_kern.o
 always += trace_output_kern.o
-always += tcbpf1_kern.o
-always += tcbpf2_kern.o
-always += tc_l2_redirect_kern.o
+#always += tcbpf1_kern.o
+#always += tcbpf2_kern.o
+#always += tc_l2_redirect_kern.o
 always += lathist_kern.o
 always += offwaketime_kern.o
 always += spintest_kern.o
@@ -115,27 +120,29 @@ always += test_overhead_tp_kern.o
 always += test_overhead_kprobe_kern.o
 always += parse_varlen.o parse_simple.o parse_ldabs.o
 always += test_cgrp2_tc_kern.o
-always += xdp1_kern.o
-always += xdp2_kern.o
-always += xdp_router_ipv4_kern.o
+#always += xdp1_kern.o
+#always += xdp2_kern.o
+#always += xdp_router_ipv4_kern.o
 always += test_current_task_under_cgroup_kern.o
 always += trace_event_kern.o
 always += sampleip_kern.o
-always += lwt_len_hist_kern.o
-always += xdp_tx_iptunnel_kern.o
+#always += lwt_len_hist_kern.o
+#always += xdp_tx_iptunnel_kern.o
 always += test_map_in_map_kern.o
-always += cookie_uid_helper_example.o
-always += tcp_synrto_kern.o
-always += tcp_rwnd_kern.o
-always += tcp_bufs_kern.o
-always += tcp_cong_kern.o
-always += tcp_iw_kern.o
-always += tcp_clamp_kern.o
-always += tcp_basertt_kern.o
-always += xdp_redirect_kern.o
-always += xdp_redirect_map_kern.o
-always += xdp_redirect_cpu_kern.o
-always += xdp_monitor_kern.o
+#always += cookie_uid_helper_example.o
+#always += tcp_synrto_kern.o
+#always += tcp_rwnd_kern.o
+#always += tcp_bufs_kern.o
+#always += tcp_cong_kern.o
+#always += tcp_iw_kern.o
+#always += tcp_clamp_kern.o
+#always += tcp_basertt_kern.o
+#always += xdp_redirect_kern.o
+#always += xdp_redirect_map_kern.o
+#always += xdp_redirect_cpu_kern.o
+#always += xdp_monitor_kern.o
+#always += xdp_rxq_info_kern.o
+#always += xdp2skb_meta_kern.o
 always += syscall_tp_kern.o
 
 HOSTCFLAGS += -I$(objtree)/usr/include
@@ -155,6 +162,7 @@ HOSTLOADLIBES_tracex3 += -lelf
 HOSTLOADLIBES_tracex4 += -lelf -lrt
 HOSTLOADLIBES_tracex5 += -lelf
 HOSTLOADLIBES_tracex6 += -lelf
+HOSTLOADLIBES_tracex7 += -lelf
 HOSTLOADLIBES_test_cgrp2_sock2 += -lelf
 HOSTLOADLIBES_load_sock_ops += -lelf
 HOSTLOADLIBES_test_probe_write_user += -lelf
@@ -178,6 +186,7 @@ HOSTLOADLIBES_xdp_redirect += -lelf
 HOSTLOADLIBES_xdp_redirect_map += -lelf
 HOSTLOADLIBES_xdp_redirect_cpu += -lelf
 HOSTLOADLIBES_xdp_monitor += -lelf
+HOSTLOADLIBES_xdp_rxq_info += -lelf
 HOSTLOADLIBES_syscall_tp += -lelf
 
 # Allows pointing LLC/CLANG to a LLVM backend with bpf support, redefine on cmdline:
@@ -192,12 +201,15 @@ CLANG_ARCH_ARGS = -target $(ARCH)
 endif
 
 # Trick to allow make to be run from this directory
-all:
+all: $(LIBBPF)
 	$(MAKE) -C ../../ $(CURDIR)/
 
 clean:
 	$(MAKE) -C ../../ M=$(CURDIR) clean
 	@rm -f *~
+
+$(LIBBPF): FORCE
+	$(MAKE) -C $(dir $@) $(notdir $@)
 
 $(obj)/syscall_nrs.s:	$(src)/syscall_nrs.c
 	$(call if_changed_dep,cc_s_c)

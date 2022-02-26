@@ -21,7 +21,7 @@ http://www.t10.org/members/w_pqi2.htm
 
 Supported devices:
 ------------------
-<Controller names to be added as they become publicly available.>
+<Controller names to be added as they become publically available.>
 
 smartpqi specific entries in /sys
 -----------------------------
@@ -38,8 +38,8 @@ smartpqi specific entries in /sys
   The version attribute is read-only and will return the driver version
   and the controller firmware version.
   For example:
-              driver: 0.9.13-370
-              firmware: 0.01-522
+	driver: 0.9.13-370
+	firmware: 0.01-522
 
   smartpqi sas device attributes
   ------------------------------
@@ -77,4 +77,4 @@ smartpqi specific ioctls:
 	Allows "BMIC" and "CISS" commands to be passed through to the Smart Storage Array.
 	These are used extensively by the SSA Array Configuration Utility, SNMP storage
 	agents, etc.
-
+.

@@ -205,30 +205,10 @@ xfs_allocbt_init_key_from_rec(
 	union xfs_btree_key	*key,
 	union xfs_btree_rec	*rec)
 {
+	ASSERT(rec->alloc.ar_startblock != 0);
+
 	key->alloc.ar_startblock = rec->alloc.ar_startblock;
 	key->alloc.ar_blockcount = rec->alloc.ar_blockcount;
-}
-
-STATIC void
-xfs_bnobt_init_high_key_from_rec(
-	union xfs_btree_key	*key,
-	union xfs_btree_rec	*rec)
-{
-	__u32			x;
-
-	x = be32_to_cpu(rec->alloc.ar_startblock);
-	x += be32_to_cpu(rec->alloc.ar_blockcount) - 1;
-	key->alloc.ar_startblock = cpu_to_be32(x);
-	key->alloc.ar_blockcount = 0;
-}
-
-STATIC void
-xfs_cntbt_init_high_key_from_rec(
-	union xfs_btree_key	*key,
-	union xfs_btree_rec	*rec)
-{
-	key->alloc.ar_blockcount = rec->alloc.ar_blockcount;
-	key->alloc.ar_startblock = 0;
 }
 
 STATIC void
@@ -236,6 +216,8 @@ xfs_allocbt_init_rec_from_cur(
 	struct xfs_btree_cur	*cur,
 	union xfs_btree_rec	*rec)
 {
+	ASSERT(cur->bc_rec.a.ar_startblock != 0);
+
 	rec->alloc.ar_startblock = cpu_to_be32(cur->bc_rec.a.ar_startblock);
 	rec->alloc.ar_blockcount = cpu_to_be32(cur->bc_rec.a.ar_blockcount);
 }
@@ -248,30 +230,23 @@ xfs_allocbt_init_ptr_from_cur(
 	struct xfs_agf		*agf = XFS_BUF_TO_AGF(cur->bc_private.a.agbp);
 
 	ASSERT(cur->bc_private.a.agno == be32_to_cpu(agf->agf_seqno));
-	ASSERT(agf->agf_roots[cur->bc_btnum] != 0);
 
 	ptr->s = agf->agf_roots[cur->bc_btnum];
 }
 
 STATIC int64_t
-xfs_bnobt_key_diff(
-	struct xfs_btree_cur	*cur,
-	union xfs_btree_key	*key)
-{
-	xfs_alloc_rec_incore_t	*rec = &cur->bc_rec.a;
-	xfs_alloc_key_t		*kp = &key->alloc;
-
-	return (int64_t)be32_to_cpu(kp->ar_startblock) - rec->ar_startblock;
-}
-
-STATIC int64_t
-xfs_cntbt_key_diff(
+xfs_allocbt_key_diff(
 	struct xfs_btree_cur	*cur,
 	union xfs_btree_key	*key)
 {
 	xfs_alloc_rec_incore_t	*rec = &cur->bc_rec.a;
 	xfs_alloc_key_t		*kp = &key->alloc;
 	int64_t			diff;
+
+	if (cur->bc_btnum == XFS_BTNUM_BNO) {
+		return (int64_t)be32_to_cpu(kp->ar_startblock) -
+				rec->ar_startblock;
+	}
 
 	diff = (int64_t)be32_to_cpu(kp->ar_blockcount) - rec->ar_blockcount;
 	if (diff)
@@ -280,40 +255,14 @@ xfs_cntbt_key_diff(
 	return (int64_t)be32_to_cpu(kp->ar_startblock) - rec->ar_startblock;
 }
 
-STATIC int64_t
-xfs_bnobt_diff_two_keys(
-	struct xfs_btree_cur	*cur,
-	union xfs_btree_key	*k1,
-	union xfs_btree_key	*k2)
-{
-	return (int64_t)be32_to_cpu(k1->alloc.ar_startblock) -
-			  be32_to_cpu(k2->alloc.ar_startblock);
-}
-
-STATIC int64_t
-xfs_cntbt_diff_two_keys(
-	struct xfs_btree_cur	*cur,
-	union xfs_btree_key	*k1,
-	union xfs_btree_key	*k2)
-{
-	int64_t			diff;
-
-	diff =  be32_to_cpu(k1->alloc.ar_blockcount) -
-		be32_to_cpu(k2->alloc.ar_blockcount);
-	if (diff)
-		return diff;
-
-	return  be32_to_cpu(k1->alloc.ar_startblock) -
-		be32_to_cpu(k2->alloc.ar_startblock);
-}
-
-static bool
+static xfs_failaddr_t
 xfs_allocbt_verify(
 	struct xfs_buf		*bp)
 {
 	struct xfs_mount	*mp = bp->b_target->bt_mount;
 	struct xfs_btree_block	*block = XFS_BUF_TO_BLOCK(bp);
 	struct xfs_perag	*pag = bp->b_pag;
+	xfs_failaddr_t		fa;
 	unsigned int		level;
 
 	/*
@@ -331,29 +280,31 @@ xfs_allocbt_verify(
 	level = be16_to_cpu(block->bb_level);
 	switch (block->bb_magic) {
 	case cpu_to_be32(XFS_ABTB_CRC_MAGIC):
-		if (!xfs_btree_sblock_v5hdr_verify(bp))
-			return false;
+		fa = xfs_btree_sblock_v5hdr_verify(bp);
+		if (fa)
+			return fa;
 		/* fall through */
 	case cpu_to_be32(XFS_ABTB_MAGIC):
 		if (pag && pag->pagf_init) {
 			if (level >= pag->pagf_levels[XFS_BTNUM_BNOi])
-				return false;
+				return __this_address;
 		} else if (level >= mp->m_ag_maxlevels)
-			return false;
+			return __this_address;
 		break;
 	case cpu_to_be32(XFS_ABTC_CRC_MAGIC):
-		if (!xfs_btree_sblock_v5hdr_verify(bp))
-			return false;
+		fa = xfs_btree_sblock_v5hdr_verify(bp);
+		if (fa)
+			return fa;
 		/* fall through */
 	case cpu_to_be32(XFS_ABTC_MAGIC):
 		if (pag && pag->pagf_init) {
 			if (level >= pag->pagf_levels[XFS_BTNUM_CNTi])
-				return false;
+				return __this_address;
 		} else if (level >= mp->m_ag_maxlevels)
-			return false;
+			return __this_address;
 		break;
 	default:
-		return false;
+		return __this_address;
 	}
 
 	return xfs_btree_sblock_verify(bp, mp->m_alloc_mxr[level != 0]);
@@ -363,25 +314,30 @@ static void
 xfs_allocbt_read_verify(
 	struct xfs_buf	*bp)
 {
-	if (!xfs_btree_sblock_verify_crc(bp))
-		xfs_buf_ioerror(bp, -EFSBADCRC);
-	else if (!xfs_allocbt_verify(bp))
-		xfs_buf_ioerror(bp, -EFSCORRUPTED);
+	xfs_failaddr_t	fa;
 
-	if (bp->b_error) {
-		trace_xfs_btree_corrupt(bp, _RET_IP_);
-		xfs_verifier_error(bp);
+	if (!xfs_btree_sblock_verify_crc(bp))
+		xfs_verifier_error(bp, -EFSBADCRC, __this_address);
+	else {
+		fa = xfs_allocbt_verify(bp);
+		if (fa)
+			xfs_verifier_error(bp, -EFSCORRUPTED, fa);
 	}
+
+	if (bp->b_error)
+		trace_xfs_btree_corrupt(bp, _RET_IP_);
 }
 
 static void
 xfs_allocbt_write_verify(
 	struct xfs_buf	*bp)
 {
-	if (!xfs_allocbt_verify(bp)) {
+	xfs_failaddr_t	fa;
+
+	fa = xfs_allocbt_verify(bp);
+	if (fa) {
 		trace_xfs_btree_corrupt(bp, _RET_IP_);
-		xfs_buf_ioerror(bp, -EFSCORRUPTED);
-		xfs_verifier_error(bp);
+		xfs_verifier_error(bp, -EFSCORRUPTED, fa);
 		return;
 	}
 	xfs_btree_sblock_calc_crc(bp);
@@ -392,57 +348,48 @@ const struct xfs_buf_ops xfs_allocbt_buf_ops = {
 	.name = "xfs_allocbt",
 	.verify_read = xfs_allocbt_read_verify,
 	.verify_write = xfs_allocbt_write_verify,
+	.verify_struct = xfs_allocbt_verify,
 };
 
 
 STATIC int
-xfs_bnobt_keys_inorder(
+xfs_allocbt_keys_inorder(
 	struct xfs_btree_cur	*cur,
 	union xfs_btree_key	*k1,
 	union xfs_btree_key	*k2)
 {
-	return be32_to_cpu(k1->alloc.ar_startblock) <
-	       be32_to_cpu(k2->alloc.ar_startblock);
+	if (cur->bc_btnum == XFS_BTNUM_BNO) {
+		return be32_to_cpu(k1->alloc.ar_startblock) <
+		       be32_to_cpu(k2->alloc.ar_startblock);
+	} else {
+		return be32_to_cpu(k1->alloc.ar_blockcount) <
+			be32_to_cpu(k2->alloc.ar_blockcount) ||
+			(k1->alloc.ar_blockcount == k2->alloc.ar_blockcount &&
+			 be32_to_cpu(k1->alloc.ar_startblock) <
+			 be32_to_cpu(k2->alloc.ar_startblock));
+	}
 }
 
 STATIC int
-xfs_bnobt_recs_inorder(
+xfs_allocbt_recs_inorder(
 	struct xfs_btree_cur	*cur,
 	union xfs_btree_rec	*r1,
 	union xfs_btree_rec	*r2)
 {
-	return be32_to_cpu(r1->alloc.ar_startblock) +
-		be32_to_cpu(r1->alloc.ar_blockcount) <=
-		be32_to_cpu(r2->alloc.ar_startblock);
+	if (cur->bc_btnum == XFS_BTNUM_BNO) {
+		return be32_to_cpu(r1->alloc.ar_startblock) +
+			be32_to_cpu(r1->alloc.ar_blockcount) <=
+			be32_to_cpu(r2->alloc.ar_startblock);
+	} else {
+		return be32_to_cpu(r1->alloc.ar_blockcount) <
+			be32_to_cpu(r2->alloc.ar_blockcount) ||
+			(r1->alloc.ar_blockcount == r2->alloc.ar_blockcount &&
+			 be32_to_cpu(r1->alloc.ar_startblock) <
+			 be32_to_cpu(r2->alloc.ar_startblock));
+	}
 }
 
-STATIC int
-xfs_cntbt_keys_inorder(
-	struct xfs_btree_cur	*cur,
-	union xfs_btree_key	*k1,
-	union xfs_btree_key	*k2)
-{
-	return be32_to_cpu(k1->alloc.ar_blockcount) <
-		be32_to_cpu(k2->alloc.ar_blockcount) ||
-		(k1->alloc.ar_blockcount == k2->alloc.ar_blockcount &&
-		 be32_to_cpu(k1->alloc.ar_startblock) <
-		 be32_to_cpu(k2->alloc.ar_startblock));
-}
-
-STATIC int
-xfs_cntbt_recs_inorder(
-	struct xfs_btree_cur	*cur,
-	union xfs_btree_rec	*r1,
-	union xfs_btree_rec	*r2)
-{
-	return be32_to_cpu(r1->alloc.ar_blockcount) <
-		be32_to_cpu(r2->alloc.ar_blockcount) ||
-		(r1->alloc.ar_blockcount == r2->alloc.ar_blockcount &&
-		 be32_to_cpu(r1->alloc.ar_startblock) <
-		 be32_to_cpu(r2->alloc.ar_startblock));
-}
-
-static const struct xfs_btree_ops xfs_bnobt_ops = {
+static const struct xfs_btree_ops xfs_allocbt_ops = {
 	.rec_len		= sizeof(xfs_alloc_rec_t),
 	.key_len		= sizeof(xfs_alloc_key_t),
 
@@ -454,36 +401,16 @@ static const struct xfs_btree_ops xfs_bnobt_ops = {
 	.get_minrecs		= xfs_allocbt_get_minrecs,
 	.get_maxrecs		= xfs_allocbt_get_maxrecs,
 	.init_key_from_rec	= xfs_allocbt_init_key_from_rec,
-	.init_high_key_from_rec	= xfs_bnobt_init_high_key_from_rec,
 	.init_rec_from_cur	= xfs_allocbt_init_rec_from_cur,
 	.init_ptr_from_cur	= xfs_allocbt_init_ptr_from_cur,
-	.key_diff		= xfs_bnobt_key_diff,
+	.key_diff		= xfs_allocbt_key_diff,
 	.buf_ops		= &xfs_allocbt_buf_ops,
-	.diff_two_keys		= xfs_bnobt_diff_two_keys,
-	.keys_inorder		= xfs_bnobt_keys_inorder,
-	.recs_inorder		= xfs_bnobt_recs_inorder,
-};
+	.keys_inorder		= xfs_allocbt_keys_inorder,
+	.recs_inorder		= xfs_allocbt_recs_inorder,
 
-static const struct xfs_btree_ops xfs_cntbt_ops = {
-	.rec_len		= sizeof(xfs_alloc_rec_t),
-	.key_len		= sizeof(xfs_alloc_key_t),
-
-	.dup_cursor		= xfs_allocbt_dup_cursor,
-	.set_root		= xfs_allocbt_set_root,
-	.alloc_block		= xfs_allocbt_alloc_block,
-	.free_block		= xfs_allocbt_free_block,
-	.update_lastrec		= xfs_allocbt_update_lastrec,
-	.get_minrecs		= xfs_allocbt_get_minrecs,
-	.get_maxrecs		= xfs_allocbt_get_maxrecs,
-	.init_key_from_rec	= xfs_allocbt_init_key_from_rec,
-	.init_high_key_from_rec	= xfs_cntbt_init_high_key_from_rec,
-	.init_rec_from_cur	= xfs_allocbt_init_rec_from_cur,
-	.init_ptr_from_cur	= xfs_allocbt_init_ptr_from_cur,
-	.key_diff		= xfs_cntbt_key_diff,
-	.buf_ops		= &xfs_allocbt_buf_ops,
-	.diff_two_keys		= xfs_cntbt_diff_two_keys,
-	.keys_inorder		= xfs_cntbt_keys_inorder,
-	.recs_inorder		= xfs_cntbt_recs_inorder,
+	.get_leaf_keys		= xfs_btree_get_leaf_keys,
+	.get_node_keys		= xfs_btree_get_node_keys,
+	.update_keys		= xfs_btree_update_keys,
 };
 
 /*
@@ -508,15 +435,16 @@ xfs_allocbt_init_cursor(
 	cur->bc_mp = mp;
 	cur->bc_btnum = btnum;
 	cur->bc_blocklog = mp->m_sb.sb_blocklog;
+	cur->bc_ops = &xfs_allocbt_ops;
+	if (btnum == XFS_BTNUM_BNO)
+		cur->bc_statoff = XFS_STATS_CALC_INDEX(xs_abtb_2);
+	else
+		cur->bc_statoff = XFS_STATS_CALC_INDEX(xs_abtc_2);
 
 	if (btnum == XFS_BTNUM_CNT) {
-		cur->bc_statoff = XFS_STATS_CALC_INDEX(xs_abtc_2);
-		cur->bc_ops = &xfs_cntbt_ops;
 		cur->bc_nlevels = be32_to_cpu(agf->agf_levels[XFS_BTNUM_CNT]);
 		cur->bc_flags = XFS_BTREE_LASTREC_UPDATE;
 	} else {
-		cur->bc_statoff = XFS_STATS_CALC_INDEX(xs_abtb_2);
-		cur->bc_ops = &xfs_bnobt_ops;
 		cur->bc_nlevels = be32_to_cpu(agf->agf_levels[XFS_BTNUM_BNO]);
 	}
 

@@ -30,10 +30,15 @@
 
 #include <net/sock.h>
 #include <net/net_ratelimit.h>
+#ifndef __GENKSYMS__
 #include <net/ipv6.h>
+#endif
 
 #include <asm/byteorder.h>
-#include <linux/uaccess.h>
+#include <asm/uaccess.h>
+
+int net_msg_warn __read_mostly = 1;
+EXPORT_SYMBOL(net_msg_warn);
 
 DEFINE_RATELIMIT_STATE(net_ratelimit_state, 5 * HZ, 10);
 /*
@@ -53,7 +58,7 @@ EXPORT_SYMBOL(net_ratelimit);
 
 __be32 in_aton(const char *str)
 {
-	unsigned int l;
+	unsigned long l;
 	unsigned int val;
 	int i;
 
@@ -135,7 +140,7 @@ int in4_pton(const char *src, int srclen,
 	s = src;
 	d = dbuf;
 	i = 0;
-	while (1) {
+	while(1) {
 		int c;
 		c = xdigit2bin(srclen > 0 ? *s : '\0', delim);
 		if (!(c & (IN6PTON_DIGIT | IN6PTON_DOT | IN6PTON_DELIM | IN6PTON_COLON_MASK))) {
@@ -285,11 +290,11 @@ cont:
 	i = 15; d--;
 
 	if (dc) {
-		while (d >= dc)
+		while(d >= dc)
 			dst[i--] = *d--;
-		while (i >= dc - dbuf)
+		while(i >= dc - dbuf)
 			dst[i--] = 0;
-		while (i >= 0)
+		while(i >= 0)
 			dst[i--] = *d--;
 	} else
 		memcpy(dst, dbuf, sizeof(dbuf));
@@ -404,24 +409,24 @@ int inet_pton_with_scope(struct net *net, __kernel_sa_family_t af,
 EXPORT_SYMBOL(inet_pton_with_scope);
 
 void inet_proto_csum_replace4(__sum16 *sum, struct sk_buff *skb,
-			      __be32 from, __be32 to, bool pseudohdr)
+			      __be32 from, __be32 to, int pseudohdr)
 {
+	__be32 diff[] = { ~from, to };
 	if (skb->ip_summed != CHECKSUM_PARTIAL) {
-		csum_replace4(sum, from, to);
+		*sum = csum_fold(csum_partial(diff, sizeof(diff),
+				~csum_unfold(*sum)));
 		if (skb->ip_summed == CHECKSUM_COMPLETE && pseudohdr)
-			skb->csum = ~csum_add(csum_sub(~(skb->csum),
-						       (__force __wsum)from),
-					      (__force __wsum)to);
+			skb->csum = ~csum_partial(diff, sizeof(diff),
+						~skb->csum);
 	} else if (pseudohdr)
-		*sum = ~csum_fold(csum_add(csum_sub(csum_unfold(*sum),
-						    (__force __wsum)from),
-					   (__force __wsum)to));
+		*sum = ~csum_fold(csum_partial(diff, sizeof(diff),
+				csum_unfold(*sum)));
 }
 EXPORT_SYMBOL(inet_proto_csum_replace4);
 
 void inet_proto_csum_replace16(__sum16 *sum, struct sk_buff *skb,
 			       const __be32 *from, const __be32 *to,
-			       bool pseudohdr)
+			       int pseudohdr)
 {
 	__be32 diff[] = {
 		~from[0], ~from[1], ~from[2], ~from[3],
@@ -439,15 +444,73 @@ void inet_proto_csum_replace16(__sum16 *sum, struct sk_buff *skb,
 }
 EXPORT_SYMBOL(inet_proto_csum_replace16);
 
-void inet_proto_csum_replace_by_diff(__sum16 *sum, struct sk_buff *skb,
-				     __wsum diff, bool pseudohdr)
+int mac_pton(const char *s, u8 *mac)
 {
-	if (skb->ip_summed != CHECKSUM_PARTIAL) {
-		*sum = csum_fold(csum_add(diff, ~csum_unfold(*sum)));
-		if (skb->ip_summed == CHECKSUM_COMPLETE && pseudohdr)
-			skb->csum = ~csum_add(diff, ~skb->csum);
-	} else if (pseudohdr) {
-		*sum = ~csum_fold(csum_add(diff, csum_unfold(*sum)));
+	int i;
+
+	/* XX:XX:XX:XX:XX:XX */
+	if (strlen(s) < 3 * ETH_ALEN - 1)
+		return 0;
+
+	/* Don't dirty result unless string is valid MAC. */
+	for (i = 0; i < ETH_ALEN; i++) {
+		if (!isxdigit(s[i * 3]) || !isxdigit(s[i * 3 + 1]))
+			return 0;
+		if (i != ETH_ALEN - 1 && s[i * 3 + 2] != ':')
+			return 0;
 	}
+	for (i = 0; i < ETH_ALEN; i++) {
+		mac[i] = (hex_to_bin(s[i * 3]) << 4) | hex_to_bin(s[i * 3 + 1]);
+	}
+	return 1;
 }
-EXPORT_SYMBOL(inet_proto_csum_replace_by_diff);
+EXPORT_SYMBOL(mac_pton);
+
+struct __net_random_once_work {
+	struct work_struct work;
+	struct static_key *key;
+};
+
+static void __net_random_once_deferred(struct work_struct *w)
+{
+	struct __net_random_once_work *work =
+		container_of(w, struct __net_random_once_work, work);
+	BUG_ON(!static_key_enabled(work->key));
+	static_key_slow_dec(work->key);
+	kfree(work);
+}
+
+static void __net_random_once_disable_jump(struct static_key *key)
+{
+	struct __net_random_once_work *w;
+
+	w = kmalloc(sizeof(*w), GFP_ATOMIC);
+	if (!w)
+		return;
+
+	INIT_WORK(&w->work, __net_random_once_deferred);
+	w->key = key;
+	schedule_work(&w->work);
+}
+
+bool __net_get_random_once(void *buf, int nbytes, bool *done,
+			   struct static_key *once_key)
+{
+	static DEFINE_SPINLOCK(lock);
+	unsigned long flags;
+
+	spin_lock_irqsave(&lock, flags);
+	if (*done) {
+		spin_unlock_irqrestore(&lock, flags);
+		return false;
+	}
+
+	get_random_bytes(buf, nbytes);
+	*done = true;
+	spin_unlock_irqrestore(&lock, flags);
+
+	__net_random_once_disable_jump(once_key);
+
+	return true;
+}
+EXPORT_SYMBOL(__net_get_random_once);

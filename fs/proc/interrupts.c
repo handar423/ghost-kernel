@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 #include <linux/fs.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
@@ -51,4 +50,4 @@ static int __init proc_interrupts_init(void)
 	proc_create("interrupts", 0, NULL, &proc_interrupts_operations);
 	return 0;
 }
-fs_initcall(proc_interrupts_init);
+module_init(proc_interrupts_init);

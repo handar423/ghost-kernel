@@ -31,16 +31,13 @@
 #include <linux/module.h>
 #include <linux/mm.h>
 #include <linux/rbtree.h>
-#include <linux/sched/signal.h>
-#include <linux/sched/mm.h>
+#include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
 #include <linux/vfio.h>
 #include <linux/workqueue.h>
 #include <linux/mdev.h>
 #include <linux/notifier.h>
-#include <linux/dma-iommu.h>
-#include <linux/irqdomain.h>
 
 #define DRIVER_VERSION  "0.2"
 #define DRIVER_AUTHOR   "Alex Williamson <alex.williamson@redhat.com>"
@@ -58,14 +55,19 @@ module_param_named(disable_hugepages,
 MODULE_PARM_DESC(disable_hugepages,
 		 "Disable VFIO IOMMU support for IOMMU hugepages.");
 
+static unsigned int dma_entry_limit __read_mostly = U16_MAX;
+module_param_named(dma_entry_limit, dma_entry_limit, uint, 0644);
+MODULE_PARM_DESC(dma_entry_limit,
+		 "Maximum number of user DMA mappings per container (65535).");
+
 struct vfio_iommu {
 	struct list_head	domain_list;
 	struct vfio_domain	*external_domain; /* domain for external user */
 	struct mutex		lock;
 	struct rb_root		dma_list;
 	struct blocking_notifier_head notifier;
-	bool			v2;
-	bool			nesting;
+	unsigned int		dma_avail;
+	bool v2;
 };
 
 struct vfio_domain {
@@ -250,7 +252,7 @@ static int vfio_lock_acct(struct task_struct *task, long npage, bool *lock_cap)
 {
 	struct mm_struct *mm;
 	bool is_current;
-	int ret;
+	int ret = 0;
 
 	if (!npage)
 		return 0;
@@ -261,26 +263,24 @@ static int vfio_lock_acct(struct task_struct *task, long npage, bool *lock_cap)
 	if (!mm)
 		return -ESRCH; /* process exited */
 
-	ret = down_write_killable(&mm->mmap_sem);
-	if (!ret) {
-		if (npage > 0) {
-			if (lock_cap ? !*lock_cap :
-			    !has_capability(task, CAP_IPC_LOCK)) {
-				unsigned long limit;
+	down_write(&mm->mmap_sem);
+	if (npage > 0) {
+		if (lock_cap ? !*lock_cap :
+		    !has_capability(task, CAP_IPC_LOCK)) {
+			unsigned long limit;
 
-				limit = task_rlimit(task,
-						RLIMIT_MEMLOCK) >> PAGE_SHIFT;
+			limit = task_rlimit(task,
+					RLIMIT_MEMLOCK) >> PAGE_SHIFT;
 
-				if (mm->locked_vm + npage > limit)
-					ret = -ENOMEM;
-			}
+			if (mm->locked_vm + npage > limit)
+				ret = -ENOMEM;
 		}
-
-		if (!ret)
-			mm->locked_vm += npage;
-
-		up_write(&mm->mmap_sem);
 	}
+
+	if (!ret)
+		mm->locked_vm += npage;
+
+	up_write(&mm->mmap_sem);
 
 	if (!is_current)
 		mmput(mm);
@@ -333,27 +333,53 @@ static int put_pfn(unsigned long pfn, int prot)
 	return 0;
 }
 
+static int follow_fault_pfn(struct vm_area_struct *vma, struct mm_struct *mm,
+			    unsigned long vaddr, unsigned long *pfn,
+			    bool write_fault)
+{
+	int ret;
+
+	ret = follow_pfn(vma, vaddr, pfn);
+	if (ret) {
+		ret = fixup_user_fault(NULL, mm, vaddr,
+				       FAULT_FLAG_REMOTE |
+				       (write_fault ?  FAULT_FLAG_WRITE : 0));
+		if (ret)
+			return ret;
+
+		ret = follow_pfn(vma, vaddr, pfn);
+	}
+
+	return ret;
+}
+
 static int vaddr_get_pfn(struct mm_struct *mm, unsigned long vaddr,
 			 int prot, unsigned long *pfn)
 {
 	struct page *page[1];
 	struct vm_area_struct *vma;
+	struct vm_area_struct *vmas[1];
+	unsigned int write = !!(prot & IOMMU_WRITE);
 	int ret;
 
+	down_read(&mm->mmap_sem);
 	if (mm == current->mm) {
-		ret = get_user_pages_fast(vaddr, 1, !!(prot & IOMMU_WRITE),
-					  page);
+		ret = get_user_pages_longterm(vaddr, 1, write, 0, page, vmas);
 	} else {
-		unsigned int flags = 0;
-
-		if (prot & IOMMU_WRITE)
-			flags |= FOLL_WRITE;
-
-		down_read(&mm->mmap_sem);
-		ret = get_user_pages_remote(NULL, mm, vaddr, 1, flags, page,
-					    NULL, NULL);
-		up_read(&mm->mmap_sem);
+		ret = get_user_pages(NULL, mm, vaddr, 1, write, 0, page, vmas);
+		/*
+		 * The lifetime of a vaddr_get_pfn() page pin is
+		 * userspace-controlled. In the fs-dax case this could
+		 * lead to indefinite stalls in filesystem operations.
+		 * Disallow attempts to pin fs-dax pages via this
+		 * interface.
+		 */
+		if (ret > 0 && vma_is_fsdax(vmas[0])) {
+			ret = -EOPNOTSUPP;
+			put_page(page[0]);
+		}
 	}
+	up_read(&mm->mmap_sem);
 
 	if (ret == 1) {
 		*pfn = page_to_pfn(page[0]);
@@ -365,9 +391,9 @@ static int vaddr_get_pfn(struct mm_struct *mm, unsigned long vaddr,
 	vma = find_vma_intersection(mm, vaddr, vaddr + 1);
 
 	if (vma && vma->vm_flags & VM_PFNMAP) {
-		*pfn = ((vaddr - vma->vm_start) >> PAGE_SHIFT) + vma->vm_pgoff;
-		if (is_invalid_reserved_pfn(*pfn))
-			ret = 0;
+		ret = follow_fault_pfn(vma, mm, vaddr, pfn, prot & IOMMU_WRITE);
+		if (!ret && !is_invalid_reserved_pfn(*pfn))
+			ret = -EFAULT;
 	}
 
 	up_read(&mm->mmap_sem);
@@ -725,30 +751,18 @@ static void vfio_remove_dma(struct vfio_iommu *iommu, struct vfio_dma *dma)
 	vfio_unlink_dma(iommu, dma);
 	put_task_struct(dma->task);
 	kfree(dma);
+	iommu->dma_avail++;
 }
 
 static unsigned long vfio_pgsize_bitmap(struct vfio_iommu *iommu)
 {
 	struct vfio_domain *domain;
-	unsigned long bitmap = ULONG_MAX;
+	unsigned long bitmap = PAGE_MASK;
 
 	mutex_lock(&iommu->lock);
 	list_for_each_entry(domain, &iommu->domain_list, next)
 		bitmap &= domain->domain->pgsize_bitmap;
 	mutex_unlock(&iommu->lock);
-
-	/*
-	 * In case the IOMMU supports page sizes smaller than PAGE_SIZE
-	 * we pretend PAGE_SIZE is supported and hide sub-PAGE_SIZE sizes.
-	 * That way the user will be able to map/unmap buffers whose size/
-	 * start address is aligned with PAGE_SIZE. Pinning code uses that
-	 * granularity while iommu driver can use the sub-PAGE_SIZE size
-	 * to map the buffer.
-	 */
-	if (bitmap & ~PAGE_MASK) {
-		bitmap &= PAGE_MASK;
-		bitmap |= PAGE_SIZE;
-	}
 
 	return bitmap;
 }
@@ -766,9 +780,6 @@ static int vfio_dma_do_unmap(struct vfio_iommu *iommu,
 	if (unmap->iova & mask)
 		return -EINVAL;
 	if (!unmap->size || unmap->size & mask)
-		return -EINVAL;
-	if (unmap->iova + unmap->size < unmap->iova ||
-	    unmap->size > SIZE_MAX)
 		return -EINVAL;
 
 	WARN_ON(mask & PAGE_MASK);
@@ -1001,12 +1012,18 @@ static int vfio_dma_do_map(struct vfio_iommu *iommu,
 		goto out_unlock;
 	}
 
+	if (!iommu->dma_avail) {
+		ret = -ENOSPC;
+		goto out_unlock;
+	}
+
 	dma = kzalloc(sizeof(*dma), GFP_KERNEL);
 	if (!dma) {
 		ret = -ENOMEM;
 		goto out_unlock;
 	}
 
+	iommu->dma_avail--;
 	dma->iova = iova;
 	dma->vaddr = vaddr;
 	dma->prot = prot;
@@ -1163,35 +1180,6 @@ static struct vfio_group *find_iommu_group(struct vfio_domain *domain,
 	return NULL;
 }
 
-static bool vfio_iommu_has_sw_msi(struct iommu_group *group, phys_addr_t *base)
-{
-	struct list_head group_resv_regions;
-	struct iommu_resv_region *region, *next;
-	bool ret = false;
-
-	INIT_LIST_HEAD(&group_resv_regions);
-	iommu_get_group_resv_regions(group, &group_resv_regions);
-	list_for_each_entry(region, &group_resv_regions, list) {
-		/*
-		 * The presence of any 'real' MSI regions should take
-		 * precedence over the software-managed one if the
-		 * IOMMU driver happens to advertise both types.
-		 */
-		if (region->type == IOMMU_RESV_MSI) {
-			ret = false;
-			break;
-		}
-
-		if (region->type == IOMMU_RESV_SW_MSI) {
-			*base = region->start;
-			ret = true;
-		}
-	}
-	list_for_each_entry_safe(region, next, &group_resv_regions, list)
-		kfree(region);
-	return ret;
-}
-
 static int vfio_iommu_type1_attach_group(void *iommu_data,
 					 struct iommu_group *iommu_group)
 {
@@ -1200,8 +1188,6 @@ static int vfio_iommu_type1_attach_group(void *iommu_data,
 	struct vfio_domain *domain, *d;
 	struct bus_type *bus = NULL, *mdev_bus;
 	int ret;
-	bool resv_msi, msi_remap;
-	phys_addr_t resv_msi_base;
 
 	mutex_lock(&iommu->lock);
 
@@ -1258,28 +1244,15 @@ static int vfio_iommu_type1_attach_group(void *iommu_data,
 		goto out_free;
 	}
 
-	if (iommu->nesting) {
-		int attr = 1;
-
-		ret = iommu_domain_set_attr(domain->domain, DOMAIN_ATTR_NESTING,
-					    &attr);
-		if (ret)
-			goto out_domain;
-	}
-
 	ret = iommu_attach_group(domain->domain, iommu_group);
 	if (ret)
 		goto out_domain;
 
-	resv_msi = vfio_iommu_has_sw_msi(iommu_group, &resv_msi_base);
-
 	INIT_LIST_HEAD(&domain->group_list);
 	list_add(&group->next, &domain->group_list);
 
-	msi_remap = irq_domain_check_msi_remap() ||
-		    iommu_capable(bus, IOMMU_CAP_INTR_REMAP);
-
-	if (!allow_unsafe_interrupts && !msi_remap) {
+	if (!allow_unsafe_interrupts &&
+	    !iommu_capable(bus, IOMMU_CAP_INTR_REMAP)) {
 		pr_warn("%s: No interrupt remapping support.  Use the module param \"allow_unsafe_interrupts\" to enable VFIO IOMMU support on this platform\n",
 		       __func__);
 		ret = -EPERM;
@@ -1320,12 +1293,6 @@ static int vfio_iommu_type1_attach_group(void *iommu_data,
 	ret = vfio_iommu_replay(iommu, domain);
 	if (ret)
 		goto out_detach;
-
-	if (resv_msi) {
-		ret = iommu_get_msi_cookie(domain->domain, resv_msi_base);
-		if (ret)
-			goto out_detach;
-	}
 
 	list_add(&domain->next, &iommu->domain_list);
 
@@ -1457,26 +1424,18 @@ static void *vfio_iommu_type1_open(unsigned long arg)
 {
 	struct vfio_iommu *iommu;
 
+	if (arg != VFIO_TYPE1_IOMMU && arg != VFIO_TYPE1v2_IOMMU)
+		return ERR_PTR(-EINVAL);
+
 	iommu = kzalloc(sizeof(*iommu), GFP_KERNEL);
 	if (!iommu)
 		return ERR_PTR(-ENOMEM);
 
-	switch (arg) {
-	case VFIO_TYPE1_IOMMU:
-		break;
-	case VFIO_TYPE1_NESTING_IOMMU:
-		iommu->nesting = true;
-	case VFIO_TYPE1v2_IOMMU:
-		iommu->v2 = true;
-		break;
-	default:
-		kfree(iommu);
-		return ERR_PTR(-EINVAL);
-	}
-
 	INIT_LIST_HEAD(&iommu->domain_list);
 	iommu->dma_list = RB_ROOT;
+	iommu->dma_avail = dma_entry_limit;
 	mutex_init(&iommu->lock);
+	iommu->v2 = (arg == VFIO_TYPE1v2_IOMMU);
 	BLOCKING_INIT_NOTIFIER_HEAD(&iommu->notifier);
 
 	return iommu;
@@ -1547,7 +1506,6 @@ static long vfio_iommu_type1_ioctl(void *iommu_data,
 		switch (arg) {
 		case VFIO_TYPE1_IOMMU:
 		case VFIO_TYPE1v2_IOMMU:
-		case VFIO_TYPE1_NESTING_IOMMU:
 			return 1;
 		case VFIO_DMA_CC_IOMMU:
 			if (!iommu)

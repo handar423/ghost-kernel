@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * bpf-loader.c
  *
@@ -10,17 +9,16 @@
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
 #include <linux/err.h>
-#include <linux/kernel.h>
 #include <linux/string.h>
-#include <errno.h>
 #include "perf.h"
 #include "debug.h"
 #include "bpf-loader.h"
 #include "bpf-prologue.h"
 #include "probe-event.h"
 #include "probe-finder.h" // for MAX_PROBES
-#include "parse-events.h"
+#include "util.h"
 #include "strfilter.h"
+#include "parse-events.h"
 #include "llvm-utils.h"
 #include "c++/clang-c.h"
 
@@ -66,7 +64,7 @@ bpf__prepare_load_buffer(void *obj_buf, size_t obj_buf_sz, const char *name)
 	}
 
 	obj = bpf_object__open_buffer(obj_buf, obj_buf_sz, name);
-	if (IS_ERR(obj)) {
+	if (IS_ERR_OR_NULL(obj)) {
 		pr_debug("bpf: failed to load buffer\n");
 		return ERR_PTR(-EINVAL);
 	}
@@ -94,7 +92,7 @@ struct bpf_object *bpf__prepare_load(const char *filename, bool source)
 		err = perf_clang__compile_bpf(filename, &obj_buf, &obj_buf_sz);
 		perf_clang__cleanup();
 		if (err) {
-			pr_warning("bpf: builtin compilation failed: %d, try external compiler\n", err);
+			pr_debug("bpf: builtin compilation failed: %d, try external compiler\n", err);
 			err = llvm__compile_bpf(filename, &obj_buf, &obj_buf_sz);
 			if (err)
 				return ERR_PTR(-BPF_LOADER_ERRNO__COMPILE);
@@ -102,14 +100,14 @@ struct bpf_object *bpf__prepare_load(const char *filename, bool source)
 			pr_debug("bpf: successfull builtin compilation\n");
 		obj = bpf_object__open_buffer(obj_buf, obj_buf_sz, filename);
 
-		if (!IS_ERR(obj) && llvm_param.dump_obj)
+		if (!IS_ERR_OR_NULL(obj) && llvm_param.dump_obj)
 			llvm__dump_obj(filename, obj_buf, obj_buf_sz);
 
 		free(obj_buf);
 	} else
 		obj = bpf_object__open(filename);
 
-	if (IS_ERR(obj)) {
+	if (IS_ERR_OR_NULL(obj)) {
 		pr_debug("bpf: failed to load %s\n", filename);
 		return obj;
 	}
@@ -256,7 +254,7 @@ parse_prog_config_kvpair(const char *config_str, struct perf_probe_event *pev)
 	int err = 0;
 
 	if (!text) {
-		pr_debug("Not enough memory: dup config_str failed\n");
+		pr_debug("No enough memory: dup config_str failed\n");
 		return ERR_PTR(-ENOMEM);
 	}
 
@@ -546,7 +544,7 @@ static int map_prologue(struct perf_probe_event *pev, int *mapping,
 
 	ptevs = malloc(array_sz);
 	if (!ptevs) {
-		pr_debug("Not enough memory: alloc ptevs failed\n");
+		pr_debug("No enough memory: alloc ptevs failed\n");
 		return -ENOMEM;
 	}
 
@@ -619,13 +617,13 @@ static int hook_load_preprocessor(struct bpf_program *prog)
 	priv->need_prologue = true;
 	priv->insns_buf = malloc(sizeof(struct bpf_insn) * BPF_MAXINSNS);
 	if (!priv->insns_buf) {
-		pr_debug("Not enough memory: alloc insns_buf failed\n");
+		pr_debug("No enough memory: alloc insns_buf failed\n");
 		return -ENOMEM;
 	}
 
 	priv->type_mapping = malloc(sizeof(int) * pev->ntevs);
 	if (!priv->type_mapping) {
-		pr_debug("Not enough memory: alloc type_mapping failed\n");
+		pr_debug("No enough memory: alloc type_mapping failed\n");
 		return -ENOMEM;
 	}
 	memset(priv->type_mapping, -1,
@@ -674,13 +672,13 @@ int bpf__probe(struct bpf_object *obj)
 
 		err = convert_perf_probe_events(pev, 1);
 		if (err < 0) {
-			pr_debug("bpf_probe: failed to convert perf probe events\n");
+			pr_debug("bpf_probe: failed to convert perf probe events");
 			goto out;
 		}
 
 		err = apply_perf_probe_events(pev, 1);
 		if (err < 0) {
-			pr_debug("bpf_probe: failed to apply perf probe events\n");
+			pr_debug("bpf_probe: failed to apply perf probe events");
 			goto out;
 		}
 
@@ -747,7 +745,9 @@ int bpf__load(struct bpf_object *obj)
 
 	err = bpf_object__load(obj);
 	if (err) {
-		pr_debug("bpf: load objects failed\n");
+		char bf[128];
+		libbpf_strerror(err, bf, sizeof(bf));
+		pr_debug("bpf: load objects failed: err=%d: (%s)\n", err, bf);
 		return err;
 	}
 	return 0;
@@ -879,7 +879,7 @@ bpf_map_op_setkey(struct bpf_map_op *op, struct parse_events_term *term)
 
 		op->k.array.ranges = memdup(term->array.ranges, memsz);
 		if (!op->k.array.ranges) {
-			pr_debug("Not enough memory to alloc indices for map\n");
+			pr_debug("No enough memory to alloc indices for map\n");
 			return -ENOMEM;
 		}
 		op->key_type = BPF_MAP_KEY_RANGES;
@@ -944,7 +944,7 @@ bpf_map_priv__clone(struct bpf_map_priv *priv)
 
 	newpriv = zalloc(sizeof(*newpriv));
 	if (!newpriv) {
-		pr_debug("Not enough memory to alloc map private\n");
+		pr_debug("No enough memory to alloc map private\n");
 		return NULL;
 	}
 	INIT_LIST_HEAD(&newpriv->ops_list);
@@ -975,7 +975,7 @@ bpf_map__add_op(struct bpf_map *map, struct bpf_map_op *op)
 	if (!priv) {
 		priv = zalloc(sizeof(*priv));
 		if (!priv) {
-			pr_debug("Not enough memory to alloc map private\n");
+			pr_debug("No enough memory to alloc map private\n");
 			return -ENOMEM;
 		}
 		INIT_LIST_HEAD(&priv->ops_list);
@@ -1533,7 +1533,7 @@ int bpf__apply_obj_config(void)
 			(strcmp("__bpf_stdout__", 	\
 				bpf_map__name(pos)) == 0))
 
-int bpf__setup_stdout(struct perf_evlist *evlist __maybe_unused)
+int bpf__setup_stdout(struct perf_evlist *evlist)
 {
 	struct bpf_map_priv *tmpl_priv = NULL;
 	struct bpf_object *obj, *tmp;
@@ -1659,7 +1659,7 @@ bpf_loader_strerror(int err, char *buf, size_t size)
 		snprintf(buf, size, "Unknown bpf loader error %d", err);
 	else
 		snprintf(buf, size, "%s",
-			 str_error_r(err, sbuf, sizeof(sbuf)));
+			 strerror_r(err, sbuf, sizeof(sbuf)));
 
 	buf[size - 1] = '\0';
 	return -1;

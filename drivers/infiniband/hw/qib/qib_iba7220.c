@@ -1257,7 +1257,7 @@ static void qib_7220_clear_freeze(struct qib_devdata *dd)
 	/* disable error interrupts, to avoid confusion */
 	qib_write_kreg(dd, kr_errmask, 0ULL);
 
-	/* also disable interrupts; errormask is sometimes overwritten */
+	/* also disable interrupts; errormask is sometimes overwriten */
 	qib_7220_set_intr_state(dd, 0);
 
 	qib_cancel_sends(dd->pport);
@@ -1772,6 +1772,15 @@ static void qib_setup_7220_setextled(struct qib_pportdata *ppd, u32 on)
 		qib_write_kreg(dd, kr_rcvpktledcnt, ledblink);
 }
 
+static void qib_7220_free_irq(struct qib_devdata *dd)
+{
+	if (dd->cspec->irq) {
+		free_irq(dd->cspec->irq, dd);
+		dd->cspec->irq = 0;
+	}
+	qib_nomsi(dd);
+}
+
 /*
  * qib_setup_7220_cleanup - clean up any per-chip chip-specific stuff
  * @dd: the qlogic_ib device
@@ -1781,7 +1790,7 @@ static void qib_setup_7220_setextled(struct qib_pportdata *ppd, u32 on)
  */
 static void qib_setup_7220_cleanup(struct qib_devdata *dd)
 {
-	qib_free_irq(dd);
+	qib_7220_free_irq(dd);
 	kfree(dd->cspec->cntrs);
 	kfree(dd->cspec->portcntrs);
 }
@@ -2009,14 +2018,20 @@ bail:
  */
 static void qib_setup_7220_interrupt(struct qib_devdata *dd)
 {
-	int ret;
+	if (!dd->cspec->irq)
+		qib_dev_err(dd,
+			"irq is 0, BIOS error?  Interrupts won't work\n");
+	else {
+		int ret = request_irq(dd->cspec->irq, qib_7220intr,
+			dd->msi_lo ? 0 : IRQF_SHARED,
+			QIB_DRV_NAME, dd);
 
-	ret = pci_request_irq(dd->pcidev, 0, qib_7220intr, NULL, dd,
-			      QIB_DRV_NAME);
-	if (ret)
-		qib_dev_err(dd, "Couldn't setup %s interrupt (irq=%d): %d\n",
-			    dd->pcidev->msi_enabled ?  "MSI" : "INTx",
-			    pci_irq_vector(dd->pcidev, 0), ret);
+		if (ret)
+			qib_dev_err(dd,
+				"Couldn't setup %s interrupt (irq=%d): %d\n",
+				dd->msi_lo ?  "MSI" : "INTx",
+				dd->cspec->irq, ret);
+	}
 }
 
 /**
@@ -3147,15 +3162,16 @@ static void init_7220_cntrnames(struct qib_devdata *dd)
 		dd->cspec->cntrnamelen = sizeof(cntr7220names) - 1;
 	else
 		dd->cspec->cntrnamelen = 1 + s - cntr7220names;
-	dd->cspec->cntrs = kmalloc(dd->cspec->ncntrs
-		* sizeof(u64), GFP_KERNEL);
+	dd->cspec->cntrs = kmalloc_array(dd->cspec->ncntrs, sizeof(u64),
+					 GFP_KERNEL);
 
 	for (i = 0, s = (char *)portcntr7220names; s; i++)
 		s = strchr(s + 1, '\n');
 	dd->cspec->nportcntrs = i - 1;
 	dd->cspec->portcntrnamelen = sizeof(portcntr7220names) - 1;
-	dd->cspec->portcntrs = kmalloc(dd->cspec->nportcntrs
-		* sizeof(u64), GFP_KERNEL);
+	dd->cspec->portcntrs = kmalloc_array(dd->cspec->nportcntrs,
+					     sizeof(u64),
+					     GFP_KERNEL);
 }
 
 static u32 qib_read_7220cntrs(struct qib_devdata *dd, loff_t pos, char **namep,
@@ -3279,12 +3295,16 @@ static int qib_7220_intr_fallback(struct qib_devdata *dd)
 		return 0;
 
 	qib_devinfo(dd->pcidev,
-		    "MSI interrupt not detected, trying INTx interrupts\n");
-
-	qib_free_irq(dd);
-	dd->msi_lo = 0;
-	if (pci_alloc_irq_vectors(dd->pcidev, 1, 1, PCI_IRQ_LEGACY) < 0)
-		qib_dev_err(dd, "Failed to enable INTx\n");
+		"MSI interrupt not detected, trying INTx interrupts\n");
+	qib_7220_free_irq(dd);
+	qib_enable_intx(dd);
+	/*
+	 * Some newer kernels require free_irq before disable_msi,
+	 * and irq can be changed during disable and INTx enable
+	 * and we need to therefore use the pcidev->irq value,
+	 * not our saved MSI value.
+	 */
+	dd->cspec->irq = dd->pcidev->irq;
 	qib_setup_7220_interrupt(dd);
 	return 1;
 }
@@ -3516,12 +3536,15 @@ static void autoneg_7220_work(struct work_struct *work)
 {
 	struct qib_pportdata *ppd;
 	struct qib_devdata *dd;
+	u64 startms;
 	u32 i;
 	unsigned long flags;
 
 	ppd = &container_of(work, struct qib_chippport_specific,
 			    autoneg_work.work)->pportdata;
 	dd = ppd->dd;
+
+	startms = jiffies_to_msecs(jiffies);
 
 	/*
 	 * Busy wait for this first part, it should be at most a
@@ -4072,9 +4095,11 @@ static int qib_init_7220_variables(struct qib_devdata *dd)
 	qib_7220_config_ctxts(dd);
 	qib_set_ctxtcnt(dd);  /* needed for PAT setup */
 
-	ret = init_chip_wc_pat(dd, 0);
-	if (ret)
-		goto bail;
+	if (qib_wc_pat) {
+		ret = init_chip_wc_pat(dd, 0);
+		if (ret)
+			goto bail;
+	}
 	set_7220_baseaddrs(dd); /* set chip access pointers now */
 
 	ret = 0;
@@ -4493,7 +4518,7 @@ struct qib_devdata *qib_init_iba7220_funcs(struct pci_dev *pdev,
 	dd->f_bringup_serdes    = qib_7220_bringup_serdes;
 	dd->f_cleanup           = qib_setup_7220_cleanup;
 	dd->f_clear_tids        = qib_7220_clear_tids;
-	dd->f_free_irq          = qib_free_irq;
+	dd->f_free_irq          = qib_7220_free_irq;
 	dd->f_get_base_info     = qib_7220_get_base_info;
 	dd->f_get_msgheader     = qib_7220_get_msgheader;
 	dd->f_getsendbuf        = qib_7220_getsendbuf;
@@ -4575,6 +4600,9 @@ struct qib_devdata *qib_init_iba7220_funcs(struct pci_dev *pdev,
 	if (qib_pcie_params(dd, minwidth, NULL))
 		qib_dev_err(dd,
 			"Failed to setup PCIe or interrupts; continuing anyway\n");
+
+	/* save IRQ for possible later use */
+	dd->cspec->irq = pdev->irq;
 
 	if (qib_read_kreg64(dd, kr_hwerrstatus) &
 	    QLOGIC_IB_HWE_SERDESPLLFAILED)

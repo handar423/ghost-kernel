@@ -70,8 +70,7 @@ static int vxlan_configure_exts(struct vport *vport, struct nlattr *attr,
 	if (nla_len(attr) < sizeof(struct nlattr))
 		return -EINVAL;
 
-	err = nla_parse_nested(exts, OVS_VXLAN_EXT_MAX, attr, exts_policy,
-			       NULL);
+	err = nla_parse_nested(exts, OVS_VXLAN_EXT_MAX, attr, exts_policy);
 	if (err < 0)
 		return err;
 
@@ -124,7 +123,7 @@ static struct vport *vxlan_tnl_create(const struct vport_parms *parms)
 	}
 
 	rtnl_lock();
-	dev = vxlan_dev_create(net, parms->name, NET_NAME_USER, &conf);
+	dev = vxlan_dev_create(net, parms->name, &conf);
 	if (IS_ERR(dev)) {
 		rtnl_unlock();
 		ovs_vport_free(vport);

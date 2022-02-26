@@ -241,6 +241,74 @@ static struct aac_driver_ident aac_drivers[] = {
 	{ aac_srcv_init, "aacraid", "ADAPTEC ", "RAID            ", 2, AAC_QUIRK_SRC }, /* Adaptec PMC Series 8 */
 };
 
+static const struct pci_device_id aac_unsupported[] = {
+	{ 0x1028, 0x0001, 0x1028, 0x0001, 0, 0, 0 }, /* PERC 2/Si (Iguana/PERC2Si) */
+	{ 0x1028, 0x0002, 0x1028, 0x0002, 0, 0, 1 }, /* PERC 3/Di (Opal/PERC3Di) */
+	{ 0x1028, 0x0003, 0x1028, 0x0003, 0, 0, 2 }, /* PERC 3/Si (SlimFast/PERC3Si */
+	{ 0x1028, 0x0004, 0x1028, 0x00d0, 0, 0, 3 }, /* PERC 3/Di (Iguana FlipChip/PERC3DiF */
+	{ 0x1028, 0x0002, 0x1028, 0x00d1, 0, 0, 4 }, /* PERC 3/Di (Viper/PERC3DiV) */
+	{ 0x1028, 0x0002, 0x1028, 0x00d9, 0, 0, 5 }, /* PERC 3/Di (Lexus/PERC3DiL) */
+	{ 0x1028, 0x000a, 0x1028, 0x0106, 0, 0, 6 }, /* PERC 3/Di (Jaguar/PERC3DiJ) */
+	{ 0x1028, 0x000a, 0x1028, 0x011b, 0, 0, 7 }, /* PERC 3/Di (Dagger/PERC3DiD) */
+	{ 0x1028, 0x000a, 0x1028, 0x0121, 0, 0, 8 }, /* PERC 3/Di (Boxster/PERC3DiB) */
+	{ 0x9005, 0x0283, 0x9005, 0x0283, 0, 0, 9 }, /* catapult */
+	{ 0x9005, 0x0284, 0x9005, 0x0284, 0, 0, 10 }, /* tomcat */
+	{ 0x9005, 0x0285, 0x9005, 0x0286, 0, 0, 11 }, /* Adaptec 2120S (Crusader) */
+	{ 0x9005, 0x0285, 0x9005, 0x0285, 0, 0, 12 }, /* Adaptec 2200S (Vulcan) */
+	{ 0x9005, 0x0285, 0x9005, 0x0287, 0, 0, 13 }, /* Adaptec 2200S (Vulcan-2m) */
+	{ 0x9005, 0x0285, 0x17aa, 0x0286, 0, 0, 14 }, /* Legend S220 (Legend Crusader) */
+	{ 0x9005, 0x0285, 0x17aa, 0x0287, 0, 0, 15 }, /* Legend S230 (Legend Vulcan) */
+	{ 0x9005, 0x0285, 0x9005, 0x0288, 0, 0, 16 }, /* Adaptec 3230S (Harrier) */
+	{ 0x9005, 0x0285, 0x9005, 0x0289, 0, 0, 17 }, /* Adaptec 3240S (Tornado) */
+	{ 0x9005, 0x0285, 0x9005, 0x028a, 0, 0, 18 }, /* ASR-2020ZCR SCSI PCI-X ZCR (Skyhawk) */
+	{ 0x9005, 0x0285, 0x9005, 0x028b, 0, 0, 19 }, /* ASR-2025ZCR SCSI SO-DIMM PCI-X ZCR (Terminator) */
+	{ 0x9005, 0x0286, 0x9005, 0x028c, 0, 0, 20 }, /* ASR-2230S + ASR-2230SLP PCI-X (Lancer) */
+	{ 0x9005, 0x0286, 0x9005, 0x028d, 0, 0, 21 }, /* ASR-2130S (Lancer) */
+	{ 0x9005, 0x0286, 0x9005, 0x029b, 0, 0, 22 }, /* AAR-2820SA (Intruder) */
+	{ 0x9005, 0x0286, 0x9005, 0x029c, 0, 0, 23 }, /* AAR-2620SA (Intruder) */
+	{ 0x9005, 0x0286, 0x9005, 0x029d, 0, 0, 24 }, /* AAR-2420SA (Intruder) */
+	{ 0x9005, 0x0286, 0x9005, 0x029e, 0, 0, 25 }, /* ICP9024RO (Lancer) */
+	{ 0x9005, 0x0286, 0x9005, 0x029f, 0, 0, 26 }, /* ICP9014RO (Lancer) */
+	{ 0x9005, 0x0286, 0x9005, 0x02a0, 0, 0, 27 }, /* ICP9047MA (Lancer) */
+	{ 0x9005, 0x0286, 0x9005, 0x02a1, 0, 0, 28 }, /* ICP9087MA (Lancer) */
+	{ 0x9005, 0x0286, 0x9005, 0x02a3, 0, 0, 29 }, /* ICP5445AU (Hurricane44) */
+	{ 0x9005, 0x0285, 0x9005, 0x02a4, 0, 0, 30 }, /* ICP9085LI (Marauder-X) */
+	{ 0x9005, 0x0285, 0x9005, 0x02a5, 0, 0, 31 }, /* ICP5085BR (Marauder-E) */
+	{ 0x9005, 0x0286, 0x9005, 0x02a6, 0, 0, 32 }, /* ICP9067MA (Intruder-6) */
+	{ 0x9005, 0x0287, 0x9005, 0x0800, 0, 0, 33 }, /* Themisto Jupiter Platform */
+	{ 0x9005, 0x0200, 0x9005, 0x0200, 0, 0, 33 }, /* Themisto Jupiter Platform */
+	{ 0x9005, 0x0286, 0x9005, 0x0800, 0, 0, 34 }, /* Callisto Jupiter Platform */
+	{ 0x9005, 0x0285, 0x9005, 0x028e, 0, 0, 35 }, /* ASR-2020SA SATA PCI-X ZCR (Skyhawk) */
+	{ 0x9005, 0x0285, 0x9005, 0x028f, 0, 0, 36 }, /* ASR-2025SA SATA SO-DIMM PCI-X ZCR (Terminator) */
+	{ 0x9005, 0x0285, 0x9005, 0x0290, 0, 0, 37 }, /* AAR-2410SA PCI SATA 4ch (Jaguar II) */
+	{ 0x9005, 0x0285, 0x1028, 0x0291, 0, 0, 38 }, /* CERC SATA RAID 2 PCI SATA 6ch (DellCorsair) */
+	{ 0x9005, 0x0285, 0x9005, 0x0292, 0, 0, 39 }, /* AAR-2810SA PCI SATA 8ch (Corsair-8) */
+	{ 0x9005, 0x0285, 0x9005, 0x0293, 0, 0, 40 }, /* AAR-21610SA PCI SATA 16ch (Corsair-16) */
+	{ 0x9005, 0x0285, 0x9005, 0x0294, 0, 0, 41 }, /* ESD SO-DIMM PCI-X SATA ZCR (Prowler) */
+	{ 0x9005, 0x0285, 0x103C, 0x3227, 0, 0, 42 }, /* AAR-2610SA PCI SATA 6ch */
+	{ 0x9005, 0x0285, 0x9005, 0x0296, 0, 0, 43 }, /* ASR-2240S (SabreExpress) */
+	{ 0x9005, 0x0285, 0x9005, 0x0297, 0, 0, 44 }, /* ASR-4005 */
+	{ 0x9005, 0x0285, 0x1014, 0x02F2, 0, 0, 45 }, /* IBM 8i (AvonPark) */
+	{ 0x9005, 0x0285, 0x1014, 0x0312, 0, 0, 45 }, /* IBM 8i (AvonPark Lite) */
+	{ 0x9005, 0x0286, 0x1014, 0x9580, 0, 0, 46 }, /* IBM 8k/8k-l8 (Aurora) */
+	{ 0x9005, 0x0286, 0x1014, 0x9540, 0, 0, 47 }, /* IBM 8k/8k-l4 (Aurora Lite) */
+	{ 0x9005, 0x0285, 0x9005, 0x0298, 0, 0, 48 }, /* ASR-4000 (BlackBird) */
+	{ 0x9005, 0x0285, 0x9005, 0x0299, 0, 0, 49 }, /* ASR-4800SAS (Marauder-X) */
+	{ 0x9005, 0x0285, 0x9005, 0x029a, 0, 0, 50 }, /* ASR-4805SAS (Marauder-E) */
+	{ 0x9005, 0x0286, 0x9005, 0x02a2, 0, 0, 51 }, /* ASR-3800 (Hurricane44) */
+	{ 0x9005, 0x0285, 0x1028, 0x0287, 0, 0, 52 }, /* Perc 320/DC*/
+	{ 0x1011, 0x0046, 0x9005, 0x0365, 0, 0, 53 }, /* Adaptec 5400S (Mustang)*/
+	{ 0x1011, 0x0046, 0x9005, 0x0364, 0, 0, 54 }, /* Adaptec 5400S (Mustang)*/
+	{ 0x1011, 0x0046, 0x9005, 0x1364, 0, 0, 55 }, /* Dell PERC2/QC */
+	{ 0x1011, 0x0046, 0x103c, 0x10c2, 0, 0, 56 }, /* HP NetRAID-4M */
+	{ 0x9005, 0x0285, 0x1028, PCI_ANY_ID, 0, 0, 57 }, /* Dell Catchall */
+	{ 0x9005, 0x0285, 0x17aa, PCI_ANY_ID, 0, 0, 58 }, /* Legend Catchall */
+	{ 0x9005, 0x0285, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 59 }, /* Adaptec Catch All */
+	{ 0x9005, 0x0286, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 60 }, /* Adaptec Rocket Catch All */
+	{ 0x9005, 0x0288, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 61 }, /* Adaptec NEMER/ARK Catch All */
+	{ 0,}
+};
+
 /**
  *	aac_queuecommand	-	queue a SCSI command
  *	@cmd:		SCSI command to queue
@@ -390,6 +458,20 @@ static int aac_biosparm(struct scsi_device *sdev, struct block_device *bdev,
 	return 0;
 }
 
+static int aac_slave_alloc(struct scsi_device *sdev)
+{
+	sdev->tagged_supported = 1;
+	scsi_activate_tcq(sdev, sdev->host->can_queue);
+
+	return 0;
+}
+
+static void aac_slave_destroy(struct scsi_device *sdev)
+{
+	scsi_deactivate_tcq(sdev, 1);
+}
+
+
 /**
  *	aac_slave_configure		-	compute queue depths
  *	@sdev:	SCSI device we are considering
@@ -404,6 +486,7 @@ static int aac_slave_configure(struct scsi_device *sdev)
 	struct aac_dev *aac = (struct aac_dev *)sdev->host->hostdata;
 	int chn, tid;
 	unsigned int depth = 0;
+	unsigned int tagged = 0;
 	unsigned int set_timeout = 0;
 	bool set_qd_dev_type = false;
 	u8 devtype = 0;
@@ -419,8 +502,10 @@ static int aac_slave_configure(struct scsi_device *sdev)
 			set_qd_dev_type = true;
 
 		set_timeout = 1;
+		tagged = MSG_ORDERED_TAG;
 		goto common_config;
 	}
+
 
 	if (aac->jbod && (sdev->type == TYPE_DISK))
 		sdev->removable = 1;
@@ -449,6 +534,7 @@ static int aac_slave_configure(struct scsi_device *sdev)
 		unsigned cid;
 
 		set_timeout = 1;
+		tagged = MSG_ORDERED_TAG;
 
 		for (cid = 0; cid < aac->maximum_num_containers; ++cid)
 			if (aac->fsa_dev[cid].valid)
@@ -504,7 +590,7 @@ common_config:
 	else if (depth < 1)
 		depth = 1;
 
-	scsi_change_queue_depth(sdev, depth);
+	scsi_adjust_queue_depth(sdev, tagged, depth);
 
 	sdev->tagged_supported = 1;
 
@@ -520,10 +606,14 @@ common_config:
  *	total capacity and the queue depth supported by the target device.
  */
 
-static int aac_change_queue_depth(struct scsi_device *sdev, int depth)
+static int aac_change_queue_depth(struct scsi_device *sdev, int depth,
+								int reason)
 {
 	struct aac_dev *aac = (struct aac_dev *)(sdev->host->hostdata);
 	int chn, tid, is_native_device = 0;
+
+	if (reason != SCSI_QDEPTH_DEFAULT)
+		return -EOPNOTSUPP;
 
 	chn = aac_logical_to_phys(sdev_channel(sdev));
 	tid = sdev_id(sdev);
@@ -551,11 +641,12 @@ static int aac_change_queue_depth(struct scsi_device *sdev, int depth)
 			depth = 256;
 		else if (depth < 2)
 			depth = 2;
-		return scsi_change_queue_depth(sdev, depth);
+		scsi_adjust_queue_depth(sdev, MSG_ORDERED_TAG, depth);
 	} else if (is_native_device) {
-		scsi_change_queue_depth(sdev, aac->hba_map[chn][tid].qd_limit);
+		scsi_adjust_queue_depth(sdev, MSG_ORDERED_TAG,
+					aac->hba_map[chn][tid].qd_limit);
 	} else {
-		scsi_change_queue_depth(sdev, 1);
+		scsi_adjust_queue_depth(sdev, 0, 1);
 	}
 	return sdev->queue_depth;
 }
@@ -683,6 +774,9 @@ static int aac_eh_abort(struct scsi_cmnd* cmd)
 	u32 bus, cid;
 	int ret = FAILED;
 
+	if (aac_adapter_check_health(aac))
+		return ret;
+
 	bus = aac_logical_to_phys(scmd_channel(cmd));
 	cid = scmd_id(cmd);
 	if (aac->hba_map[bus][cid].devtype == AAC_DEVTYPE_NATIVE_RAW) {
@@ -690,7 +784,6 @@ static int aac_eh_abort(struct scsi_cmnd* cmd)
 		struct aac_hba_tm_req *tmf;
 		int status;
 		u64 address;
-		__le32 managed_request_id;
 
 		pr_err("%s: Host adapter abort request (%d,%d,%d,%d)\n",
 		 AAC_DRIVERNAME,
@@ -703,8 +796,6 @@ static int aac_eh_abort(struct scsi_cmnd* cmd)
 				(fib->flags & FIB_CONTEXT_FLAG_NATIVE_HBA) &&
 				(fib->callback_data == cmd)) {
 				found = 1;
-				managed_request_id = ((struct aac_hba_cmd_req *)
-					fib->hw_fib_va)->request_id;
 				break;
 			}
 		}
@@ -1375,18 +1466,15 @@ static ssize_t aac_store_reset_adapter(struct device *device,
 				       const char *buf, size_t count)
 {
 	int retval = -EACCES;
-	int bled = 0;
-	struct aac_dev *aac;
-
 
 	if (!capable(CAP_SYS_ADMIN))
 		return retval;
 
-	aac = (struct aac_dev *)class_to_shost(device)->hostdata;
-	bled = buf[0] == '!' ? 1:0;
-	retval = aac_reset_adapter(aac, bled, IOP_HWSOFT_RESET);
+	retval = aac_reset_adapter(shost_priv(class_to_shost(device)),
+					buf[0] == '!', IOP_HWSOFT_RESET);
 	if (retval >= 0)
 		retval = count;
+
 	return retval;
 }
 
@@ -1525,6 +1613,8 @@ static struct scsi_host_template aac_driver_template = {
 	.queuecommand			= aac_queuecommand,
 	.bios_param			= aac_biosparm,
 	.shost_attrs			= aac_attrs,
+	.slave_alloc			= aac_slave_alloc,
+	.slave_destroy			= aac_slave_destroy,
 	.slave_configure		= aac_slave_configure,
 	.change_queue_depth		= aac_change_queue_depth,
 	.sdev_attrs			= aac_dev_attrs,
@@ -1550,6 +1640,7 @@ static struct scsi_host_template aac_driver_template = {
 static void __aac_shutdown(struct aac_dev * aac)
 {
 	int i;
+	int cpu;
 
 	mutex_lock(&aac->ioctl_mutex);
 	aac->adapter_shutdown = 1;
@@ -1565,16 +1656,28 @@ static void __aac_shutdown(struct aac_dev * aac)
 				up(&fib->event_wait);
 		}
 		kthread_stop(aac->thread);
+		aac->thread = NULL;
 	}
 
 	aac_send_shutdown(aac);
 
 	aac_adapter_disable_int(aac);
 
+	cpu = cpumask_first(cpu_online_mask);
 	if (aac_is_src(aac)) {
 		if (aac->max_msix > 1) {
 			for (i = 0; i < aac->max_msix; i++) {
-				free_irq(pci_irq_vector(aac->pdev, i),
+				if (irq_set_affinity_hint(
+				    aac->msixentry[i].vector,
+				    NULL)) {
+					printk(KERN_ERR "%s%d: Failed to reset IRQ affinity for cpu %d\n",
+						aac->name,
+						aac->id,
+						cpu);
+				}
+				cpu = cpumask_next(cpu,
+						cpu_online_mask);
+				free_irq(aac->msixentry[i].vector,
 					 &(aac->aac_msix[i]));
 			}
 		} else {
@@ -1608,6 +1711,8 @@ static int aac_probe_one(struct pci_dev *pdev, const struct pci_device_id *id)
 	u64 dmamask;
 	int mask_bits = 0;
 	extern int aac_sync_mode;
+
+	pci_hw_vendor_status(aac_unsupported, pdev);
 
 	/*
 	 * Only series 7 needs freset.
@@ -1689,12 +1794,17 @@ static int aac_probe_one(struct pci_dev *pdev, const struct pci_device_id *id)
 	spin_lock_init(&aac->fib_lock);
 
 	mutex_init(&aac->ioctl_mutex);
+	mutex_init(&aac->scan_mutex);
+
+	INIT_DELAYED_WORK(&aac->safw_rescan_work, aac_safw_rescan_worker);
 	/*
 	 *	Map in the registers from the adapter.
 	 */
 	aac->base_size = AAC_MIN_FOOTPRINT_SIZE;
-	if ((*aac_drivers[index].init)(aac))
+	if ((*aac_drivers[index].init)(aac)) {
+		error = -ENODEV;
 		goto out_unmap;
+	}
 
 	if (aac->sync_mode) {
 		if (aac_sync_mode)
@@ -1789,10 +1899,15 @@ static int aac_probe_one(struct pci_dev *pdev, const struct pci_device_id *id)
 
 	pci_set_drvdata(pdev, shost);
 
+	error = scsi_init_shared_tag_map(shost, shost->can_queue);
+	if (error)
+		goto out_deinit;
+
 	error = scsi_add_host(shost, &pdev->dev);
 	if (error)
 		goto out_deinit;
-	scsi_scan_host(shost);
+
+	aac_scan_host(aac);
 
 	pci_enable_pcie_error_reporting(pdev);
 	pci_save_state(pdev);
@@ -1857,7 +1972,7 @@ static int aac_acquire_resources(struct aac_dev *dev)
 
 	if (!dev->sync_mode) {
 		/* After EEH recovery or suspend resume, max_msix count
-		 * may change, therefore updating in init as well.
+		 * may change, therfore updating in init as well.
 		 */
 		dev->init->r7.no_of_msix_vectors = cpu_to_le32(dev->max_msix);
 		aac_adapter_start(dev);
@@ -1877,6 +1992,7 @@ static int aac_suspend(struct pci_dev *pdev, pm_message_t state)
 	struct aac_dev *aac = (struct aac_dev *)shost->hostdata;
 
 	scsi_block_requests(shost);
+	aac_cancel_safw_rescan_worker(aac);
 	aac_send_shutdown(aac);
 
 	aac_release_resources(aac);
@@ -1935,6 +2051,7 @@ static void aac_remove_one(struct pci_dev *pdev)
 	struct Scsi_Host *shost = pci_get_drvdata(pdev);
 	struct aac_dev *aac = (struct aac_dev *)shost->hostdata;
 
+	aac_cancel_safw_rescan_worker(aac);
 	scsi_remove_host(shost);
 
 	__aac_shutdown(aac);
@@ -1992,6 +2109,7 @@ static pci_ers_result_t aac_pci_error_detected(struct pci_dev *pdev,
 		aac->handle_pci_error = 1;
 
 		scsi_block_requests(aac->scsi_host_ptr);
+		aac_cancel_safw_rescan_worker(aac);
 		aac_flush_ios(aac);
 		aac_release_resources(aac);
 
@@ -2076,7 +2194,7 @@ static void aac_pci_resume(struct pci_dev *pdev)
 		if (sdev->sdev_state == SDEV_OFFLINE)
 			sdev->sdev_state = SDEV_RUNNING;
 	scsi_unblock_requests(aac->scsi_host_ptr);
-	scsi_scan_host(aac->scsi_host_ptr);
+	aac_scan_host(aac);
 	pci_save_state(pdev);
 
 	dev_err(&pdev->dev, "aacraid: PCI error - resume\n");

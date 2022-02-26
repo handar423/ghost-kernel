@@ -37,9 +37,21 @@ static inline void ceph_set_cached_acl(struct inode *inode,
 	spin_lock(&ci->i_ceph_lock);
 	if (__ceph_caps_issued_mask(ci, CEPH_CAP_XATTR_SHARED, 0))
 		set_cached_acl(inode, type, acl);
-	else
-		forget_cached_acl(inode, type);
 	spin_unlock(&ci->i_ceph_lock);
+}
+
+static inline struct posix_acl *ceph_get_cached_acl(struct inode *inode,
+							int type)
+{
+	struct ceph_inode_info *ci = ceph_inode(inode);
+	struct posix_acl *acl = ACL_NOT_CACHED;
+
+	spin_lock(&ci->i_ceph_lock);
+	if (__ceph_caps_issued_mask(ci, CEPH_CAP_XATTR_SHARED, 0))
+		acl = get_cached_acl(inode, type);
+	spin_unlock(&ci->i_ceph_lock);
+
+	return acl;
 }
 
 struct posix_acl *ceph_get_acl(struct inode *inode, int type)
@@ -49,12 +61,19 @@ struct posix_acl *ceph_get_acl(struct inode *inode, int type)
 	char *value = NULL;
 	struct posix_acl *acl;
 
+	if (!IS_POSIXACL(inode))
+		return NULL;
+
+	acl = ceph_get_cached_acl(inode, type);
+	if (acl != ACL_NOT_CACHED)
+		return acl;
+
 	switch (type) {
 	case ACL_TYPE_ACCESS:
-		name = XATTR_NAME_POSIX_ACL_ACCESS;
+		name = POSIX_ACL_XATTR_ACCESS;
 		break;
 	case ACL_TYPE_DEFAULT:
-		name = XATTR_NAME_POSIX_ACL_DEFAULT;
+		name = POSIX_ACL_XATTR_DEFAULT;
 		break;
 	default:
 		BUG();
@@ -83,7 +102,8 @@ struct posix_acl *ceph_get_acl(struct inode *inode, int type)
 	return acl;
 }
 
-int ceph_set_acl(struct inode *inode, struct posix_acl *acl, int type)
+static int ceph_set_acl(struct dentry *dentry, struct inode *inode,
+				struct posix_acl *acl, int type)
 {
 	int ret = 0, size = 0;
 	const char *name = NULL;
@@ -93,7 +113,7 @@ int ceph_set_acl(struct inode *inode, struct posix_acl *acl, int type)
 
 	switch (type) {
 	case ACL_TYPE_ACCESS:
-		name = XATTR_NAME_POSIX_ACL_ACCESS;
+		name = POSIX_ACL_XATTR_ACCESS;
 		if (acl) {
 			ret = posix_acl_update_mode(inode, &new_mode, &acl);
 			if (ret)
@@ -105,7 +125,7 @@ int ceph_set_acl(struct inode *inode, struct posix_acl *acl, int type)
 			ret = acl ? -EINVAL : 0;
 			goto out;
 		}
-		name = XATTR_NAME_POSIX_ACL_DEFAULT;
+		name = POSIX_ACL_XATTR_DEFAULT;
 		break;
 	default:
 		ret = -EINVAL;
@@ -125,26 +145,21 @@ int ceph_set_acl(struct inode *inode, struct posix_acl *acl, int type)
 			goto out_free;
 	}
 
-	if (ceph_snap(inode) != CEPH_NOSNAP) {
-		ret = -EROFS;
-		goto out_free;
-	}
-
 	if (new_mode != old_mode) {
-		newattrs.ia_ctime = current_time(inode);
+		newattrs.ia_ctime = current_fs_time(inode->i_sb);
 		newattrs.ia_mode = new_mode;
 		newattrs.ia_valid = ATTR_MODE;
-		ret = __ceph_setattr(inode, &newattrs);
+		ret = __ceph_setattr(dentry, &newattrs);
 		if (ret)
 			goto out_free;
 	}
 
-	ret = __ceph_setxattr(inode, name, value, size, 0);
+	ret = __ceph_setxattr(dentry, name, value, size, 0);
 	if (ret) {
 		if (new_mode != old_mode) {
 			newattrs.ia_mode = old_mode;
 			newattrs.ia_valid = ATTR_MODE;
-			__ceph_setattr(inode, &newattrs);
+			__ceph_setattr(dentry, &newattrs);
 		}
 		goto out_free;
 	}
@@ -160,24 +175,37 @@ out:
 int ceph_pre_init_acls(struct inode *dir, umode_t *mode,
 		       struct ceph_acls_info *info)
 {
-	struct posix_acl *acl, *default_acl;
+	struct posix_acl *acl = NULL, *default_acl = NULL;
 	size_t val_size1 = 0, val_size2 = 0;
 	struct ceph_pagelist *pagelist = NULL;
 	void *tmp_buf = NULL;
 	int err;
 
-	err = posix_acl_create(dir, mode, &default_acl, &acl);
-	if (err)
-		return err;
+	if (S_ISLNK(*mode) || !IS_POSIXACL(dir))
+		return 0;
 
-	if (acl) {
-		int ret = posix_acl_equiv_mode(acl, mode);
-		if (ret < 0)
-			goto out_err;
-		if (ret == 0) {
-			posix_acl_release(acl);
-			acl = NULL;
-		}
+	default_acl = ceph_get_acl(dir, ACL_TYPE_DEFAULT);
+	if (IS_ERR(default_acl))
+		return PTR_ERR(default_acl);
+
+	if (!default_acl) {
+		*mode &= ~current_umask();
+		return 0;
+	}
+
+	if (S_ISDIR(*mode)) {
+		acl = posix_acl_dup(default_acl);
+	} else {
+		acl = default_acl;
+		default_acl = NULL;
+	}
+
+	err = posix_acl_create(&acl, GFP_NOFS, mode);
+	if (err < 0)
+		goto out_err;
+	if (err == 0) {
+		posix_acl_release(acl);
+		acl = NULL;
 	}
 
 	if (!default_acl && !acl)
@@ -189,10 +217,10 @@ int ceph_pre_init_acls(struct inode *dir, umode_t *mode,
 		val_size2 = posix_acl_xattr_size(default_acl->a_count);
 
 	err = -ENOMEM;
-	tmp_buf = kmalloc(max(val_size1, val_size2), GFP_KERNEL);
+	tmp_buf = kmalloc(max(val_size1, val_size2), GFP_NOFS);
 	if (!tmp_buf)
 		goto out_err;
-	pagelist = kmalloc(sizeof(struct ceph_pagelist), GFP_KERNEL);
+	pagelist = kmalloc(sizeof(struct ceph_pagelist), GFP_NOFS);
 	if (!pagelist)
 		goto out_err;
 	ceph_pagelist_init(pagelist);
@@ -204,11 +232,11 @@ int ceph_pre_init_acls(struct inode *dir, umode_t *mode,
 	ceph_pagelist_encode_32(pagelist, acl && default_acl ? 2 : 1);
 
 	if (acl) {
-		size_t len = strlen(XATTR_NAME_POSIX_ACL_ACCESS);
+		size_t len = strlen(POSIX_ACL_XATTR_ACCESS);
 		err = ceph_pagelist_reserve(pagelist, len + val_size1 + 8);
 		if (err)
 			goto out_err;
-		ceph_pagelist_encode_string(pagelist, XATTR_NAME_POSIX_ACL_ACCESS,
+		ceph_pagelist_encode_string(pagelist, POSIX_ACL_XATTR_ACCESS,
 					    len);
 		err = posix_acl_to_xattr(&init_user_ns, acl,
 					 tmp_buf, val_size1);
@@ -218,12 +246,12 @@ int ceph_pre_init_acls(struct inode *dir, umode_t *mode,
 		ceph_pagelist_append(pagelist, tmp_buf, val_size1);
 	}
 	if (default_acl) {
-		size_t len = strlen(XATTR_NAME_POSIX_ACL_DEFAULT);
+		size_t len = strlen(POSIX_ACL_XATTR_DEFAULT);
 		err = ceph_pagelist_reserve(pagelist, len + val_size2 + 8);
 		if (err)
 			goto out_err;
 		err = ceph_pagelist_encode_string(pagelist,
-						  XATTR_NAME_POSIX_ACL_DEFAULT, len);
+						  POSIX_ACL_XATTR_DEFAULT, len);
 		err = posix_acl_to_xattr(&init_user_ns, default_acl,
 					 tmp_buf, val_size2);
 		if (err < 0)
@@ -238,7 +266,6 @@ int ceph_pre_init_acls(struct inode *dir, umode_t *mode,
 	info->default_acl = default_acl;
 	info->pagelist = pagelist;
 	return 0;
-
 out_err:
 	posix_acl_release(acl);
 	posix_acl_release(default_acl);
@@ -263,3 +290,104 @@ void ceph_release_acls_info(struct ceph_acls_info *info)
 	if (info->pagelist)
 		ceph_pagelist_release(info->pagelist);
 }
+
+int ceph_acl_chmod(struct dentry *dentry, struct inode *inode)
+{
+	struct posix_acl *acl;
+	int ret = 0;
+
+	if (S_ISLNK(inode->i_mode)) {
+		ret = -EOPNOTSUPP;
+		goto out;
+	}
+
+	if (!IS_POSIXACL(inode))
+		goto out;
+
+	acl = ceph_get_acl(inode, ACL_TYPE_ACCESS);
+	if (IS_ERR_OR_NULL(acl)) {
+		ret = PTR_ERR(acl);
+		goto out;
+	}
+
+	ret = posix_acl_chmod(&acl, GFP_KERNEL, inode->i_mode);
+	if (ret)
+		goto out;
+	ret = ceph_set_acl(dentry, inode, acl, ACL_TYPE_ACCESS);
+	posix_acl_release(acl);
+out:
+	return ret;
+}
+
+static int ceph_xattr_acl_get(struct dentry *dentry, const char *name,
+				void *value, size_t size, int type)
+{
+	struct posix_acl *acl;
+	int ret = 0;
+
+	if (!IS_POSIXACL(dentry->d_inode))
+		return -EOPNOTSUPP;
+
+	acl = ceph_get_acl(dentry->d_inode, type);
+	if (IS_ERR(acl))
+		return PTR_ERR(acl);
+	if (acl == NULL)
+		return -ENODATA;
+
+	ret = posix_acl_to_xattr(&init_user_ns, acl, value, size);
+	posix_acl_release(acl);
+
+	return ret;
+}
+
+static int ceph_xattr_acl_set(struct dentry *dentry, const char *name,
+			const void *value, size_t size, int flags, int type)
+{
+	int ret = 0;
+	struct posix_acl *acl = NULL;
+
+	if (!inode_owner_or_capable(dentry->d_inode)) {
+		ret = -EPERM;
+		goto out;
+	}
+
+	if (!IS_POSIXACL(dentry->d_inode)) {
+		ret = -EOPNOTSUPP;
+		goto out;
+	}
+
+	if (value) {
+		acl = posix_acl_from_xattr(&init_user_ns, value, size);
+		if (IS_ERR(acl)) {
+			ret = PTR_ERR(acl);
+			goto out;
+		}
+
+		if (acl) {
+			ret = posix_acl_valid(dentry->d_inode->i_sb->s_user_ns, acl);
+			if (ret)
+				goto out_release;
+		}
+	}
+
+	ret = ceph_set_acl(dentry, dentry->d_inode, acl, type);
+
+out_release:
+	posix_acl_release(acl);
+out:
+	return ret;
+}
+
+const struct xattr_handler ceph_xattr_acl_default_handler = {
+	.prefix = POSIX_ACL_XATTR_DEFAULT,
+	.flags  = ACL_TYPE_DEFAULT,
+	.get    = ceph_xattr_acl_get,
+	.set    = ceph_xattr_acl_set,
+};
+
+const struct xattr_handler ceph_xattr_acl_access_handler = {
+	.prefix = POSIX_ACL_XATTR_ACCESS,
+	.flags  = ACL_TYPE_ACCESS,
+	.get    = ceph_xattr_acl_get,
+	.set    = ceph_xattr_acl_set,
+};

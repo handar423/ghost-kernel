@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0+
 /*
  * Freescale QUICC Engine USB Host Controller Driver
  *
@@ -9,6 +8,11 @@
  *               Peter Barada <peterb@logicpd.com>
  * Copyright (c) MontaVista Software, Inc. 2008.
  *               Anton Vorontsov <avorontsov@ru.mvista.com>
+ *
+ * This program is free software; you can redistribute  it and/or modify it
+ * under  the terms of  the GNU General  Public License as published by the
+ * Free Software Foundation;  either version 2 of the  License, or (at your
+ * option) any later version.
  */
 
 #include <linux/module.h>
@@ -22,12 +26,10 @@
 #include <linux/io.h>
 #include <linux/usb.h>
 #include <linux/usb/hcd.h>
-#include <linux/of_address.h>
-#include <linux/of_irq.h>
 #include <linux/of_platform.h>
 #include <linux/of_gpio.h>
 #include <linux/slab.h>
-#include <soc/fsl/qe/qe.h>
+#include <asm/qe.h>
 #include <asm/fsl_gtm.h>
 #include "fhci.h"
 
@@ -306,8 +308,10 @@ static struct fhci_usb *fhci_create_lld(struct fhci_hcd *fhci)
 
 	/* allocate memory for SCC data structure */
 	usb = kzalloc(sizeof(*usb), GFP_KERNEL);
-	if (!usb)
+	if (!usb) {
+		fhci_err(fhci, "no memory for SCC data struct\n");
 		return NULL;
+	}
 
 	usb->fhci = fhci;
 	usb->hc_list = fhci->hc_list;
@@ -354,12 +358,12 @@ static int fhci_start(struct usb_hcd *hcd)
 	hcd->state = HC_STATE_RUNNING;
 
 	/*
-	 * From here on, hub_wq concurrently accesses the root
+	 * From here on, khubd concurrently accesses the root
 	 * hub; drivers will be talking to enumerated devices.
-	 * (On restart paths, hub_wq already knows about the root
+	 * (On restart paths, khubd already knows about the root
 	 * hub and could find work as soon as we wrote FLAG_CF.)
 	 *
-	 * Before this point the HC was idle/ready.  After, hub_wq
+	 * Before this point the HC was idle/ready.  After, khubd
 	 * and device drivers may start it running.
 	 */
 	fhci_usb_enable(fhci);
@@ -748,8 +752,6 @@ static int of_fhci_probe(struct platform_device *ofdev)
 	if (ret < 0)
 		goto err_add_hcd;
 
-	device_wakeup_enable(hcd->self.controller);
-
 	fhci_dfs_create(fhci);
 
 	return 0;
@@ -815,6 +817,7 @@ MODULE_DEVICE_TABLE(of, of_fhci_match);
 static struct platform_driver of_fhci_driver = {
 	.driver = {
 		.name = "fsl,usb-fhci",
+		.owner = THIS_MODULE,
 		.of_match_table = of_fhci_match,
 	},
 	.probe		= of_fhci_probe,

@@ -105,25 +105,16 @@ static int r_show(struct seq_file *m, void *v)
 {
 	struct resource *root = m->private;
 	struct resource *r = v, *p;
-	unsigned long long start, end;
 	int width = root->end < 0x10000 ? 4 : 8;
 	int depth;
 
 	for (depth = 0, p = r; depth < MAX_IORES_LEVEL; depth++, p = p->parent)
 		if (p->parent == root)
 			break;
-
-	if (file_ns_capable(m->file, &init_user_ns, CAP_SYS_ADMIN)) {
-		start = r->start;
-		end = r->end;
-	} else {
-		start = end = 0;
-	}
-
 	seq_printf(m, "%*s%0*llx-%0*llx : %s\n",
 			depth * 2, "",
-			width, start,
-			width, end,
+			width, (unsigned long long) r->start,
+			width, (unsigned long long) r->end,
 			r->name ? r->name : "<BAD>");
 	return 0;
 }
@@ -352,13 +343,13 @@ int release_resource(struct resource *old)
 EXPORT_SYMBOL(release_resource);
 
 /*
- * Finds the lowest iomem resource existing within [res->start.res->end).
- * The caller must specify res->start, res->end, res->flags, and optionally
- * desc.  If found, returns 0, res is overwritten, if not found, returns -1.
- * This function walks the whole tree and not just first level children until
- * and unless first_level_children_only is true.
+ * Finds the lowest iomem reosurce exists with-in [res->start.res->end)
+ * the caller must specify res->start, res->end, res->flags and "name".
+ * If found, returns 0, res is overwritten, if not found, returns -1.
+ * This walks through whole tree and not just first level children
+ * until and unless first_level_children_only is true.
  */
-static int find_next_iomem_res(struct resource *res, unsigned long desc,
+static int find_next_iomem_res(struct resource *res, char *name,
 			       bool first_level_children_only)
 {
 	resource_size_t start, end;
@@ -379,7 +370,7 @@ static int find_next_iomem_res(struct resource *res, unsigned long desc,
 	for (p = iomem_resource.child; p; p = next_resource(p, sibling_only)) {
 		if ((p->flags & res->flags) != res->flags)
 			continue;
-		if ((desc != IORES_DESC_NONE) && (desc != p->desc))
+		if (name && strcmp(p->name, name))
 			continue;
 		if (p->start > end) {
 			p = NULL;
@@ -398,20 +389,19 @@ static int find_next_iomem_res(struct resource *res, unsigned long desc,
 	if (res->end > p->end)
 		res->end = p->end;
 	res->flags = p->flags;
-	res->desc = p->desc;
+	res->name = p->name;
 	return 0;
 }
 
-static int __walk_iomem_res_desc(struct resource *res, unsigned long desc,
-				 bool first_level_children_only,
-				 void *arg,
-				 int (*func)(struct resource *, void *))
+static int __walk_iomem_res(struct resource *res, char *name,
+			     bool first_level_children_only,
+			     void *arg, int (*func)(struct resource *, void *))
 {
 	u64 orig_end = res->end;
 	int ret = -1;
 
 	while ((res->start < res->end) &&
-	       !find_next_iomem_res(res, desc, first_level_children_only)) {
+	       !find_next_iomem_res(res, name, first_level_children_only)) {
 		ret = (*func)(res, arg);
 		if (ret)
 			break;
@@ -427,18 +417,15 @@ static int __walk_iomem_res_desc(struct resource *res, unsigned long desc,
  * Walks through iomem resources and calls func() with matching resource
  * ranges. This walks through whole tree and not just first level children.
  * All the memory ranges which overlap start,end and also match flags and
- * desc are valid candidates.
+ * name are valid candidates.
  *
- * @desc: I/O resource descriptor. Use IORES_DESC_NONE to skip @desc check.
- * @flags: I/O resource flags
+ * @name: name of resource
+ * @flags: resource flags
  * @start: start addr
  * @end: end addr
- *
- * NOTE: For a new descriptor search, define a new IORES_DESC in
- * <linux/ioport.h> and set it in 'desc' of a target resource entry.
  */
-int walk_iomem_res_desc(unsigned long desc, unsigned long flags, u64 start,
-		u64 end, void *arg, int (*func)(struct resource *, void *))
+int walk_iomem_res(char *name, unsigned long flags, u64 start,
+		   u64 end, void *arg, int (*func)(struct resource *, void *))
 {
 	struct resource res;
 
@@ -446,7 +433,7 @@ int walk_iomem_res_desc(unsigned long desc, unsigned long flags, u64 start,
 	res.end = end;
 	res.flags = flags;
 
-	return __walk_iomem_res_desc(&res, desc, false, arg, func);
+	return __walk_iomem_res(&res, name, false, arg, func);
 }
 
 /*
@@ -457,7 +444,7 @@ int walk_iomem_res_desc(unsigned long desc, unsigned long flags, u64 start,
  * ranges.
  */
 int walk_system_ram_res(u64 start, u64 end, void *arg,
-				int (*func)(struct resource *, void *))
+			int (*func)(struct resource *, void *))
 {
 	struct resource res;
 
@@ -465,8 +452,7 @@ int walk_system_ram_res(u64 start, u64 end, void *arg,
 	res.end = end;
 	res.flags = IORESOURCE_SYSTEM_RAM | IORESOURCE_BUSY;
 
-	return __walk_iomem_res_desc(&res, IORES_DESC_NONE, true,
-				     arg, func);
+	return __walk_iomem_res(&res, NULL, true, arg, func);
 }
 
 /*
@@ -482,8 +468,7 @@ int walk_mem_res(u64 start, u64 end, void *arg,
 	res.end = end;
 	res.flags = IORESOURCE_MEM | IORESOURCE_BUSY;
 
-	return __walk_iomem_res_desc(&res, IORES_DESC_NONE, true,
-				     arg, func);
+	return __walk_iomem_res(&res, NULL, true, arg, func);
 }
 
 #if !defined(CONFIG_ARCH_HAS_WALK_MEMORY)
@@ -506,7 +491,7 @@ int walk_system_ram_range(unsigned long start_pfn, unsigned long nr_pages,
 	res.flags = IORESOURCE_SYSTEM_RAM | IORESOURCE_BUSY;
 	orig_end = res.end;
 	while ((res.start < res.end) &&
-		(find_next_iomem_res(&res, IORES_DESC_NONE, true) >= 0)) {
+		(find_next_iomem_res(&res, NULL, true) >= 0)) {
 		pfn = (res.start + PAGE_SIZE - 1) >> PAGE_SHIFT;
 		end_pfn = (res.end + 1) >> PAGE_SHIFT;
 		if (end_pfn > pfn)
@@ -540,24 +525,19 @@ EXPORT_SYMBOL_GPL(page_is_ram);
  * region_intersects() - determine intersection of region with known resources
  * @start: region start address
  * @size: size of region
+ * @name: name of resource (in iomem_resource)
  * @flags: flags of resource (in iomem_resource)
- * @desc: descriptor of resource (in iomem_resource) or IORES_DESC_NONE
  *
  * Check if the specified region partially overlaps or fully eclipses a
- * resource identified by @flags and @desc (optional with IORES_DESC_NONE).
- * Return REGION_DISJOINT if the region does not overlap @flags/@desc,
- * return REGION_MIXED if the region overlaps @flags/@desc and another
- * resource, and return REGION_INTERSECTS if the region overlaps @flags/@desc
- * and no other defined resource. Note that REGION_INTERSECTS is also
- * returned in the case when the specified region overlaps RAM and undefined
- * memory holes.
- *
- * region_intersect() is used by memory remapping functions to ensure
- * the user is not remapping RAM and is a vast speed up over walking
- * through the resource table page by page.
+ * resource identified by @name.  Return REGION_DISJOINT if the region
+ * does not overlap @name, return REGION_MIXED if the region overlaps
+ * @type and another resource, and return REGION_INTERSECTS if the
+ * region overlaps @type and no other defined resource. Note, that
+ * REGION_INTERSECTS is also returned in the case when the specified
+ * region overlaps with undefined memory holes.
  */
-int region_intersects(resource_size_t start, size_t size, unsigned long flags,
-		      unsigned long desc)
+int region_intersects(resource_size_t start, size_t size, const char *name,
+			unsigned long flags)
 {
 	resource_size_t end = start + size - 1;
 	int type = 0; int other = 0;
@@ -565,9 +545,8 @@ int region_intersects(resource_size_t start, size_t size, unsigned long flags,
 
 	read_lock(&resource_lock);
 	for (p = iomem_resource.child; p ; p = p->sibling) {
-		bool is_type = (((p->flags & flags) == flags) &&
-				((desc == IORES_DESC_NONE) ||
-				 (desc == p->desc)));
+		bool is_type = strcmp(p->name, name) == 0 &&
+				((p->flags & flags) == flags);
 
 		if (start >= p->start && start <= p->end)
 			is_type ? type++ : other++;
@@ -586,7 +565,30 @@ int region_intersects(resource_size_t start, size_t size, unsigned long flags,
 
 	return REGION_DISJOINT;
 }
-EXPORT_SYMBOL_GPL(region_intersects);
+
+/*
+ * region_intersect_ram() is used by memory remapping functions to ensure
+ * the user is not remapping RAM and is a vast speed up over walking
+ * through the resource table page by page.
+ */
+int region_intersects_ram(resource_size_t start, size_t size)
+{
+	return region_intersects(start, size, "System RAM",
+				 IORESOURCE_MEM | IORESOURCE_BUSY);
+}
+EXPORT_SYMBOL_GPL(region_intersects_ram);
+
+/*
+ * region_intersects_pmem() checks if a specified address range is
+ * persistent memory, registered as "Persistent Memory", in the
+ * iomem_resource list.
+ */
+int region_intersects_pmem(resource_size_t start, size_t size)
+{
+	return region_intersects(start, size, "Persistent Memory",
+				 IORESOURCE_MEM);
+}
+EXPORT_SYMBOL_GPL(region_intersects_pmem);
 
 void __weak arch_remove_reservations(struct resource *avail)
 {
@@ -621,6 +623,7 @@ static int __find_resource(struct resource *root, struct resource *old,
 	struct resource *this = root->child;
 	struct resource tmp = *new, avail, alloc;
 
+	tmp.flags = new->flags;
 	tmp.start = root->start;
 	/*
 	 * Skip past an allocated resource that starts at 0, since the assignment
@@ -688,7 +691,7 @@ static int find_resource(struct resource *root, struct resource *new,
  * @newsize: new size of the resource descriptor
  * @constraint: the size and alignment constraints to be met.
  */
-static int reallocate_resource(struct resource *root, struct resource *old,
+int reallocate_resource(struct resource *root, struct resource *old,
 			resource_size_t newsize,
 			struct resource_constraint  *constraint)
 {
@@ -1030,7 +1033,6 @@ static void __init __reserve_region_with_split(struct resource *root,
 	res->start = start;
 	res->end = end;
 	res->flags = IORESOURCE_BUSY;
-	res->desc = IORES_DESC_NONE;
 
 	while (1) {
 
@@ -1065,7 +1067,6 @@ static void __init __reserve_region_with_split(struct resource *root,
 				next_res->start = conflict->end + 1;
 				next_res->end = end;
 				next_res->flags = IORESOURCE_BUSY;
-				next_res->desc = IORES_DESC_NONE;
 			}
 		} else {
 			res->start = conflict->end + 1;
@@ -1129,6 +1130,8 @@ resource_size_t resource_alignment(struct resource *res)
  *
  * request_region creates a new busy region.
  *
+ * check_region returns non-zero if the area is already busy.
+ *
  * release_region releases a matching busy region.
  */
 
@@ -1163,16 +1166,14 @@ struct resource * __request_region(struct resource *parent,
 
 		res->flags = resource_type(parent) | resource_ext_type(parent);
 		res->flags |= IORESOURCE_BUSY | flags;
-		res->desc = parent->desc;
 
 		conflict = __request_resource(parent, res);
 		if (!conflict)
 			break;
 		if (conflict != parent) {
-			if (!(conflict->flags & IORESOURCE_BUSY)) {
-				parent = conflict;
+			parent = conflict;
+			if (!(conflict->flags & IORESOURCE_BUSY))
 				continue;
-			}
 		}
 		if (conflict->flags & flags & IORESOURCE_MUXED) {
 			add_wait_queue(&muxed_resource_wait, &wait);
@@ -1192,6 +1193,36 @@ struct resource * __request_region(struct resource *parent,
 	return res;
 }
 EXPORT_SYMBOL(__request_region);
+
+/**
+ * __check_region - check if a resource region is busy or free
+ * @parent: parent resource descriptor
+ * @start: resource start address
+ * @n: resource region size
+ *
+ * Returns 0 if the region is free at the moment it is checked,
+ * returns %-EBUSY if the region is busy.
+ *
+ * NOTE:
+ * This function is deprecated because its use is racy.
+ * Even if it returns 0, a subsequent call to request_region()
+ * may fail because another driver etc. just allocated the region.
+ * Do NOT use it.  It will be removed from the kernel.
+ */
+int __check_region(struct resource *parent, resource_size_t start,
+			resource_size_t n)
+{
+	struct resource * res;
+
+	res = __request_region(parent, start, n, "check-region", 0);
+	if (!res)
+		return -EBUSY;
+
+	release_resource(res);
+	free_resource(res);
+	return 0;
+}
+EXPORT_SYMBOL(__check_region);
 
 /**
  * __release_region - release a previously reserved resource region
@@ -1324,7 +1355,6 @@ int release_mem_region_adjustable(struct resource *parent,
 			new_res->start = end + 1;
 			new_res->end = res->end;
 			new_res->flags = res->flags;
-			new_res->desc = res->desc;
 			new_res->parent = res->parent;
 			new_res->sibling = res->sibling;
 			new_res->child = NULL;
@@ -1500,7 +1530,6 @@ static int __init reserve_setup(char *str)
 			res->start = io_start;
 			res->end = io_start + io_num - 1;
 			res->flags = IORESOURCE_BUSY;
-			res->desc = IORES_DESC_NONE;
 			res->child = NULL;
 			if (request_resource(res->start >= 0x10000 ? &iomem_resource : &ioport_resource, res) == 0)
 				reserved = x+1;
@@ -1587,15 +1616,8 @@ int iomem_is_exclusive(u64 addr)
 			break;
 		if (p->end < addr)
 			continue;
-		/*
-		 * A resource is exclusive if IORESOURCE_EXCLUSIVE is set
-		 * or CONFIG_IO_STRICT_DEVMEM is enabled and the
-		 * resource is busy.
-		 */
-		if ((p->flags & IORESOURCE_BUSY) == 0)
-			continue;
-		if (IS_ENABLED(CONFIG_IO_STRICT_DEVMEM)
-				|| p->flags & IORESOURCE_EXCLUSIVE) {
+		if (p->flags & IORESOURCE_BUSY &&
+		     p->flags & IORESOURCE_EXCLUSIVE) {
 			err = 1;
 			break;
 		}

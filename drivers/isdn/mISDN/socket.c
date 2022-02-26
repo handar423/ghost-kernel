@@ -112,8 +112,8 @@ mISDN_sock_cmsg(struct sock *sk, struct msghdr *msg, struct sk_buff *skb)
 }
 
 static int
-mISDN_sock_recvmsg(struct socket *sock, struct msghdr *msg, size_t len,
-		   int flags)
+mISDN_sock_recvmsg(struct kiocb *iocb, struct socket *sock,
+		   struct msghdr *msg, size_t len, int flags)
 {
 	struct sk_buff		*skb;
 	struct sock		*sk = sock->sk;
@@ -135,7 +135,7 @@ mISDN_sock_recvmsg(struct socket *sock, struct msghdr *msg, size_t len,
 		return err;
 
 	if (msg->msg_name) {
-		DECLARE_SOCKADDR(struct sockaddr_mISDN *, maddr, msg->msg_name);
+		struct sockaddr_mISDN *maddr = msg->msg_name;
 
 		maddr->family = AF_ISDN;
 		maddr->dev = _pms(sk)->dev->id;
@@ -155,7 +155,7 @@ mISDN_sock_recvmsg(struct socket *sock, struct msghdr *msg, size_t len,
 	copied = skb->len + MISDN_HEADER_LEN;
 	if (len < copied) {
 		if (flags & MSG_PEEK)
-			refcount_dec(&skb->users);
+			atomic_dec(&skb->users);
 		else
 			skb_queue_head(&sk->sk_receive_queue, skb);
 		return -ENOSPC;
@@ -173,11 +173,13 @@ mISDN_sock_recvmsg(struct socket *sock, struct msghdr *msg, size_t len,
 }
 
 static int
-mISDN_sock_sendmsg(struct socket *sock, struct msghdr *msg, size_t len)
+mISDN_sock_sendmsg(struct kiocb *iocb, struct socket *sock,
+		   struct msghdr *msg, size_t len)
 {
 	struct sock		*sk = sock->sk;
 	struct sk_buff		*skb;
 	int			err = -ENOMEM;
+	struct sockaddr_mISDN	*maddr;
 
 	if (*debug & DEBUG_SOCKET)
 		printk(KERN_DEBUG "%s: len %d flags %x ch %d proto %x\n",
@@ -212,7 +214,7 @@ mISDN_sock_sendmsg(struct socket *sock, struct msghdr *msg, size_t len)
 
 	if (msg->msg_namelen >= sizeof(struct sockaddr_mISDN)) {
 		/* if we have a address, we use it */
-		DECLARE_SOCKADDR(struct sockaddr_mISDN *, maddr, msg->msg_name);
+		maddr = (struct sockaddr_mISDN *)msg->msg_name;
 		mISDN_HEAD_ID(skb) = maddr->channel;
 	} else { /* use default for L2 messages */
 		if ((sk->sk_protocol == ISDN_P_LAPD_TE) ||
@@ -601,14 +603,14 @@ static const struct proto_ops data_sock_ops = {
 };
 
 static int
-data_sock_create(struct net *net, struct socket *sock, int protocol, int kern)
+data_sock_create(struct net *net, struct socket *sock, int protocol)
 {
 	struct sock *sk;
 
 	if (sock->type != SOCK_DGRAM)
 		return -ESOCKTNOSUPPORT;
 
-	sk = sk_alloc(net, PF_ISDN, GFP_KERNEL, &mISDN_proto, kern);
+	sk = sk_alloc(net, PF_ISDN, GFP_KERNEL, &mISDN_proto);
 	if (!sk)
 		return -ENOMEM;
 
@@ -715,9 +717,6 @@ base_sock_bind(struct socket *sock, struct sockaddr *addr, int addr_len)
 	if (!maddr || maddr->family != AF_ISDN)
 		return -EINVAL;
 
-	if (addr_len < sizeof(struct sockaddr_mISDN))
-		return -EINVAL;
-
 	lock_sock(sk);
 
 	if (_pms(sk)->dev) {
@@ -759,14 +758,16 @@ static const struct proto_ops base_sock_ops = {
 
 
 static int
-base_sock_create(struct net *net, struct socket *sock, int protocol, int kern)
+base_sock_create(struct net *net, struct socket *sock, int protocol)
 {
 	struct sock *sk;
 
 	if (sock->type != SOCK_RAW)
 		return -ESOCKTNOSUPPORT;
+	if (!capable(CAP_NET_RAW))
+		return -EPERM;
 
-	sk = sk_alloc(net, PF_ISDN, GFP_KERNEL, &mISDN_proto, kern);
+	sk = sk_alloc(net, PF_ISDN, GFP_KERNEL, &mISDN_proto);
 	if (!sk)
 		return -ENOMEM;
 
@@ -788,7 +789,7 @@ mISDN_sock_create(struct net *net, struct socket *sock, int proto, int kern)
 
 	switch (proto) {
 	case ISDN_P_BASE:
-		err = base_sock_create(net, sock, proto, kern);
+		err = base_sock_create(net, sock, proto);
 		break;
 	case ISDN_P_TE_S0:
 	case ISDN_P_NT_S0:
@@ -802,7 +803,7 @@ mISDN_sock_create(struct net *net, struct socket *sock, int proto, int kern)
 	case ISDN_P_B_L2DTMF:
 	case ISDN_P_B_L2DSP:
 	case ISDN_P_B_L2DSPHDLC:
-		err = data_sock_create(net, sock, proto, kern);
+		err = data_sock_create(net, sock, proto);
 		break;
 	default:
 		return err;

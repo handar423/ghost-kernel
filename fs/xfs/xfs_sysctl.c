@@ -140,6 +140,24 @@ static struct ctl_table xfs_table[] = {
 		.extra2		= &xfs_params.inherit_noatim.max
 	},
 	{
+		.procname	= "xfsbufd_centisecs",
+		.data		= &xfs_params.xfs_buf_timer.val,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &xfs_params.xfs_buf_timer.min,
+		.extra2		= &xfs_params.xfs_buf_timer.max
+	},
+	{
+		.procname	= "age_buffer_centisecs",
+		.data		= &xfs_params.xfs_buf_age.val,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &xfs_params.xfs_buf_age.min,
+		.extra2		= &xfs_params.xfs_buf_age.max
+	},
+	{
 		.procname	= "inherit_nosymlinks",
 		.data		= &xfs_params.inherit_nosym.val,
 		.maxlen		= sizeof(int),
@@ -183,15 +201,6 @@ static struct ctl_table xfs_table[] = {
 		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= &xfs_params.eofb_timer.min,
 		.extra2		= &xfs_params.eofb_timer.max,
-	},
-	{
-		.procname	= "speculative_cow_prealloc_lifetime",
-		.data		= &xfs_params.cowb_timer.val,
-		.maxlen		= sizeof(int),
-		.mode		= 0644,
-		.proc_handler	= proc_dointvec_minmax,
-		.extra1		= &xfs_params.cowb_timer.min,
-		.extra2		= &xfs_params.cowb_timer.max,
 	},
 	/* please keep this the last entry */
 #ifdef CONFIG_PROC_FS

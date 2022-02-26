@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /* power.c: Power management driver.
  *
  * Copyright (C) 1999, 2007, 2008 David S. Miller (davem@davemloft.net)
@@ -64,8 +63,14 @@ static struct platform_driver power_driver = {
 	.probe		= power_probe,
 	.driver = {
 		.name = "power",
+		.owner = THIS_MODULE,
 		.of_match_table = power_match,
 	},
 };
 
-builtin_platform_driver(power_driver);
+static int __init power_init(void)
+{
+	return platform_driver_register(&power_driver);
+}
+
+device_initcall(power_init);

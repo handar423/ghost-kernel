@@ -20,9 +20,6 @@
 #include <linux/err.h>
 #include <linux/vfio.h>
 #include <linux/vmalloc.h>
-#include <linux/sched/mm.h>
-#include <linux/sched/signal.h>
-
 #include <asm/iommu.h>
 #include <asm/tce.h>
 #include <asm/mmu_context.h>
@@ -507,8 +504,6 @@ static int tce_iommu_clear(struct tce_container *container,
 	enum dma_data_direction direction;
 
 	for ( ; pages; --pages, ++entry) {
-		cond_resched();
-
 		direction = DMA_NONE;
 		oldhpa = 0;
 		ret = iommu_tce_xchg(tbl, entry, &oldhpa, &direction);
@@ -687,7 +682,7 @@ static void tce_iommu_free_table(struct tce_container *container,
 	unsigned long pages = tbl->it_allocated_size >> PAGE_SHIFT;
 
 	tce_iommu_userspace_view_free(tbl, container->mm);
-	iommu_tce_table_put(tbl);
+	tbl->it_ops->free(tbl);
 	decrement_locked_vm(container->mm, pages);
 }
 
@@ -1301,10 +1296,6 @@ static int tce_iommu_attach_group(void *iommu_data,
 	/* pr_debug("tce_vfio: Attaching group #%u to iommu %p\n",
 			iommu_group_id(iommu_group), iommu_group); */
 	table_group = iommu_group_get_iommudata(iommu_group);
-	if (!table_group) {
-		ret = -ENODEV;
-		goto unlock_exit;
-	}
 
 	if (tce_groups_attached(container) && (!table_group->ops ||
 			!table_group->ops->take_ownership ||
@@ -1324,8 +1315,7 @@ static int tce_iommu_attach_group(void *iommu_data,
 			goto unlock_exit;
 		}
 		table_group_tmp = iommu_group_get_iommudata(tcegrp->grp);
-		if (table_group_tmp->ops->create_table !=
-				table_group->ops->create_table) {
+		if (table_group_tmp->ops != table_group->ops) {
 			pr_warn("tce_vfio: Group %d is incompatible with group %d\n",
 					iommu_group_id(iommu_group),
 					iommu_group_id(tcegrp->grp));
@@ -1342,16 +1332,8 @@ static int tce_iommu_attach_group(void *iommu_data,
 
 	if (!table_group->ops || !table_group->ops->take_ownership ||
 			!table_group->ops->release_ownership) {
-		if (container->v2) {
-			ret = -EPERM;
-			goto unlock_exit;
-		}
 		ret = tce_iommu_take_ownership(container, table_group);
 	} else {
-		if (!container->v2) {
-			ret = -EPERM;
-			goto unlock_exit;
-		}
 		ret = tce_iommu_take_ownership_ddw(container, table_group);
 		if (!tce_groups_attached(container) && !container->tables[0])
 			container->def_window_pending = true;

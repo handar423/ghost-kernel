@@ -1,9 +1,17 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_X86_PVCLOCK_H
 #define _ASM_X86_PVCLOCK_H
 
 #include <linux/clocksource.h>
 #include <asm/pvclock-abi.h>
+
+#ifdef CONFIG_KVM_GUEST
+extern struct pvclock_vsyscall_time_info *pvclock_pvti_cpu0_va(void);
+#else
+static inline struct pvclock_vsyscall_time_info *pvclock_pvti_cpu0_va(void)
+{
+	return NULL;
+}
+#endif
 
 /* some helper functions for xen and kvm pv clock sources */
 u64 pvclock_clocksource_read(struct pvclock_vcpu_time_info *src);
@@ -16,6 +24,8 @@ void pvclock_read_wallclock(struct pvclock_wall_clock *wall,
 void pvclock_resume(void);
 
 void pvclock_touch_watchdogs(void);
+
+#define virt_rmb()      barrier()
 
 static __always_inline
 unsigned pvclock_read_begin(const struct pvclock_vcpu_time_info *src)
@@ -92,15 +102,10 @@ struct pvclock_vsyscall_time_info {
 } __attribute__((__aligned__(SMP_CACHE_BYTES)));
 
 #define PVTI_SIZE sizeof(struct pvclock_vsyscall_time_info)
+#define PVCLOCK_VSYSCALL_NR_PAGES (((NR_CPUS-1)/(PAGE_SIZE/PVTI_SIZE))+1)
 
-#ifdef CONFIG_PARAVIRT_CLOCK
-void pvclock_set_pvti_cpu0_va(struct pvclock_vsyscall_time_info *pvti);
-struct pvclock_vsyscall_time_info *pvclock_get_pvti_cpu0_va(void);
-#else
-static inline struct pvclock_vsyscall_time_info *pvclock_get_pvti_cpu0_va(void)
-{
-	return NULL;
-}
-#endif
+int __init pvclock_init_vsyscall(struct pvclock_vsyscall_time_info *i,
+				 int size);
+struct pvclock_vcpu_time_info *pvclock_get_vsyscall_time_info(int cpu);
 
 #endif /* _ASM_X86_PVCLOCK_H */

@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * Author(s)......: Holger Smolinski <Holger.Smolinski@de.ibm.com>
  *		    Horst Hummel <Horst.Hummel@de.ibm.com>
@@ -27,7 +26,7 @@
 #include <asm/idals.h>
 #include <asm/ebcdic.h>
 #include <asm/io.h>
-#include <linux/uaccess.h>
+#include <asm/uaccess.h>
 #include <asm/cio.h>
 #include <asm/ccwdev.h>
 #include <asm/itcw.h>
@@ -227,7 +226,7 @@ static int check_XRC(struct ccw1 *ccw, struct DE_eckd_data *data,
 	data->ga_extended |= 0x08; /* switch on 'Time Stamp Valid'   */
 	data->ga_extended |= 0x02; /* switch on 'Extended Parameter' */
 
-	rc = get_phys_clock(&data->ep_sys_time);
+	rc = get_sync_clock(&data->ep_sys_time);
 	/* Ignore return code if sync clock is switched off. */
 	if (rc == -EOPNOTSUPP || rc == -EACCES)
 		rc = 0;
@@ -346,7 +345,6 @@ define_extent(struct ccw1 *ccw, struct DE_eckd_data *data, unsigned int trk,
 	set_ch_t(&data->end_ext, endcyl, endhead);
 	return rc;
 }
-
 
 static void locate_record_ext(struct ccw1 *ccw, struct LRE_eckd_data *data,
 			      unsigned int trk, unsigned int rec_on_trk,
@@ -531,12 +529,10 @@ static int prefix_LRE(struct ccw1 *ccw, struct PFX_eckd_data *pfxdata,
 	pfxdata->validity.define_extent = 1;
 
 	/* private uid is kept up to date, conf_data may be outdated */
-	if (startpriv->uid.type == UA_BASE_PAV_ALIAS)
+	if (startpriv->uid.type != UA_BASE_DEVICE) {
 		pfxdata->validity.verify_base = 1;
-
-	if (startpriv->uid.type == UA_HYPER_PAV_ALIAS) {
-		pfxdata->validity.verify_base = 1;
-		pfxdata->validity.hyper_pav = 1;
+		if (startpriv->uid.type == UA_HYPER_PAV_ALIAS)
+			pfxdata->validity.hyper_pav = 1;
 	}
 
 	rc = define_extent(NULL, dedata, trk, totrk, cmd, basedev, blksize);
@@ -1132,12 +1128,14 @@ static int dasd_eckd_read_conf(struct dasd_device *device)
 
 static u32 get_fcx_max_data(struct dasd_device *device)
 {
+#if defined(CONFIG_64BIT)
 	struct dasd_eckd_private *private = device->private;
 	int fcx_in_css, fcx_in_gneq, fcx_in_features;
 	int tpm, mdc;
 
 	if (dasd_nofcx)
 		return 0;
+
 	/* is transport mode supported? */
 	fcx_in_css = css_general_characteristics.fcx;
 	fcx_in_gneq = private->gneq->reserved2[7] & 0x04;
@@ -1154,6 +1152,9 @@ static u32 get_fcx_max_data(struct dasd_device *device)
 	} else {
 		return (u32)mdc * FCX_MAX_DATA_FACTOR;
 	}
+#else
+	return 0;
+#endif
 }
 
 static int verify_fcx_max_data(struct dasd_device *device, __u8 lpm)
@@ -1171,7 +1172,7 @@ static int verify_fcx_max_data(struct dasd_device *device, __u8 lpm)
 				 mdc, lpm);
 			return mdc;
 		}
-		fcx_max_data = (u32)mdc * FCX_MAX_DATA_FACTOR;
+		fcx_max_data = mdc * FCX_MAX_DATA_FACTOR;
 		if (fcx_max_data < private->fcx_max_data) {
 			dev_warn(&device->cdev->dev,
 				 "The maximum data size for zHPF requests %u "
@@ -1417,9 +1418,10 @@ static int dasd_eckd_verify_path(struct dasd_device *device, __u8 lpm)
 
 static void dasd_eckd_reset_path(struct dasd_device *device, __u8 pm)
 {
-	struct dasd_eckd_private *private = device->private;
+	struct dasd_eckd_private *private;
 	unsigned long flags;
 
+        private = (struct dasd_eckd_private *) device->private;
 	if (!private->fcx_max_data)
 		private->fcx_max_data = get_fcx_max_data(device);
 	spin_lock_irqsave(get_ccwdev_lock(device->cdev), flags);
@@ -1640,8 +1642,6 @@ dasd_eckd_check_characteristics(struct dasd_device *device)
 
 	/* setup work queue for validate server*/
 	INIT_WORK(&device->kick_validate, dasd_eckd_do_validate_server);
-	/* setup work queue for summary unit check */
-	INIT_WORK(&device->suc_work, dasd_alias_handle_summary_unit_check);
 
 	if (!ccw_device_is_pathgroup(device->cdev)) {
 		dev_warn(&device->cdev->dev,
@@ -1677,10 +1677,8 @@ dasd_eckd_check_characteristics(struct dasd_device *device)
 
 	/* set some default values */
 	device->default_expires = DASD_EXPIRES;
-	device->default_retries = DASD_RETRIES;
 	device->path_thrhld = DASD_ECKD_PATH_THRHLD;
 	device->path_interval = DASD_ECKD_PATH_INTERVAL;
-
 	if (private->gneq) {
 		value = 1;
 		for (i = 0; i < private->gneq->timeout.value; i++)
@@ -1778,6 +1776,9 @@ static void dasd_eckd_uncheck_device(struct dasd_device *device)
 {
 	struct dasd_eckd_private *private = device->private;
 	int i;
+
+	if (!private)
+		return;
 
 	dasd_alias_disconnect_device_from_lcu(device);
 	private->ned = NULL;
@@ -2127,7 +2128,7 @@ dasd_eckd_build_check_tcw(struct dasd_device *base, struct format_data_t *fdata,
 	cqr->startdev = startdev;
 	cqr->memdev = startdev;
 	cqr->basedev = base;
-	cqr->retries = startdev->default_retries;
+	cqr->retries = 255;
 	cqr->expires = startdev->default_expires * HZ;
 	cqr->buildclk = get_tod_clock();
 	cqr->status = DASD_CQR_FILLED;
@@ -2221,7 +2222,7 @@ dasd_eckd_build_check(struct dasd_device *base, struct format_data_t *fdata,
 	cqr->startdev = startdev;
 	cqr->memdev = startdev;
 	cqr->basedev = base;
-	cqr->retries = DASD_RETRIES;
+	cqr->retries = 255;
 	cqr->expires = startdev->default_expires * HZ;
 	cqr->buildclk = get_tod_clock();
 	cqr->status = DASD_CQR_FILLED;
@@ -2234,7 +2235,7 @@ dasd_eckd_build_check(struct dasd_device *base, struct format_data_t *fdata,
 static struct dasd_ccw_req *
 dasd_eckd_build_format(struct dasd_device *base,
 		       struct format_data_t *fdata,
-		       int enable_pav)
+		       int enable_PAV)
 {
 	struct dasd_eckd_private *base_priv;
 	struct dasd_eckd_private *start_priv;
@@ -2252,7 +2253,7 @@ dasd_eckd_build_format(struct dasd_device *base,
 	int nr_tracks;
 	int use_prefix;
 
-	if (enable_pav)
+	if (enable_PAV)
 		startdev = dasd_alias_get_start_dev(base);
 
 	if (!startdev)
@@ -2476,8 +2477,8 @@ dasd_eckd_build_format(struct dasd_device *base,
 						DASD_ECKD_CCW_WRITE_CKD_MT;
 				ccw->flags = CCW_FLAG_SLI;
 				ccw->count = 8;
-				ccw->cda = (__u32)(addr_t) ect;
-				ccw++;
+					ccw->cda = (__u32)(addr_t) ect;
+					ccw++;
 			}
 		}
 	}
@@ -2908,10 +2909,6 @@ out:
 
 static void dasd_eckd_handle_terminated_request(struct dasd_ccw_req *cqr)
 {
-	if (cqr->retries < 0) {
-		cqr->status = DASD_CQR_FAILED;
-		return;
-	}
 	cqr->status = DASD_CQR_FILLED;
 	if (cqr->block && (cqr->startdev != cqr->block->base)) {
 		dasd_eckd_reset_ccw_to_base_io(cqr);
@@ -2964,6 +2961,14 @@ static void dasd_eckd_check_for_device_change(struct dasd_device *device,
 		    device->state == DASD_STATE_ONLINE &&
 		    !test_bit(DASD_FLAG_OFFLINE, &device->flags) &&
 		    !test_bit(DASD_FLAG_SUSPENDED, &device->flags)) {
+			/*
+			 * the state change could be caused by an alias
+			 * reassignment remove device from alias handling
+			 * to prevent new requests from being scheduled on
+			 * the wrong alias device
+			 */
+			dasd_alias_remove_device(device);
+
 			/* schedule worker to reload device */
 			dasd_reload_device(device);
 		}
@@ -2978,27 +2983,7 @@ static void dasd_eckd_check_for_device_change(struct dasd_device *device,
 	/* summary unit check */
 	if ((sense[27] & DASD_SENSE_BIT_0) && (sense[7] == 0x0D) &&
 	    (scsw_dstat(&irb->scsw) & DEV_STAT_UNIT_CHECK)) {
-		if (test_and_set_bit(DASD_FLAG_SUC, &device->flags)) {
-			DBF_DEV_EVENT(DBF_WARNING, device, "%s",
-				      "eckd suc: device already notified");
-			return;
-		}
-		sense = dasd_get_sense(irb);
-		if (!sense) {
-			DBF_DEV_EVENT(DBF_WARNING, device, "%s",
-				      "eckd suc: no reason code available");
-			clear_bit(DASD_FLAG_SUC, &device->flags);
-			return;
-
-		}
-		private->suc_reason = sense[8];
-		DBF_DEV_EVENT(DBF_NOTICE, device, "%s %x",
-			      "eckd handle summary unit check: reason",
-			      private->suc_reason);
-		dasd_get_device(device);
-		if (!schedule_work(&device->suc_work))
-			dasd_put_device(device);
-
+		dasd_alias_handle_summary_unit_check(device, irb);
 		return;
 	}
 
@@ -3043,7 +3028,7 @@ static struct dasd_ccw_req *dasd_eckd_build_cp_cmd_single(
 	struct dasd_ccw_req *cqr;
 	struct ccw1 *ccw;
 	struct req_iterator iter;
-	struct bio_vec bv;
+	struct bio_vec *bv;
 	char *dst;
 	unsigned int off;
 	int count, cidaw, cplength, datasize;
@@ -3065,12 +3050,14 @@ static struct dasd_ccw_req *dasd_eckd_build_cp_cmd_single(
 	count = 0;
 	cidaw = 0;
 	rq_for_each_segment(bv, req, iter) {
-		if (bv.bv_len & (blksize - 1))
+		if (bv->bv_len & (blksize - 1))
 			/* Eckd can only do full blocks. */
 			return ERR_PTR(-EINVAL);
-		count += bv.bv_len >> (block->s2b_shift + 9);
-		if (idal_is_needed (page_address(bv.bv_page), bv.bv_len))
-			cidaw += bv.bv_len >> (block->s2b_shift + 9);
+		count += bv->bv_len >> (block->s2b_shift + 9);
+#if defined(CONFIG_64BIT)
+		if (idal_is_needed (page_address(bv->bv_page), bv->bv_len))
+			cidaw += bv->bv_len >> (block->s2b_shift + 9);
+#endif
 	}
 	/* Paranoia. */
 	if (count != last_rec - first_rec + 1)
@@ -3140,16 +3127,16 @@ static struct dasd_ccw_req *dasd_eckd_build_cp_cmd_single(
 			      last_rec - recid + 1, cmd, basedev, blksize);
 	}
 	rq_for_each_segment(bv, req, iter) {
-		dst = page_address(bv.bv_page) + bv.bv_offset;
+		dst = page_address(bv->bv_page) + bv->bv_offset;
 		if (dasd_page_cache) {
 			char *copy = kmem_cache_alloc(dasd_page_cache,
 						      GFP_DMA | __GFP_NOWARN);
 			if (copy && rq_data_dir(req) == WRITE)
-				memcpy(copy + bv.bv_offset, dst, bv.bv_len);
+				memcpy(copy + bv->bv_offset, dst, bv->bv_len);
 			if (copy)
-				dst = copy + bv.bv_offset;
+				dst = copy + bv->bv_offset;
 		}
-		for (off = 0; off < bv.bv_len; off += blksize) {
+		for (off = 0; off < bv->bv_len; off += blksize) {
 			sector_t trkid = recid;
 			unsigned int recoffs = sector_div(trkid, blk_per_trk);
 			rcmd = cmd;
@@ -3202,7 +3189,7 @@ static struct dasd_ccw_req *dasd_eckd_build_cp_cmd_single(
 	cqr->block = block;
 	cqr->expires = startdev->default_expires * HZ;	/* default 5 minutes */
 	cqr->lpm = dasd_path_get_ppm(startdev);
-	cqr->retries = startdev->default_retries;
+	cqr->retries = 256;
 	cqr->buildclk = get_tod_clock();
 	cqr->status = DASD_CQR_FILLED;
 	return cqr;
@@ -3225,7 +3212,7 @@ static struct dasd_ccw_req *dasd_eckd_build_cp_cmd_track(
 	struct dasd_ccw_req *cqr;
 	struct ccw1 *ccw;
 	struct req_iterator iter;
-	struct bio_vec bv;
+	struct bio_vec *bv;
 	char *dst, *idaw_dst;
 	unsigned int cidaw, cplength, datasize;
 	unsigned int tlf;
@@ -3257,7 +3244,11 @@ static struct dasd_ccw_req *dasd_eckd_build_cp_cmd_track(
 	/* 1x prefix + one read/write ccw per track */
 	cplength = 1 + trkcount;
 
-	datasize = sizeof(struct PFX_eckd_data) + cidaw * sizeof(unsigned long);
+	/* on 31-bit we need space for two 32 bit addresses per page
+	 * on 64-bit one 64 bit address
+	 */
+	datasize = sizeof(struct PFX_eckd_data) +
+		cidaw * sizeof(unsigned long long);
 
 	/* Allocate the ccw request. */
 	cqr = dasd_smalloc_request(DASD_ECKD_MAGIC, cplength, datasize,
@@ -3299,8 +3290,8 @@ static struct dasd_ccw_req *dasd_eckd_build_cp_cmd_track(
 	idaw_dst = NULL;
 	idaw_len = 0;
 	rq_for_each_segment(bv, req, iter) {
-		dst = page_address(bv.bv_page) + bv.bv_offset;
-		seg_len = bv.bv_len;
+		dst = page_address(bv->bv_page) + bv->bv_offset;
+		seg_len = bv->bv_len;
 		while (seg_len) {
 			if (new_track) {
 				trkid = recid;
@@ -3373,7 +3364,7 @@ static struct dasd_ccw_req *dasd_eckd_build_cp_cmd_track(
 	cqr->block = block;
 	cqr->expires = startdev->default_expires * HZ;	/* default 5 minutes */
 	cqr->lpm = dasd_path_get_ppm(startdev);
-	cqr->retries = startdev->default_retries;
+	cqr->retries = 256;
 	cqr->buildclk = get_tod_clock();
 	cqr->status = DASD_CQR_FILLED;
 	return cqr;
@@ -3417,12 +3408,10 @@ static int prepare_itcw(struct itcw *itcw,
 	pfxdata.validity.define_extent = 1;
 
 	/* private uid is kept up to date, conf_data may be outdated */
-	if (startpriv->uid.type == UA_BASE_PAV_ALIAS)
+	if (startpriv->uid.type != UA_BASE_DEVICE) {
 		pfxdata.validity.verify_base = 1;
-
-	if (startpriv->uid.type == UA_HYPER_PAV_ALIAS) {
-		pfxdata.validity.verify_base = 1;
-		pfxdata.validity.hyper_pav = 1;
+		if (startpriv->uid.type == UA_HYPER_PAV_ALIAS)
+			pfxdata.validity.hyper_pav = 1;
 	}
 
 	switch (cmd) {
@@ -3532,7 +3521,7 @@ static int prepare_itcw(struct itcw *itcw,
 
 	dcw = itcw_add_dcw(itcw, pfx_cmd, 0,
 		     &pfxdata, sizeof(pfxdata), total_data_size);
-	return PTR_RET(dcw);
+	return IS_ERR(dcw) ? PTR_ERR(dcw) : 0;
 }
 
 static struct dasd_ccw_req *dasd_eckd_build_cp_tpm_track(
@@ -3550,7 +3539,7 @@ static struct dasd_ccw_req *dasd_eckd_build_cp_tpm_track(
 {
 	struct dasd_ccw_req *cqr;
 	struct req_iterator iter;
-	struct bio_vec bv;
+	struct bio_vec *bv;
 	char *dst;
 	unsigned int trkcount, ctidaw;
 	unsigned char cmd;
@@ -3636,8 +3625,8 @@ static struct dasd_ccw_req *dasd_eckd_build_cp_tpm_track(
 		new_track = 1;
 		recid = first_rec;
 		rq_for_each_segment(bv, req, iter) {
-			dst = page_address(bv.bv_page) + bv.bv_offset;
-			seg_len = bv.bv_len;
+			dst = page_address(bv->bv_page) + bv->bv_offset;
+			seg_len = bv->bv_len;
 			while (seg_len) {
 				if (new_track) {
 					trkid = recid;
@@ -3669,9 +3658,9 @@ static struct dasd_ccw_req *dasd_eckd_build_cp_tpm_track(
 		}
 	} else {
 		rq_for_each_segment(bv, req, iter) {
-			dst = page_address(bv.bv_page) + bv.bv_offset;
+			dst = page_address(bv->bv_page) + bv->bv_offset;
 			last_tidaw = itcw_add_tidaw(itcw, 0x00,
-						    dst, bv.bv_len);
+						    dst, bv->bv_len);
 			if (IS_ERR(last_tidaw)) {
 				ret = -EINVAL;
 				goto out_error;
@@ -3691,7 +3680,7 @@ static struct dasd_ccw_req *dasd_eckd_build_cp_tpm_track(
 	cqr->block = block;
 	cqr->expires = startdev->default_expires * HZ;	/* default 5 minutes */
 	cqr->lpm = dasd_path_get_ppm(startdev);
-	cqr->retries = startdev->default_retries;
+	cqr->retries = 256;
 	cqr->buildclk = get_tod_clock();
 	cqr->status = DASD_CQR_FILLED;
 	return cqr;
@@ -3797,7 +3786,7 @@ static struct dasd_ccw_req *dasd_eckd_build_cp_raw(struct dasd_device *startdev,
 	unsigned long *idaws;
 	unsigned int size;
 	unsigned char cmd;
-	struct bio_vec bv;
+	struct bio_vec *bv;
 	struct ccw1 *ccw;
 	int use_prefix;
 	void *data;
@@ -3857,7 +3846,7 @@ static struct dasd_ccw_req *dasd_eckd_build_cp_raw(struct dasd_device *startdev,
 	}
 	size = ALIGN(size, 8);
 
-	datasize = size + cidaw * sizeof(unsigned long);
+	datasize = size + cidaw * sizeof(unsigned long long);
 
 	/* Allocate the ccw request. */
 	cqr = dasd_smalloc_request(DASD_ECKD_MAGIC, cplength,
@@ -3897,8 +3886,8 @@ static struct dasd_ccw_req *dasd_eckd_build_cp_raw(struct dasd_device *startdev,
 			idaws = idal_create_words(idaws, rawpadpage, PAGE_SIZE);
 	}
 	rq_for_each_segment(bv, req, iter) {
-		dst = page_address(bv.bv_page) + bv.bv_offset;
-		seg_len = bv.bv_len;
+		dst = page_address(bv->bv_page) + bv->bv_offset;
+		seg_len = bv->bv_len;
 		if (cmd == DASD_ECKD_CCW_READ_TRACK)
 			memset(dst, 0, seg_len);
 		if (!len_to_track_end) {
@@ -3926,7 +3915,7 @@ static struct dasd_ccw_req *dasd_eckd_build_cp_raw(struct dasd_device *startdev,
 	cqr->block = block;
 	cqr->expires = startdev->default_expires * HZ;
 	cqr->lpm = dasd_path_get_ppm(startdev);
-	cqr->retries = startdev->default_retries;
+	cqr->retries = 256;
 	cqr->buildclk = get_tod_clock();
 	cqr->status = DASD_CQR_FILLED;
 
@@ -3940,7 +3929,7 @@ dasd_eckd_free_cp(struct dasd_ccw_req *cqr, struct request *req)
 	struct dasd_eckd_private *private;
 	struct ccw1 *ccw;
 	struct req_iterator iter;
-	struct bio_vec bv;
+	struct bio_vec *bv;
 	char *dst, *cda;
 	unsigned int blksize, blk_per_trk, off;
 	sector_t recid;
@@ -3958,8 +3947,8 @@ dasd_eckd_free_cp(struct dasd_ccw_req *cqr, struct request *req)
 	if (private->uses_cdl == 0 || recid > 2*blk_per_trk)
 		ccw++;
 	rq_for_each_segment(bv, req, iter) {
-		dst = page_address(bv.bv_page) + bv.bv_offset;
-		for (off = 0; off < bv.bv_len; off += blksize) {
+		dst = page_address(bv->bv_page) + bv->bv_offset;
+		for (off = 0; off < bv->bv_len; off += blksize) {
 			/* Skip locate record. */
 			if (private->uses_cdl && recid <= 2*blk_per_trk)
 				ccw++;
@@ -3970,7 +3959,7 @@ dasd_eckd_free_cp(struct dasd_ccw_req *cqr, struct request *req)
 					cda = (char *)((addr_t) ccw->cda);
 				if (dst != cda) {
 					if (rq_data_dir(req) == READ)
-						memcpy(dst, cda, bv.bv_len);
+						memcpy(dst, cda, bv->bv_len);
 					kmem_cache_free(dasd_page_cache,
 					    (void *)((addr_t)cda & PAGE_MASK));
 				}
@@ -4448,7 +4437,7 @@ static int dasd_symm_io(struct dasd_device *device, void __user *argp)
 	rc = -EFAULT;
 	if (copy_from_user(&usrparm, argp, sizeof(usrparm)))
 		goto out;
-	if (is_compat_task()) {
+	if (is_compat_task() || sizeof(long) == 4) {
 		/* Make sure pointers are sane even on 31 bit. */
 		rc = -EINVAL;
 		if ((usrparm.psf_data >> 32) != 0)
@@ -4807,7 +4796,7 @@ static void dasd_eckd_dump_sense_tcw(struct dasd_device *device,
 			break;
 		case 3: /* tsa_intrg */
 			len += sprintf(page + len, PRINTK_HEADER
-				      " tsb->tsa.intrg.: not supported yet\n");
+				      " tsb->tsa.intrg.: not supportet yet\n");
 			break;
 		}
 
@@ -4977,12 +4966,6 @@ static int dasd_eckd_reload_device(struct dasd_device *device)
 	struct dasd_uid uid;
 	unsigned long flags;
 
-	/*
-	 * remove device from alias handling to prevent new requests
-	 * from being scheduled on the wrong alias device
-	 */
-	dasd_alias_remove_device(device);
-
 	spin_lock_irqsave(get_ccwdev_lock(device->cdev), flags);
 	old_base = private->uid.base_unit_addr;
 	spin_unlock_irqrestore(get_ccwdev_lock(device->cdev), flags);
@@ -5108,13 +5091,14 @@ retry:
 static int dasd_eckd_query_host_access(struct dasd_device *device,
 				       struct dasd_psf_query_host_access *data)
 {
-	struct dasd_eckd_private *private = device->private;
+	struct dasd_eckd_private *private;
 	struct dasd_psf_query_host_access *host_access;
 	struct dasd_psf_prssd_data *prssdp;
 	struct dasd_ccw_req *cqr;
 	struct ccw1 *ccw;
 	int rc;
 
+	private = (struct dasd_eckd_private *) device->private;
 	/* not available for HYPER PAV alias devices */
 	if (!device->block && private->lcu->pav == HYPER_PAV)
 		return -EOPNOTSUPP;
@@ -5676,8 +5660,9 @@ static int dasd_eckd_disable_hpf_path(struct dasd_device *device, __u8 lpum)
 
 static void dasd_eckd_disable_hpf_device(struct dasd_device *device)
 {
-	struct dasd_eckd_private *private = device->private;
+	struct dasd_eckd_private *private;
 
+	private = (struct dasd_eckd_private *) device->private;
 	dev_err(&device->cdev->dev,
 		"High Performance FICON disabled\n");
 	private->fcx_max_data = 0;
@@ -5685,16 +5670,18 @@ static void dasd_eckd_disable_hpf_device(struct dasd_device *device)
 
 static int dasd_eckd_hpf_enabled(struct dasd_device *device)
 {
-	struct dasd_eckd_private *private = device->private;
+	struct dasd_eckd_private *private;
 
+	private = (struct dasd_eckd_private *) device->private;
 	return private->fcx_max_data ? 1 : 0;
 }
 
 static void dasd_eckd_handle_hpf_error(struct dasd_device *device,
 				       struct irb *irb)
 {
-	struct dasd_eckd_private *private = device->private;
+	struct dasd_eckd_private *private;
 
+	private = (struct dasd_eckd_private *) device->private;
 	if (!private->fcx_max_data) {
 		/* sanity check for no HPF, the error makes no sense */
 		DBF_DEV_EVENT(DBF_WARNING, device, "%s",

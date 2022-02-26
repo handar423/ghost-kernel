@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_SCORE_PROCESSOR_H
 #define _ASM_SCORE_PROCESSOR_H
 
@@ -14,6 +13,7 @@ struct task_struct;
  */
 extern void (*cpu_wait)(void);
 
+extern unsigned long thread_saved_pc(struct task_struct *tsk);
 extern void start_thread(struct pt_regs *regs,
 			unsigned long pc, unsigned long sp);
 extern unsigned long get_wchan(struct task_struct *p);

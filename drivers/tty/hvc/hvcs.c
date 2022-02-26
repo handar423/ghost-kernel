@@ -1,8 +1,21 @@
-// SPDX-License-Identifier: GPL-2.0+
 /*
  * IBM eServer Hypervisor Virtual Console Server Device Driver
  * Copyright (C) 2003, 2004 IBM Corp.
  *  Ryan S. Arnold (rsa@us.ibm.com)
+ *
+ *  This program is free software; you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License as published by
+ *  the Free Software Foundation; either version 2 of the License, or
+ *  (at your option) any later version.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  *
  * Author(s) :  Ryan S. Arnold <rsa@us.ibm.com>
  *
@@ -68,7 +81,7 @@
 #include <linux/tty_flip.h>
 #include <asm/hvconsole.h>
 #include <asm/hvcserver.h>
-#include <linux/uaccess.h>
+#include <asm/uaccess.h>
 #include <asm/vio.h>
 
 /*
@@ -176,7 +189,7 @@ MODULE_VERSION(HVCS_DRIVER_VERSION);
  * that will cause echoing or we'll go into recursive loop echoing chars back
  * and forth with the console drivers.
  */
-static const struct ktermios hvcs_tty_termios = {
+static struct ktermios hvcs_tty_termios = {
 	.c_iflag = IGNBRK | IGNPAR,
 	.c_oflag = OPOST,
 	.c_cflag = B38400 | CS8 | CREAD | HUPCL,
@@ -471,13 +484,13 @@ static struct attribute_group hvcs_attr_group = {
 	.attrs = hvcs_attrs,
 };
 
-static ssize_t rescan_show(struct device_driver *ddp, char *buf)
+static ssize_t hvcs_rescan_show(struct device_driver *ddp, char *buf)
 {
 	/* A 1 means it is updating, a 0 means it is done updating */
 	return snprintf(buf, PAGE_SIZE, "%d\n", hvcs_rescan_status);
 }
 
-static ssize_t rescan_store(struct device_driver *ddp, const char * buf,
+static ssize_t hvcs_rescan_store(struct device_driver *ddp, const char * buf,
 		size_t count)
 {
 	if ((simple_strtol(buf, NULL, 0) != 1)
@@ -492,7 +505,8 @@ static ssize_t rescan_store(struct device_driver *ddp, const char * buf,
 	return count;
 }
 
-static DRIVER_ATTR_RW(rescan);
+static DRIVER_ATTR(rescan,
+	S_IRUGO | S_IWUSR, hvcs_rescan_show, hvcs_rescan_store);
 
 static void hvcs_kick(void)
 {
@@ -662,7 +676,7 @@ static int khvcsd(void *unused)
 	return 0;
 }
 
-static const struct vio_device_id hvcs_driver_table[] = {
+static struct vio_device_id hvcs_driver_table[] = {
 	{"serial-server", "hvterm2"},
 	{ "", "" }
 };
@@ -1030,8 +1044,8 @@ static int hvcs_enable_device(struct hvcs_struct *hvcsd, uint32_t unit_address,
 	 * It is possible that the vty-server was removed between the time that
 	 * the conn was registered and now.
 	 */
-	rc = request_irq(irq, &hvcs_handle_interrupt, 0, "ibmhvcs", hvcsd);
-	if (!rc) {
+	if (!(rc = request_irq(irq, &hvcs_handle_interrupt,
+				0, "ibmhvcs", hvcsd))) {
 		/*
 		 * It is possible the vty-server was removed after the irq was
 		 * requested but before we have time to enable interrupts.
@@ -1228,7 +1242,8 @@ static void hvcs_close(struct tty_struct *tty, struct file *filp)
 		free_irq(irq, hvcsd);
 		return;
 	} else if (hvcsd->port.count < 0) {
-		printk(KERN_ERR "HVCS: vty-server@%X open_count: %d is mismanaged.\n",
+		printk(KERN_ERR "HVCS: vty-server@%X open_count: %d"
+				" is missmanaged.\n",
 		hvcsd->vdev->unit_address, hvcsd->port.count);
 	}
 
@@ -1560,7 +1575,7 @@ static int __init hvcs_module_init(void)
 	 */
 	rc = driver_create_file(&(hvcs_vio_driver.driver), &driver_attr_rescan);
 	if (rc)
-		pr_warn("HVCS: Failed to create rescan file (err %d)\n", rc);
+		pr_warning(KERN_ERR "HVCS: Failed to create rescan file (err %d)\n", rc);
 
 	return 0;
 }

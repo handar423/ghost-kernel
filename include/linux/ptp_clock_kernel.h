@@ -39,6 +39,15 @@ struct ptp_clock_request {
 };
 
 struct system_device_crosststamp;
+
+/**
+ * struct ptp_system_timestamp - system time corresponding to a PHC timestamp
+ */
+struct ptp_system_timestamp {
+	struct timespec64 pre_ts;
+	struct timespec64 post_ts;
+};
+
 /**
  * struct ptp_clock_info - decribes a PTP hardware clock
  *
@@ -72,8 +81,24 @@ struct system_device_crosststamp;
  * @adjtime:  Shifts the time of the hardware clock.
  *            parameter delta: Desired change in nanoseconds.
  *
+ * @gettime:  Reads the current time from the hardware clock. (deprecated)
+ *            parameter ts: Holds the result.
+ *
+ * @settime:  Set the current time on the hardware clock. (deprecated)
+ *            parameter ts: Time value to set.
+ *
  * @gettime64:  Reads the current time from the hardware clock.
+ *              This method is deprecated.  New drivers should implement
+ *              the @gettimex64 method instead.
  *              parameter ts: Holds the result.
+ *
+ * @gettimex64:  Reads the current time from the hardware clock and optionally
+ *               also the system clock.
+ *               parameter ts: Holds the PHC timestamp.
+ *               parameter sts: If not NULL, it holds a pair of timestamps from
+ *               the system clock. The first reading is made right before
+ *               reading the lowest bits of the PHC timestamp and the second
+ *               reading immediately follows that.
  *
  * @getcrosststamp:  Reads the current time from the hardware clock and
  *                   system clock simultaneously.
@@ -99,11 +124,6 @@ struct system_device_crosststamp;
  *            parameter func: the desired function to use.
  *            parameter chan: the function channel index to use.
  *
- * @do_work:  Request driver to perform auxiliary (periodic) operations
- *	      Driver should return delay of the next auxiliary work scheduling
- *	      time (>=0) or negative value in case further scheduling
- *	      is not required.
- *
  * Drivers should embed their ptp_clock_info within a private
  * structure, obtaining a reference to it using container_of().
  *
@@ -123,7 +143,11 @@ struct ptp_clock_info {
 	int (*adjfine)(struct ptp_clock_info *ptp, long scaled_ppm);
 	int (*adjfreq)(struct ptp_clock_info *ptp, s32 delta);
 	int (*adjtime)(struct ptp_clock_info *ptp, s64 delta);
+	int (*gettime)(struct ptp_clock_info *ptp, struct timespec *ts);
+	int (*settime)(struct ptp_clock_info *ptp, const struct timespec *ts);
 	int (*gettime64)(struct ptp_clock_info *ptp, struct timespec64 *ts);
+	int (*gettimex64)(struct ptp_clock_info *ptp, struct timespec64 *ts,
+			  struct ptp_system_timestamp *sts);
 	int (*getcrosststamp)(struct ptp_clock_info *ptp,
 			      struct system_device_crosststamp *cts);
 	int (*settime64)(struct ptp_clock_info *p, const struct timespec64 *ts);
@@ -131,10 +155,33 @@ struct ptp_clock_info {
 		      struct ptp_clock_request *request, int on);
 	int (*verify)(struct ptp_clock_info *ptp, unsigned int pin,
 		      enum ptp_pin_function func, unsigned int chan);
-	long (*do_aux_work)(struct ptp_clock_info *ptp);
 };
 
 struct ptp_clock;
+
+/**
+ * ptp_clock_register() - register a PTP hardware clock driver
+ *
+ * @info:   Structure describing the new clock.
+ * @parent: Pointer to the parent device of the new clock.
+ *
+ * Returns a valid pointer on success or PTR_ERR on failure.  If PHC
+ * support is missing at the configuration level, this function
+ * returns NULL, and drivers are expected to gracefully handle that
+ * case separately.
+ */
+
+extern struct ptp_clock *ptp_clock_register(struct ptp_clock_info *info,
+					    struct device *parent);
+
+/**
+ * ptp_clock_unregister() - unregister a PTP hardware clock driver
+ *
+ * @ptp:  The clock to remove from service.
+ */
+
+extern int ptp_clock_unregister(struct ptp_clock *ptp);
+
 
 enum ptp_clock_events {
 	PTP_CLOCK_ALARM,
@@ -160,31 +207,6 @@ struct ptp_clock_event {
 		struct pps_event_time pps_times;
 	};
 };
-
-#if IS_REACHABLE(CONFIG_PTP_1588_CLOCK)
-
-/**
- * ptp_clock_register() - register a PTP hardware clock driver
- *
- * @info:   Structure describing the new clock.
- * @parent: Pointer to the parent device of the new clock.
- *
- * Returns a valid pointer on success or PTR_ERR on failure.  If PHC
- * support is missing at the configuration level, this function
- * returns NULL, and drivers are expected to gracefully handle that
- * case separately.
- */
-
-extern struct ptp_clock *ptp_clock_register(struct ptp_clock_info *info,
-					    struct device *parent);
-
-/**
- * ptp_clock_unregister() - unregister a PTP hardware clock driver
- *
- * @ptp:  The clock to remove from service.
- */
-
-extern int ptp_clock_unregister(struct ptp_clock *ptp);
 
 /**
  * ptp_clock_event() - notify the PTP layer about an event
@@ -217,34 +239,16 @@ extern int ptp_clock_index(struct ptp_clock *ptp);
 int ptp_find_pin(struct ptp_clock *ptp,
 		 enum ptp_pin_function func, unsigned int chan);
 
-/**
- * ptp_schedule_worker() - schedule ptp auxiliary work
- *
- * @ptp:    The clock obtained from ptp_clock_register().
- * @delay:  number of jiffies to wait before queuing
- *          See kthread_queue_delayed_work() for more info.
- */
+static inline void ptp_read_system_prets(struct ptp_system_timestamp *sts)
+{
+	if (sts)
+		ktime_get_real_ts64(&sts->pre_ts);
+}
 
-int ptp_schedule_worker(struct ptp_clock *ptp, unsigned long delay);
-
-#else
-static inline struct ptp_clock *ptp_clock_register(struct ptp_clock_info *info,
-						   struct device *parent)
-{ return NULL; }
-static inline int ptp_clock_unregister(struct ptp_clock *ptp)
-{ return 0; }
-static inline void ptp_clock_event(struct ptp_clock *ptp,
-				   struct ptp_clock_event *event)
-{ }
-static inline int ptp_clock_index(struct ptp_clock *ptp)
-{ return -1; }
-static inline int ptp_find_pin(struct ptp_clock *ptp,
-			       enum ptp_pin_function func, unsigned int chan)
-{ return -1; }
-static inline int ptp_schedule_worker(struct ptp_clock *ptp,
-				      unsigned long delay)
-{ return -EOPNOTSUPP; }
-
-#endif
+static inline void ptp_read_system_postts(struct ptp_system_timestamp *sts)
+{
+	if (sts)
+		ktime_get_real_ts64(&sts->post_ts);
+}
 
 #endif

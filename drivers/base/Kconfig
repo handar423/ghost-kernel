@@ -1,11 +1,10 @@
-# SPDX-License-Identifier: GPL-2.0
 menu "Generic Driver Options"
 
-config UEVENT_HELPER
-	bool "Support for uevent helper"
-	default y
+config UEVENT_HELPER_PATH
+	string "path to uevent helper"
+	default ""
 	help
-	  The uevent helper program is forked by the kernel for
+	  Path to uevent helper program forked by the kernel for
 	  every uevent.
 	  Before the switch to the netlink-based uevent source, this was
 	  used to hook hotplug scripts into kernel device events. It
@@ -16,13 +15,8 @@ config UEVENT_HELPER
 	  that it creates a high system load, or on smaller systems
 	  it is known to create out-of-memory situations during bootup.
 
-config UEVENT_HELPER_PATH
-	string "path to uevent helper"
-	depends on UEVENT_HELPER
-	default ""
-	help
-	  To disable user space helper program execution at by default
-	  specify an empty string here. This setting can still be altered
+	  To disable user space helper program execution at early boot
+	  time specify an empty string here. This setting can be altered
 	  via /proc/sys/kernel/hotplug or via /sys/kernel/uevent_helper
 	  later at runtime.
 
@@ -55,7 +49,7 @@ config DEVTMPFS_MOUNT
 	  with the commandline parameter: devtmpfs.mount=0|1.
 	  This option does not affect initramfs based booting, here
 	  the devtmpfs filesystem always needs to be mounted manually
-	  after the rootfs is mounted.
+	  after the roots is mounted.
 	  With this option enabled, it allows to bring up a system in
 	  rescue mode with init=/bin/sh, even when the /dev directory
 	  on the rootfs is completely empty.
@@ -91,23 +85,22 @@ config FIRMWARE_IN_KERNEL
 	depends on FW_LOADER
 	default y
 	help
-	  Various drivers in the kernel source tree may require firmware,
-	  which is generally available in your distribution's linux-firmware
-	  package.
-
-	  The linux-firmware package should install firmware into
-	  /lib/firmware/ on your system, so they can be loaded by userspace
-	  helpers on request.
+	  The kernel source tree includes a number of firmware 'blobs'
+	  that are used by various drivers. The recommended way to
+	  use these is to run "make firmware_install", which, after
+	  converting ihex files to binary, copies all of the needed
+	  binary files in firmware/ to /lib/firmware/ on your system so
+	  that they can be loaded by userspace helpers on request.
 
 	  Enabling this option will build each required firmware blob
-	  specified by EXTRA_FIRMWARE into the kernel directly, where
-	  request_firmware() will find them without having to call out to
-	  userspace. This may be useful if your root file system requires a
-	  device that uses such firmware and you do not wish to use an
-	  initrd.
+	  into the kernel directly, where request_firmware() will find
+	  them without having to call out to userspace. This may be
+	  useful if your root file system requires a device that uses
+	  such firmware and do not wish to use an initrd.
 
 	  This single option controls the inclusion of firmware for
-	  every driver that uses request_firmware(), which avoids a
+	  every driver that uses request_firmware() and ships its
+	  firmware in the kernel source tree, which avoids a
 	  proliferation of 'Include firmware for xxx device' options.
 
 	  Say 'N' and let firmware be loaded from userspace.
@@ -142,27 +135,24 @@ config EXTRA_FIRMWARE
 config EXTRA_FIRMWARE_DIR
 	string "Firmware blobs root directory"
 	depends on EXTRA_FIRMWARE != ""
-	default "/lib/firmware"
+	default "firmware"
 	help
 	  This option controls the directory in which the kernel build system
 	  looks for the firmware files listed in the EXTRA_FIRMWARE option.
+	  The default is firmware/ in the kernel source tree, but by changing
+	  this option you can point it elsewhere, such as /lib/firmware/ or
+	  some other directory containing the firmware files.
 
 config FW_LOADER_USER_HELPER
-	bool
-
-config FW_LOADER_USER_HELPER_FALLBACK
 	bool "Fallback user-helper invocation for firmware loading"
 	depends on FW_LOADER
-	select FW_LOADER_USER_HELPER
+	default y
 	help
 	  This option enables / disables the invocation of user-helper
 	  (e.g. udev) for loading firmware files as a fallback after the
 	  direct file loading in kernel fails.  The user-mode helper is
 	  no longer required unless you have a special firmware file that
-	  resides in a non-standard path. Moreover, the udev support has
-	  been deprecated upstream.
-
-	  If you are unsure about this, say N here.
+	  resides in a non-standard path.
 
 config WANT_DEV_COREDUMP
 	bool
@@ -170,23 +160,20 @@ config WANT_DEV_COREDUMP
 	  Drivers should "select" this option if they desire to use the
 	  device coredump mechanism.
 
-config ALLOW_DEV_COREDUMP
-	bool "Allow device coredump" if EXPERT
-	default y
+config DISABLE_DEV_COREDUMP
+	bool "Disable device coredump" if EXPERT
 	help
-	  This option controls if the device coredump mechanism is available or
-	  not; if disabled, the mechanism will be omitted even if drivers that
-	  can use it are enabled.
-	  Say 'N' for more sensitive systems or systems that don't want
-	  to ever access the information to not have the code, nor keep any
-	  data.
+	  Disable the device coredump mechanism despite drivers wanting to
+	  use it; this allows for more sensitive systems or systems that
+	  don't want to ever access the information to not have the code,
+	  nor keep any data.
 
-	  If unsure, say Y.
+	  If unsure, say N.
 
 config DEV_COREDUMP
 	bool
 	default y if WANT_DEV_COREDUMP
-	depends on ALLOW_DEV_COREDUMP
+	depends on !DISABLE_DEV_COREDUMP
 
 config DEBUG_DRIVER
 	bool "Driver Core verbose debug messages"
@@ -211,20 +198,6 @@ config DEBUG_DEVRES
 
 	  If you are unsure about this, Say N here.
 
-config DEBUG_TEST_DRIVER_REMOVE
-	bool "Test driver remove calls during probe (UNSTABLE)"
-	depends on DEBUG_KERNEL
-	help
-	  Say Y here if you want the Driver core to test driver remove functions
-	  by calling probe, remove, probe. This tests the remove path without
-	  having to unbind the driver or unload the driver module.
-
-	  This option is expected to find errors and may render your system
-	  unusable. You should say N here unless you are explicitly looking to
-	  test this functionality.
-
-source "drivers/base/test/Kconfig"
-
 config SYS_HYPERVISOR
 	bool
 	default n
@@ -233,15 +206,11 @@ config GENERIC_CPU_DEVICES
 	bool
 	default n
 
-config GENERIC_CPU_AUTOPROBE
-	bool
-
 config GENERIC_CPU_VULNERABILITIES
 	bool
 
 config SOC_BUS
 	bool
-	select GLOB
 
 source "drivers/base/regmap/Kconfig"
 
@@ -255,15 +224,6 @@ config DMA_SHARED_BUFFER
 	  APIs extension; the file's descriptor can then be passed on to other
 	  driver.
 
-config DMA_FENCE_TRACE
-	bool "Enable verbose DMA_FENCE_TRACE messages"
-	depends on DMA_SHARED_BUFFER
-	help
-	  Enable the DMA_FENCE_TRACE printks. This will add extra
-	  spam to the console log, but will make it easier to diagnose
-	  lockup related problems for dma-buffers shared across multiple
-	  devices.
-
 config DMA_CMA
 	bool "DMA Contiguous Memory Allocator"
 	depends on HAVE_DMA_CONTIGUOUS && CMA
@@ -271,9 +231,6 @@ config DMA_CMA
 	  This enables the Contiguous Memory Allocator which allows drivers
 	  to allocate big physically-contiguous blocks of memory for use with
 	  hardware components that do not support I/O map nor scatter-gather.
-
-	  You can disable CMA by specifying "cma=0" on the kernel's command
-	  line.
 
 	  For more information see <include/linux/dma-contiguous.h>.
 	  If unsure, say "n".
@@ -284,24 +241,18 @@ comment "Default contiguous memory area size:"
 config CMA_SIZE_MBYTES
 	int "Size in Mega Bytes"
 	depends on !CMA_SIZE_SEL_PERCENTAGE
-	default 0 if X86
 	default 16
 	help
 	  Defines the size (in MiB) of the default memory area for Contiguous
-	  Memory Allocator.  If the size of 0 is selected, CMA is disabled by
-	  default, but it can be enabled by passing cma=size[MG] to the kernel.
-
+	  Memory Allocator.
 
 config CMA_SIZE_PERCENTAGE
 	int "Percentage of total memory"
 	depends on !CMA_SIZE_SEL_MBYTES
-	default 0 if X86
 	default 10
 	help
 	  Defines the size of the default memory area for Contiguous Memory
 	  Allocator as a percentage of the total memory in the system.
-	  If 0 percent is selected, CMA is disabled by default, but it can be
-	  enabled by passing cma=size[MG] to the kernel.
 
 choice
 	prompt "Selected region size"
@@ -323,7 +274,7 @@ endchoice
 
 config CMA_ALIGNMENT
 	int "Maximum PAGE_SIZE order of alignment for contiguous buffers"
-	range 4 12
+	range 4 9
 	default 8
 	help
 	  DMA mapping framework by default aligns all buffers to the smallest
@@ -339,14 +290,16 @@ config CMA_ALIGNMENT
 
 	  If unsure, leave the default value "8".
 
-endif
-
-config GENERIC_ARCH_TOPOLOGY
-	bool
+config CMA_AREAS
+	int "Maximum count of the CMA device-private areas"
+	default 7
 	help
-	  Enable support for architectures common topology code: e.g., parsing
-	  CPU capacity information from DT, usage of such information for
-	  appropriate scaling, sysfs interface for changing capacity values at
-	  runtime.
+	  CMA allows to create CMA areas for particular devices. This parameter
+	  sets the maximum number of such device private CMA areas in the
+	  system.
+
+	  If unsure, leave the default value "7".
+
+endif
 
 endmenu

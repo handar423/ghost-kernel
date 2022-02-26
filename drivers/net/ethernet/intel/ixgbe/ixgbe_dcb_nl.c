@@ -1,30 +1,5 @@
-/*******************************************************************************
-
-  Intel 10 Gigabit PCI Express Linux driver
-  Copyright(c) 1999 - 2014 Intel Corporation.
-
-  This program is free software; you can redistribute it and/or modify it
-  under the terms and conditions of the GNU General Public License,
-  version 2, as published by the Free Software Foundation.
-
-  This program is distributed in the hope it will be useful, but WITHOUT
-  ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
-  FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
-  more details.
-
-  You should have received a copy of the GNU General Public License along with
-  this program; if not, write to the Free Software Foundation, Inc.,
-  51 Franklin St - Fifth Floor, Boston, MA 02110-1301 USA.
-
-  The full GNU General Public License is included in this distribution in
-  the file called "COPYING".
-
-  Contact Information:
-  Linux NICS <linux.nics@intel.com>
-  e1000-devel Mailing List <e1000-devel@lists.sourceforge.net>
-  Intel Corporation, 5200 N.E. Elam Young Parkway, Hillsboro, OR 97124-6497
-
-*******************************************************************************/
+// SPDX-License-Identifier: GPL-2.0
+/* Copyright(c) 1999 - 2018 Intel Corporation. */
 
 #include "ixgbe.h"
 #include <linux/dcbnl.h>
@@ -492,10 +467,10 @@ static void ixgbe_dcbnl_setpfcstate(struct net_device *netdev, u8 state)
  * @id: id is either ether type or TCP/UDP port number
  *
  * Returns : on success, returns a non-zero 802.1p user priority bitmap
- * otherwise returns -EINVAL as the invalid user priority bitmap to indicate an
+ * otherwise returns 0 as the invalid user priority bitmap to indicate an
  * error.
  */
-static int ixgbe_dcbnl_getapp(struct net_device *netdev, u8 idtype, u16 id)
+static u8 ixgbe_dcbnl_getapp(struct net_device *netdev, u8 idtype, u16 id)
 {
 	struct ixgbe_adapter *adapter = netdev_priv(netdev);
 	struct dcb_app app = {
@@ -504,7 +479,7 @@ static int ixgbe_dcbnl_getapp(struct net_device *netdev, u8 idtype, u16 id)
 			     };
 
 	if (!(adapter->dcbx_cap & DCB_CAP_DCBX_VER_CEE))
-		return -EINVAL;
+		return 0;
 
 	return dcb_getapp(netdev, &app);
 }
@@ -571,7 +546,7 @@ static int ixgbe_dcbnl_ieee_setets(struct net_device *dev,
 	if (max_tc > adapter->dcb_cfg.num_tcs.pg_tcs)
 		return -EINVAL;
 
-	if (max_tc != netdev_get_num_tc(dev)) {
+	if (max_tc != adapter->hw_tcs) {
 		err = ixgbe_setup_tc(dev, max_tc);
 		if (err)
 			return err;

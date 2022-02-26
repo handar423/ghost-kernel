@@ -52,8 +52,10 @@
 #include <linux/errno.h>
 #include <linux/init.h>
 #include <linux/if_ether.h>
+#ifndef __GENKSYMS__
 #include <linux/of_net.h>
 #include <linux/pci.h>
+#endif
 #include <net/dst.h>
 #include <net/arp.h>
 #include <net/sock.h>
@@ -61,8 +63,10 @@
 #include <net/ip.h>
 #include <net/dsa.h>
 #include <net/flow_dissector.h>
-#include <linux/uaccess.h>
+#include <asm/uaccess.h>
+#ifndef __GENKSYMS__
 #include <net/pkt_sched.h>
+#endif
 
 __setup("ether=", netdev_boot_setup);
 
@@ -108,7 +112,7 @@ int eth_header(struct sk_buff *skb, struct net_device *dev,
 	 */
 
 	if (dev->flags & (IFF_LOOPBACK | IFF_NOARP)) {
-		eth_zero_addr(eth->h_dest);
+		memset(eth->h_dest, 0, ETH_ALEN);
 		return ETH_HLEN;
 	}
 
@@ -117,7 +121,40 @@ int eth_header(struct sk_buff *skb, struct net_device *dev,
 EXPORT_SYMBOL(eth_header);
 
 /**
- * eth_get_headlen - determine the length of header for an ethernet frame
+ * eth_rebuild_header- rebuild the Ethernet MAC header.
+ * @skb: socket buffer to update
+ *
+ * This is called after an ARP or IPV6 ndisc it's resolution on this
+ * sk_buff. We now let protocol (ARP) fill in the other fields.
+ *
+ * This routine CANNOT use cached dst->neigh!
+ * Really, it is used only when dst->neigh is wrong.
+ */
+int eth_rebuild_header(struct sk_buff *skb)
+{
+	struct ethhdr *eth = (struct ethhdr *)skb->data;
+	struct net_device *dev = skb->dev;
+
+	switch (eth->h_proto) {
+#ifdef CONFIG_INET
+	case htons(ETH_P_IP):
+		return arp_find(eth->h_dest, skb);
+#endif
+	default:
+		printk(KERN_DEBUG
+		       "%s: unable to resolve type %X addresses.\n",
+		       dev->name, ntohs(eth->h_proto));
+
+		memcpy(eth->h_source, dev->dev_addr, ETH_ALEN);
+		break;
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL(eth_rebuild_header);
+
+/**
+ * eth_get_headlen - determine the the length of header for an ethernet frame
  * @data: pointer to start of frame
  * @len: total length of frame
  *
@@ -131,7 +168,7 @@ u32 eth_get_headlen(void *data, unsigned int len)
 	struct flow_keys keys;
 
 	/* this should never happen, but better safe than sorry */
-	if (unlikely(len < sizeof(*eth)))
+	if (len < sizeof(*eth))
 		return len;
 
 	/* parse any remaining L2/L3 headers, check for L4 */
@@ -155,25 +192,33 @@ EXPORT_SYMBOL(eth_get_headlen);
  */
 __be16 eth_type_trans(struct sk_buff *skb, struct net_device *dev)
 {
-	unsigned short _service_access_point;
-	const unsigned short *sap;
-	const struct ethhdr *eth;
+	struct ethhdr *eth;
 
 	skb->dev = dev;
 	skb_reset_mac_header(skb);
-
-	eth = (struct ethhdr *)skb->data;
 	skb_pull_inline(skb, ETH_HLEN);
+	eth = eth_hdr(skb);
 
-	if (unlikely(is_multicast_ether_addr_64bits(eth->h_dest))) {
+	if (unlikely(is_multicast_ether_addr(eth->h_dest))) {
 		if (ether_addr_equal_64bits(eth->h_dest, dev->broadcast))
 			skb->pkt_type = PACKET_BROADCAST;
 		else
 			skb->pkt_type = PACKET_MULTICAST;
 	}
-	else if (unlikely(!ether_addr_equal_64bits(eth->h_dest,
-						   dev->dev_addr)))
-		skb->pkt_type = PACKET_OTHERHOST;
+
+	/*
+	 *      This ALLMULTI check should be redundant by 1.4
+	 *      so don't forget to remove it.
+	 *
+	 *      Seems, you forgot to remove it. All silly devices
+	 *      seems to set IFF_PROMISC.
+	 */
+
+	else if (1 /*dev->flags&IFF_PROMISC */ ) {
+		if (unlikely(!ether_addr_equal_64bits(eth->h_dest,
+						      dev->dev_addr)))
+			skb->pkt_type = PACKET_OTHERHOST;
+	}
 
 	/*
 	 * Some variants of DSA tagging don't have an ethertype field
@@ -193,8 +238,7 @@ __be16 eth_type_trans(struct sk_buff *skb, struct net_device *dev)
 	 *      layer. We look for FFFF which isn't a used 802.2 SSAP/DSAP. This
 	 *      won't work for fault tolerant netware but does for the rest.
 	 */
-	sap = skb_header_pointer(skb, 0, sizeof(*sap), &_service_access_point);
-	if (sap && *sap == 0xFFFF)
+	if (unlikely(skb->len >= 2 && *(unsigned short *)(skb->data) == 0xFFFF))
 		return htons(ETH_P_802_3);
 
 	/*
@@ -323,7 +367,13 @@ EXPORT_SYMBOL(eth_mac_addr);
  */
 int eth_change_mtu(struct net_device *dev, int new_mtu)
 {
-	netdev_warn(dev, "%s is deprecated\n", __func__);
+	/* RHEL - For newer drivers show deprecation warning and for older
+	 * ones preserve old behavior.
+	 */
+	if (get_ndo_ext(dev->netdev_ops, ndo_change_mtu))
+		netdev_warn(dev, "%s is deprecated\n", __func__);
+	else if (new_mtu < 68 || new_mtu > ETH_DATA_LEN)
+		return -EINVAL;
 	dev->mtu = new_mtu;
 	return 0;
 }
@@ -341,37 +391,62 @@ EXPORT_SYMBOL(eth_validate_addr);
 const struct header_ops eth_header_ops ____cacheline_aligned = {
 	.create		= eth_header,
 	.parse		= eth_header_parse,
+	.rebuild	= eth_rebuild_header,
 	.cache		= eth_header_cache,
 	.cache_update	= eth_header_cache_update,
 };
+
+/*
+ * RHEL: The macros ether_setup and alloc_etherdev_mqs need to be undefined
+ * here. For details, please see their definition in include/linux/netdevice.h
+ * and include/linux/etherdevice.h
+ */
+#undef ether_setup
+#undef alloc_etherdev_mqs
 
 /**
  * ether_setup - setup Ethernet network device
  * @dev: network device
  *
  * Fill in the fields of the device structure with Ethernet-generic values.
+ *
+ * RHEL: This function is preserved for existing binary modules compiled
+ * against RHEL-7.4 and older.
  */
 void ether_setup(struct net_device *dev)
 {
 	dev->header_ops		= &eth_header_ops;
 	dev->type		= ARPHRD_ETHER;
 	dev->hard_header_len 	= ETH_HLEN;
-	dev->min_header_len	= ETH_HLEN;
 	dev->mtu		= ETH_DATA_LEN;
-	dev->min_mtu		= ETH_MIN_MTU;
-	dev->max_mtu		= ETH_DATA_LEN;
 	dev->addr_len		= ETH_ALEN;
 	dev->tx_queue_len	= DEFAULT_TX_QUEUE_LEN;
 	dev->flags		= IFF_BROADCAST|IFF_MULTICAST;
 	dev->priv_flags		|= IFF_TX_SKB_SHARING;
 
-	eth_broadcast_addr(dev->broadcast);
+	memset(dev->broadcast, 0xFF, ETH_ALEN);
 
 }
 EXPORT_SYMBOL(ether_setup);
 
 /**
- * alloc_etherdev_mqs - Allocates and sets up an Ethernet device
+ * ether_setup_rh - setup Ethernet network device
+ * @dev: network device
+ *
+ * Fill in the fields of the device structure with Ethernet-generic values.
+ *
+ * RHEL: This variant also initializes .min_mtu & .max_mtu
+ */
+void ether_setup_rh(struct net_device *dev)
+{
+	ether_setup(dev);
+	dev->extended->min_mtu	= ETH_MIN_MTU;
+	dev->extended->max_mtu	= ETH_DATA_LEN;
+}
+EXPORT_SYMBOL(ether_setup_rh);
+
+/**
+ * alloc_etherdev_mqs_rh - Allocates and sets up an Ethernet device
  * @sizeof_priv: Size of additional driver-private structure to be allocated
  *	for this Ethernet device
  * @txqs: The number of TX queues this device has.
@@ -383,13 +458,27 @@ EXPORT_SYMBOL(ether_setup);
  * Constructs a new net device, complete with a private data area of
  * size (sizeof_priv).  A 32-byte (not bit) alignment is enforced for
  * this private data area.
+ *
+ * RHEL: This function uses ether_setup_rh() that also initializes
+ * .{min,max}_mtu members to their default values.
  */
 
+struct net_device *alloc_etherdev_mqs_rh(int sizeof_priv, unsigned int txqs,
+					 unsigned int rxqs)
+{
+	return alloc_netdev_mqs(sizeof_priv, "eth%d", ether_setup_rh, txqs,
+				rxqs);
+}
+EXPORT_SYMBOL(alloc_etherdev_mqs_rh);
+
+/*
+ * RHEL: This function is preserved for existing binary modules compiled
+ * against RHEL-7.4 and older.
+ */
 struct net_device *alloc_etherdev_mqs(int sizeof_priv, unsigned int txqs,
 				      unsigned int rxqs)
 {
-	return alloc_netdev_mqs(sizeof_priv, "eth%d", NET_NAME_UNKNOWN,
-				ether_setup, txqs, rxqs);
+	return alloc_netdev_mqs(sizeof_priv, "eth%d", ether_setup, txqs, rxqs);
 }
 EXPORT_SYMBOL(alloc_etherdev_mqs);
 
@@ -475,7 +564,7 @@ struct sk_buff **eth_gro_receive(struct sk_buff **head,
 out_unlock:
 	rcu_read_unlock();
 out:
-	skb_gro_flush_final(skb, pp, flush);
+	NAPI_GRO_CB(skb)->flush |= flush;
 
 	return pp;
 }

@@ -88,7 +88,7 @@ static const char * const boot_msg =
 
 #include <asm/byteorder.h>
 #include <asm/io.h>
-#include <linux/uaccess.h>
+#include <asm/uaccess.h>
 
 #include	"h/types.h"
 #undef ADDR			// undo Linux definition
@@ -166,6 +166,7 @@ static const struct net_device_ops skfp_netdev_ops = {
 	.ndo_stop		= skfp_close,
 	.ndo_start_xmit		= skfp_send_pkt,
 	.ndo_get_stats		= skfp_ctl_get_stats,
+	.ndo_change_mtu		= fddi_change_mtu,
 	.ndo_set_rx_mode	= skfp_ctl_set_multicast_list,
 	.ndo_set_mac_address	= skfp_ctl_set_mac_address,
 	.ndo_do_ioctl		= skfp_ioctl,
@@ -350,6 +351,7 @@ static void skfp_remove_one(struct pci_dev *pdev)
 	free_netdev(p);
 
 	pci_disable_device(pdev);
+	pci_set_drvdata(pdev, NULL);
 }
 
 /*
@@ -2244,4 +2246,15 @@ static struct pci_driver skfddi_pci_driver = {
 	.remove		= skfp_remove_one,
 };
 
-module_pci_driver(skfddi_pci_driver);
+static int __init skfd_init(void)
+{
+	return pci_register_driver(&skfddi_pci_driver);
+}
+
+static void __exit skfd_exit(void)
+{
+	pci_unregister_driver(&skfddi_pci_driver);
+}
+
+module_init(skfd_init);
+module_exit(skfd_exit);

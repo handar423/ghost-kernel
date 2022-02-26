@@ -149,10 +149,13 @@ static int ip_vs_wrr_dest_changed(struct ip_vs_service *svc,
 	mark->cl = list_entry(&svc->destinations, struct ip_vs_dest, n_list);
 	mark->di = ip_vs_wrr_gcd_weight(svc);
 	mark->mw = ip_vs_wrr_max_weight(svc) - (mark->di - 1);
-	if (mark->cw > mark->mw || !mark->cw)
+	if (mark->cw > mark->mw || !mark->cw) {
+		gmb();
 		mark->cw = mark->mw;
-	else if (mark->di > 1)
+	} else if (mark->di > 1) {
+		gmb();
 		mark->cw = (mark->cw / mark->di) * mark->di + 1;
+	}
 	spin_unlock_bh(&svc->sched_lock);
 	return 0;
 }
@@ -216,9 +219,9 @@ ip_vs_wrr_schedule(struct ip_vs_service *svc, const struct sk_buff *skb,
 found:
 	IP_VS_DBG_BUF(6, "WRR: server %s:%u "
 		      "activeconns %d refcnt %d weight %d\n",
-		      IP_VS_DBG_ADDR(dest->af, &dest->addr), ntohs(dest->port),
+		      IP_VS_DBG_ADDR(svc->af, &dest->addr), ntohs(dest->port),
 		      atomic_read(&dest->activeconns),
-		      refcount_read(&dest->refcnt),
+		      atomic_read(&dest->refcnt),
 		      atomic_read(&dest->weight));
 	mark->cl = dest;
 

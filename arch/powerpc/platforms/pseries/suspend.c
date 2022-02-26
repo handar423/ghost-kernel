@@ -124,7 +124,7 @@ static int pseries_prepare_late(void)
 	atomic_set(&suspend_data.done, 0);
 	atomic_set(&suspend_data.error, 0);
 	suspend_data.complete = &suspend_work;
-	reinit_completion(&suspend_work);
+	INIT_COMPLETION(suspend_work);
 	return 0;
 }
 
@@ -151,7 +151,7 @@ static ssize_t store_hibernate(struct device *dev,
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
 
-	if (!alloc_cpumask_var(&offline_mask, GFP_KERNEL))
+	if (!alloc_cpumask_var(&offline_mask, GFP_TEMPORARY))
 		return -ENOMEM;
 
 	stream_id = simple_strtoul(buf, NULL, 16);
@@ -265,7 +265,7 @@ static int __init pseries_suspend_init(void)
 {
 	int rc;
 
-	if (!firmware_has_feature(FW_FEATURE_LPAR))
+	if (!machine_is(pseries) || !firmware_has_feature(FW_FEATURE_LPAR))
 		return 0;
 
 	suspend_data.token = rtas_token("ibm,suspend-me");
@@ -280,4 +280,5 @@ static int __init pseries_suspend_init(void)
 	suspend_set_ops(&pseries_suspend_ops);
 	return 0;
 }
-machine_device_initcall(pseries, pseries_suspend_init);
+
+__initcall(pseries_suspend_init);

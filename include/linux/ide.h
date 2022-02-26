@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _IDE_H
 #define _IDE_H
 /*
@@ -19,11 +18,14 @@
 #include <linux/completion.h>
 #include <linux/pm.h>
 #include <linux/mutex.h>
-/* for request_sense */
-#include <linux/cdrom.h>
-#include <scsi/scsi_cmnd.h>
+#ifdef CONFIG_BLK_DEV_IDEACPI
+#include <acpi/acpi.h>
+#endif
 #include <asm/byteorder.h>
 #include <asm/io.h>
+
+/* for request_sense */
+#include <linux/cdrom.h>
 
 #if defined(CONFIG_CRIS) || defined(CONFIG_FRV) || defined(CONFIG_MN10300)
 # define SUPPORT_VLB_SYNC 0
@@ -41,55 +43,7 @@
 
 struct device;
 
-/* values for ide_request.type */
-enum ata_priv_type {
-	ATA_PRIV_MISC,
-	ATA_PRIV_TASKFILE,
-	ATA_PRIV_PC,
-	ATA_PRIV_SENSE,		/* sense request */
-	ATA_PRIV_PM_SUSPEND,	/* suspend request */
-	ATA_PRIV_PM_RESUME,	/* resume request */
-};
-
-struct ide_request {
-	struct scsi_request sreq;
-	u8 sense[SCSI_SENSE_BUFFERSIZE];
-	u8 type;
-};
-
-static inline struct ide_request *ide_req(struct request *rq)
-{
-	return blk_mq_rq_to_pdu(rq);
-}
-
-static inline bool ata_misc_request(struct request *rq)
-{
-	return blk_rq_is_private(rq) && ide_req(rq)->type == ATA_PRIV_MISC;
-}
-
-static inline bool ata_taskfile_request(struct request *rq)
-{
-	return blk_rq_is_private(rq) && ide_req(rq)->type == ATA_PRIV_TASKFILE;
-}
-
-static inline bool ata_pc_request(struct request *rq)
-{
-	return blk_rq_is_private(rq) && ide_req(rq)->type == ATA_PRIV_PC;
-}
-
-static inline bool ata_sense_request(struct request *rq)
-{
-	return blk_rq_is_private(rq) && ide_req(rq)->type == ATA_PRIV_SENSE;
-}
-
-static inline bool ata_pm_request(struct request *rq)
-{
-	return blk_rq_is_private(rq) &&
-		(ide_req(rq)->type == ATA_PRIV_PM_SUSPEND ||
-		 ide_req(rq)->type == ATA_PRIV_PM_RESUME);
-}
-
-/* Error codes returned in result to the higher part of the driver. */
+/* Error codes returned in rq->errors to the higher part of the driver. */
 enum {
 	IDE_DRV_ERROR_GENERAL	= 101,
 	IDE_DRV_ERROR_FILEMARK	= 102,
@@ -616,7 +570,7 @@ struct ide_drive_s {
 
 	/* current sense rq and buffer */
 	bool sense_rq_armed;
-	struct request *sense_rq;
+	struct request sense_rq;
 	struct request_sense sense_data;
 };
 
@@ -672,7 +626,7 @@ struct ide_port_ops {
 	void	(*init_dev)(ide_drive_t *);
 	void	(*set_pio_mode)(struct hwif_s *, ide_drive_t *);
 	void	(*set_dma_mode)(struct hwif_s *, ide_drive_t *);
-	blk_status_t (*reset_poll)(ide_drive_t *);
+	int	(*reset_poll)(ide_drive_t *);
 	void	(*pre_reset)(ide_drive_t *);
 	void	(*resetproc)(ide_drive_t *);
 	void	(*maskproc)(ide_drive_t *, int);
@@ -1093,7 +1047,7 @@ int generic_ide_ioctl(ide_drive_t *, struct block_device *, unsigned, unsigned l
 extern int ide_vlb_clk;
 extern int ide_pci_clk;
 
-int ide_end_rq(ide_drive_t *, struct request *, blk_status_t, unsigned int);
+int ide_end_rq(ide_drive_t *, struct request *, int, unsigned int);
 void ide_kill_rq(ide_drive_t *, struct request *);
 
 void __ide_set_handler(ide_drive_t *, ide_handler_t *, unsigned int);
@@ -1124,7 +1078,7 @@ extern int ide_devset_execute(ide_drive_t *drive,
 			      const struct ide_devset *setting, int arg);
 
 void ide_complete_cmd(ide_drive_t *, struct ide_cmd *, u8, u8);
-int ide_complete_rq(ide_drive_t *, blk_status_t, unsigned int);
+int ide_complete_rq(ide_drive_t *, int, unsigned int);
 
 void ide_tf_readback(ide_drive_t *drive, struct ide_cmd *cmd);
 void ide_tf_dump(const char *, struct ide_cmd *);
@@ -1212,7 +1166,7 @@ extern int ide_wait_not_busy(ide_hwif_t *hwif, unsigned long timeout);
 
 extern void ide_stall_queue(ide_drive_t *drive, unsigned long timeout);
 
-extern void ide_timer_expiry(struct timer_list *t);
+extern void ide_timer_expiry(unsigned long);
 extern irqreturn_t ide_intr(int irq, void *dev_id);
 extern void do_ide_request(struct request_queue *);
 extern void ide_requeue_and_plug(ide_drive_t *drive, struct request *rq);
@@ -1363,19 +1317,6 @@ struct ide_port_info {
 	u8			mwdma_mask;
 	u8			udma_mask;
 };
-
-/*
- * State information carried for REQ_TYPE_ATA_PM_SUSPEND and REQ_TYPE_ATA_PM_RESUME
- * requests.
- */
-struct ide_pm_state {
-	/* PM state machine step value, currently driver specific */
-	int	pm_step;
-	/* requested PM state value (S1, S2, S3, S4, ...) */
-	u32	pm_state;
-	void*	data;		/* for driver use */
-};
-
 
 int ide_pci_init_one(struct pci_dev *, const struct ide_port_info *, void *);
 int ide_pci_init_two(struct pci_dev *, struct pci_dev *,
@@ -1573,7 +1514,7 @@ static inline void ide_set_max_pio(ide_drive_t *drive)
 
 char *ide_media_string(ide_drive_t *);
 
-extern const struct attribute_group *ide_dev_groups[];
+extern struct device_attribute ide_dev_attrs[];
 extern struct bus_type ide_bus_type;
 extern struct class *ide_port_class;
 
@@ -1613,6 +1554,5 @@ static inline void ide_set_drivedata(ide_drive_t *drive, void *data)
 
 #define ide_host_for_each_port(i, port, host) \
 	for ((i) = 0; ((port) = (host)->ports[i]) || (i) < MAX_HOST_PORTS; (i)++)
-
 
 #endif /* _IDE_H */

@@ -8,7 +8,6 @@
 
 #include <linux/types.h>
 #include <linux/sched.h>
-#include <linux/cred.h>
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/errno.h>
@@ -71,7 +70,7 @@ static int param_get_hashtbl_sz(char *buffer, const struct kernel_param *kp)
 
 #define param_check_hashtbl_sz(name, p) __param_check(name, p, unsigned int);
 
-static const struct kernel_param_ops param_ops_hashtbl_sz = {
+static struct kernel_param_ops param_ops_hashtbl_sz = {
 	.set = param_set_hashtbl_sz,
 	.get = param_get_hashtbl_sz,
 };
@@ -299,7 +298,7 @@ static void
 rpcauth_unhash_cred_locked(struct rpc_cred *cred)
 {
 	hlist_del_rcu(&cred->cr_hash);
-	smp_mb__before_atomic();
+	smp_mb__before_clear_bit();
 	clear_bit(RPCAUTH_CRED_HASHED, &cred->cr_flags);
 }
 
@@ -448,13 +447,12 @@ EXPORT_SYMBOL_GPL(rpcauth_destroy_credcache);
 /*
  * Remove stale credentials. Avoid sleeping inside the loop.
  */
-static long
+static int
 rpcauth_prune_expired(struct list_head *free, int nr_to_scan)
 {
 	spinlock_t *cache_lock;
 	struct rpc_cred *cred, *next;
 	unsigned long expired = jiffies - RPC_AUTH_EXPIRY_MORATORIUM;
-	long freed = 0;
 
 	list_for_each_entry_safe(cred, next, &cred_unused, cr_lru) {
 
@@ -465,14 +463,11 @@ rpcauth_prune_expired(struct list_head *free, int nr_to_scan)
 		 * Note that the cred_unused list must be time-ordered.
 		 */
 		if (time_in_range(cred->cr_expire, expired, jiffies) &&
-		    test_bit(RPCAUTH_CRED_HASHED, &cred->cr_flags) != 0) {
-			freed = SHRINK_STOP;
-			break;
-		}
+		    test_bit(RPCAUTH_CRED_HASHED, &cred->cr_flags) != 0)
+			return 0;
 
 		list_del_init(&cred->cr_lru);
 		number_cred_unused--;
-		freed++;
 		if (atomic_read(&cred->cr_count) != 0)
 			continue;
 
@@ -485,14 +480,13 @@ rpcauth_prune_expired(struct list_head *free, int nr_to_scan)
 		}
 		spin_unlock(cache_lock);
 	}
-	return freed;
+	return (number_cred_unused / 100) * sysctl_vfs_cache_pressure;
 }
 
-static unsigned long
-rpcauth_cache_do_shrink(int nr_to_scan)
+int rpcauth_cache_do_shrinker(int nr_to_scan)
 {
 	LIST_HEAD(free);
-	unsigned long freed;
+	int freed;
 
 	spin_lock(&rpc_credcache_lock);
 	freed = rpcauth_prune_expired(&free, nr_to_scan);
@@ -505,25 +499,18 @@ rpcauth_cache_do_shrink(int nr_to_scan)
 /*
  * Run memory cache shrinker.
  */
-static unsigned long
-rpcauth_cache_shrink_scan(struct shrinker *shrink, struct shrink_control *sc)
-
+static int
+rpcauth_cache_shrinker(struct shrinker *shrink, struct shrink_control *sc)
 {
-	if ((sc->gfp_mask & GFP_KERNEL) != GFP_KERNEL)
-		return SHRINK_STOP;
+	int nr_to_scan = sc->nr_to_scan;
+	gfp_t gfp_mask = sc->gfp_mask;
 
-	/* nothing left, don't come back */
+	if ((gfp_mask & GFP_KERNEL) != GFP_KERNEL)
+		return (nr_to_scan == 0) ? 0 : -1;
 	if (list_empty(&cred_unused))
-		return SHRINK_STOP;
+		return 0;
 
-	return rpcauth_cache_do_shrink(sc->nr_to_scan);
-}
-
-static unsigned long
-rpcauth_cache_shrink_count(struct shrinker *shrink, struct shrink_control *sc)
-
-{
-	return number_cred_unused * sysctl_vfs_cache_pressure / 100;
+	return rpcauth_cache_do_shrinker(nr_to_scan);
 }
 
 static void
@@ -538,7 +525,7 @@ rpcauth_cache_enforce_limit(void)
 	nr_to_scan = 100;
 	if (diff < nr_to_scan)
 		nr_to_scan = diff;
-	rpcauth_cache_do_shrink(nr_to_scan);
+	rpcauth_cache_do_shrinker(nr_to_scan);
 }
 
 /*
@@ -649,6 +636,9 @@ rpcauth_init_cred(struct rpc_cred *cred, const struct auth_cred *acred,
 	cred->cr_auth = auth;
 	cred->cr_ops = ops;
 	cred->cr_expire = jiffies;
+#if IS_ENABLED(CONFIG_SUNRPC_DEBUG)
+	cred->cr_magic = RPCAUTH_CRED_MAGIC;
+#endif
 	cred->cr_uid = acred->uid;
 }
 EXPORT_SYMBOL_GPL(rpcauth_init_cred);
@@ -861,8 +851,7 @@ rpcauth_uptodatecred(struct rpc_task *task)
 }
 
 static struct shrinker rpc_cred_shrinker = {
-	.count_objects = rpcauth_cache_shrink_count,
-	.scan_objects = rpcauth_cache_shrink_scan,
+	.shrink = rpcauth_cache_shrinker,
 	.seeks = DEFAULT_SEEKS,
 };
 
@@ -876,12 +865,8 @@ int __init rpcauth_init_module(void)
 	err = rpc_init_generic_auth();
 	if (err < 0)
 		goto out2;
-	err = register_shrinker(&rpc_cred_shrinker);
-	if (err < 0)
-		goto out3;
+	register_shrinker(&rpc_cred_shrinker);
 	return 0;
-out3:
-	rpc_destroy_generic_auth();
 out2:
 	rpc_destroy_authunix();
 out1:

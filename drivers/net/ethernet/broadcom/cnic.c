@@ -443,7 +443,7 @@ static int cnic_offld_prep(struct cnic_sock *csk)
 static int cnic_close_prep(struct cnic_sock *csk)
 {
 	clear_bit(SK_F_CONNECT_START, &csk->flags);
-	smp_mb__after_atomic();
+	smp_mb__after_clear_bit();
 
 	if (test_and_clear_bit(SK_F_OFFLD_COMPLETE, &csk->flags)) {
 		while (test_and_set_bit(SK_F_OFFLD_SCHED, &csk->flags))
@@ -457,7 +457,7 @@ static int cnic_close_prep(struct cnic_sock *csk)
 static int cnic_abort_prep(struct cnic_sock *csk)
 {
 	clear_bit(SK_F_CONNECT_START, &csk->flags);
-	smp_mb__after_atomic();
+	smp_mb__after_clear_bit();
 
 	while (test_and_set_bit(SK_F_OFFLD_SCHED, &csk->flags))
 		msleep(1);
@@ -660,7 +660,7 @@ static int cnic_init_id_tbl(struct cnic_id_tbl *id_tbl, u32 size, u32 start_id,
 	id_tbl->max = size;
 	id_tbl->next = next;
 	spin_lock_init(&id_tbl->lock);
-	id_tbl->table = kzalloc(DIV_ROUND_UP(size, 32) * 4, GFP_KERNEL);
+	id_tbl->table = kcalloc(BITS_TO_LONGS(size), sizeof(long), GFP_KERNEL);
 	if (!id_tbl->table)
 		return -ENOMEM;
 
@@ -2562,7 +2562,6 @@ static void cnic_bnx2x_delete_wait(struct cnic_dev *dev, u32 start_cid)
 
 static int cnic_bnx2x_fcoe_fw_destroy(struct cnic_dev *dev, struct kwqe *kwqe)
 {
-	struct fcoe_kwqe_destroy *req;
 	union l5cm_specific_data l5_data;
 	struct cnic_local *cp = dev->cnic_priv;
 	struct bnx2x *bp = netdev_priv(dev->netdev);
@@ -2571,7 +2570,6 @@ static int cnic_bnx2x_fcoe_fw_destroy(struct cnic_dev *dev, struct kwqe *kwqe)
 
 	cnic_bnx2x_delete_wait(dev, MAX_ISCSI_TBL_SZ);
 
-	req = (struct fcoe_kwqe_destroy *) kwqe;
 	cid = BNX2X_HW_CID(bp, cp->fcoe_init_cid);
 
 	memset(&l5_data, 0, sizeof(l5_data));
@@ -3652,7 +3650,7 @@ static int cnic_cm_destroy(struct cnic_sock *csk)
 
 	csk_hold(csk);
 	clear_bit(SK_F_INUSE, &csk->flags);
-	smp_mb__after_atomic();
+	smp_mb__after_clear_bit();
 	while (atomic_read(&csk->ref_count) != 1)
 		msleep(1);
 	cnic_cm_cleanup(csk);
@@ -4032,7 +4030,7 @@ static void cnic_cm_process_kcqe(struct cnic_dev *dev, struct kcqe *kcqe)
 			 L4_KCQE_COMPLETION_STATUS_PARITY_ERROR)
 			set_bit(SK_F_HW_ERR, &csk->flags);
 
-		smp_mb__before_atomic();
+		smp_mb__before_clear_bit();
 		clear_bit(SK_F_OFFLD_SCHED, &csk->flags);
 		cnic_cm_upcall(cp, csk, opcode);
 		break;
@@ -5091,13 +5089,12 @@ static int cnic_start_bnx2x_hw(struct cnic_dev *dev)
 	struct cnic_local *cp = dev->cnic_priv;
 	struct bnx2x *bp = netdev_priv(dev->netdev);
 	struct cnic_eth_dev *ethdev = cp->ethdev;
-	int func, ret;
+	int ret;
 	u32 pfid;
 
 	dev->stats_addr = ethdev->addr_drv_info_to_mcp;
 	cp->func = bp->pf_num;
 
-	func = CNIC_FUNC(cp);
 	pfid = bp->pfid;
 
 	ret = cnic_init_id_tbl(&cp->cid_tbl, MAX_ISCSI_TBL_SZ,
@@ -5765,7 +5762,7 @@ static int __init cnic_init(void)
 
 	pr_info("%s", version);
 
-	rc = register_netdevice_notifier(&cnic_netdev_notifier);
+	rc = register_netdevice_notifier_rh(&cnic_netdev_notifier);
 	if (rc) {
 		cnic_release();
 		return rc;
@@ -5774,7 +5771,7 @@ static int __init cnic_init(void)
 	cnic_wq = create_singlethread_workqueue("cnic_wq");
 	if (!cnic_wq) {
 		cnic_release();
-		unregister_netdevice_notifier(&cnic_netdev_notifier);
+		unregister_netdevice_notifier_rh(&cnic_netdev_notifier);
 		return -ENOMEM;
 	}
 
@@ -5783,7 +5780,7 @@ static int __init cnic_init(void)
 
 static void __exit cnic_exit(void)
 {
-	unregister_netdevice_notifier(&cnic_netdev_notifier);
+	unregister_netdevice_notifier_rh(&cnic_netdev_notifier);
 	cnic_release();
 	destroy_workqueue(cnic_wq);
 }

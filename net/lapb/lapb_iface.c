@@ -33,7 +33,7 @@
 #include <linux/skbuff.h>
 #include <linux/slab.h>
 #include <net/sock.h>
-#include <linux/uaccess.h>
+#include <asm/uaccess.h>
 #include <linux/fcntl.h>
 #include <linux/mm.h>
 #include <linux/interrupt.h>
@@ -54,12 +54,12 @@ static void lapb_free_cb(struct lapb_cb *lapb)
 
 static __inline__ void lapb_hold(struct lapb_cb *lapb)
 {
-	refcount_inc(&lapb->refcnt);
+	atomic_inc(&lapb->refcnt);
 }
 
 static __inline__ void lapb_put(struct lapb_cb *lapb)
 {
-	if (refcount_dec_and_test(&lapb->refcnt))
+	if (atomic_dec_and_test(&lapb->refcnt))
 		lapb_free_cb(lapb);
 }
 
@@ -73,7 +73,6 @@ static void __lapb_remove_cb(struct lapb_cb *lapb)
 		lapb_put(lapb);
 	}
 }
-EXPORT_SYMBOL(lapb_register);
 
 /*
  *	Add a socket to the bound sockets list.
@@ -127,8 +126,8 @@ static struct lapb_cb *lapb_create_cb(void)
 	skb_queue_head_init(&lapb->write_queue);
 	skb_queue_head_init(&lapb->ack_queue);
 
-	timer_setup(&lapb->t1timer, NULL, 0);
-	timer_setup(&lapb->t2timer, NULL, 0);
+	init_timer(&lapb->t1timer);
+	init_timer(&lapb->t2timer);
 
 	lapb->t1      = LAPB_DEFAULT_T1;
 	lapb->t2      = LAPB_DEFAULT_T2;
@@ -136,7 +135,7 @@ static struct lapb_cb *lapb_create_cb(void)
 	lapb->mode    = LAPB_DEFAULT_MODE;
 	lapb->window  = LAPB_DEFAULT_WINDOW;
 	lapb->state   = LAPB_STATE_0;
-	refcount_set(&lapb->refcnt, 1);
+	atomic_set(&lapb->refcnt, 1);
 out:
 	return lapb;
 }
@@ -196,7 +195,6 @@ out:
 	write_unlock_bh(&lapb_list_lock);
 	return rc;
 }
-EXPORT_SYMBOL(lapb_unregister);
 
 int lapb_getparms(struct net_device *dev, struct lapb_parms_struct *parms)
 {
@@ -229,7 +227,6 @@ int lapb_getparms(struct net_device *dev, struct lapb_parms_struct *parms)
 out:
 	return rc;
 }
-EXPORT_SYMBOL(lapb_getparms);
 
 int lapb_setparms(struct net_device *dev, struct lapb_parms_struct *parms)
 {
@@ -265,7 +262,6 @@ out_put:
 out:
 	return rc;
 }
-EXPORT_SYMBOL(lapb_setparms);
 
 int lapb_connect_request(struct net_device *dev)
 {
@@ -294,7 +290,6 @@ out_put:
 out:
 	return rc;
 }
-EXPORT_SYMBOL(lapb_connect_request);
 
 int lapb_disconnect_request(struct net_device *dev)
 {
@@ -339,7 +334,6 @@ out_put:
 out:
 	return rc;
 }
-EXPORT_SYMBOL(lapb_disconnect_request);
 
 int lapb_data_request(struct net_device *dev, struct sk_buff *skb)
 {
@@ -361,7 +355,6 @@ out_put:
 out:
 	return rc;
 }
-EXPORT_SYMBOL(lapb_data_request);
 
 int lapb_data_received(struct net_device *dev, struct sk_buff *skb)
 {
@@ -376,7 +369,6 @@ int lapb_data_received(struct net_device *dev, struct sk_buff *skb)
 
 	return rc;
 }
-EXPORT_SYMBOL(lapb_data_received);
 
 void lapb_connect_confirmation(struct lapb_cb *lapb, int reason)
 {
@@ -422,6 +414,15 @@ int lapb_data_transmit(struct lapb_cb *lapb, struct sk_buff *skb)
 
 	return used;
 }
+
+EXPORT_SYMBOL(lapb_register);
+EXPORT_SYMBOL(lapb_unregister);
+EXPORT_SYMBOL(lapb_getparms);
+EXPORT_SYMBOL(lapb_setparms);
+EXPORT_SYMBOL(lapb_connect_request);
+EXPORT_SYMBOL(lapb_disconnect_request);
+EXPORT_SYMBOL(lapb_data_request);
+EXPORT_SYMBOL(lapb_data_received);
 
 static int __init lapb_init(void)
 {

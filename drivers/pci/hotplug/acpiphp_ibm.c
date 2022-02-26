@@ -35,7 +35,7 @@
 #include <linux/kobject.h>
 #include <linux/moduleparam.h>
 #include <linux/pci.h>
-#include <linux/uaccess.h>
+#include <asm/uaccess.h>
 
 #include "acpiphp.h"
 #include "../pci.h"
@@ -107,7 +107,7 @@ static void __exit ibm_acpiphp_exit(void);
 
 static acpi_handle ibm_acpi_handle;
 static struct notification ibm_note;
-static struct bin_attribute ibm_apci_table_attr __ro_after_init = {
+static struct bin_attribute ibm_apci_table_attr = {
 	    .attr = {
 		    .name = "apci_table",
 		    .mode = S_IRUGO,
@@ -272,6 +272,7 @@ static void ibm_handle_events(acpi_handle handle, u32 event, void *context)
 
 	if (subevent == 0x80) {
 		pr_debug("%s: generating bus event\n", __func__);
+		acpi_bus_generate_proc_event(note->device, note->event, detail);
 		acpi_bus_generate_netlink_event(note->device->pnp.device_class,
 						  dev_name(&note->device->dev),
 						  note->event, detail);

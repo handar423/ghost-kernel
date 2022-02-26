@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 #include <uapi/linux/mman.h>
 
 static size_t syscall_arg__scnprintf_mmap_prot(char *bf, size_t size,
@@ -54,6 +53,9 @@ static size_t syscall_arg__scnprintf_mmap_flags(char *bf, size_t size,
 	P_MMAP_FLAG(EXECUTABLE);
 	P_MMAP_FLAG(FILE);
 	P_MMAP_FLAG(FIXED);
+#ifdef MAP_FIXED_NOREPLACE
+	P_MMAP_FLAG(FIXED_NOREPLACE);
+#endif
 	P_MMAP_FLAG(GROWSDOWN);
 	P_MMAP_FLAG(HUGETLB);
 	P_MMAP_FLAG(LOCKED);

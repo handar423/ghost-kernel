@@ -75,12 +75,6 @@ const struct raid6_calls * const raid6_algos[] = {
 	&raid6_altivec4,
 	&raid6_altivec8,
 #endif
-#if defined(CONFIG_TILEGX)
-	&raid6_tilegx8,
-#endif
-#if defined(CONFIG_S390)
-	&raid6_s390vx8,
-#endif
 	&raid6_intx1,
 	&raid6_intx2,
 	&raid6_intx4,
@@ -101,20 +95,14 @@ void (*raid6_datap_recov)(int, size_t, int, void **);
 EXPORT_SYMBOL_GPL(raid6_datap_recov);
 
 const struct raid6_recov_calls *const raid6_recov_algos[] = {
+#if (defined(__i386__) || defined(__x86_64__)) && !defined(__arch_um__)
 #ifdef CONFIG_AS_AVX512
 	&raid6_recov_avx512,
 #endif
 #ifdef CONFIG_AS_AVX2
 	&raid6_recov_avx2,
 #endif
-#ifdef CONFIG_AS_SSSE3
 	&raid6_recov_ssse3,
-#endif
-#ifdef CONFIG_S390
-	&raid6_recov_s390xc,
-#endif
-#if defined(CONFIG_KERNEL_MODE_NEON)
-	&raid6_recov_neon,
 #endif
 	&raid6_recov_intx1,
 	NULL
@@ -142,9 +130,9 @@ static inline const struct raid6_recov_calls *raid6_choose_recov(void)
 		raid6_2data_recov = best->data2;
 		raid6_datap_recov = best->datap;
 
-		pr_info("raid6: using %s recovery algorithm\n", best->name);
+		printk("raid6: using %s recovery algorithm\n", best->name);
 	} else
-		pr_err("raid6: Yikes! No recovery algorithm found!\n");
+		printk("raid6: Yikes! No recovery algorithm found!\n");
 
 	return best;
 }
@@ -179,7 +167,7 @@ static inline const struct raid6_calls *raid6_choose_gen(
 				bestgenperf = perf;
 				best = *algo;
 			}
-			pr_info("raid6: %-8s gen() %5ld MB/s\n", (*algo)->name,
+			printk("raid6: %-8s gen() %5ld MB/s\n", (*algo)->name,
 			       (perf*HZ) >> (20-16+RAID6_TIME_JIFFIES_LG2));
 
 			if (!(*algo)->xor_syndrome)
@@ -208,7 +196,7 @@ static inline const struct raid6_calls *raid6_choose_gen(
 	}
 
 	if (best) {
-		pr_info("raid6: using algorithm %s gen() %ld MB/s\n",
+		printk("raid6: using algorithm %s gen() (%ld MB/s)\n",
 		       best->name,
 		       (bestgenperf*HZ) >> (20-16+RAID6_TIME_JIFFIES_LG2));
 		if (best->xor_syndrome)
@@ -216,7 +204,7 @@ static inline const struct raid6_calls *raid6_choose_gen(
 			       (bestxorperf*HZ) >> (20-16+RAID6_TIME_JIFFIES_LG2+1));
 		raid6_call = *best;
 	} else
-		pr_err("raid6: Yikes!  No algorithm found!\n");
+		printk("raid6: Yikes!  No algorithm found!\n");
 
 	return best;
 }
@@ -242,7 +230,7 @@ int __init raid6_select_algo(void)
 	syndromes = (void *) __get_free_pages(GFP_KERNEL, 1);
 
 	if (!syndromes) {
-		pr_err("raid6: Yikes!  No memory available.\n");
+		printk("raid6: Yikes!  No memory available.\n");
 		return -ENOMEM;
 	}
 

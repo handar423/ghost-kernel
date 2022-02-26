@@ -380,10 +380,11 @@ static irqreturn_t pcc_interrupt(int irq, void *dev)
 	return IRQ_RETVAL(handled);
 } /* pcc_interrupt */
 
-static void pcc_interrupt_wrapper(struct timer_list *unused)
+static void pcc_interrupt_wrapper(u_long data)
 {
 	pr_debug("m32r_cfc: pcc_interrupt_wrapper:\n");
 	pcc_interrupt(0, NULL);
+	init_timer(&poll_timer);
 	poll_timer.expires = jiffies + poll_interval;
 	add_timer(&poll_timer);
 }
@@ -686,6 +687,7 @@ static struct pccard_operations pcc_operations = {
 static struct platform_driver pcc_driver = {
 	.driver = {
 		.name		= "cfc",
+		.owner		= THIS_MODULE,
 	},
 };
 
@@ -753,11 +755,20 @@ static int __init init_m32r_pcc(void)
 		ret = pcmcia_register_socket(&socket[i].socket);
 		if (!ret)
 			socket[i].flags |= IS_REGISTERED;
+
+#if 0	/* driver model ordering issue */
+		class_device_create_file(&socket[i].socket.dev,
+					 &class_device_attr_info);
+		class_device_create_file(&socket[i].socket.dev,
+					 &class_device_attr_exca);
+#endif
 	}
 
 	/* Finally, schedule a polling interrupt */
 	if (poll_interval != 0) {
-		timer_setup(&poll_timer, pcc_interrupt_wrapper, 0);
+		poll_timer.function = pcc_interrupt_wrapper;
+		poll_timer.data = 0;
+		init_timer(&poll_timer);
 		poll_timer.expires = jiffies + poll_interval;
 		add_timer(&poll_timer);
 	}

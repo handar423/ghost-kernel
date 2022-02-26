@@ -24,7 +24,6 @@
 #include <net/checksum.h>
 
 #include <net/inet_sock.h>
-#include <net/inet_common.h>
 #include <net/sock.h>
 #include <net/xfrm.h>
 
@@ -171,15 +170,6 @@ const char *dccp_packet_name(const int type)
 
 EXPORT_SYMBOL_GPL(dccp_packet_name);
 
-static void dccp_sk_destruct(struct sock *sk)
-{
-	struct dccp_sock *dp = dccp_sk(sk);
-
-	ccid_hc_tx_delete(dp->dccps_hc_tx_ccid, sk);
-	dp->dccps_hc_tx_ccid = NULL;
-	inet_sock_destruct(sk);
-}
-
 int dccp_init_sock(struct sock *sk, const __u8 ctl_sock_initialized)
 {
 	struct dccp_sock *dp = dccp_sk(sk);
@@ -189,7 +179,6 @@ int dccp_init_sock(struct sock *sk, const __u8 ctl_sock_initialized)
 	icsk->icsk_syn_retries	= sysctl_dccp_request_retries;
 	sk->sk_state		= DCCP_CLOSED;
 	sk->sk_write_space	= dccp_write_space;
-	sk->sk_destruct		= dccp_sk_destruct;
 	icsk->icsk_sync_mss	= dccp_sync_mss;
 	dp->dccps_mss_cache	= 536;
 	dp->dccps_rate_last	= jiffies;
@@ -212,7 +201,10 @@ void dccp_destroy_sock(struct sock *sk)
 {
 	struct dccp_sock *dp = dccp_sk(sk);
 
-	__skb_queue_purge(&sk->sk_write_queue);
+	/*
+	 * DCCP doesn't use sk_write_queue, just sk_send_head
+	 * for retransmissions
+	 */
 	if (sk->sk_send_head != NULL) {
 		kfree_skb(sk->sk_send_head);
 		sk->sk_send_head = NULL;
@@ -230,7 +222,8 @@ void dccp_destroy_sock(struct sock *sk)
 		dp->dccps_hc_rx_ackvec = NULL;
 	}
 	ccid_hc_rx_delete(dp->dccps_hc_rx_ccid, sk);
-	dp->dccps_hc_rx_ccid = NULL;
+	ccid_hc_tx_delete(dp->dccps_hc_tx_ccid, sk);
+	dp->dccps_hc_rx_ccid = dp->dccps_hc_tx_ccid = NULL;
 
 	/* clean up feature negotiation state */
 	dccp_feat_list_purge(&dp->dccps_featneg);
@@ -351,7 +344,8 @@ unsigned int dccp_poll(struct file *file, struct socket *sock,
 			if (sk_stream_is_writeable(sk)) {
 				mask |= POLLOUT | POLLWRNORM;
 			} else {  /* send SIGIO later */
-				sk_set_bit(SOCKWQ_ASYNC_NOSPACE, sk);
+				set_bit(SOCK_ASYNC_NOSPACE,
+					&sk->sk_socket->flags);
 				set_bit(SOCK_NOSPACE, &sk->sk_socket->flags);
 
 				/* Race breaker. If space is freed after
@@ -714,7 +708,7 @@ EXPORT_SYMBOL_GPL(compat_dccp_getsockopt);
 
 static int dccp_msghdr_parse(struct msghdr *msg, struct sk_buff *skb)
 {
-	struct cmsghdr *cmsg;
+	struct cmsghdr *cmsg = CMSG_FIRSTHDR(msg);
 
 	/*
 	 * Assign an (opaque) qpolicy priority value to skb->priority.
@@ -728,7 +722,8 @@ static int dccp_msghdr_parse(struct msghdr *msg, struct sk_buff *skb)
 	 */
 	skb->priority = 0;
 
-	for_each_cmsghdr(cmsg, msg) {
+	for (; cmsg != NULL; cmsg = CMSG_NXTHDR(msg, cmsg)) {
+
 		if (!CMSG_OK(msg, cmsg))
 			return -EINVAL;
 
@@ -752,7 +747,8 @@ static int dccp_msghdr_parse(struct msghdr *msg, struct sk_buff *skb)
 	return 0;
 }
 
-int dccp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
+int dccp_sendmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
+		 size_t len)
 {
 	const struct dccp_sock *dp = dccp_sk(sk);
 	const int flags = msg->msg_flags;
@@ -789,6 +785,11 @@ int dccp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 	if (skb == NULL)
 		goto out_release;
 
+	if (sk->sk_state == DCCP_CLOSED) {
+		rc = -ENOTCONN;
+		goto out_discard;
+	}
+
 	skb_reserve(skb, sk->sk_prot->max_header);
 	rc = memcpy_from_msg(skb_put(skb, len), msg, len);
 	if (rc != 0)
@@ -816,8 +817,8 @@ out_discard:
 
 EXPORT_SYMBOL_GPL(dccp_sendmsg);
 
-int dccp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int nonblock,
-		 int flags, int *addr_len)
+int dccp_recvmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
+		 size_t len, int nonblock, int flags, int *addr_len)
 {
 	const struct dccp_hdr *dh;
 	long timeo;
@@ -1095,17 +1096,16 @@ void dccp_shutdown(struct sock *sk, int how)
 
 EXPORT_SYMBOL_GPL(dccp_shutdown);
 
-static inline int __init dccp_mib_init(void)
+static inline int dccp_mib_init(void)
 {
-	dccp_statistics = alloc_percpu(struct dccp_mib);
-	if (!dccp_statistics)
-		return -ENOMEM;
-	return 0;
+	return snmp_mib_init((void __percpu **)dccp_statistics,
+			     sizeof(struct dccp_mib),
+			     __alignof__(struct dccp_mib));
 }
 
 static inline void dccp_mib_exit(void)
 {
-	free_percpu(dccp_statistics);
+	snmp_mib_free((void __percpu **)dccp_statistics);
 }
 
 static int thash_entries;

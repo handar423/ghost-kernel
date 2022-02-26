@@ -4,9 +4,9 @@
  * Authors: Salvatore Benedetto <salvatore.benedetto@intel.com>
  *
  * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
+ * modify it under the terms of the GNU General Public Licence
  * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
+ * 2 of the Licence, or (at your option) any later version.
  */
 
 #include <linux/module.h>
@@ -112,7 +112,7 @@ static int dh_compute_value(struct kpp_request *req)
 	if (req->src) {
 		base = mpi_read_raw_from_sgl(req->src, req->src_len);
 		if (!base) {
-			ret = -EINVAL;
+			ret = EINVAL;
 			goto err_free_val;
 		}
 	} else {
@@ -123,7 +123,7 @@ static int dh_compute_value(struct kpp_request *req)
 	if (ret)
 		goto err_free_base;
 
-	ret = mpi_write_to_sgl(val, req->dst, req->dst_len, &sign);
+	ret = mpi_write_to_sgl(val, req->dst, &req->dst_len, &sign);
 	if (ret)
 		goto err_free_base;
 
@@ -137,7 +137,7 @@ err_free_val:
 	return ret;
 }
 
-static unsigned int dh_max_size(struct crypto_kpp *tfm)
+static int dh_max_size(struct crypto_kpp *tfm)
 {
 	struct dh_ctx *ctx = dh_get_ctx(tfm);
 

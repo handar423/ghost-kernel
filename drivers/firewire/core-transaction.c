@@ -137,9 +137,9 @@ int fw_cancel_transaction(struct fw_card *card,
 }
 EXPORT_SYMBOL(fw_cancel_transaction);
 
-static void split_transaction_timeout_callback(struct timer_list *timer)
+static void split_transaction_timeout_callback(unsigned long data)
 {
-	struct fw_transaction *t = from_timer(t, timer, split_timeout_timer);
+	struct fw_transaction *t = (struct fw_transaction *)data;
 	struct fw_card *card = t->card;
 	unsigned long flags;
 
@@ -373,8 +373,8 @@ void fw_send_request(struct fw_card *card, struct fw_transaction *t, int tcode,
 	t->tlabel = tlabel;
 	t->card = card;
 	t->is_split_transaction = false;
-	timer_setup(&t->split_timeout_timer,
-		    split_transaction_timeout_callback, 0);
+	setup_timer(&t->split_timeout_timer,
+		    split_transaction_timeout_callback, (unsigned long)t);
 	t->callback = callback;
 	t->callback_data = callback_data;
 
@@ -423,7 +423,7 @@ int fw_run_transaction(struct fw_card *card, int tcode, int destination_id,
 	struct transaction_callback_data d;
 	struct fw_transaction t;
 
-	timer_setup_on_stack(&t.split_timeout_timer, NULL, 0);
+	init_timer_on_stack(&t.split_timeout_timer);
 	init_completion(&d.done);
 	d.payload = payload;
 	fw_send_request(card, &t, tcode, destination_id, generation, speed,
@@ -477,7 +477,7 @@ void fw_send_phy_config(struct fw_card *card,
 	phy_config_packet.header[1] = data;
 	phy_config_packet.header[2] = ~data;
 	phy_config_packet.generation = generation;
-	reinit_completion(&phy_config_done);
+	INIT_COMPLETION(phy_config_done);
 
 	card->driver->send_request(card, &phy_config_packet);
 	wait_for_completion_timeout(&phy_config_done, timeout);
@@ -523,11 +523,11 @@ static DEFINE_SPINLOCK(address_handler_list_lock);
 static LIST_HEAD(address_handler_list);
 
 const struct fw_address_region fw_high_memory_region =
-	{ .start = FW_MAX_PHYSICAL_RANGE, .end = 0xffffe0000000ULL, };
+	{ .start = 0x000100000000ULL, .end = 0xffffe0000000ULL,  };
 EXPORT_SYMBOL(fw_high_memory_region);
 
 static const struct fw_address_region low_memory_region =
-	{ .start = 0x000000000000ULL, .end = FW_MAX_PHYSICAL_RANGE, };
+	{ .start = 0x000000000000ULL, .end = 0x000100000000ULL,  };
 
 #if 0
 const struct fw_address_region fw_private_region =
@@ -1217,7 +1217,7 @@ static void handle_low_memory(struct fw_card *card, struct fw_request *request,
 }
 
 static struct fw_address_handler low_memory = {
-	.length			= FW_MAX_PHYSICAL_RANGE,
+	.length			= 0x000100000000ULL,
 	.address_callback	= handle_low_memory,
 };
 
@@ -1246,14 +1246,14 @@ static const u32 model_textual_descriptor[] = {
 
 static struct fw_descriptor vendor_id_descriptor = {
 	.length = ARRAY_SIZE(vendor_textual_descriptor),
-	.immediate = 0x03001f11,
+	.immediate = 0x03d00d1e,
 	.key = 0x81000000,
 	.data = vendor_textual_descriptor,
 };
 
 static struct fw_descriptor model_id_descriptor = {
 	.length = ARRAY_SIZE(model_textual_descriptor),
-	.immediate = 0x17023901,
+	.immediate = 0x17000001,
 	.key = 0x81000000,
 	.data = model_textual_descriptor,
 };
@@ -1262,7 +1262,8 @@ static int __init fw_core_init(void)
 {
 	int ret;
 
-	fw_workqueue = alloc_workqueue("firewire", WQ_MEM_RECLAIM, 0);
+	fw_workqueue = alloc_workqueue("firewire",
+				       WQ_NON_REENTRANT | WQ_MEM_RECLAIM, 0);
 	if (!fw_workqueue)
 		return -ENOMEM;
 

@@ -124,10 +124,10 @@ static unsigned int icp_native_get_irq(void)
 	unsigned int irq;
 
 	if (vec == XICS_IRQ_SPURIOUS)
-		return 0;
+		return NO_IRQ;
 
 	irq = irq_find_mapping(xics_host, vec);
-	if (likely(irq)) {
+	if (likely(irq != NO_IRQ)) {
 		xics_push_cppr(vec);
 		return irq;
 	}
@@ -138,15 +138,21 @@ static unsigned int icp_native_get_irq(void)
 	/* We might learn about it later, so EOI it */
 	icp_native_set_xirr(xirr);
 
-	return 0;
+	return NO_IRQ;
 }
 
 #ifdef CONFIG_SMP
 
-static void icp_native_cause_ipi(int cpu)
+static void icp_native_cause_ipi(int cpu, unsigned long data)
 {
 	kvmppc_set_host_ipi(cpu, 1);
-	icp_native_set_qirr(cpu, IPI_PRIORITY);
+#ifdef CONFIG_PPC_DOORBELL
+	if (cpu_has_feature(CPU_FTR_DBELL) &&
+	    (cpumask_test_cpu(cpu, cpu_sibling_mask(smp_processor_id()))))
+		doorbell_cause_ipi(cpu, data);
+	else
+#endif
+		icp_native_set_qirr(cpu, IPI_PRIORITY);
 }
 
 #ifdef CONFIG_KVM_BOOK3S_HV_POSSIBLE
@@ -158,15 +164,15 @@ void icp_native_cause_ipi_rm(int cpu)
 	 * Need the physical address of the XICS to be
 	 * previously saved in kvm_hstate in the paca.
 	 */
-	void __iomem *xics_phys;
+	unsigned long xics_phys;
 
 	/*
 	 * Just like the cause_ipi functions, it is required to
-	 * include a full barrier before causing the IPI.
+	 * include a full barrier (out8 includes a sync) before
+	 * causing the IPI.
 	 */
 	xics_phys = paca[cpu].kvm_hstate.xics_phys;
-	mb();
-	__raw_rm_writeb(IPI_PRIORITY, xics_phys + XICS_MFRR);
+	out_rm8((u8 *)(xics_phys + XICS_MFRR), IPI_PRIORITY);
 }
 #endif
 

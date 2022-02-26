@@ -36,7 +36,6 @@
  ********************************************************************/
 
 #include <linux/kernel.h>
-#include <linux/sched/signal.h>
 #include <linux/types.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
@@ -437,7 +436,7 @@ static void snd_msnd_capture_reset_queue(struct snd_msnd *chip,
 	}
 }
 
-static const struct snd_pcm_hardware snd_msnd_playback = {
+static struct snd_pcm_hardware snd_msnd_playback = {
 	.info =			SNDRV_PCM_INFO_MMAP |
 				SNDRV_PCM_INFO_INTERLEAVED |
 				SNDRV_PCM_INFO_MMAP_VALID |
@@ -456,7 +455,7 @@ static const struct snd_pcm_hardware snd_msnd_playback = {
 	.fifo_size =		0,
 };
 
-static const struct snd_pcm_hardware snd_msnd_capture = {
+static struct snd_pcm_hardware snd_msnd_capture = {
 	.info =			SNDRV_PCM_INFO_MMAP |
 				SNDRV_PCM_INFO_INTERLEAVED |
 				SNDRV_PCM_INFO_MMAP_VALID |
@@ -572,7 +571,7 @@ snd_msnd_playback_pointer(struct snd_pcm_substream *substream)
 }
 
 
-static const struct snd_pcm_ops snd_msnd_playback_ops = {
+static struct snd_pcm_ops snd_msnd_playback_ops = {
 	.open =		snd_msnd_playback_open,
 	.close =	snd_msnd_playback_close,
 	.ioctl =	snd_pcm_lib_ioctl,
@@ -669,7 +668,7 @@ static int snd_msnd_capture_hw_params(struct snd_pcm_substream *substream,
 }
 
 
-static const struct snd_pcm_ops snd_msnd_capture_ops = {
+static struct snd_pcm_ops snd_msnd_capture_ops = {
 	.open =		snd_msnd_capture_open,
 	.close =	snd_msnd_capture_close,
 	.ioctl =	snd_pcm_lib_ioctl,
@@ -680,7 +679,8 @@ static const struct snd_pcm_ops snd_msnd_capture_ops = {
 };
 
 
-int snd_msnd_pcm(struct snd_card *card, int device)
+int snd_msnd_pcm(struct snd_card *card, int device,
+			struct snd_pcm **rpcm)
 {
 	struct snd_msnd *chip = card->private_data;
 	struct snd_pcm	*pcm;
@@ -696,6 +696,9 @@ int snd_msnd_pcm(struct snd_card *card, int device)
 	pcm->private_data = chip;
 	strcpy(pcm->name, "Hurricane");
 
+
+	if (rpcm)
+		*rpcm = pcm;
 	return 0;
 }
 EXPORT_SYMBOL(snd_msnd_pcm);

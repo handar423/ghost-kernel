@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_X86_MSHYPER_H
 #define _ASM_X86_MSHYPER_H
 
@@ -28,12 +27,12 @@ enum hv_cpuid_function {
 	HVCPUID_IMPLEMENTATION_LIMITS		= 0x40000005,
 };
 
+#define VP_INVAL	U32_MAX
+
 struct ms_hyperv_info {
 	u32 features;
 	u32 misc_features;
 	u32 hints;
-	u32 max_vp_index;
-	u32 max_lp_index;
 };
 
 extern struct ms_hyperv_info ms_hyperv;
@@ -162,6 +161,7 @@ static inline void vmbus_signal_eom(struct hv_message *msg, u32 old_msg_type)
 void hyperv_callback_vector(void);
 #ifdef CONFIG_TRACING
 #define trace_hyperv_callback_vector hyperv_callback_vector
+#define trace_hv_stimer0_callback_vector hv_stimer0_callback_vector
 #endif
 void hyperv_vector_handler(struct pt_regs *regs);
 void hv_setup_vmbus_irq(void (*handler)(void));
@@ -172,6 +172,19 @@ void hv_remove_kexec_handler(void);
 void hv_setup_crash_handler(void (*handler)(struct pt_regs *regs));
 void hv_remove_crash_handler(void);
 
+/*
+ * Routines for stimer0 Direct Mode handling.
+ * On x86/x64, there are no percpu actions to take.
+ */
+void hv_stimer0_vector_handler(struct pt_regs *regs);
+void hv_stimer0_callback_vector(void);
+int hv_setup_stimer0_irq(int *irq, int *vector, void (*handler)(void));
+void hv_remove_stimer0_irq(int irq);
+
+static inline void hv_enable_stimer0_percpu_irq(int irq) {}
+static inline void hv_disable_stimer0_percpu_irq(int irq) {}
+
+
 #if IS_ENABLED(CONFIG_HYPERV)
 extern struct clocksource *hyperv_cs;
 extern void *hv_hypercall_pg;
@@ -181,6 +194,7 @@ static inline u64 hv_do_hypercall(u64 control, void *input, void *output)
 	u64 input_address = input ? virt_to_phys(input) : 0;
 	u64 output_address = output ? virt_to_phys(output) : 0;
 	u64 hv_status;
+	register void *__sp asm(_ASM_SP);
 
 #ifdef CONFIG_X86_64
 	if (!hv_hypercall_pg)
@@ -188,7 +202,7 @@ static inline u64 hv_do_hypercall(u64 control, void *input, void *output)
 
 	__asm__ __volatile__("mov %4, %%r8\n"
 			     CALL_NOSPEC
-			     : "=a" (hv_status), ASM_CALL_CONSTRAINT,
+			     : "=a" (hv_status), "+r" (__sp),
 			       "+c" (control), "+d" (input_address)
 			     :  "r" (output_address),
 				THUNK_TARGET(hv_hypercall_pg)
@@ -204,7 +218,7 @@ static inline u64 hv_do_hypercall(u64 control, void *input, void *output)
 
 	__asm__ __volatile__(CALL_NOSPEC
 			     : "=A" (hv_status),
-			       "+c" (input_address_lo), ASM_CALL_CONSTRAINT
+			       "+c" (input_address_lo), "+r" (__sp)
 			     : "A" (control),
 			       "b" (input_address_hi),
 			       "D"(output_address_hi), "S"(output_address_lo),
@@ -226,11 +240,12 @@ static inline u64 hv_do_hypercall(u64 control, void *input, void *output)
 static inline u64 hv_do_fast_hypercall8(u16 code, u64 input1)
 {
 	u64 hv_status, control = (u64)code | HV_HYPERCALL_FAST_BIT;
+	register void *__sp asm(_ASM_SP);
 
 #ifdef CONFIG_X86_64
 	{
 		__asm__ __volatile__(CALL_NOSPEC
-				     : "=a" (hv_status), ASM_CALL_CONSTRAINT,
+				     : "=a" (hv_status), "+r" (__sp),
 				       "+c" (control), "+d" (input1)
 				     : THUNK_TARGET(hv_hypercall_pg)
 				     : "cc", "r8", "r9", "r10", "r11");
@@ -243,7 +258,7 @@ static inline u64 hv_do_fast_hypercall8(u16 code, u64 input1)
 		__asm__ __volatile__ (CALL_NOSPEC
 				      : "=A"(hv_status),
 					"+c"(input1_lo),
-					ASM_CALL_CONSTRAINT
+					"+r"(__sp)
 				      :	"A" (control),
 					"b" (input1_hi),
 					THUNK_TARGET(hv_hypercall_pg)
@@ -310,15 +325,51 @@ static inline int hv_cpu_number_to_vp_number(int cpu_number)
 	return hv_vp_index[cpu_number];
 }
 
-void hyperv_init(void);
+static inline int cpumask_to_vpset(struct hv_vpset *vpset,
+                                   const struct cpumask *cpus)
+{
+	int cpu, vcpu, vcpu_bank, vcpu_offset, nr_bank = 1;
+
+	/* valid_bank_mask can represent up to 64 banks */
+	if (hv_max_vp_index / 64 >= 64)
+		return 0;
+
+	/*
+	 * Clear all banks up to the maximum possible bank as hv_flush_pcpu_ex
+	 * structs are not cleared between calls, we risk flushing unneeded
+	 * vCPUs otherwise.
+	 */
+	for (vcpu_bank = 0; vcpu_bank <= hv_max_vp_index / 64; vcpu_bank++)
+		vpset->bank_contents[vcpu_bank] = 0;
+
+	/*
+	 * Some banks may end up being empty but this is acceptable.
+	 */
+	for_each_cpu(cpu, cpus) {
+		vcpu = hv_cpu_number_to_vp_number(cpu);
+		if (vcpu == VP_INVAL)
+			return -1;
+		vcpu_bank = vcpu / 64;
+		vcpu_offset = vcpu % 64;
+		__set_bit(vcpu_offset, (unsigned long *)
+			  &vpset->bank_contents[vcpu_bank]);
+		if (vcpu_bank >= nr_bank)
+			nr_bank = vcpu_bank + 1;
+	}
+	vpset->valid_bank_mask = GENMASK_ULL(nr_bank - 1, 0);
+	return nr_bank;
+}
+
+void __init hyperv_init(void);
 void hyperv_setup_mmu_ops(void);
 void hyper_alloc_mmu(void);
-void hyperv_report_panic(struct pt_regs *regs, long err);
-bool hv_is_hypercall_page_setup(void);
+void hyperv_report_panic(struct pt_regs *regs, long err, bool in_die);
+void hyperv_report_panic_msg(phys_addr_t pa, size_t size);
+bool hv_is_hyperv_initialized(void);
 void hyperv_cleanup(void);
 #else /* CONFIG_HYPERV */
 static inline void hyperv_init(void) {}
-static inline bool hv_is_hypercall_page_setup(void) { return false; }
+static inline bool hv_is_hyperv_initialized(void) { return false; }
 static inline void hyperv_cleanup(void) {}
 static inline void hyperv_setup_mmu_ops(void) {}
 #endif /* CONFIG_HYPERV */

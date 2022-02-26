@@ -64,7 +64,8 @@ struct vsock_sock {
 	struct list_head pending_links;
 	struct list_head accept_queue;
 	bool rejected;
-	struct delayed_work dwork;
+	struct delayed_work connect_work;
+	struct delayed_work pending_work;
 	struct delayed_work close_work;
 	bool close_work_scheduled;
 	u32 peer_shutdown;
@@ -77,11 +78,10 @@ struct vsock_sock {
 
 s64 vsock_stream_has_data(struct vsock_sock *vsk);
 s64 vsock_stream_has_space(struct vsock_sock *vsk);
-void vsock_pending_work(struct work_struct *work);
 struct sock *__vsock_create(struct net *net,
 			    struct socket *sock,
 			    struct sock *parent,
-			    gfp_t priority, unsigned short type, int kern);
+			    gfp_t priority, unsigned short type);
 
 /**** TRANSPORT ****/
 
@@ -102,16 +102,13 @@ struct vsock_transport {
 	void (*destruct)(struct vsock_sock *);
 	void (*release)(struct vsock_sock *);
 
-	/* Cancel all pending packets sent on vsock. */
-	int (*cancel_pkt)(struct vsock_sock *vsk);
-
 	/* Connections. */
 	int (*connect)(struct vsock_sock *);
 
 	/* DGRAM. */
 	int (*dgram_bind)(struct vsock_sock *, struct sockaddr_vm *);
-	int (*dgram_dequeue)(struct vsock_sock *vsk, struct msghdr *msg,
-			     size_t len, int flags);
+	int (*dgram_dequeue)(struct kiocb *kiocb, struct vsock_sock *vsk,
+			     struct msghdr *msg, size_t len, int flags);
 	int (*dgram_enqueue)(struct vsock_sock *, struct sockaddr_vm *,
 			     struct msghdr *, size_t len);
 	bool (*dgram_allow)(u32 cid, u32 port);

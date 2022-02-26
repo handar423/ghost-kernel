@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ALPHA_CMPXCHG_H
 #define _ALPHA_CMPXCHG_H
 
@@ -66,5 +65,7 @@
 
 #undef __ASM__MB
 #undef ____cmpxchg
+
+#define __HAVE_ARCH_CMPXCHG 1
 
 #endif /* _ALPHA_CMPXCHG_H */

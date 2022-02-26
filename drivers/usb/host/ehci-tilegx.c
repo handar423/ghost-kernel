@@ -1,6 +1,15 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright 2012 Tilera Corporation. All Rights Reserved.
+ *
+ *   This program is free software; you can redistribute it and/or
+ *   modify it under the terms of the GNU General Public License
+ *   as published by the Free Software Foundation, version 2.
+ *
+ *   This program is distributed in the hope that it will be useful, but
+ *   WITHOUT ANY WARRANTY; without even the implied warranty of
+ *   MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE, GOOD TITLE or
+ *   NON INFRINGEMENT.  See the GNU General Public License for
+ *   more details.
  */
 
 /*
@@ -92,7 +101,7 @@ static int ehci_hcd_tilegx_drv_probe(struct platform_device *pdev)
 {
 	struct usb_hcd *hcd;
 	struct ehci_hcd *ehci;
-	struct tilegx_usb_platform_data *pdata = dev_get_platdata(&pdev->dev);
+	struct tilegx_usb_platform_data *pdata = pdev->dev.platform_data;
 	pte_t pte = { 0 };
 	int my_cpu = smp_processor_id();
 	int ret;
@@ -133,8 +142,8 @@ static int ehci_hcd_tilegx_drv_probe(struct platform_device *pdev)
 	ehci->hcs_params = readl(&ehci->caps->hcs_params);
 
 	/* Create our IRQs and register them. */
-	pdata->irq = irq_alloc_hwirq(-1);
-	if (!pdata->irq) {
+	pdata->irq = create_irq();
+	if (pdata->irq < 0) {
 		ret = -ENXIO;
 		goto err_no_irq;
 	}
@@ -161,12 +170,11 @@ static int ehci_hcd_tilegx_drv_probe(struct platform_device *pdev)
 	ret = usb_add_hcd(hcd, pdata->irq, IRQF_SHARED);
 	if (ret == 0) {
 		platform_set_drvdata(pdev, hcd);
-		device_wakeup_enable(hcd->self.controller);
 		return ret;
 	}
 
 err_have_irq:
-	irq_free_hwirq(pdata->irq);
+	destroy_irq(pdata->irq);
 err_no_irq:
 	tilegx_stop_ehc();
 	usb_put_hcd(hcd);
@@ -178,13 +186,14 @@ err_hcd:
 static int ehci_hcd_tilegx_drv_remove(struct platform_device *pdev)
 {
 	struct usb_hcd *hcd = platform_get_drvdata(pdev);
-	struct tilegx_usb_platform_data *pdata = dev_get_platdata(&pdev->dev);
+	struct tilegx_usb_platform_data *pdata = pdev->dev.platform_data;
 
 	usb_remove_hcd(hcd);
 	usb_put_hcd(hcd);
 	tilegx_stop_ehc();
 	gxio_usb_host_destroy(&pdata->usb_ctx);
-	irq_free_hwirq(pdata->irq);
+	destroy_irq(pdata->irq);
+	platform_set_drvdata(pdev, NULL);
 
 	return 0;
 }
@@ -201,6 +210,7 @@ static struct platform_driver ehci_hcd_tilegx_driver = {
 	.shutdown	= ehci_hcd_tilegx_drv_shutdown,
 	.driver = {
 		.name	= "tilegx-ehci",
+		.owner	= THIS_MODULE,
 	}
 };
 

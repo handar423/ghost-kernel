@@ -10,8 +10,10 @@
 
 TRACE_EVENT(hyperv_mmu_flush_tlb_others,
 	    TP_PROTO(const struct cpumask *cpus,
-		     const struct flush_tlb_info *info),
-	    TP_ARGS(cpus, info),
+		     struct mm_struct *mm,
+		     unsigned long start,
+		     unsigned long end),
+	    TP_ARGS(cpus, mm, start, end),
 	    TP_STRUCT__entry(
 		    __field(unsigned int, ncpus)
 		    __field(struct mm_struct *, mm)
@@ -19,9 +21,9 @@ TRACE_EVENT(hyperv_mmu_flush_tlb_others,
 		    __field(unsigned long, end)
 		    ),
 	    TP_fast_assign(__entry->ncpus = cpumask_weight(cpus);
-			   __entry->mm = info->mm;
-			   __entry->addr = info->start;
-			   __entry->end = info->end;
+			   __entry->mm = mm;
+			   __entry->addr = start;
+			   __entry->end = end;
 		    ),
 	    TP_printk("ncpus %d mm %p addr %lx, end %lx",
 		      __entry->ncpus, __entry->mm,

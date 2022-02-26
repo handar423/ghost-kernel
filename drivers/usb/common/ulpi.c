@@ -104,7 +104,7 @@ static ssize_t modalias_show(struct device *dev, struct device_attribute *attr,
 	int len;
 	struct ulpi *ulpi = to_ulpi_dev(dev);
 
-	len = of_device_modalias(dev, buf, PAGE_SIZE);
+	len = of_device_get_modalias(dev, buf, PAGE_SIZE - 1);
 	if (len != -ENODEV)
 		return len;
 

@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 #ifndef _LINUX_XFRM_H
 #define _LINUX_XFRM_H
 
@@ -15,7 +14,9 @@
 typedef union {
 	__be32		a4;
 	__be32		a6[4];
+#ifndef __GENKSYMS__
 	struct in6_addr	in6;
+#endif
 } xfrm_address_t;
 
 /* Ident of a specific xfrm_state. It is used on input to lookup
@@ -299,13 +300,11 @@ enum xfrm_attr_type_t {
 	XFRMA_ALG_AUTH_TRUNC,	/* struct xfrm_algo_auth */
 	XFRMA_MARK,		/* struct xfrm_mark */
 	XFRMA_TFCPAD,		/* __u32 */
-	XFRMA_REPLAY_ESN_VAL,	/* struct xfrm_replay_state_esn */
+	XFRMA_REPLAY_ESN_VAL,	/* struct xfrm_replay_esn */
 	XFRMA_SA_EXTRA_FLAGS,	/* __u32 */
-	XFRMA_PROTO,		/* __u8 */
-	XFRMA_ADDRESS_FILTER,	/* struct xfrm_address_filter */
+	__RH_RESERVED_XFRMA_PROTO,	/* __u8 */
+	__RH_RESERVED_XFRMA_ADDRESS_FILTER,	/* struct xfrm_address_filter */
 	XFRMA_PAD,
-	XFRMA_OFFLOAD_DEV,	/* struct xfrm_state_offload */
-	XFRMA_OUTPUT_MARK,	/* __u32 */
 	__XFRMA_MAX
 
 #define XFRMA_MAX (__XFRMA_MAX - 1)
@@ -488,21 +487,6 @@ struct xfrm_user_mapping {
 	__be16				old_sport;
 	__be16				new_sport;
 };
-
-struct xfrm_address_filter {
-	xfrm_address_t			saddr;
-	xfrm_address_t			daddr;
-	__u16				family;
-	__u8				splen;
-	__u8				dplen;
-};
-
-struct xfrm_user_offload {
-	int				ifindex;
-	__u8				flags;
-};
-#define XFRM_OFFLOAD_IPV6	1
-#define XFRM_OFFLOAD_INBOUND	2
 
 #ifndef __KERNEL__
 /* backwards compatibility for userspace */

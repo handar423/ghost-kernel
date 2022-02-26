@@ -112,7 +112,7 @@ static int br_device_event(struct notifier_block *unused, unsigned long event, v
 	/* Events that may cause spanning tree to refresh */
 	if (event == NETDEV_CHANGEADDR || event == NETDEV_UP ||
 	    event == NETDEV_CHANGE || event == NETDEV_DOWN)
-		br_ifinfo_notify(RTM_NEWLINK, NULL, p);
+		br_ifinfo_notify(RTM_NEWLINK, p);
 
 	return NOTIFY_DONE;
 }
@@ -218,7 +218,7 @@ static int __init br_init(void)
 	if (err)
 		goto err_out2;
 
-	err = register_netdevice_notifier(&br_device_notifier);
+	err = register_netdevice_notifier_rh(&br_device_notifier);
 	if (err)
 		goto err_out3;
 
@@ -247,7 +247,7 @@ static int __init br_init(void)
 err_out5:
 	unregister_switchdev_notifier(&br_switchdev_notifier);
 err_out4:
-	unregister_netdevice_notifier(&br_device_notifier);
+	unregister_netdevice_notifier_rh(&br_device_notifier);
 err_out3:
 	br_nf_core_fini();
 err_out2:
@@ -264,7 +264,7 @@ static void __exit br_deinit(void)
 	stp_proto_unregister(&br_stp_proto);
 	br_netlink_fini();
 	unregister_switchdev_notifier(&br_switchdev_notifier);
-	unregister_netdevice_notifier(&br_device_notifier);
+	unregister_netdevice_notifier_rh(&br_device_notifier);
 	brioctl_set(NULL);
 	unregister_pernet_subsys(&br_net_ops);
 

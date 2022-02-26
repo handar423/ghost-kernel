@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * linux/can/skb.h
  *
@@ -8,13 +7,11 @@
  *
  */
 
-#ifndef _CAN_SKB_H
-#define _CAN_SKB_H
+#ifndef CAN_SKB_H
+#define CAN_SKB_H
 
 #include <linux/types.h>
-#include <linux/skbuff.h>
 #include <linux/can.h>
-#include <net/sock.h>
 
 /*
  * The struct can_skb_priv is used to transport additional information along
@@ -47,35 +44,4 @@ static inline void can_skb_reserve(struct sk_buff *skb)
 	skb_reserve(skb, sizeof(struct can_skb_priv));
 }
 
-static inline void can_skb_set_owner(struct sk_buff *skb, struct sock *sk)
-{
-	if (sk) {
-		sock_hold(sk);
-		skb->destructor = sock_efree;
-		skb->sk = sk;
-	}
-}
-
-/*
- * returns an unshared skb owned by the original sock to be echo'ed back
- */
-static inline struct sk_buff *can_create_echo_skb(struct sk_buff *skb)
-{
-	if (skb_shared(skb)) {
-		struct sk_buff *nskb = skb_clone(skb, GFP_ATOMIC);
-
-		if (likely(nskb)) {
-			can_skb_set_owner(nskb, skb->sk);
-			consume_skb(skb);
-			return nskb;
-		} else {
-			kfree_skb(skb);
-			return NULL;
-		}
-	}
-
-	/* we can assume to have an unshared skb with proper owner */
-	return skb;
-}
-
-#endif /* !_CAN_SKB_H */
+#endif /* CAN_SKB_H */

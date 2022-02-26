@@ -302,13 +302,13 @@ static int convert_variable_type(Dwarf_Die *vr_die,
 	char sbuf[STRERR_BUFSIZE];
 	int bsize, boffs, total;
 	int ret;
-	char prefix;
+	char sign;
 
 	/* TODO: check all types */
-	if (cast && strcmp(cast, "string") != 0 && strcmp(cast, "x") != 0 &&
+	if (cast && strcmp(cast, "string") != 0 &&
 	    strcmp(cast, "s") != 0 && strcmp(cast, "u") != 0) {
 		/* Non string type is OK */
-		/* and respect signedness/hexadecimal cast */
+		/* and respect signedness cast */
 		tvar->type = strdup(cast);
 		return (tvar->type == NULL) ? -ENOMEM : 0;
 	}
@@ -370,15 +370,11 @@ static int convert_variable_type(Dwarf_Die *vr_die,
 	}
 
 	if (cast && (strcmp(cast, "u") == 0))
-		prefix = 'u';
+		sign = 'u';
 	else if (cast && (strcmp(cast, "s") == 0))
-		prefix = 's';
-	else if (cast && (strcmp(cast, "x") == 0) &&
-		 probe_type_is_available(PROBE_TYPE_X))
-		prefix = 'x';
+		sign = 's';
 	else
-		prefix = die_is_signed_type(&type) ? 's' :
-			 probe_type_is_available(PROBE_TYPE_X) ? 'x' : 'u';
+		sign = die_is_signed_type(&type) ? 's' : 'u';
 
 	ret = dwarf_bytesize(&type);
 	if (ret <= 0)
@@ -392,7 +388,7 @@ static int convert_variable_type(Dwarf_Die *vr_die,
 			dwarf_diename(&type), MAX_BASIC_TYPE_BITS);
 		ret = MAX_BASIC_TYPE_BITS;
 	}
-	ret = snprintf(buf, 16, "%c%d", prefix, ret);
+	ret = snprintf(buf, 16, "%c%d", sign, ret);
 
 formatted:
 	if (ret < 0 || ret >= 16) {
@@ -423,20 +419,20 @@ static int convert_variable_fields(Dwarf_Die *vr_die, const char *varname,
 		pr_warning("Failed to get the type of %s.\n", varname);
 		return -ENOENT;
 	}
-	pr_debug2("Var real type: (%x)\n", (unsigned)dwarf_dieoffset(&type));
+	pr_debug2("Var real type: %s (%x)\n", dwarf_diename(&type),
+		  (unsigned)dwarf_dieoffset(&type));
 	tag = dwarf_tag(&type);
 
 	if (field->name[0] == '[' &&
 	    (tag == DW_TAG_array_type || tag == DW_TAG_pointer_type)) {
-		if (field->next)
-			/* Save original type for next field */
-			memcpy(die_mem, &type, sizeof(*die_mem));
+		/* Save original type for next field or type */
+		memcpy(die_mem, &type, sizeof(*die_mem));
 		/* Get the type of this array */
 		if (die_get_real_type(&type, &type) == NULL) {
 			pr_warning("Failed to get the type of %s.\n", varname);
 			return -ENOENT;
 		}
-		pr_debug2("Array real type: (%x)\n",
+		pr_debug2("Array real type: %s (%x)\n", dwarf_diename(&type),
 			 (unsigned)dwarf_dieoffset(&type));
 		if (tag == DW_TAG_pointer_type) {
 			ref = zalloc(sizeof(struct probe_trace_arg_ref));
@@ -448,9 +444,6 @@ static int convert_variable_fields(Dwarf_Die *vr_die, const char *varname,
 				*ref_ptr = ref;
 		}
 		ref->offset += dwarf_bytesize(&type) * field->index;
-		if (!field->next)
-			/* Save vr_die for converting types */
-			memcpy(die_mem, vr_die, sizeof(*die_mem));
 		goto next;
 	} else if (tag == DW_TAG_pointer_type) {
 		/* Check the pointer and dereference */

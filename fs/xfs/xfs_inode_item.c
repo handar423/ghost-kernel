@@ -205,8 +205,6 @@ xfs_inode_item_format_data_fork(
 			 * to be there by xfs_idata_realloc().
 			 */
 			data_bytes = roundup(ip->i_df.if_bytes, 4);
-			ASSERT(ip->i_df.if_real_bytes == 0 ||
-			       ip->i_df.if_real_bytes >= data_bytes);
 			ASSERT(ip->i_df.if_u1.if_data != NULL);
 			ASSERT(ip->i_d.di_size > 0);
 			xlog_copy_iovec(lv, vecp, XLOG_REG_TYPE_ILOCAL,
@@ -291,8 +289,6 @@ xfs_inode_item_format_attr_fork(
 			 * to be there by xfs_idata_realloc().
 			 */
 			data_bytes = roundup(ip->i_afp->if_bytes, 4);
-			ASSERT(ip->i_afp->if_real_bytes == 0 ||
-			       ip->i_afp->if_real_bytes >= data_bytes);
 			ASSERT(ip->i_afp->if_u1.if_data != NULL);
 			xlog_copy_iovec(lv, vecp, XLOG_REG_TYPE_IATTR_LOCAL,
 					ip->i_afp->if_u1.if_data,
@@ -358,7 +354,7 @@ xfs_inode_to_log_dinode(
 		to->di_crtime.t_sec = from->di_crtime.t_sec;
 		to->di_crtime.t_nsec = from->di_crtime.t_nsec;
 		to->di_flags2 = from->di_flags2;
-		to->di_cowextsize = from->di_cowextsize;
+
 		to->di_ino = ip->i_ino;
 		to->di_lsn = lsn;
 		memset(to->di_pad2, 0, sizeof(to->di_pad2));
@@ -517,7 +513,7 @@ xfs_inode_item_push(
 	 * The buffer containing this item failed to be written back
 	 * previously. Resubmit the buffer for IO.
 	 */
-	if (lip->li_flags & XFS_LI_FAILED) {
+	if (test_bit(XFS_LI_FAILED, &lip->li_flags)) {
 		if (!xfs_buf_trylock(bp))
 			return XFS_ITEM_LOCKED;
 
@@ -578,9 +574,6 @@ out_unlock:
 
 /*
  * Unlock the inode associated with the inode log item.
- * Clear the fields of the inode and inode log item that
- * are specific to the current transaction.  If the
- * hold flags is set, do not unlock the inode.
  */
 STATIC void
 xfs_inode_item_unlock(
@@ -636,10 +629,6 @@ xfs_inode_item_committed(
 	return lsn;
 }
 
-/*
- * XXX rcc - this one really has to do something.  Probably needs
- * to stamp in a new field in the incore inode.
- */
 STATIC void
 xfs_inode_item_committing(
 	struct xfs_log_item	*lip,
@@ -749,7 +738,7 @@ xfs_iflush_done(
 		 */
 		iip = INODE_ITEM(blip);
 		if ((iip->ili_logged && blip->li_lsn == iip->ili_flush_lsn) ||
-		    (blip->li_flags & XFS_LI_FAILED))
+		    test_bit(XFS_LI_FAILED, &blip->li_flags))
 			need_ail++;
 
 		blip = next;
@@ -758,7 +747,7 @@ xfs_iflush_done(
 	/* make sure we capture the state of the initial inode. */
 	iip = INODE_ITEM(lip);
 	if ((iip->ili_logged && lip->li_lsn == iip->ili_flush_lsn) ||
-	    lip->li_flags & XFS_LI_FAILED)
+	    test_bit(XFS_LI_FAILED, &lip->li_flags))
 		need_ail++;
 
 	/*
@@ -826,7 +815,7 @@ xfs_iflush_abort(
 	xfs_inode_log_item_t	*iip = ip->i_itemp;
 
 	if (iip) {
-		if (iip->ili_item.li_flags & XFS_LI_IN_AIL) {
+		if (test_bit(XFS_LI_IN_AIL, &iip->ili_item.li_flags)) {
 			xfs_trans_ail_remove(&iip->ili_item,
 					     stale ? SHUTDOWN_LOG_IO_ERROR :
 						     SHUTDOWN_CORRUPT_INCORE);

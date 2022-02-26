@@ -24,7 +24,7 @@ ebt_redirect_tg(struct sk_buff *skb, const struct xt_action_param *par)
 		return EBT_DROP;
 
 	if (xt_hooknum(par) != NF_BR_BROUTING)
-		/* rcu_read_lock()ed by nf_hook_thresh */
+		/* rcu_read_lock()ed by nf_hook_slow */
 		ether_addr_copy(eth_hdr(skb)->h_dest,
 				br_port_get_rcu(xt_in(par))->br->dev->dev_addr);
 	else
@@ -47,7 +47,7 @@ static int ebt_redirect_tg_check(const struct xt_tgchk_param *par)
 	    (strcmp(par->table, "broute") != 0 ||
 	    hook_mask & ~(1 << NF_BR_BROUTING)))
 		return -EINVAL;
-	if (ebt_invalid_target(info->target))
+	if (INVALID_TARGET)
 		return -EINVAL;
 	return 0;
 }

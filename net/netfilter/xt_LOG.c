@@ -32,8 +32,8 @@ static unsigned int
 log_tg(struct sk_buff *skb, const struct xt_action_param *par)
 {
 	const struct xt_log_info *loginfo = par->targinfo;
-	struct net *net = xt_net(par);
 	struct nf_loginfo li;
+	struct net *net = xt_net(par);
 
 	li.type = NF_LOG_TYPE_LOG;
 	li.u.log.level = loginfo->level;
@@ -61,7 +61,7 @@ static int log_tg_check(const struct xt_tgchk_param *par)
 		return -EINVAL;
 	}
 
-	return nf_logger_find_get(par->family, NF_LOG_TYPE_LOG);
+	return nf_logger_find_get(par->family, NF_LOG_TYPE_LOG, par->nft_compat);
 }
 
 static void log_tg_destroy(const struct xt_tgdtor_param *par)

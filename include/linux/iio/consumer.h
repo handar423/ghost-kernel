@@ -165,18 +165,6 @@ struct iio_channel
 *iio_channel_cb_get_channels(const struct iio_cb_buffer *cb_buffer);
 
 /**
- * iio_channel_cb_get_iio_dev() - get access to the underlying device.
- * @cb_buffer:		The callback buffer from whom we want the device
- *			information.
- *
- * This function allows one to obtain information about the device.
- * The primary aim is to allow drivers that are consuming a device to query
- * things like current trigger.
- */
-struct iio_dev
-*iio_channel_cb_get_iio_dev(const struct iio_cb_buffer *cb_buffer);
-
-/**
  * iio_read_channel_raw() - read from a given channel
  * @chan:		The channel being queried.
  * @val:		Value read back.
@@ -311,42 +299,5 @@ int iio_read_channel_scale(struct iio_channel *chan, int *val,
  */
 int iio_convert_raw_to_processed(struct iio_channel *chan, int raw,
 	int *processed, unsigned int scale);
-
-/**
- * iio_get_channel_ext_info_count() - get number of ext_info attributes
- *				      connected to the channel.
- * @chan:		The channel being queried
- *
- * Returns the number of ext_info attributes
- */
-unsigned int iio_get_channel_ext_info_count(struct iio_channel *chan);
-
-/**
- * iio_read_channel_ext_info() - read ext_info attribute from a given channel
- * @chan:		The channel being queried.
- * @attr:		The ext_info attribute to read.
- * @buf:		Where to store the attribute value. Assumed to hold
- *			at least PAGE_SIZE bytes.
- *
- * Returns the number of bytes written to buf (perhaps w/o zero termination;
- * it need not even be a string), or an error code.
- */
-ssize_t iio_read_channel_ext_info(struct iio_channel *chan,
-				  const char *attr, char *buf);
-
-/**
- * iio_write_channel_ext_info() - write ext_info attribute from a given channel
- * @chan:		The channel being queried.
- * @attr:		The ext_info attribute to read.
- * @buf:		The new attribute value. Strings needs to be zero-
- *			terminated, but the terminator should not be included
- *			in the below len.
- * @len:		The size of the new attribute value.
- *
- * Returns the number of accepted bytes, which should be the same as len.
- * An error code can also be returned.
- */
-ssize_t iio_write_channel_ext_info(struct iio_channel *chan, const char *attr,
-				   const char *buf, size_t len);
 
 #endif

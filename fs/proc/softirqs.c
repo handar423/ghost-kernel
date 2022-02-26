@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 #include <linux/init.h>
 #include <linux/kernel_stat.h>
 #include <linux/proc_fs.h>
@@ -42,4 +41,4 @@ static int __init proc_softirqs_init(void)
 	proc_create("softirqs", 0, NULL, &proc_softirqs_operations);
 	return 0;
 }
-fs_initcall(proc_softirqs_init);
+module_init(proc_softirqs_init);

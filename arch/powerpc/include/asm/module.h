@@ -13,17 +13,14 @@
 #include <asm/bug.h>
 #include <asm-generic/module.h>
 
-
-#ifdef CC_USING_MPROFILE_KERNEL
-#define MODULE_ARCH_VERMAGIC	"mprofile-kernel"
-#endif
+#include <linux/rh_kabi.h>
 
 #ifndef __powerpc64__
 /*
  * Thanks to Paul M for explaining this.
  *
  * PPC can only do rel jumps += 32MB, and often the kernel and other
- * modules are further away than this.  So, we jump to a table of
+ * modules are furthur away than this.  So, we jump to a table of
  * trampolines attached to the module (the Procedure Linkage Table)
  * whenever that happens.
  */
@@ -39,10 +36,13 @@ struct mod_arch_specific {
 #ifdef __powerpc64__
 	unsigned int stubs_section;	/* Index of stubs section in module */
 	unsigned int toc_section;	/* What section is the TOC? */
-	bool toc_fixed;			/* Have we fixed up .TOC.? */
 #ifdef CONFIG_DYNAMIC_FTRACE
-	unsigned long toc;
-	unsigned long tramp;
+	/*
+	 * These fields have been moved to module_ext to preserve kABI:
+	 *
+	 * unsigned long toc;
+	 * unsigned long tramp;
+	 */
 #endif
 
 #else /* powerpc64 */
@@ -58,6 +58,9 @@ struct mod_arch_specific {
 	struct list_head bug_list;
 	struct bug_entry *bug_table;
 	unsigned int num_bugs;
+#ifdef __powerpc64__
+	RH_KABI_EXTEND(bool toc_fixed)			/* Have we fixed up .TOC.? */
+#endif
 };
 
 /*
@@ -94,5 +97,13 @@ static inline int module_finalize_ftrace(struct module *mod, const Elf_Shdr *sec
 }
 #endif
 
+struct exception_table_entry;
+void sort_ex_table(struct exception_table_entry *start,
+		   struct exception_table_entry *finish);
+
+#if defined(CONFIG_MODVERSIONS) && defined(CONFIG_PPC64)
+#define ARCH_RELOCATES_KCRCTAB
+#define reloc_start PHYSICAL_START
+#endif
 #endif /* __KERNEL__ */
 #endif	/* _ASM_POWERPC_MODULE_H */

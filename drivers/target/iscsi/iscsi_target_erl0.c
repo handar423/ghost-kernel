@@ -17,8 +17,6 @@
  * GNU General Public License for more details.
  ******************************************************************************/
 
-#include <linux/sched/signal.h>
-
 #include <scsi/iscsi_proto.h>
 #include <target/target_core_base.h>
 #include <target/target_core_fabric.h>
@@ -749,9 +747,9 @@ int iscsit_check_post_dataout(
 	}
 }
 
-void iscsit_handle_time2retain_timeout(struct timer_list *t)
+static void iscsit_handle_time2retain_timeout(unsigned long data)
 {
-	struct iscsi_session *sess = from_timer(sess, t, time2retain_timer);
+	struct iscsi_session *sess = (struct iscsi_session *) data;
 	struct iscsi_portal_group *tpg = sess->tpg;
 	struct se_portal_group *se_tpg = &tpg->tpg_se_tpg;
 
@@ -770,23 +768,10 @@ void iscsit_handle_time2retain_timeout(struct timer_list *t)
 
 	pr_err("Time2Retain timer expired for SID: %u, cleaning up"
 			" iSCSI session.\n", sess->sid);
-	{
-	struct iscsi_tiqn *tiqn = tpg->tpg_tiqn;
 
-	if (tiqn) {
-		spin_lock(&tiqn->sess_err_stats.lock);
-		strcpy(tiqn->sess_err_stats.last_sess_fail_rem_name,
-			(void *)sess->sess_ops->InitiatorName);
-		tiqn->sess_err_stats.last_sess_failure_type =
-				ISCSI_SESS_ERR_CXN_TIMEOUT;
-		tiqn->sess_err_stats.cxn_timeout_errors++;
-		atomic_long_inc(&sess->conn_timeout_errors);
-		spin_unlock(&tiqn->sess_err_stats.lock);
-	}
-	}
-
+	iscsit_fill_cxn_timeout_err_stats(sess);
 	spin_unlock_bh(&se_tpg->session_lock);
-	iscsit_close_session(sess);
+	target_put_session(sess->se_sess);
 }
 
 void iscsit_start_time2retain_handler(struct iscsi_session *sess)
@@ -809,10 +794,14 @@ void iscsit_start_time2retain_handler(struct iscsi_session *sess)
 	pr_debug("Starting Time2Retain timer for %u seconds on"
 		" SID: %u\n", sess->sess_ops->DefaultTime2Retain, sess->sid);
 
+	init_timer(&sess->time2retain_timer);
+	sess->time2retain_timer.expires =
+		(get_jiffies_64() + sess->sess_ops->DefaultTime2Retain * HZ);
+	sess->time2retain_timer.data = (unsigned long)sess;
+	sess->time2retain_timer.function = iscsit_handle_time2retain_timeout;
 	sess->time2retain_timer_flags &= ~ISCSI_TF_STOP;
 	sess->time2retain_timer_flags |= ISCSI_TF_RUNNING;
-	mod_timer(&sess->time2retain_timer,
-		  jiffies + sess->sess_ops->DefaultTime2Retain * HZ);
+	add_timer(&sess->time2retain_timer);
 }
 
 /*

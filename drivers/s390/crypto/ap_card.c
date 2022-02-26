@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright IBM Corp. 2016
  * Author(s): Martin Schwidefsky <schwidefsky@de.ibm.com>
@@ -154,7 +153,7 @@ static const struct attribute_group *ap_card_dev_attr_groups[] = {
 	NULL
 };
 
-static struct device_type ap_card_type = {
+struct device_type ap_card_type = {
 	.name = "ap_card",
 	.groups = ap_card_dev_attr_groups,
 };

@@ -34,20 +34,24 @@ config AMD8111_ETH
 	tristate "AMD 8111 (new PCI LANCE) support"
 	depends on PCI
 	select CRC32
+	select NET_CORE
 	select MII
 	---help---
 	  If you have an AMD 8111-based PCI LANCE ethernet card,
-	  answer Y here.
+	  answer Y here and read the Ethernet-HOWTO, available from
+	  <http://www.tldp.org/docs.html#howto>.
 
 	  To compile this driver as a module, choose M here. The module
 	  will be called amd8111e.
 
 config LANCE
 	tristate "AMD LANCE and PCnet (AT1500 and NE2100) support"
-	depends on ISA && ISA_DMA_API && !ARM
+	depends on ISA && ISA_DMA_API
 	---help---
-	  If you have a network (Ethernet) card of this type, say Y here.
-	  Some LinkSys cards are of this type.
+	  If you have a network (Ethernet) card of this type, say Y and read
+	  the Ethernet-HOWTO, available from
+	  <http://www.tldp.org/docs.html#howto>. Some LinkSys cards are
+	  of this type.
 
 	  To compile this driver as a module, choose M here: the module
 	  will be called lance.  This is recommended.
@@ -56,10 +60,12 @@ config PCNET32
 	tristate "AMD PCnet32 PCI support"
 	depends on PCI
 	select CRC32
+	select NET_CORE
 	select MII
 	---help---
 	  If you have a PCnet32 or PCnetPCI based network (Ethernet) card,
-	  answer Y here.
+	  answer Y here and read the Ethernet-HOWTO, available from
+	  <http://www.tldp.org/docs.html#howto>.
 
 	  To compile this driver as a module, choose M here. The module
 	  will be called pcnet32.
@@ -100,7 +106,7 @@ config DECLANCE
 	  DEPCA series.  (This chipset is better known via the NE2100 cards.)
 
 config HPLANCE
-	tristate "HP on-board LANCE support"
+	bool "HP on-board LANCE support"
 	depends on DIO
 	select CRC32
 	---help---
@@ -138,9 +144,11 @@ config PCMCIA_NMCLAN
 
 config NI65
 	tristate "NI6510 support"
-	depends on ISA && ISA_DMA_API && !ARM
+	depends on ISA && ISA_DMA_API
 	---help---
-	  If you have a network (Ethernet) card of this type, say Y here.
+	  If you have a network (Ethernet) card of this type, say Y and read
+	  the Ethernet-HOWTO, available from
+	  <http://www.tldp.org/docs.html#howto>.
 
 	  To compile this driver as a module, choose M here. The module
 	  will be called ni65.
@@ -177,9 +185,9 @@ config AMD_XGBE
 	depends on X86 || ARM64 || COMPILE_TEST
 	select BITREVERSE
 	select CRC32
+	select PTP_1588_CLOCK
 	select PHYLIB
 	select AMD_XGBE_HAVE_ECC if X86
-	imply PTP_1588_CLOCK
 	---help---
 	  This driver supports the AMD 10GbE Ethernet device found on an
 	  AMD SoC.

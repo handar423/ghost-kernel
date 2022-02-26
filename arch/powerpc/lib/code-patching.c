@@ -8,191 +8,75 @@
  */
 
 #include <linux/kernel.h>
-#include <linux/kprobes.h>
 #include <linux/vmalloc.h>
 #include <linux/init.h>
 #include <linux/mm.h>
-#include <linux/cpuhotplug.h>
+#include <linux/cpu.h>
 #include <linux/slab.h>
-#include <linux/uaccess.h>
-#include <linux/kprobes.h>
 
 #include <asm/pgtable.h>
 #include <asm/tlbflush.h>
 #include <asm/page.h>
 #include <asm/code-patching.h>
 #include <asm/setup.h>
+#include <asm/uaccess.h>
+#include <asm/kprobes.h>
+#include <asm/sections.h>
 
-static int __patch_instruction(unsigned int *addr, unsigned int instr)
+static int __patch_instruction(unsigned int *exec_addr, unsigned int instr,
+			       unsigned int *patch_addr)
 {
 	int err;
 
-	__put_user_size(instr, addr, 4, err);
+	__put_user_size(instr, patch_addr, 4, err);
 	if (err)
 		return err;
 
-	asm ("dcbst 0, %0; sync; icbi 0,%0; sync; isync" :: "r" (addr));
+	asm ("dcbst 0, %0; sync; icbi 0,%1; sync; isync" :: "r" (patch_addr),
+							    "r" (exec_addr));
 
 	return 0;
 }
 
-#ifdef CONFIG_STRICT_KERNEL_RWX
-static DEFINE_PER_CPU(struct vm_struct *, text_poke_area);
-
-static int text_area_cpu_up(unsigned int cpu)
+int raw_patch_instruction(unsigned int *addr, unsigned int instr)
 {
-	struct vm_struct *area;
+	return __patch_instruction(addr, instr, addr);
+}
 
-	area = get_vm_area(PAGE_SIZE, VM_ALLOC);
-	if (!area) {
-		WARN_ONCE(1, "Failed to create text area for cpu %d\n",
-			cpu);
-		return -1;
+static int do_patch_instruction(unsigned int *addr, unsigned int instr)
+{
+	return raw_patch_instruction(addr, instr);
+}
+
+int __kprobes patch_instruction(unsigned int *addr, unsigned int instr)
+{
+	/* Make sure we aren't patching a freed init section */
+	if (init_mem_is_free && init_section_contains(addr, 4)) {
+		pr_debug("Skipping init section patching addr: 0x%px\n", addr);
+		return 0;
 	}
-	this_cpu_write(text_poke_area, area);
-
-	return 0;
+	return do_patch_instruction(addr, instr);
 }
-
-static int text_area_cpu_down(unsigned int cpu)
-{
-	free_vm_area(this_cpu_read(text_poke_area));
-	return 0;
-}
-
-/*
- * Run as a late init call. This allows all the boot time patching to be done
- * simply by patching the code, and then we're called here prior to
- * mark_rodata_ro(), which happens after all init calls are run. Although
- * BUG_ON() is rude, in this case it should only happen if ENOMEM, and we judge
- * it as being preferable to a kernel that will crash later when someone tries
- * to use patch_instruction().
- */
-static int __init setup_text_poke_area(void)
-{
-	BUG_ON(!cpuhp_setup_state(CPUHP_AP_ONLINE_DYN,
-		"powerpc/text_poke:online", text_area_cpu_up,
-		text_area_cpu_down));
-
-	return 0;
-}
-late_initcall(setup_text_poke_area);
-
-/*
- * This can be called for kernel text or a module.
- */
-static int map_patch_area(void *addr, unsigned long text_poke_addr)
-{
-	unsigned long pfn;
-	int err;
-
-	if (is_vmalloc_addr(addr))
-		pfn = vmalloc_to_pfn(addr);
-	else
-		pfn = __pa_symbol(addr) >> PAGE_SHIFT;
-
-	err = map_kernel_page(text_poke_addr, (pfn << PAGE_SHIFT),
-				pgprot_val(PAGE_KERNEL));
-
-	pr_devel("Mapped addr %lx with pfn %lx:%d\n", text_poke_addr, pfn, err);
-	if (err)
-		return -1;
-
-	return 0;
-}
-
-static inline int unmap_patch_area(unsigned long addr)
-{
-	pte_t *ptep;
-	pmd_t *pmdp;
-	pud_t *pudp;
-	pgd_t *pgdp;
-
-	pgdp = pgd_offset_k(addr);
-	if (unlikely(!pgdp))
-		return -EINVAL;
-
-	pudp = pud_offset(pgdp, addr);
-	if (unlikely(!pudp))
-		return -EINVAL;
-
-	pmdp = pmd_offset(pudp, addr);
-	if (unlikely(!pmdp))
-		return -EINVAL;
-
-	ptep = pte_offset_kernel(pmdp, addr);
-	if (unlikely(!ptep))
-		return -EINVAL;
-
-	pr_devel("clearing mm %p, pte %p, addr %lx\n", &init_mm, ptep, addr);
-
-	/*
-	 * In hash, pte_clear flushes the tlb, in radix, we have to
-	 */
-	pte_clear(&init_mm, addr, ptep);
-	flush_tlb_kernel_range(addr, addr + PAGE_SIZE);
-
-	return 0;
-}
-
-int patch_instruction(unsigned int *addr, unsigned int instr)
-{
-	int err;
-	unsigned int *dest = NULL;
-	unsigned long flags;
-	unsigned long text_poke_addr;
-	unsigned long kaddr = (unsigned long)addr;
-
-	/*
-	 * During early early boot patch_instruction is called
-	 * when text_poke_area is not ready, but we still need
-	 * to allow patching. We just do the plain old patching
-	 */
-	if (!this_cpu_read(*PTRRELOC(&text_poke_area)))
-		return __patch_instruction(addr, instr);
-
-	local_irq_save(flags);
-
-	text_poke_addr = (unsigned long)__this_cpu_read(text_poke_area)->addr;
-	if (map_patch_area(addr, text_poke_addr)) {
-		err = -1;
-		goto out;
-	}
-
-	dest = (unsigned int *)(text_poke_addr) +
-			((kaddr & ~PAGE_MASK) / sizeof(unsigned int));
-
-	/*
-	 * We use __put_user_size so that we can handle faults while
-	 * writing to dest and return err to handle faults gracefully
-	 */
-	__put_user_size(instr, dest, 4, err);
-	if (!err)
-		asm ("dcbst 0, %0; sync; icbi 0,%0; icbi 0,%1; sync; isync"
-			::"r" (dest), "r"(addr));
-
-	err = unmap_patch_area(text_poke_addr);
-	if (err)
-		pr_warn("failed to unmap %lx\n", text_poke_addr);
-
-out:
-	local_irq_restore(flags);
-
-	return err;
-}
-#else /* !CONFIG_STRICT_KERNEL_RWX */
-
-int patch_instruction(unsigned int *addr, unsigned int instr)
-{
-	return __patch_instruction(addr, instr);
-}
-
-#endif /* CONFIG_STRICT_KERNEL_RWX */
-NOKPROBE_SYMBOL(patch_instruction);
 
 int patch_branch(unsigned int *addr, unsigned long target, int flags)
 {
 	return patch_instruction(addr, create_branch(addr, target, flags));
+}
+
+int patch_branch_site(s32 *site, unsigned long target, int flags)
+{
+	unsigned int *addr;
+
+	addr = (unsigned int *)((unsigned long)site + *site);
+	return patch_instruction(addr, create_branch(addr, target, flags));
+}
+
+int patch_instruction_site(s32 *site, unsigned int instr)
+{
+	unsigned int *addr;
+
+	addr = (unsigned int *)((unsigned long)site + *site);
+	return patch_instruction(addr, instr);
 }
 
 bool is_offset_in_branch_range(long offset)
@@ -216,28 +100,6 @@ bool is_offset_in_branch_range(long offset)
 	 */
 	return (offset >= -0x2000000 && offset <= 0x1fffffc && !(offset & 0x3));
 }
-
-/*
- * Helper to check if a given instruction is a conditional branch
- * Derived from the conditional checks in analyse_instr()
- */
-bool is_conditional_branch(unsigned int instr)
-{
-	unsigned int opcode = instr >> 26;
-
-	if (opcode == 16)       /* bc, bca, bcl, bcla */
-		return true;
-	if (opcode == 19) {
-		switch ((instr >> 1) & 0x3ff) {
-		case 16:        /* bclr, bclrl */
-		case 528:       /* bcctr, bcctrl */
-		case 560:       /* bctar, bctarl */
-			return true;
-		}
-	}
-	return false;
-}
-NOKPROBE_SYMBOL(is_conditional_branch);
 
 unsigned int create_branch(const unsigned int *addr,
 			   unsigned long target, int flags)
@@ -300,6 +162,11 @@ int instr_is_relative_branch(unsigned int instr)
 		return 0;
 
 	return instr_is_branch_iform(instr) || instr_is_branch_bform(instr);
+}
+
+int instr_is_relative_link_branch(unsigned int instr)
+{
+	return instr_is_relative_branch(instr) && (instr & BRANCH_SET_LINK);
 }
 
 static unsigned long branch_iform_target(const unsigned int *instr)
@@ -366,21 +233,6 @@ unsigned int translate_branch(const unsigned int *dest, const unsigned int *src)
 	return 0;
 }
 
-#ifdef CONFIG_PPC_BOOK3E_64
-void __patch_exception(int exc, unsigned long addr)
-{
-	extern unsigned int interrupt_base_book3e;
-	unsigned int *ibase = &interrupt_base_book3e;
-
-	/* Our exceptions vectors start with a NOP and -then- a branch
-	 * to deal with single stepping from userspace which stops on
-	 * the second instruction. Thus we need to patch the second
-	 * instruction of the exception, not the first one
-	 */
-
-	patch_branch(ibase + (exc / 4) + 1, addr, 0);
-}
-#endif
 
 #ifdef CONFIG_CODE_PATCHING_SELFTEST
 

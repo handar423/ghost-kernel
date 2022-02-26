@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 /*
  *  ebtables
  *
@@ -13,9 +12,9 @@
 
 #ifndef _UAPI__LINUX_BRIDGE_EFF_H
 #define _UAPI__LINUX_BRIDGE_EFF_H
-#include <linux/types.h>
 #include <linux/if.h>
 #include <linux/netfilter_bridge.h>
+#include <linux/if_ether.h>
 
 #define EBT_TABLE_MAXNAMELEN 32
 #define EBT_CHAIN_MAXNAMELEN EBT_TABLE_MAXNAMELEN
@@ -36,8 +35,8 @@ struct xt_match;
 struct xt_target;
 
 struct ebt_counter {
-	__u64 pcnt;
-	__u64 bcnt;
+	uint64_t pcnt;
+	uint64_t bcnt;
 };
 
 struct ebt_replace {

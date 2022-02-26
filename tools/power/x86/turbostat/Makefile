@@ -1,4 +1,3 @@
-# SPDX-License-Identifier: GPL-2.0
 CC		= $(CROSS_COMPILE)gcc
 BUILD_OUTPUT	:= $(CURDIR)
 PREFIX		?= /usr
@@ -25,4 +24,4 @@ install : turbostat
 	install -d  $(DESTDIR)$(PREFIX)/bin
 	install $(BUILD_OUTPUT)/turbostat $(DESTDIR)$(PREFIX)/bin/turbostat
 	install -d  $(DESTDIR)$(PREFIX)/share/man/man8
-	install turbostat.8 $(DESTDIR)$(PREFIX)/share/man/man8
+	install -m 644 turbostat.8 $(DESTDIR)$(PREFIX)/share/man/man8

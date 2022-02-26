@@ -21,6 +21,7 @@
 #include <linux/kernel.h>
 #include <linux/kmod.h>
 #include <linux/list.h>
+#include <linux/miscdevice.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/net.h>
@@ -95,23 +96,31 @@ static int PROTOCOL_OVERRIDE = -1;
 
 static s32 vmci_transport_error_to_vsock_error(s32 vmci_error)
 {
+	int err;
+
 	switch (vmci_error) {
 	case VMCI_ERROR_NO_MEM:
-		return -ENOMEM;
+		err = ENOMEM;
+		break;
 	case VMCI_ERROR_DUPLICATE_ENTRY:
 	case VMCI_ERROR_ALREADY_EXISTS:
-		return -EADDRINUSE;
+		err = EADDRINUSE;
+		break;
 	case VMCI_ERROR_NO_ACCESS:
-		return -EPERM;
+		err = EPERM;
+		break;
 	case VMCI_ERROR_NO_RESOURCES:
-		return -ENOBUFS;
+		err = ENOBUFS;
+		break;
 	case VMCI_ERROR_INVALID_RESOURCE:
-		return -EHOSTUNREACH;
+		err = EHOSTUNREACH;
+		break;
 	case VMCI_ERROR_INVALID_ARGS:
 	default:
-		break;
+		err = EINVAL;
 	}
-	return -EINVAL;
+
+	return err > 0 ? -err : err;
 }
 
 static u32 vmci_transport_peer_rid(u32 peer_cid)
@@ -551,8 +560,7 @@ vmci_transport_queue_pair_alloc(struct vmci_qp **qpair,
 			       peer, flags, VMCI_NO_PRIVILEGE_FLAGS);
 out:
 	if (err < 0) {
-		pr_err("Could not attach to queue pair with %d\n",
-		       err);
+		pr_err_once("Could not attach to queue pair with %d\n", err);
 		err = vmci_transport_error_to_vsock_error(err);
 	}
 
@@ -616,14 +624,13 @@ static int vmci_transport_recv_dgram_cb(void *data, struct vmci_datagram *dg)
 
 	/* Attach the packet to the socket's receive queue as an sk_buff. */
 	skb = alloc_skb(size, GFP_ATOMIC);
-	if (!skb)
-		return VMCI_ERROR_NO_MEM;
-
-	/* sk_receive_skb() will do a sock_put(), so hold here. */
-	sock_hold(sk);
-	skb_put(skb, size);
-	memcpy(skb->data, dg, size);
-	sk_receive_skb(sk, skb, 0);
+	if (skb) {
+		/* sk_receive_skb() will do a sock_put(), so hold here. */
+		sock_hold(sk);
+		skb_put(skb, size);
+		memcpy(skb->data, dg, size);
+		sk_receive_skb(sk, skb, 0);
+	}
 
 	return VMCI_SUCCESS;
 }
@@ -797,13 +804,9 @@ static void vmci_transport_handle_detach(struct sock *sk)
 
 		/* We should not be sending anymore since the peer won't be
 		 * there to receive, but we can still receive if there is data
-		 * left in our consume queue. If the local endpoint is a host,
-		 * we can't call vsock_stream_has_data, since that may block,
-		 * but a host endpoint can't read data once the VM has
-		 * detached, so there is no available data in that case.
+		 * left in our consume queue.
 		 */
-		if (vsk->local_addr.svm_cid == VMADDR_CID_HOST ||
-		    vsock_stream_has_data(vsk) <= 0) {
+		if (vsock_stream_has_data(vsk) <= 0) {
 			if (sk->sk_state == TCP_SYN_SENT) {
 				/* The peer may detach from a queue pair while
 				 * we are still in the connecting state, i.e.,
@@ -907,9 +910,10 @@ static void vmci_transport_recv_pkt_work(struct work_struct *work)
 		 * reset to prevent that.
 		 */
 		vmci_transport_send_reset(sk, pkt);
-		break;
+		goto out;
 	}
 
+out:
 	release_sock(sk);
 	kfree(recv_pkt_info);
 	/* Release reference obtained in the stream callback when we fetched
@@ -989,7 +993,7 @@ static int vmci_transport_recv_listen(struct sock *sk,
 	}
 
 	pending = __vsock_create(sock_net(sk), NULL, sk, GFP_KERNEL,
-				 sk->sk_type, 0);
+				 sk->sk_type);
 	if (!pending) {
 		vmci_transport_send_reset(sk, pkt);
 		return -ENOMEM;
@@ -1094,8 +1098,7 @@ static int vmci_transport_recv_listen(struct sock *sk,
 	vpending->listener = sk;
 	sock_hold(sk);
 	sock_hold(pending);
-	INIT_DELAYED_WORK(&vpending->dwork, vsock_pending_work);
-	schedule_delayed_work(&vpending->dwork, HZ);
+	schedule_delayed_work(&vpending->pending_work, HZ);
 
 out:
 	return err;
@@ -1229,7 +1232,7 @@ vmci_transport_recv_connecting_server(struct sock *listener,
 	/* Callers of accept() will be be waiting on the listening socket, not
 	 * the pending socket.
 	 */
-	listener->sk_data_ready(listener);
+	listener->sk_state_change(listener);
 
 	return 0;
 
@@ -1714,7 +1717,8 @@ static int vmci_transport_dgram_enqueue(
 	return err - sizeof(*dg);
 }
 
-static int vmci_transport_dgram_dequeue(struct vsock_sock *vsk,
+static int vmci_transport_dgram_dequeue(struct kiocb *kiocb,
+					struct vsock_sock *vsk,
 					struct msghdr *msg, size_t len,
 					int flags)
 {
@@ -1758,8 +1762,10 @@ static int vmci_transport_dgram_dequeue(struct vsock_sock *vsk,
 		goto out;
 
 	if (msg->msg_name) {
+		struct sockaddr_vm *vm_addr;
+
 		/* Provide the address of the sender. */
-		DECLARE_SOCKADDR(struct sockaddr_vm *, vm_addr, msg->msg_name);
+		vm_addr = (struct sockaddr_vm *)msg->msg_name;
 		vsock_addr_init(vm_addr, dg->src.context, dg->src.resource);
 		msg->msg_namelen = sizeof(*vm_addr);
 	}
@@ -1820,9 +1826,9 @@ static ssize_t vmci_transport_stream_dequeue(
 	int flags)
 {
 	if (flags & MSG_PEEK)
-		return vmci_qpair_peekv(vmci_trans(vsk)->qpair, msg, len, 0);
+		return vmci_qpair_peekv(vmci_trans(vsk)->qpair, msg->msg_iov, len, 0);
 	else
-		return vmci_qpair_dequev(vmci_trans(vsk)->qpair, msg, len, 0);
+		return vmci_qpair_dequev(vmci_trans(vsk)->qpair, msg->msg_iov, len, 0);
 }
 
 static ssize_t vmci_transport_stream_enqueue(
@@ -1830,7 +1836,7 @@ static ssize_t vmci_transport_stream_enqueue(
 	struct msghdr *msg,
 	size_t len)
 {
-	return vmci_qpair_enquev(vmci_trans(vsk)->qpair, msg, len, 0);
+	return vmci_qpair_enquev(vmci_trans(vsk)->qpair, msg->msg_iov, len, 0);
 }
 
 static s64 vmci_transport_stream_has_data(struct vsock_sock *vsk)
@@ -2048,7 +2054,7 @@ static u32 vmci_transport_get_local_cid(void)
 	return vmci_get_context_id();
 }
 
-static const struct vsock_transport vmci_transport = {
+static struct vsock_transport vmci_transport = {
 	.init = vmci_transport_socket_init,
 	.destruct = vmci_transport_destruct,
 	.release = vmci_transport_release,
@@ -2148,7 +2154,7 @@ module_exit(vmci_transport_exit);
 
 MODULE_AUTHOR("VMware, Inc.");
 MODULE_DESCRIPTION("VMCI transport for Virtual Sockets");
-MODULE_VERSION("1.0.5.0-k");
+MODULE_VERSION("1.0.4.0-k");
 MODULE_LICENSE("GPL v2");
 MODULE_ALIAS("vmware_vsock");
 MODULE_ALIAS_NETPROTO(PF_VSOCK);

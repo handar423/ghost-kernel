@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (C) 2015, Wang Nan <wangnan0@huawei.com>
  * Copyright (C) 2015, Huawei Inc.
@@ -7,11 +6,12 @@
 #include <errno.h>
 #include <limits.h>
 #include <stdio.h>
-#include <stdlib.h>
+#include "util.h"
 #include <linux/err.h>
 #include "debug.h"
 #include "llvm-utils.h"
 #include "config.h"
+#include <stdlib.h>
 #include "util.h"
 #include <sys/wait.h>
 
@@ -108,12 +108,11 @@ read_from_pipe(const char *cmd, void **p_buf, size_t *p_read_sz)
 	void *buf = NULL;
 	FILE *file = NULL;
 	size_t read_sz = 0, buf_sz = 0;
-	char serr[STRERR_BUFSIZE];
 
 	file = popen(cmd, "r");
 	if (!file) {
 		pr_err("ERROR: unable to popen cmd: %s\n",
-		       str_error_r(errno, serr, sizeof(serr)));
+		       strerror(errno));
 		return -EINVAL;
 	}
 
@@ -147,7 +146,7 @@ read_from_pipe(const char *cmd, void **p_buf, size_t *p_read_sz)
 
 	if (ferror(file)) {
 		pr_err("ERROR: error occurred when reading from pipe: %s\n",
-		       str_error_r(errno, serr, sizeof(serr)));
+		       strerror(errno));
 		err = -EIO;
 		goto errout;
 	}
@@ -265,16 +264,16 @@ static const char *kinc_fetch_script =
 "#!/usr/bin/env sh\n"
 "if ! test -d \"$KBUILD_DIR\"\n"
 "then\n"
-"	exit -1\n"
+"	exit 1\n"
 "fi\n"
 "if ! test -f \"$KBUILD_DIR/include/generated/autoconf.h\"\n"
 "then\n"
-"	exit -1\n"
+"	exit 1\n"
 "fi\n"
 "TMPDIR=`mktemp -d`\n"
 "if test -z \"$TMPDIR\"\n"
 "then\n"
-"    exit -1\n"
+"    exit 1\n"
 "fi\n"
 "cat << EOF > $TMPDIR/Makefile\n"
 "obj-y := dummy.o\n"
@@ -392,7 +391,7 @@ void llvm__dump_obj(const char *path, void *obj_buf, size_t size)
 	char *p;
 
 	if (!obj_path) {
-		pr_warning("WARNING: Not enough memory, skip object dumping\n");
+		pr_warning("WARNING: No enough memory, skip object dumping\n");
 		return;
 	}
 
@@ -429,15 +428,16 @@ int llvm__compile_bpf(const char *path, void **p_obj_buf,
 	unsigned int kernel_version;
 	char linux_version_code_str[64];
 	const char *clang_opt = llvm_param.clang_opt;
-	char clang_path[PATH_MAX], abspath[PATH_MAX], nr_cpus_avail_str[64];
 	char serr[STRERR_BUFSIZE];
+	char clang_path[PATH_MAX], nr_cpus_avail_str[64], abspath[PATH_MAX];
 	char *kbuild_dir = NULL, *kbuild_include_opts = NULL;
 	const char *template = llvm_param.clang_bpf_cmd_template;
+	char *command_echo, *command_out;
 
 	if (path[0] != '-' && realpath(path, abspath) == NULL) {
 		err = errno;
 		pr_err("ERROR: problems with path %s: %s\n",
-		       path, str_error_r(err, serr, sizeof(serr)));
+		       path, strerror_r(err, serr, sizeof(serr)));
 		return -err;
 	}
 
@@ -487,6 +487,16 @@ int llvm__compile_bpf(const char *path, void **p_obj_buf,
 		      (path[0] == '-') ? path : abspath);
 
 	pr_debug("llvm compiling command template: %s\n", template);
+
+	if (asprintf(&command_echo, "echo -n \"%s\"", template) < 0)
+		goto errout;
+
+	err = read_from_pipe(command_echo, (void **) &command_out, NULL);
+	if (err)
+		goto errout;
+
+	pr_debug("llvm compiling command : %s\n", command_out);
+
 	err = read_from_pipe(template, &obj_buf, &obj_buf_sz);
 	if (err) {
 		pr_err("ERROR:\tunable to compile %s\n", path);
@@ -497,6 +507,8 @@ int llvm__compile_bpf(const char *path, void **p_obj_buf,
 		goto errout;
 	}
 
+	free(command_echo);
+	free(command_out);
 	free(kbuild_dir);
 	free(kbuild_include_opts);
 
@@ -509,6 +521,7 @@ int llvm__compile_bpf(const char *path, void **p_obj_buf,
 		*p_obj_buf_sz = obj_buf_sz;
 	return 0;
 errout:
+	free(command_echo);
 	free(kbuild_dir);
 	free(kbuild_include_opts);
 	free(obj_buf);

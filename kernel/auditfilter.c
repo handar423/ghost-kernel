@@ -19,8 +19,6 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
-#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
-
 #include <linux/kernel.h>
 #include <linux/audit.h>
 #include <linux/kthread.h>
@@ -31,21 +29,19 @@
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/security.h>
-#include <net/net_namespace.h>
-#include <net/sock.h>
 #include "audit.h"
 
 /*
  * Locking model:
  *
  * audit_filter_mutex:
- *		Synchronizes writes and blocking reads of audit's filterlist
- *		data.  Rcu is used to traverse the filterlist and access
- *		contents of structs audit_entry, audit_watch and opaque
- *		LSM rules during filtering.  If modified, these structures
- *		must be copied and replace their counterparts in the filterlist.
- *		An audit_parent struct is not accessed during filtering, so may
- *		be written directly provided audit_filter_mutex is held.
+ * 		Synchronizes writes and blocking reads of audit's filterlist
+ * 		data.  Rcu is used to traverse the filterlist and access
+ * 		contents of structs audit_entry, audit_watch and opaque
+ * 		LSM rules during filtering.  If modified, these structures
+ * 		must be copied and replace their counterparts in the filterlist.
+ * 		An audit_parent struct is not accessed during filtering, so may
+ * 		be written directly provided audit_filter_mutex is held.
  */
 
 /* Audit filter lists, defined in <linux/audit.h> */
@@ -73,24 +69,6 @@ static struct list_head audit_rules_list[AUDIT_NR_FILTERS] = {
 
 DEFINE_MUTEX(audit_filter_mutex);
 
-static void audit_free_lsm_field(struct audit_field *f)
-{
-	switch (f->type) {
-	case AUDIT_SUBJ_USER:
-	case AUDIT_SUBJ_ROLE:
-	case AUDIT_SUBJ_TYPE:
-	case AUDIT_SUBJ_SEN:
-	case AUDIT_SUBJ_CLR:
-	case AUDIT_OBJ_USER:
-	case AUDIT_OBJ_ROLE:
-	case AUDIT_OBJ_TYPE:
-	case AUDIT_OBJ_LEV_LOW:
-	case AUDIT_OBJ_LEV_HIGH:
-		kfree(f->lsm_str);
-		security_audit_rule_free(f->lsm_rule);
-	}
-}
-
 static inline void audit_free_rule(struct audit_entry *e)
 {
 	int i;
@@ -100,8 +78,11 @@ static inline void audit_free_rule(struct audit_entry *e)
 	if (erule->watch)
 		audit_put_watch(erule->watch);
 	if (erule->fields)
-		for (i = 0; i < erule->field_count; i++)
-			audit_free_lsm_field(&erule->fields[i]);
+		for (i = 0; i < erule->field_count; i++) {
+			struct audit_field *f = &erule->fields[i];
+			kfree(f->lsm_str);
+			security_audit_rule_free(f->lsm_rule);
+		}
 	kfree(erule->fields);
 	kfree(erule->filterkey);
 	kfree(e);
@@ -123,7 +104,7 @@ static inline struct audit_entry *audit_init_entry(u32 field_count)
 	if (unlikely(!entry))
 		return NULL;
 
-	fields = kcalloc(field_count, sizeof(*fields), GFP_KERNEL);
+	fields = kzalloc(sizeof(*fields) * field_count, GFP_KERNEL);
 	if (unlikely(!fields)) {
 		kfree(entry);
 		return NULL;
@@ -160,12 +141,12 @@ char *audit_unpack_string(void **bufp, size_t *remain, size_t len)
 	return str;
 }
 
-/* Translate an inode field to kernel representation. */
+/* Translate an inode field to kernel respresentation. */
 static inline int audit_to_inode(struct audit_krule *krule,
 				 struct audit_field *f)
 {
 	if (krule->listnr != AUDIT_FILTER_EXIT ||
-	    krule->inode_f || krule->watch || krule->tree ||
+	    krule->watch || krule->inode_f || krule->tree ||
 	    (f->op != Audit_equal && f->op != Audit_not_equal))
 		return -EINVAL;
 
@@ -177,7 +158,7 @@ static __u32 *classes[AUDIT_SYSCALL_CLASSES];
 
 int __init audit_register_class(int class, unsigned *list)
 {
-	__u32 *p = kcalloc(AUDIT_BITMASK_SIZE, sizeof(__u32), GFP_KERNEL);
+	__u32 *p = kzalloc(AUDIT_BITMASK_SIZE * sizeof(__u32), GFP_KERNEL);
 	if (!p)
 		return -ENOMEM;
 	while (*list != ~0U) {
@@ -245,7 +226,7 @@ static int audit_match_signal(struct audit_entry *entry)
 #endif
 
 /* Common user-space to kernel rule translation. */
-static inline struct audit_entry *audit_to_entry_common(struct audit_rule_data *rule)
+static inline struct audit_entry *audit_to_entry_common(struct audit_rule *rule)
 {
 	unsigned listnr;
 	struct audit_entry *entry;
@@ -269,7 +250,7 @@ static inline struct audit_entry *audit_to_entry_common(struct audit_rule_data *
 		;
 	}
 	if (unlikely(rule->action == AUDIT_POSSIBLE)) {
-		pr_err("AUDIT_POSSIBLE is deprecated\n");
+		printk(KERN_ERR "AUDIT_POSSIBLE is deprecated\n");
 		goto exit_err;
 	}
 	if (rule->action != AUDIT_NEVER && rule->action != AUDIT_ALWAYS)
@@ -435,7 +416,7 @@ static int audit_field_valid(struct audit_entry *entry, struct audit_field *f)
 	return 0;
 }
 
-/* Translate struct audit_rule_data to kernel's rule representation. */
+/* Translate struct audit_rule_data to kernel's rule respresentation. */
 static struct audit_entry *audit_data_to_entry(struct audit_rule_data *data,
 					       size_t datasz)
 {
@@ -447,11 +428,12 @@ static struct audit_entry *audit_data_to_entry(struct audit_rule_data *data,
 	char *str;
 	struct audit_fsnotify_mark *audit_mark;
 
-	entry = audit_to_entry_common(data);
+	entry = audit_to_entry_common((struct audit_rule *)data);
 	if (IS_ERR(entry))
 		goto exit_nofree;
 
 	bufp = data->buf;
+	entry->rule.vers_ops = 2;
 	for (i = 0; i < data->field_count; i++) {
 		struct audit_field *f = &entry->rule.fields[i];
 
@@ -463,6 +445,10 @@ static struct audit_entry *audit_data_to_entry(struct audit_rule_data *data,
 
 		f->type = data->fields[i];
 		f->val = data->values[i];
+		f->uid = INVALID_UID;
+		f->gid = INVALID_GID;
+		f->lsm_str = NULL;
+		f->lsm_rule = NULL;
 
 		/* Support legacy tests for a valid loginuid */
 		if ((f->type == AUDIT_LOGINUID) && (f->val == AUDIT_UID_UNSET)) {
@@ -520,8 +506,8 @@ static struct audit_entry *audit_data_to_entry(struct audit_rule_data *data,
 			/* Keep currently invalid fields around in case they
 			 * become valid after a policy reload. */
 			if (err == -EINVAL) {
-				pr_warn("audit rule for LSM \'%s\' is invalid\n",
-					str);
+				printk(KERN_WARNING "audit rule for LSM "
+				       "\'%s\' is invalid\n",  str);
 				err = 0;
 			}
 			if (err) {
@@ -614,7 +600,7 @@ static inline size_t audit_pack_string(void **bufp, const char *str)
 	return len;
 }
 
-/* Translate kernel rule representation to struct audit_rule_data. */
+/* Translate kernel rule respresentation to struct audit_rule_data. */
 static struct audit_rule_data *audit_krule_to_data(struct audit_krule *krule)
 {
 	struct audit_rule_data *data;
@@ -786,8 +772,8 @@ static inline int audit_dupe_lsm_field(struct audit_field *df,
 	/* Keep currently invalid fields around in case they
 	 * become valid after a policy reload. */
 	if (ret == -EINVAL) {
-		pr_warn("audit rule for LSM \'%s\' is invalid\n",
-			df->lsm_str);
+		printk(KERN_WARNING "audit rule for LSM \'%s\' is "
+		       "invalid\n", df->lsm_str);
 		ret = 0;
 	}
 
@@ -813,6 +799,7 @@ struct audit_entry *audit_dupe_rule(struct audit_krule *old)
 		return ERR_PTR(-ENOMEM);
 
 	new = &entry->rule;
+	new->vers_ops = old->vers_ops;
 	new->flags = old->flags;
 	new->pflags = old->pflags;
 	new->listnr = old->listnr;
@@ -1058,7 +1045,7 @@ out:
 }
 
 /* List rules using struct audit_rule_data. */
-static void audit_list_rules(int seq, struct sk_buff_head *q)
+static void audit_list_rules(__u32 portid, int seq, struct sk_buff_head *q)
 {
 	struct sk_buff *skb;
 	struct audit_krule *r;
@@ -1073,15 +1060,15 @@ static void audit_list_rules(int seq, struct sk_buff_head *q)
 			data = audit_krule_to_data(r);
 			if (unlikely(!data))
 				break;
-			skb = audit_make_reply(seq, AUDIT_LIST_RULES, 0, 1,
-					       data,
+			skb = audit_make_reply(portid, seq, AUDIT_LIST_RULES,
+					       0, 1, data,
 					       sizeof(*data) + data->buflen);
 			if (skb)
 				skb_queue_tail(q, skb);
 			kfree(data);
 		}
 	}
-	skb = audit_make_reply(seq, AUDIT_LIST_RULES, 1, 1, NULL, 0);
+	skb = audit_make_reply(portid, seq, AUDIT_LIST_RULES, 1, 1, NULL, 0);
 	if (skb)
 		skb_queue_tail(q, skb);
 }
@@ -1110,11 +1097,13 @@ static void audit_log_rule_change(char *action, struct audit_krule *rule, int re
 /**
  * audit_rule_change - apply all rules to the specified message type
  * @type: audit message type
+ * @portid: target port id for netlink audit messages
  * @seq: netlink audit message sequence (serial) number
  * @data: payload data
  * @datasz: size of payload data
  */
-int audit_rule_change(int type, int seq, void *data, size_t datasz)
+int audit_rule_change(int type, __u32 portid, int seq, void *data,
+			size_t datasz)
 {
 	int err = 0;
 	struct audit_entry *entry;
@@ -1148,13 +1137,11 @@ int audit_rule_change(int type, int seq, void *data, size_t datasz)
 
 /**
  * audit_list_rules_send - list the audit rules
- * @request_skb: skb of request we are replying to (used to target the reply)
+ * @portid: target portid for netlink audit messages
  * @seq: netlink audit message sequence (serial) number
  */
-int audit_list_rules_send(struct sk_buff *request_skb, int seq)
+int audit_list_rules_send(__u32 portid, int seq)
 {
-	u32 portid = NETLINK_CB(request_skb).portid;
-	struct net *net = sock_net(NETLINK_CB(request_skb).sk);
 	struct task_struct *tsk;
 	struct audit_netlink_list *dest;
 	int err = 0;
@@ -1168,12 +1155,11 @@ int audit_list_rules_send(struct sk_buff *request_skb, int seq)
 	dest = kmalloc(sizeof(struct audit_netlink_list), GFP_KERNEL);
 	if (!dest)
 		return -ENOMEM;
-	dest->net = get_net(net);
 	dest->portid = portid;
 	skb_queue_head_init(&dest->q);
 
 	mutex_lock(&audit_filter_mutex);
-	audit_list_rules(seq, &dest->q);
+	audit_list_rules(portid, seq, &dest->q);
 	mutex_unlock(&audit_filter_mutex);
 
 	tsk = kthread_run(audit_send_list, dest, "audit_send_list");

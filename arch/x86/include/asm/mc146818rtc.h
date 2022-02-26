@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Machine dependent access functions for RTC registers.
  */
@@ -7,13 +6,14 @@
 
 #include <asm/io.h>
 #include <asm/processor.h>
+#include <linux/mc146818rtc.h>
 
 #ifndef RTC_PORT
 #define RTC_PORT(x)	(0x70 + (x))
 #define RTC_ALWAYS_BCD	1	/* RTC operates in binary mode */
 #endif
 
-#if defined(CONFIG_X86_32)
+#if defined(CONFIG_X86_32) && defined(__HAVE_ARCH_CMPXCHG)
 /*
  * This lock provides nmi access to the CMOS/RTC registers.  It has some
  * special properties.  It is owned by a CPU and stores the index register

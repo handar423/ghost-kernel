@@ -33,10 +33,10 @@
 #include <asm/kexec.h>
 #include <asm/bug.h>
 #include <asm/ptrace.h>
-#include <asm/export.h>
 
 	.text
 
+#ifndef CONFIG_PREEMPT_RT_FULL
 /*
  * We store the saved ksp_limit in the unused part
  * of the STACK_FRAME_OVERHEAD
@@ -57,15 +57,13 @@ _GLOBAL(call_do_softirq)
 	stw	r10,THREAD+KSP_LIMIT(r2)
 	mtlr	r0
 	blr
+#endif
 
-/*
- * void call_do_irq(struct pt_regs *regs, struct thread_info *irqtp);
- */
 _GLOBAL(call_do_irq)
 	mflr	r0
 	stw	r0,4(r1)
 	lwz	r10,THREAD+KSP_LIMIT(r2)
-	addi	r11,r4,THREAD_INFO_GAP
+	addi	r11,r3,THREAD_INFO_GAP
 	stwu	r1,THREAD_SIZE-STACK_FRAME_OVERHEAD(r4)
 	mr	r1,r4
 	stw	r10,8(r1)
@@ -92,16 +90,31 @@ _GLOBAL(mulhdu)
 	addc	r7,r0,r7
 	addze	r4,r4
 1:	beqlr	cr1		/* all done if high part of A is 0 */
+	mr	r10,r3
 	mullw	r9,r3,r5
-	mulhwu	r10,r3,r5
+	mulhwu	r3,r3,r5
 	beq	2f
-	mullw	r0,r3,r6
-	mulhwu	r8,r3,r6
+	mullw	r0,r10,r6
+	mulhwu	r8,r10,r6
 	addc	r7,r0,r7
 	adde	r4,r4,r8
-	addze	r10,r10
+	addze	r3,r3
 2:	addc	r4,r4,r9
-	addze	r3,r10
+	addze	r3,r3
+	blr
+
+/*
+ * sub_reloc_offset(x) returns x - reloc_offset().
+ */
+_GLOBAL(sub_reloc_offset)
+	mflr	r0
+	bl	1f
+1:	mflr	r5
+	lis	r4,1b@ha
+	addi	r4,r4,1b@l
+	subf	r5,r4,r5
+	subf	r3,r5,r3
+	mtlr	r0
 	blr
 
 /*
@@ -209,7 +222,7 @@ _GLOBAL(low_choose_7447a_dfs)
 	mfmsr	r7
 	rlwinm	r0,r7,0,17,15
 	mtmsr	r0
-	
+
 	/* Calc new HID1 value */
 	mfspr	r4,SPRN_HID1
 	insrwi	r4,r3,1,9	/* insert parameter into bit 9 */
@@ -244,7 +257,8 @@ _GLOBAL(_nmask_and_or_msr)
  */
 _GLOBAL(real_readb)
 	mfmsr	r7
-	rlwinm	r0,r7,0,~MSR_DR
+	ori	r0,r7,MSR_DR
+	xori	r0,r0,MSR_DR
 	sync
 	mtmsr	r0
 	sync
@@ -261,7 +275,8 @@ _GLOBAL(real_readb)
  */
 _GLOBAL(real_writeb)
 	mfmsr	r7
-	rlwinm	r0,r7,0,~MSR_DR
+	ori	r0,r7,MSR_DR
+	xori	r0,r0,MSR_DR
 	sync
 	mtmsr	r0
 	sync
@@ -280,9 +295,12 @@ _GLOBAL(real_writeb)
  * Flush instruction cache.
  * This is a no-op on the 601.
  */
-#ifndef CONFIG_PPC_8xx
 _GLOBAL(flush_instruction_cache)
-#if defined(CONFIG_4xx)
+#if defined(CONFIG_8xx)
+	isync
+	lis	r5, IDC_INVALL@h
+	mtspr	SPRN_IC_CST, r5
+#elif defined(CONFIG_4xx)
 #ifdef CONFIG_403GCX
 	li      r3, 512
 	mtctr   r3
@@ -294,7 +312,7 @@ _GLOBAL(flush_instruction_cache)
 	lis	r3, KERNELBASE@h
 	iccci	0,r3
 #endif
-#elif defined(CONFIG_FSL_BOOKE)
+#elif CONFIG_FSL_BOOKE
 BEGIN_FTR_SECTION
 	mfspr   r3,SPRN_L1CSR0
 	ori     r3,r3,L1CSR0_CFI|L1CSR0_CLFC
@@ -315,11 +333,9 @@ END_FTR_SECTION_IFSET(CPU_FTR_UNIFIED_ID_CACHE)
 	mfspr	r3,SPRN_HID0
 	ori	r3,r3,HID0_ICFI
 	mtspr	SPRN_HID0,r3
-#endif /* CONFIG_4xx */
+#endif /* CONFIG_8xx/4xx */
 	isync
 	blr
-EXPORT_SYMBOL(flush_instruction_cache)
-#endif /* CONFIG_PPC_8xx */
 
 /*
  * Write any modified data cache blocks out to memory
@@ -328,14 +344,15 @@ EXPORT_SYMBOL(flush_instruction_cache)
  *
  * flush_icache_range(unsigned long start, unsigned long stop)
  */
-_GLOBAL(flush_icache_range)
+_KPROBE(flush_icache_range)
 BEGIN_FTR_SECTION
 	PURGE_PREFETCHED_INS
 	blr				/* for 601, do nothing */
 END_FTR_SECTION_IFSET(CPU_FTR_COHERENT_ICACHE)
-	rlwinm	r3,r3,0,0,31 - L1_CACHE_SHIFT
+	li	r5,L1_CACHE_BYTES-1
+	andc	r3,r3,r5
 	subf	r4,r3,r4
-	addi	r4,r4,L1_CACHE_BYTES - 1
+	add	r4,r4,r5
 	srwi.	r4,r4,L1_CACHE_SHIFT
 	beqlr
 	mtctr	r4
@@ -358,8 +375,70 @@ END_FTR_SECTION_IFSET(CPU_FTR_COHERENT_ICACHE)
 	sync				/* additional sync needed on g4 */
 	isync
 	blr
-_ASM_NOKPROBE_SYMBOL(flush_icache_range)
-EXPORT_SYMBOL(flush_icache_range)
+/*
+ * Write any modified data cache blocks out to memory.
+ * Does not invalidate the corresponding cache lines (especially for
+ * any corresponding instruction cache).
+ *
+ * clean_dcache_range(unsigned long start, unsigned long stop)
+ */
+_GLOBAL(clean_dcache_range)
+	li	r5,L1_CACHE_BYTES-1
+	andc	r3,r3,r5
+	subf	r4,r3,r4
+	add	r4,r4,r5
+	srwi.	r4,r4,L1_CACHE_SHIFT
+	beqlr
+	mtctr	r4
+
+1:	dcbst	0,r3
+	addi	r3,r3,L1_CACHE_BYTES
+	bdnz	1b
+	sync				/* wait for dcbst's to get to ram */
+	blr
+
+/*
+ * Write any modified data cache blocks out to memory and invalidate them.
+ * Does not invalidate the corresponding instruction cache blocks.
+ *
+ * flush_dcache_range(unsigned long start, unsigned long stop)
+ */
+_GLOBAL(flush_dcache_range)
+	li	r5,L1_CACHE_BYTES-1
+	andc	r3,r3,r5
+	subf	r4,r3,r4
+	add	r4,r4,r5
+	srwi.	r4,r4,L1_CACHE_SHIFT
+	beqlr
+	mtctr	r4
+
+1:	dcbf	0,r3
+	addi	r3,r3,L1_CACHE_BYTES
+	bdnz	1b
+	sync				/* wait for dcbst's to get to ram */
+	blr
+
+/*
+ * Like above, but invalidate the D-cache.  This is used by the 8xx
+ * to invalidate the cache so the PPC core doesn't get stale data
+ * from the CPM (no cache snooping here :-).
+ *
+ * invalidate_dcache_range(unsigned long start, unsigned long stop)
+ */
+_GLOBAL(invalidate_dcache_range)
+	li	r5,L1_CACHE_BYTES-1
+	andc	r3,r3,r5
+	subf	r4,r3,r4
+	add	r4,r4,r5
+	srwi.	r4,r4,L1_CACHE_SHIFT
+	beqlr
+	mtctr	r4
+
+1:	dcbi	0,r3
+	addi	r3,r3,L1_CACHE_BYTES
+	bdnz	1b
+	sync				/* wait for dcbi's to get to ram */
+	blr
 
 /*
  * Flush a particular page from the data cache to RAM.
@@ -439,6 +518,22 @@ END_FTR_SECTION_IFSET(CPU_FTR_COHERENT_ICACHE)
 #endif /* CONFIG_BOOKE */
 
 /*
+ * Clear pages using the dcbz instruction, which doesn't cause any
+ * memory traffic (except to write out any cache lines which get
+ * displaced).  This only works on cacheable memory.
+ *
+ * void clear_pages(void *page, int order) ;
+ */
+_GLOBAL(clear_pages)
+	li	r0,PAGE_SIZE/L1_CACHE_BYTES
+	slw	r0,r0,r4
+	mtctr	r0
+1:	dcbz	0,r3
+	addi	r3,r3,L1_CACHE_BYTES
+	bdnz	1b
+	blr
+
+/*
  * Copy a whole page.  We use the dcbz instruction on the destination
  * to reduce memory traffic (it eliminates the unnecessary reads of
  * the destination into cache).  This requires that the destination
@@ -498,7 +593,25 @@ _GLOBAL(copy_page)
 	li	r0,MAX_COPY_PREFETCH
 	li	r11,4
 	b	2b
-EXPORT_SYMBOL(copy_page)
+
+/*
+ * void atomic_clear_mask(atomic_t mask, atomic_t *addr)
+ * void atomic_set_mask(atomic_t mask, atomic_t *addr);
+ */
+_GLOBAL(atomic_clear_mask)
+10:	lwarx	r5,0,r4
+	andc	r5,r5,r3
+	PPC405_ERR77(0,r4)
+	stwcx.	r5,0,r4
+	bne-	10b
+	blr
+_GLOBAL(atomic_set_mask)
+10:	lwarx	r5,0,r4
+	or	r5,r5,r3
+	PPC405_ERR77(0,r4)
+	stwcx.	r5,0,r4
+	bne-	10b
+	blr
 
 /*
  * Extended precision shifts.
@@ -510,7 +623,7 @@ EXPORT_SYMBOL(copy_page)
  * R5    has shift count
  * result in R3/R4
  *
- *  ashrdi3: arithmetic right shift (sign propagation)	
+ *  ashrdi3: arithmetic right shift (sign propagation)
  *  lshrdi3: logical right shift
  *  ashldi3: left shift
  */
@@ -526,7 +639,6 @@ _GLOBAL(__ashrdi3)
 	sraw	r3,r3,r5	# MSW = MSW >> count
 	or	r4,r4,r7	# LSW |= t2
 	blr
-EXPORT_SYMBOL(__ashrdi3)
 
 _GLOBAL(__ashldi3)
 	subfic	r6,r5,32
@@ -538,7 +650,6 @@ _GLOBAL(__ashldi3)
 	slw	r4,r4,r5	# LSW = LSW << count
 	or	r3,r3,r7	# MSW |= t2
 	blr
-EXPORT_SYMBOL(__ashldi3)
 
 _GLOBAL(__lshrdi3)
 	subfic	r6,r5,32
@@ -550,7 +661,6 @@ _GLOBAL(__lshrdi3)
 	srw	r3,r3,r5	# MSW = MSW >> count
 	or	r4,r4,r7	# LSW |= t2
 	blr
-EXPORT_SYMBOL(__lshrdi3)
 
 /*
  * 64-bit comparison: __cmpdi2(s64 a, s64 b)
@@ -566,7 +676,6 @@ _GLOBAL(__cmpdi2)
 	bltlr
 	li	r3,2
 	blr
-EXPORT_SYMBOL(__cmpdi2)
 /*
  * 64-bit comparison: __ucmpdi2(u64 a, u64 b)
  * Returns 0 if a < b, 1 if a == b, 2 if a > b.
@@ -581,7 +690,6 @@ _GLOBAL(__ucmpdi2)
 	bltlr
 	li	r3,2
 	blr
-EXPORT_SYMBOL(__ucmpdi2)
 
 _GLOBAL(__bswapdi2)
 	rotlwi  r9,r4,8
@@ -593,7 +701,12 @@ _GLOBAL(__bswapdi2)
 	mr      r3,r9
 	mr      r4,r10
 	blr
-EXPORT_SYMBOL(__bswapdi2)
+
+_GLOBAL(abs)
+	srawi	r4,r3,31
+	xor	r3,r3,r4
+	sub	r3,r3,r4
+	blr
 
 #ifdef CONFIG_SMP
 _GLOBAL(start_secondary_resume)
@@ -605,14 +718,14 @@ _GLOBAL(start_secondary_resume)
 	bl	start_secondary
 	b	.
 #endif /* CONFIG_SMP */
-	
+
 /*
  * This routine is just here to keep GCC happy - sigh...
  */
 _GLOBAL(__main)
 	blr
 
-#ifdef CONFIG_KEXEC_CORE
+#ifdef CONFIG_KEXEC
 	/*
 	 * Must be relocatable PIC code callable as a C function.
 	 */
@@ -648,14 +761,12 @@ relocate_new_kernel:
 	/* Check for 47x cores */
 	mfspr	r3,SPRN_PVR
 	srwi	r3,r3,16
-	cmplwi	cr0,r3,PVR_476FPE@h
-	beq	setup_map_47x
 	cmplwi	cr0,r3,PVR_476@h
 	beq	setup_map_47x
 	cmplwi	cr0,r3,PVR_476_ISS@h
 	beq	setup_map_47x
 #endif /* CONFIG_PPC_47x */
-	
+
 /*
  * Code for setting up 1:1 mapping for PPC440x for KEXEC
  *
@@ -672,7 +783,7 @@ relocate_new_kernel:
  *
  */
 
-	/* 
+	/*
 	 * Load the PID with kernel PID (0).
 	 * Also load our MSR_IS and TID to MMUCR for TLB search.
 	 */
@@ -849,7 +960,7 @@ setup_map_47x:
 	 * Invalidates all the tlb entries by writing to 256 RPNs(r4)
 	 * of 4k page size in all  4 ways (0-3 in r3).
 	 * This would invalidate the entire UTLB including the one we are
-	 * running from. However the shadow TLB entries would help us 
+	 * running from. However the shadow TLB entries would help us
 	 * to continue the execution, until we flush them (rfi/isync).
 	 */
 	addis	r3, 0, 0x8000			/* specify the way */
@@ -880,11 +991,11 @@ clear_utlb_entry:
 
 	insrwi	r24, r7, 1, 21			/* Change the TS in the saved TLB word 0 */
 
-	/* 
+	/*
 	 * write out the TLB entries for the tmp mapping
 	 * Use way '0' so that we could easily invalidate it later.
 	 */
-	lis	r3, 0x8000			/* Way '0' */ 
+	lis	r3, 0x8000			/* Way '0' */
 
 	tlbwe	r24, r3, 0
 	tlbwe	r25, r3, 1
@@ -901,7 +1012,7 @@ clear_utlb_entry:
 	mtspr	SPRN_SRR1, r5
 	rfi
 
-	/* 
+	/*
 	 * Now we are in the tmp address space.
 	 * Create a 1:1 mapping for 0-2GiB in the original TS.
 	 */
@@ -934,7 +1045,7 @@ write_utlb:
 	/* make sure we complete the TLB write up */
 	isync
 
-	/* 
+	/*
 	 * Prepare to jump to the 1:1 mapping.
 	 * 1) Extract page size of the tmp mapping
 	 *    DSIZ = TLB_Word0[22:27]
@@ -951,7 +1062,7 @@ write_utlb:
 0:
 	/* Defaults to 256M */
 	lis	r10, 0x1000
-	
+
 	bl	1f
 1:	mflr	r4
 	addi	r4, r4, (2f-1b)			/* virtual address  of 2f */

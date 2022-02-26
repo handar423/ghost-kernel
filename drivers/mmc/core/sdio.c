@@ -1168,16 +1168,19 @@ int mmc_attach_sdio(struct mmc_host *host)
 	return 0;
 
 
-remove:
-	mmc_release_host(host);
 remove_added:
-	/*
-	 * The devices are being deleted so it is not necessary to disable
+	/* Remove without lock if the device has been added.
 	 * runtime PM. Similarly we also don't pm_runtime_put() the SDIO card
 	 * because it needs to be active to remove any function devices that
 	 * were probed, and after that it gets deleted.
 	 */
 	mmc_sdio_remove(host);
+	mmc_claim_host(host);
+remove:
+	/* And with lock if it hasn't been added. */
+	mmc_release_host(host);
+	if (host->card)
+		mmc_sdio_remove(host);
 	mmc_claim_host(host);
 err:
 	mmc_detach_bus(host);

@@ -17,7 +17,6 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/kernel.h>
-#include <linux/sched/signal.h>
 #include <linux/errno.h>
 #include <linux/slab.h>
 #include <linux/module.h>
@@ -54,7 +53,7 @@ MODULE_DEVICE_TABLE(usb, device_table);
 /* we can have up to this number of device plugged in at once */
 #define MAX_DEVICES	16
 
-#define COMMAND_TIMEOUT	(2*HZ)	/* 60 second timeout for a command */
+#define COMMAND_TIMEOUT	(2*HZ)
 
 /*
  * The locking scheme is a vanilla 3-lock:
@@ -132,6 +131,8 @@ static void adu_abort_transfers(struct adu_device *dev)
 	spin_lock_irqsave(&dev->buflock, flags);
 	if (!dev->out_urb_finished) {
 		spin_unlock_irqrestore(&dev->buflock, flags);
+		wait_event_timeout(dev->write_wait, dev->out_urb_finished,
+			COMMAND_TIMEOUT);
 		usb_kill_urb(dev->interrupt_out_urb);
 	} else
 		spin_unlock_irqrestore(&dev->buflock, flags);
@@ -153,11 +154,12 @@ static void adu_interrupt_in_callback(struct urb *urb)
 {
 	struct adu_device *dev = urb->context;
 	int status = urb->status;
+	unsigned long flags;
 
 	adu_debug_data(&dev->udev->dev, __func__,
 		       urb->actual_length, urb->transfer_buffer);
 
-	spin_lock(&dev->buflock);
+	spin_lock_irqsave(&dev->buflock, flags);
 
 	if (status != 0) {
 		if ((status != -ENOENT) && (status != -ECONNRESET) &&
@@ -188,7 +190,7 @@ static void adu_interrupt_in_callback(struct urb *urb)
 
 exit:
 	dev->read_urb_finished = 1;
-	spin_unlock(&dev->buflock);
+	spin_unlock_irqrestore(&dev->buflock, flags);
 	/* always wake up so we recover from errors */
 	wake_up_interruptible(&dev->read_wait);
 }
@@ -197,6 +199,7 @@ static void adu_interrupt_out_callback(struct urb *urb)
 {
 	struct adu_device *dev = urb->context;
 	int status = urb->status;
+	unsigned long flags;
 
 	adu_debug_data(&dev->udev->dev, __func__,
 		       urb->actual_length, urb->transfer_buffer);
@@ -211,10 +214,10 @@ static void adu_interrupt_out_callback(struct urb *urb)
 		return;
 	}
 
-	spin_lock(&dev->buflock);
+	spin_lock_irqsave(&dev->buflock, flags);
 	dev->out_urb_finished = 1;
 	wake_up(&dev->write_wait);
-	spin_unlock(&dev->buflock);
+	spin_unlock_irqrestore(&dev->buflock, flags);
 }
 
 static int adu_open(struct inode *inode, struct file *file)
@@ -558,20 +561,20 @@ static ssize_t adu_write(struct file *file, const __user char *buffer,
 			}
 
 			dev_dbg(&dev->udev->dev,
-				"%s : in progress, count = %zd\n",
+				"%s : in progress, count = %Zd\n",
 				__func__, count);
 		} else {
 			spin_unlock_irqrestore(&dev->buflock, flags);
 			set_current_state(TASK_RUNNING);
 			remove_wait_queue(&dev->write_wait, &waita);
-			dev_dbg(&dev->udev->dev, "%s : sending, count = %zd\n",
+			dev_dbg(&dev->udev->dev, "%s : sending, count = %Zd\n",
 				__func__, count);
 
 			/* write the data into interrupt_out_buffer from userspace */
 			buffer_size = usb_endpoint_maxp(dev->interrupt_out_endpoint);
 			bytes_to_write = count > buffer_size ? buffer_size : count;
 			dev_dbg(&dev->udev->dev,
-				"%s : buffer_size = %zd, count = %zd, bytes_to_write = %zd\n",
+				"%s : buffer_size = %Zd, count = %Zd, bytes_to_write = %Zd\n",
 				__func__, buffer_size, count, bytes_to_write);
 
 			if (copy_from_user(dev->interrupt_out_buffer, buffer, bytes_to_write) != 0) {
@@ -760,13 +763,14 @@ static void adu_disconnect(struct usb_interface *interface)
 
 	dev = usb_get_intfdata(interface);
 
-	mutex_lock(&dev->mtx);	/* not interruptible */
-	dev->udev = NULL;	/* poison */
 	usb_deregister_dev(interface, &adu_class);
-	mutex_unlock(&dev->mtx);
 
 	mutex_lock(&adutux_mutex);
 	usb_set_intfdata(interface, NULL);
+
+	mutex_lock(&dev->mtx);	/* not interruptible */
+	dev->udev = NULL;	/* poison */
+	mutex_unlock(&dev->mtx);
 
 	/* if the device is not opened, then we clean up right now */
 	if (!dev->open_count)

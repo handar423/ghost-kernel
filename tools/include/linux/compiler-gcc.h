@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _TOOLS_LINUX_COMPILER_H_
 #error "Please don't include <linux/compiler-gcc.h> directly, include <linux/compiler.h> instead."
 #endif
@@ -21,6 +20,9 @@
 /* &a[0] degrades to a pointer: a different type from an array */
 #define __must_be_array(a)	BUILD_BUG_ON_ZERO(__same_type((a), &(a)[0]))
 
+#ifndef __pure
+#define  __pure		__attribute__((pure))
+#endif
 #define  noinline	__attribute__((noinline))
 #ifndef __packed
 #define __packed	__attribute__((packed))

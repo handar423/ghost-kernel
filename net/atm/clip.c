@@ -68,7 +68,7 @@ static int to_atmarpd(enum atmarp_ctrl_type type, int itf, __be32 ip)
 
 	sk = sk_atm(atmarpd);
 	skb_queue_tail(&sk->sk_receive_queue, skb);
-	sk->sk_data_ready(sk);
+	sk->sk_data_ready(sk, skb->len);
 	return 0;
 }
 
@@ -137,11 +137,11 @@ static int neigh_check_cb(struct neighbour *n)
 	if (entry->vccs || time_before(jiffies, entry->expires))
 		return 0;
 
-	if (refcount_read(&n->refcnt) > 1) {
+	if (atomic_read(&n->refcnt) > 1) {
 		struct sk_buff *skb;
 
 		pr_debug("destruction postponed with ref %d\n",
-			 refcount_read(&n->refcnt));
+			 atomic_read(&n->refcnt));
 
 		while ((skb = skb_dequeue(&n->arp_queue)) != NULL)
 			dev_kfree_skb(skb);
@@ -153,7 +153,7 @@ static int neigh_check_cb(struct neighbour *n)
 	return 1;
 }
 
-static void idle_timer_check(struct timer_list *unused)
+static void idle_timer_check(unsigned long dummy)
 {
 	write_lock(&arp_tbl.lock);
 	__neigh_for_each_release(&arp_tbl, neigh_check_cb);
@@ -317,9 +317,6 @@ static int clip_constructor(struct net_device *dev, struct neighbour *neigh)
 
 static int clip_encap(struct atm_vcc *vcc, int mode)
 {
-	if (!CLIP_VCC(vcc))
-		return -EBADFD;
-
 	CLIP_VCC(vcc)->encap = mode;
 	return 0;
 }
@@ -381,13 +378,13 @@ static netdev_tx_t clip_start_xmit(struct sk_buff *skb,
 		memcpy(here, llc_oui, sizeof(llc_oui));
 		((__be16 *) here)[3] = skb->protocol;
 	}
-	refcount_add(skb->truesize, &sk_atm(vcc)->sk_wmem_alloc);
+	atomic_add(skb->truesize, &sk_atm(vcc)->sk_wmem_alloc);
 	ATM_SKB(skb)->atm_options = vcc->atm_options;
 	entry->vccs->last_use = jiffies;
 	pr_debug("atm_skb(%p)->vcc(%p)->dev(%p)\n", skb, vcc, vcc->dev);
 	old = xchg(&entry->vccs->xoff, 1);	/* assume XOFF ... */
 	if (old) {
-		pr_warn("XOFF->XOFF transition\n");
+		pr_warning("XOFF->XOFF transition\n");
 		goto out_release_neigh;
 	}
 	dev->stats.tx_packets++;
@@ -450,7 +447,7 @@ static int clip_setentry(struct atm_vcc *vcc, __be32 ip)
 	struct rtable *rt;
 
 	if (vcc->push != clip_push) {
-		pr_warn("non-CLIP VCC\n");
+		pr_warning("non-CLIP VCC\n");
 		return -EBADF;
 	}
 	clip_vcc = CLIP_VCC(vcc);
@@ -487,8 +484,9 @@ static int clip_setentry(struct atm_vcc *vcc, __be32 ip)
 }
 
 static const struct net_device_ops clip_netdev_ops = {
+	.ndo_size		= sizeof(struct net_device_ops),
 	.ndo_start_xmit		= clip_start_xmit,
-	.ndo_neigh_construct	= clip_constructor,
+	.extended.ndo_neigh_construct	= clip_constructor,
 };
 
 static void clip_setup(struct net_device *dev)
@@ -523,8 +521,7 @@ static int clip_create(int number)
 			if (PRIV(dev)->number >= number)
 				number = PRIV(dev)->number + 1;
 	}
-	dev = alloc_netdev(sizeof(struct clip_priv), "", NET_NAME_UNKNOWN,
-			   clip_setup);
+	dev = alloc_netdev(sizeof(struct clip_priv), "", clip_setup);
 	if (!dev)
 		return -ENOMEM;
 	clip_priv = PRIV(dev);
@@ -617,7 +614,7 @@ static void atmarpd_close(struct atm_vcc *vcc)
 	module_put(THIS_MODULE);
 }
 
-static const struct atmdev_ops atmarpd_dev_ops = {
+static struct atmdev_ops atmarpd_dev_ops = {
 	.close = atmarpd_close
 };
 
@@ -767,7 +764,7 @@ static void atmarp_info(struct seq_file *seq, struct neighbour *n,
 			seq_printf(seq, "(resolving)\n");
 		else
 			seq_printf(seq, "(expired, ref %d)\n",
-				   refcount_read(&entry->neigh->refcnt));
+				   atomic_read(&entry->neigh->refcnt));
 	} else if (!svc) {
 		seq_printf(seq, "%d.%d.%d\n",
 			   clip_vcc->vcc->dev->number,
@@ -884,10 +881,10 @@ static void atm_clip_exit_noproc(void);
 static int __init atm_clip_init(void)
 {
 	register_atm_ioctl(&clip_ioctl_ops);
-	register_netdevice_notifier(&clip_dev_notifier);
+	register_netdevice_notifier_rh(&clip_dev_notifier);
 	register_inetaddr_notifier(&clip_inet_notifier);
 
-	timer_setup(&idle_timer, idle_timer_check, 0);
+	setup_timer(&idle_timer, idle_timer_check, 0);
 
 #ifdef CONFIG_PROC_FS
 	{
@@ -910,7 +907,7 @@ static void atm_clip_exit_noproc(void)
 	struct net_device *dev, *next;
 
 	unregister_inetaddr_notifier(&clip_inet_notifier);
-	unregister_netdevice_notifier(&clip_dev_notifier);
+	unregister_netdevice_notifier_rh(&clip_dev_notifier);
 
 	deregister_atm_ioctl(&clip_ioctl_ops);
 

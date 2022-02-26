@@ -44,17 +44,20 @@ static int hwpoison_inject(void *data, u64 val)
 	/*
 	 * do a racy check with elevated page count, to make sure PG_hwpoison
 	 * will only be set for the targeted owner (or on a free page).
+	 * We temporarily take page lock for try_get_mem_cgroup_from_page().
 	 * memory_failure() will redo the check reliably inside page lock.
 	 */
+	lock_page(hpage);
 	err = hwpoison_filter(hpage);
+	unlock_page(hpage);
 	if (err)
 		goto put_out;
 
 inject:
-	pr_info("Injecting memory failure at pfn %#lx\n", pfn);
+	printk(KERN_INFO "Injecting memory failure at pfn %lx\n", pfn);
 	return memory_failure(pfn, 18, MF_COUNT_INCREASED);
 put_out:
-	put_hwpoison_page(p);
+	put_page(p);
 	return 0;
 }
 
@@ -71,7 +74,8 @@ DEFINE_SIMPLE_ATTRIBUTE(unpoison_fops, NULL, hwpoison_unpoison, "%lli\n");
 
 static void pfn_inject_exit(void)
 {
-	debugfs_remove_recursive(hwpoison_dir);
+	if (hwpoison_dir)
+		debugfs_remove_recursive(hwpoison_dir);
 }
 
 static int pfn_inject_init(void)
@@ -87,12 +91,12 @@ static int pfn_inject_init(void)
 	 * hardware status change, hence do not require hardware support.
 	 * They are mainly for testing hwpoison in software level.
 	 */
-	dentry = debugfs_create_file("corrupt-pfn", 0200, hwpoison_dir,
+	dentry = debugfs_create_file("corrupt-pfn", 0600, hwpoison_dir,
 					  NULL, &hwpoison_fops);
 	if (!dentry)
 		goto fail;
 
-	dentry = debugfs_create_file("unpoison-pfn", 0200, hwpoison_dir,
+	dentry = debugfs_create_file("unpoison-pfn", 0600, hwpoison_dir,
 				     NULL, &unpoison_fops);
 	if (!dentry)
 		goto fail;
@@ -122,7 +126,7 @@ static int pfn_inject_init(void)
 	if (!dentry)
 		goto fail;
 
-#ifdef CONFIG_MEMCG
+#ifdef CONFIG_MEMCG_SWAP
 	dentry = debugfs_create_u64("corrupt-filter-memcg", 0600,
 				    hwpoison_dir, &hwpoison_filter_memcg);
 	if (!dentry)

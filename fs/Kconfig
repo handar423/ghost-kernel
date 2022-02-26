@@ -14,15 +14,18 @@ config FS_IOMAP
 	bool
 
 source "fs/ext2/Kconfig"
+source "fs/ext3/Kconfig"
 source "fs/ext4/Kconfig"
+source "fs/jbd/Kconfig"
 source "fs/jbd2/Kconfig"
 
 config FS_MBCACHE
 # Meta block cache for Extended Attributes (ext2/ext3/ext4)
 	tristate
 	default y if EXT2_FS=y && EXT2_FS_XATTR
+	default y if EXT3_FS=y && EXT3_FS_XATTR
 	default y if EXT4_FS=y
-	default m if EXT2_FS_XATTR || EXT4_FS
+	default m if EXT2_FS_XATTR || EXT3_FS_XATTR || EXT4_FS
 
 source "fs/reiserfs/Kconfig"
 source "fs/jfs/Kconfig"
@@ -32,7 +35,6 @@ source "fs/gfs2/Kconfig"
 source "fs/ocfs2/Kconfig"
 source "fs/btrfs/Kconfig"
 source "fs/nilfs2/Kconfig"
-source "fs/f2fs/Kconfig"
 
 config FS_DAX
 	bool "Direct Access (DAX) support"
@@ -58,6 +60,13 @@ config FS_DAX_PMD
 	depends on ZONE_DEVICE
 	depends on TRANSPARENT_HUGEPAGE
 
+# Selected by DAX drivers that do not expect filesystem DAX to support
+# get_user_pages() of DAX mappings. I.e. "limited" indicates no support
+# for fork() of processes with MAP_SHARED mappings or support for
+# direct-I/O to a DAX mapping.
+config FS_DAX_LIMITED
+	bool
+
 endif # BLOCK
 
 # Posix ACL utility routines
@@ -70,12 +79,6 @@ config FS_POSIX_ACL
 
 config EXPORTFS
 	tristate
-
-config EXPORTFS_BLOCK_OPS
-	bool "Enable filesystem export operations for block IO"
-	help
-	  This option enables the export operations for a filesystem to support
-	  external block IO.
 
 config FILE_LOCKING
 	bool "Enable POSIX file locking API" if EXPERT
@@ -95,8 +98,6 @@ config MANDATORY_FILE_LOCKING
 
 	  To the best of my knowledge this is dead code that no one cares about.
 
-source "fs/crypto/Kconfig"
-
 source "fs/notify/Kconfig"
 
 source "fs/quota/Kconfig"
@@ -104,6 +105,10 @@ source "fs/quota/Kconfig"
 source "fs/autofs4/Kconfig"
 source "fs/fuse/Kconfig"
 source "fs/overlayfs/Kconfig"
+
+config GENERIC_ACL
+	bool
+	select FS_POSIX_ACL
 
 menu "Caches"
 
@@ -153,7 +158,7 @@ config TMPFS_POSIX_ACL
 	bool "Tmpfs POSIX Access Control Lists"
 	depends on TMPFS
 	select TMPFS_XATTR
-	select FS_POSIX_ACL
+	select GENERIC_ACL
 	help
 	  POSIX Access Control Lists (ACLs) support additional access rights
 	  for users and groups beyond the standard owner/group/world scheme,
@@ -200,11 +205,7 @@ config HUGETLBFS
 config HUGETLB_PAGE
 	def_bool HUGETLBFS
 
-config ARCH_HAS_GIGANTIC_PAGE
-	bool
-
 source "fs/configfs/Kconfig"
-source "fs/efivarfs/Kconfig"
 
 endmenu
 
@@ -223,7 +224,6 @@ menuconfig MISC_FILESYSTEMS
 
 if MISC_FILESYSTEMS
 
-source "fs/orangefs/Kconfig"
 source "fs/adfs/Kconfig"
 source "fs/affs/Kconfig"
 source "fs/ecryptfs/Kconfig"
@@ -235,6 +235,7 @@ source "fs/efs/Kconfig"
 source "fs/jffs2/Kconfig"
 # UBIFS File system configuration
 source "fs/ubifs/Kconfig"
+source "fs/logfs/Kconfig"
 source "fs/cramfs/Kconfig"
 source "fs/squashfs/Kconfig"
 source "fs/freevxfs/Kconfig"
@@ -248,6 +249,8 @@ source "fs/pstore/Kconfig"
 source "fs/sysv/Kconfig"
 source "fs/ufs/Kconfig"
 source "fs/exofs/Kconfig"
+source "fs/f2fs/Kconfig"
+source "fs/efivarfs/Kconfig"
 
 endif # MISC_FILESYSTEMS
 
