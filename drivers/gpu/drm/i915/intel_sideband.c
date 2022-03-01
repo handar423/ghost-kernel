@@ -60,7 +60,7 @@ static void __vlv_punit_get(struct drm_i915_private *i915)
 	 * to the Valleyview P-unit and not all sideband communications.
 	 */
 	if (IS_VALLEYVIEW(i915)) {
-		cpu_latency_qos_update_request(&i915->sb_qos, 0);
+		pm_qos_update_request(&i915->sb_qos, 0);
 		on_each_cpu(ping, NULL, 1);
 	}
 }
@@ -68,8 +68,7 @@ static void __vlv_punit_get(struct drm_i915_private *i915)
 static void __vlv_punit_put(struct drm_i915_private *i915)
 {
 	if (IS_VALLEYVIEW(i915))
-		cpu_latency_qos_update_request(&i915->sb_qos,
-					       PM_QOS_DEFAULT_VALUE);
+		pm_qos_update_request(&i915->sb_qos, PM_QOS_DEFAULT_VALUE);
 
 	iosf_mbi_punit_release();
 }
@@ -106,8 +105,8 @@ static int vlv_sideband_rw(struct drm_i915_private *i915,
 	if (intel_wait_for_register(uncore,
 				    VLV_IOSF_DOORBELL_REQ, IOSF_SB_BUSY, 0,
 				    5)) {
-		drm_dbg(&i915->drm, "IOSF sideband idle wait (%s) timed out\n",
-			is_read ? "read" : "write");
+		DRM_DEBUG_DRIVER("IOSF sideband idle wait (%s) timed out\n",
+				 is_read ? "read" : "write");
 		return -EAGAIN;
 	}
 
@@ -130,8 +129,8 @@ static int vlv_sideband_rw(struct drm_i915_private *i915,
 			*val = intel_uncore_read_fw(uncore, VLV_IOSF_DATA);
 		err = 0;
 	} else {
-		drm_dbg(&i915->drm, "IOSF sideband finish wait (%s) timed out\n",
-			is_read ? "read" : "write");
+		DRM_DEBUG_DRIVER("IOSF sideband finish wait (%s) timed out\n",
+				 is_read ? "read" : "write");
 		err = -ETIMEDOUT;
 	}
 
@@ -231,21 +230,9 @@ void vlv_ccu_write(struct drm_i915_private *i915, u32 reg, u32 val)
 			SB_CRWRDA_NP, reg, &val);
 }
 
-static u32 vlv_dpio_phy_iosf_port(struct drm_i915_private *i915, enum dpio_phy phy)
-{
-	/*
-	 * IOSF_PORT_DPIO: VLV x2 PHY (DP/HDMI B and C), CHV x1 PHY (DP/HDMI D)
-	 * IOSF_PORT_DPIO_2: CHV x2 PHY (DP/HDMI B and C)
-	 */
-	if (IS_CHERRYVIEW(i915))
-		return phy == DPIO_PHY0 ? IOSF_PORT_DPIO_2 : IOSF_PORT_DPIO;
-	else
-		return IOSF_PORT_DPIO;
-}
-
 u32 vlv_dpio_read(struct drm_i915_private *i915, enum pipe pipe, int reg)
 {
-	u32 port = vlv_dpio_phy_iosf_port(i915, DPIO_PHY(pipe));
+	int port = i915->dpio_phy_iosf_port[DPIO_PHY(pipe)];
 	u32 val = 0;
 
 	vlv_sideband_rw(i915, DPIO_DEVFN, port, SB_MRD_NP, reg, &val);
@@ -254,9 +241,8 @@ u32 vlv_dpio_read(struct drm_i915_private *i915, enum pipe pipe, int reg)
 	 * FIXME: There might be some registers where all 1's is a valid value,
 	 * so ideally we should check the register offset instead...
 	 */
-	drm_WARN(&i915->drm, val == 0xffffffff,
-		 "DPIO read pipe %c reg 0x%x == 0x%x\n",
-		 pipe_name(pipe), reg, val);
+	WARN(val == 0xffffffff, "DPIO read pipe %c reg 0x%x == 0x%x\n",
+	     pipe_name(pipe), reg, val);
 
 	return val;
 }
@@ -264,7 +250,7 @@ u32 vlv_dpio_read(struct drm_i915_private *i915, enum pipe pipe, int reg)
 void vlv_dpio_write(struct drm_i915_private *i915,
 		    enum pipe pipe, int reg, u32 val)
 {
-	u32 port = vlv_dpio_phy_iosf_port(i915, DPIO_PHY(pipe));
+	int port = i915->dpio_phy_iosf_port[DPIO_PHY(pipe)];
 
 	vlv_sideband_rw(i915, DPIO_DEVFN, port, SB_MWR_NP, reg, &val);
 }
@@ -297,8 +283,7 @@ static int intel_sbi_rw(struct drm_i915_private *i915, u16 reg,
 	if (intel_wait_for_register_fw(uncore,
 				       SBI_CTL_STAT, SBI_BUSY, 0,
 				       100)) {
-		drm_err(&i915->drm,
-			"timeout waiting for SBI to become ready\n");
+		DRM_ERROR("timeout waiting for SBI to become ready\n");
 		return -EBUSY;
 	}
 
@@ -316,13 +301,12 @@ static int intel_sbi_rw(struct drm_i915_private *i915, u16 reg,
 	if (__intel_wait_for_register_fw(uncore,
 					 SBI_CTL_STAT, SBI_BUSY, 0,
 					 100, 100, &cmd)) {
-		drm_err(&i915->drm,
-			"timeout waiting for SBI to complete read\n");
+		DRM_ERROR("timeout waiting for SBI to complete read\n");
 		return -ETIMEDOUT;
 	}
 
 	if (cmd & SBI_RESPONSE_FAIL) {
-		drm_err(&i915->drm, "error during SBI read of reg %x\n", reg);
+		DRM_ERROR("error during SBI read of reg %x\n", reg);
 		return -ENXIO;
 	}
 
@@ -348,7 +332,7 @@ void intel_sbi_write(struct drm_i915_private *i915, u16 reg, u32 value,
 	intel_sbi_rw(i915, reg, destination, &value, false);
 }
 
-static int gen6_check_mailbox_status(u32 mbox)
+static inline int gen6_check_mailbox_status(u32 mbox)
 {
 	switch (mbox & GEN6_PCODE_ERROR_MASK) {
 	case GEN6_PCODE_SUCCESS:
@@ -368,7 +352,7 @@ static int gen6_check_mailbox_status(u32 mbox)
 	}
 }
 
-static int gen7_check_mailbox_status(u32 mbox)
+static inline int gen7_check_mailbox_status(u32 mbox)
 {
 	switch (mbox & GEN6_PCODE_ERROR_MASK) {
 	case GEN6_PCODE_SUCCESS:
@@ -379,12 +363,6 @@ static int gen7_check_mailbox_status(u32 mbox)
 		return -ETIMEDOUT;
 	case GEN7_PCODE_ILLEGAL_DATA:
 		return -EINVAL;
-	case GEN11_PCODE_ILLEGAL_SUBCOMMAND:
-		return -ENXIO;
-	case GEN11_PCODE_LOCKED:
-		return -EBUSY;
-	case GEN11_PCODE_REJECTED:
-		return -EACCES;
 	case GEN7_PCODE_MIN_FREQ_TABLE_GT_RATIO_OUT_OF_RANGE:
 		return -EOVERFLOW;
 	default:
@@ -443,14 +421,13 @@ int sandybridge_pcode_read(struct drm_i915_private *i915, u32 mbox,
 
 	mutex_lock(&i915->sb_lock);
 	err = __sandybridge_pcode_rw(i915, mbox, val, val1,
-				     500, 20,
+				     500, 0,
 				     true);
 	mutex_unlock(&i915->sb_lock);
 
 	if (err) {
-		drm_dbg(&i915->drm,
-			"warning: pcode (read from mbox %x) mailbox access failed for %ps: %d\n",
-			mbox, __builtin_return_address(0), err);
+		DRM_DEBUG_DRIVER("warning: pcode (read from mbox %x) mailbox access failed for %ps: %d\n",
+				 mbox, __builtin_return_address(0), err);
 	}
 
 	return err;
@@ -470,9 +447,8 @@ int sandybridge_pcode_write_timeout(struct drm_i915_private *i915,
 	mutex_unlock(&i915->sb_lock);
 
 	if (err) {
-		drm_dbg(&i915->drm,
-			"warning: pcode (write of 0x%08x to mbox %x) mailbox access failed for %ps: %d\n",
-			val, mbox, __builtin_return_address(0), err);
+		DRM_DEBUG_DRIVER("warning: pcode (write of 0x%08x to mbox %x) mailbox access failed for %ps: %d\n",
+				 val, mbox, __builtin_return_address(0), err);
 	}
 
 	return err;
@@ -543,9 +519,8 @@ int skl_pcode_request(struct drm_i915_private *i915, u32 mbox, u32 request,
 	 * requests, and for any quirks of the PCODE firmware that delays
 	 * the request completion.
 	 */
-	drm_dbg_kms(&i915->drm,
-		    "PCODE timeout, retrying with preemption disabled\n");
-	drm_WARN_ON_ONCE(&i915->drm, timeout_base_ms > 3);
+	DRM_DEBUG_KMS("PCODE timeout, retrying with preemption disabled\n");
+	WARN_ON_ONCE(timeout_base_ms > 3);
 	preempt_disable();
 	ret = wait_for_atomic(COND, 50);
 	preempt_enable();
@@ -554,19 +529,4 @@ out:
 	mutex_unlock(&i915->sb_lock);
 	return ret ? ret : status;
 #undef COND
-}
-
-void intel_pcode_init(struct drm_i915_private *i915)
-{
-	int ret;
-
-	if (!IS_DGFX(i915))
-		return;
-
-	ret = skl_pcode_request(i915, DG1_PCODE_STATUS,
-				DG1_UNCORE_GET_INIT_STATUS,
-				DG1_UNCORE_INIT_STATUS_COMPLETE,
-				DG1_UNCORE_INIT_STATUS_COMPLETE, 50);
-	if (ret)
-		drm_err(&i915->drm, "Pcode did not report uncore initialization completion!\n");
 }

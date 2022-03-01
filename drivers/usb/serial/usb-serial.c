@@ -288,7 +288,7 @@ static void serial_close(struct tty_struct *tty, struct file *filp)
 
 /**
  * serial_cleanup - free resources post close/hangup
- * @tty: tty to clean up
+ * @port: port to free up
  *
  * Do the resource freeing and refcount dropping for the port.
  * Avoid freeing the console.

@@ -16,7 +16,6 @@
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <perf/evlist.h>
-#include <perf/mmap.h>
 
 /*
  * This test will generate random numbers of calls to some getpid syscalls,
@@ -69,7 +68,7 @@ int test__basic_mmap(struct test *test __maybe_unused, int subtest __maybe_unuse
 
 	evlist = evlist__new();
 	if (evlist == NULL) {
-		pr_debug("evlist__new\n");
+		pr_debug("perf_evlist__new\n");
 		goto out_free_cpus;
 	}
 
@@ -79,14 +78,14 @@ int test__basic_mmap(struct test *test __maybe_unused, int subtest __maybe_unuse
 		char name[64];
 
 		snprintf(name, sizeof(name), "sys_enter_%s", syscall_names[i]);
-		evsels[i] = evsel__newtp("syscalls", name);
+		evsels[i] = perf_evsel__newtp("syscalls", name);
 		if (IS_ERR(evsels[i])) {
-			pr_debug("evsel__new(%s)\n", name);
+			pr_debug("perf_evsel__new(%s)\n", name);
 			goto out_delete_evlist;
 		}
 
 		evsels[i]->core.attr.wakeup_events = 1;
-		evsel__set_sample_id(evsels[i], false);
+		perf_evsel__set_sample_id(evsels[i], false);
 
 		evlist__add(evlist, evsels[i]);
 
@@ -114,10 +113,10 @@ int test__basic_mmap(struct test *test __maybe_unused, int subtest __maybe_unuse
 		}
 
 	md = &evlist->mmap[0];
-	if (perf_mmap__read_init(&md->core) < 0)
+	if (perf_mmap__read_init(md) < 0)
 		goto out_init;
 
-	while ((event = perf_mmap__read_event(&md->core)) != NULL) {
+	while ((event = perf_mmap__read_event(md)) != NULL) {
 		struct perf_sample sample;
 
 		if (event->header.type != PERF_RECORD_SAMPLE) {
@@ -126,23 +125,23 @@ int test__basic_mmap(struct test *test __maybe_unused, int subtest __maybe_unuse
 			goto out_delete_evlist;
 		}
 
-		err = evlist__parse_sample(evlist, event, &sample);
+		err = perf_evlist__parse_sample(evlist, event, &sample);
 		if (err) {
 			pr_err("Can't parse sample, err = %d\n", err);
 			goto out_delete_evlist;
 		}
 
 		err = -1;
-		evsel = evlist__id2evsel(evlist, sample.id);
+		evsel = perf_evlist__id2evsel(evlist, sample.id);
 		if (evsel == NULL) {
 			pr_debug("event with id %" PRIu64
 				 " doesn't map to an evsel\n", sample.id);
 			goto out_delete_evlist;
 		}
 		nr_events[evsel->idx]++;
-		perf_mmap__consume(&md->core);
+		perf_mmap__consume(md);
 	}
-	perf_mmap__read_done(&md->core);
+	perf_mmap__read_done(md);
 
 out_init:
 	err = 0;
@@ -150,7 +149,7 @@ out_init:
 		if (nr_events[evsel->idx] != expected_nr_events[evsel->idx]) {
 			pr_debug("expected %d %s events, got %d\n",
 				 expected_nr_events[evsel->idx],
-				 evsel__name(evsel), nr_events[evsel->idx]);
+				 perf_evsel__name(evsel), nr_events[evsel->idx]);
 			err = -1;
 			goto out_delete_evlist;
 		}

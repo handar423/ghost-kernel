@@ -218,6 +218,7 @@ static bool m48t86_verify_chip(struct platform_device *pdev)
 static int m48t86_rtc_probe(struct platform_device *pdev)
 {
 	struct m48t86_rtc_info *info;
+	struct resource *res;
 	unsigned char reg;
 	int err;
 	struct nvmem_config m48t86_nvmem_cfg = {
@@ -234,11 +235,17 @@ static int m48t86_rtc_probe(struct platform_device *pdev)
 	if (!info)
 		return -ENOMEM;
 
-	info->index_reg = devm_platform_ioremap_resource(pdev, 0);
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	if (!res)
+		return -ENODEV;
+	info->index_reg = devm_ioremap_resource(&pdev->dev, res);
 	if (IS_ERR(info->index_reg))
 		return PTR_ERR(info->index_reg);
 
-	info->data_reg = devm_platform_ioremap_resource(pdev, 1);
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 1);
+	if (!res)
+		return -ENODEV;
+	info->data_reg = devm_ioremap_resource(&pdev->dev, res);
 	if (IS_ERR(info->data_reg))
 		return PTR_ERR(info->data_reg);
 
@@ -254,12 +261,13 @@ static int m48t86_rtc_probe(struct platform_device *pdev)
 		return PTR_ERR(info->rtc);
 
 	info->rtc->ops = &m48t86_rtc_ops;
+	info->rtc->nvram_old_abi = true;
 
-	err = devm_rtc_register_device(info->rtc);
+	err = rtc_register_device(info->rtc);
 	if (err)
 		return err;
 
-	devm_rtc_nvmem_register(info->rtc, &m48t86_nvmem_cfg);
+	rtc_nvmem_register(info->rtc, &m48t86_nvmem_cfg);
 
 	/* read battery status */
 	reg = m48t86_readb(&pdev->dev, M48T86_D);

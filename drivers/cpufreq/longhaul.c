@@ -593,6 +593,7 @@ static void longhaul_setup_voltagescaling(void)
 		break;
 	default:
 		return;
+		break;
 	}
 	if (min_vid_speed >= highest_speed)
 		return;
@@ -909,7 +910,7 @@ static struct cpufreq_driver longhaul_driver = {
 };
 
 static const struct x86_cpu_id longhaul_id[] = {
-	X86_MATCH_VENDOR_FAM(CENTAUR, 6, NULL),
+	{ X86_VENDOR_CENTAUR, 6 },
 	{}
 };
 MODULE_DEVICE_TABLE(x86cpu, longhaul_id);

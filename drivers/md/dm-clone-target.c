@@ -68,6 +68,7 @@ struct hash_table_bucket;
 
 struct clone {
 	struct dm_target *ti;
+	struct dm_target_callbacks callbacks;
 
 	struct dm_dev *metadata_dev;
 	struct dm_dev *dest_dev;
@@ -329,7 +330,7 @@ static void submit_bios(struct bio_list *bios)
 	blk_start_plug(&plug);
 
 	while ((bio = bio_list_pop(bios)))
-		submit_bio_noacct(bio);
+		generic_make_request(bio);
 
 	blk_finish_plug(&plug);
 }
@@ -345,7 +346,7 @@ static void submit_bios(struct bio_list *bios)
 static void issue_bio(struct clone *clone, struct bio *bio)
 {
 	if (!bio_triggers_commit(clone, bio)) {
-		submit_bio_noacct(bio);
+		generic_make_request(bio);
 		return;
 	}
 
@@ -472,7 +473,7 @@ static void complete_discard_bio(struct clone *clone, struct bio *bio, bool succ
 		bio_region_range(clone, bio, &rs, &nr_regions);
 		trim_bio(bio, region_to_sector(clone, rs),
 			 nr_regions << clone->region_shift);
-		submit_bio_noacct(bio);
+		generic_make_request(bio);
 	} else
 		bio_endio(bio);
 }
@@ -572,12 +573,6 @@ struct hash_table_bucket {
 
 #define bucket_unlock_irqrestore(bucket, flags) \
 	spin_unlock_irqrestore(&(bucket)->lock, flags)
-
-#define bucket_lock_irq(bucket) \
-	spin_lock_irq(&(bucket)->lock)
-
-#define bucket_unlock_irq(bucket) \
-	spin_unlock_irq(&(bucket)->lock)
 
 static int hash_table_init(struct clone *clone)
 {
@@ -864,7 +859,7 @@ static void hydration_overwrite(struct dm_clone_region_hydration *hd, struct bio
 	bio->bi_private = hd;
 
 	atomic_inc(&hd->clone->hydrations_in_flight);
-	submit_bio_noacct(bio);
+	generic_make_request(bio);
 }
 
 /*
@@ -879,6 +874,7 @@ static void hydration_overwrite(struct dm_clone_region_hydration *hd, struct bio
  */
 static void hydrate_bio_region(struct clone *clone, struct bio *bio)
 {
+	unsigned long flags;
 	unsigned long region_nr;
 	struct hash_table_bucket *bucket;
 	struct dm_clone_region_hydration *hd, *hd2;
@@ -886,19 +882,19 @@ static void hydrate_bio_region(struct clone *clone, struct bio *bio)
 	region_nr = bio_to_region(clone, bio);
 	bucket = get_hash_table_bucket(clone, region_nr);
 
-	bucket_lock_irq(bucket);
+	bucket_lock_irqsave(bucket, flags);
 
 	hd = __hash_find(bucket, region_nr);
 	if (hd) {
 		/* Someone else is hydrating the region */
 		bio_list_add(&hd->deferred_bios, bio);
-		bucket_unlock_irq(bucket);
+		bucket_unlock_irqrestore(bucket, flags);
 		return;
 	}
 
 	if (dm_clone_is_region_hydrated(clone->cmd, region_nr)) {
 		/* The region has been hydrated */
-		bucket_unlock_irq(bucket);
+		bucket_unlock_irqrestore(bucket, flags);
 		issue_bio(clone, bio);
 		return;
 	}
@@ -907,16 +903,16 @@ static void hydrate_bio_region(struct clone *clone, struct bio *bio)
 	 * We must allocate a hydration descriptor and start the hydration of
 	 * the corresponding region.
 	 */
-	bucket_unlock_irq(bucket);
+	bucket_unlock_irqrestore(bucket, flags);
 
 	hd = alloc_hydration(clone);
 	hydration_init(hd, region_nr);
 
-	bucket_lock_irq(bucket);
+	bucket_lock_irqsave(bucket, flags);
 
 	/* Check if the region has been hydrated in the meantime. */
 	if (dm_clone_is_region_hydrated(clone->cmd, region_nr)) {
-		bucket_unlock_irq(bucket);
+		bucket_unlock_irqrestore(bucket, flags);
 		free_hydration(hd);
 		issue_bio(clone, bio);
 		return;
@@ -926,7 +922,7 @@ static void hydrate_bio_region(struct clone *clone, struct bio *bio)
 	if (hd2 != hd) {
 		/* Someone else started the region's hydration. */
 		bio_list_add(&hd2->deferred_bios, bio);
-		bucket_unlock_irq(bucket);
+		bucket_unlock_irqrestore(bucket, flags);
 		free_hydration(hd);
 		return;
 	}
@@ -938,7 +934,7 @@ static void hydrate_bio_region(struct clone *clone, struct bio *bio)
 	 */
 	if (unlikely(get_clone_mode(clone) >= CM_READ_ONLY)) {
 		hlist_del(&hd->h);
-		bucket_unlock_irq(bucket);
+		bucket_unlock_irqrestore(bucket, flags);
 		free_hydration(hd);
 		bio_io_error(bio);
 		return;
@@ -952,11 +948,11 @@ static void hydrate_bio_region(struct clone *clone, struct bio *bio)
 	 * to the destination device.
 	 */
 	if (is_overwrite_bio(clone, bio)) {
-		bucket_unlock_irq(bucket);
+		bucket_unlock_irqrestore(bucket, flags);
 		hydration_overwrite(hd, bio);
 	} else {
 		bio_list_add(&hd->deferred_bios, bio);
-		bucket_unlock_irq(bucket);
+		bucket_unlock_irqrestore(bucket, flags);
 		hydration_copy(hd, 1);
 	}
 }
@@ -1023,6 +1019,7 @@ static unsigned long __start_next_hydration(struct clone *clone,
 					    unsigned long offset,
 					    struct batch_info *batch)
 {
+	unsigned long flags;
 	struct hash_table_bucket *bucket;
 	struct dm_clone_region_hydration *hd;
 	unsigned long nr_regions = clone->nr_regions;
@@ -1036,13 +1033,13 @@ static unsigned long __start_next_hydration(struct clone *clone,
 			break;
 
 		bucket = get_hash_table_bucket(clone, offset);
-		bucket_lock_irq(bucket);
+		bucket_lock_irqsave(bucket, flags);
 
 		if (!dm_clone_is_region_hydrated(clone->cmd, offset) &&
 		    !__hash_find(bucket, offset)) {
 			hydration_init(hd, offset);
 			__insert_region_hydration(bucket, hd);
-			bucket_unlock_irq(bucket);
+			bucket_unlock_irqrestore(bucket, flags);
 
 			/* Batch hydration */
 			__batch_hydration(batch, hd);
@@ -1050,7 +1047,7 @@ static unsigned long __start_next_hydration(struct clone *clone,
 			return (offset + 1);
 		}
 
-		bucket_unlock_irq(bucket);
+		bucket_unlock_irqrestore(bucket, flags);
 
 	} while (++offset < nr_regions);
 
@@ -1280,7 +1277,7 @@ static void process_deferred_flush_bios(struct clone *clone)
 			 */
 			bio_endio(bio);
 		} else {
-			submit_bio_noacct(bio);
+			generic_make_request(bio);
 		}
 	}
 }
@@ -1515,6 +1512,18 @@ static void clone_status(struct dm_target *ti, status_type_t type,
 
 error:
 	DMEMIT("Error");
+}
+
+static int clone_is_congested(struct dm_target_callbacks *cb, int bdi_bits)
+{
+	struct request_queue *dest_q, *source_q;
+	struct clone *clone = container_of(cb, struct clone, callbacks);
+
+	source_q = bdev_get_queue(clone->source_dev->bdev);
+	dest_q = bdev_get_queue(clone->dest_dev->bdev);
+
+	return (bdi_congested(dest_q->backing_dev_info, bdi_bits) |
+		bdi_congested(source_q->backing_dev_info, bdi_bits));
 }
 
 static sector_t get_dev_size(struct dm_dev *dev)
@@ -1917,6 +1926,8 @@ static int clone_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 		goto out_with_mempool;
 
 	mutex_init(&clone->commit_lock);
+	clone->callbacks.congested_fn = clone_is_congested;
+	dm_table_add_target_callbacks(ti->table, &clone->callbacks);
 
 	/* Enable flushes */
 	ti->num_flush_bios = 1;

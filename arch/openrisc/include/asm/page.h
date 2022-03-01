@@ -86,6 +86,11 @@ typedef struct page *pgtable_t;
 
 #endif /* __ASSEMBLY__ */
 
+
+#define VM_DATA_DEFAULT_FLAGS	(VM_READ | VM_WRITE | VM_EXEC | \
+				 VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC)
+
+
 #include <asm-generic/memory_model.h>
 #include <asm-generic/getorder.h>
 

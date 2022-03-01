@@ -259,7 +259,7 @@ static void au1xmmc_tasklet_finish(unsigned long param)
 	au1xmmc_finish_request(host);
 }
 
-static int au1xmmc_send_command(struct au1xmmc_host *host,
+static int au1xmmc_send_command(struct au1xmmc_host *host, int wait,
 				struct mmc_command *cmd, struct mmc_data *data)
 {
 	u32 mmccmd = (cmd->opcode << SD_CMD_CI_SHIFT);
@@ -302,12 +302,28 @@ static int au1xmmc_send_command(struct au1xmmc_host *host,
 	__raw_writel(cmd->arg, HOST_CMDARG(host));
 	wmb(); /* drain writebuffer */
 
+	if (wait)
+		IRQ_OFF(host, SD_CONFIG_CR);
+
 	__raw_writel((mmccmd | SD_CMD_GO), HOST_CMD(host));
 	wmb(); /* drain writebuffer */
 
 	/* Wait for the command to go on the line */
 	while (__raw_readl(HOST_CMD(host)) & SD_CMD_GO)
 		/* nop */;
+
+	/* Wait for the command to come back */
+	if (wait) {
+		u32 status = __raw_readl(HOST_STATUS(host));
+
+		while (!(status & SD_STATUS_CR))
+			status = __raw_readl(HOST_STATUS(host));
+
+		/* Clear the CR status */
+		__raw_writel(SD_STATUS_CR, HOST_STATUS(host));
+
+		IRQ_ON(host, SD_CONFIG_CR);
+	}
 
 	return 0;
 }
@@ -695,7 +711,7 @@ static void au1xmmc_request(struct mmc_host* mmc, struct mmc_request* mrq)
 	}
 
 	if (!ret)
-		ret = au1xmmc_send_command(host, mrq->cmd, mrq->data);
+		ret = au1xmmc_send_command(host, 0, mrq->cmd, mrq->data);
 
 	if (ret) {
 		mrq->cmd->error = ret;
@@ -968,9 +984,12 @@ static int au1xmmc_probe(struct platform_device *pdev)
 		goto out2;
 	}
 
-	host->irq = platform_get_irq(pdev, 0);
-	if (host->irq < 0)
+	r = platform_get_resource(pdev, IORESOURCE_IRQ, 0);
+	if (!r) {
+		dev_err(&pdev->dev, "no IRQ defined\n");
 		goto out3;
+	}
+	host->irq = r->start;
 
 	mmc->ops = &au1xmmc_ops;
 
@@ -1189,7 +1208,6 @@ static struct platform_driver au1xmmc_driver = {
 	.resume        = au1xmmc_resume,
 	.driver        = {
 		.name  = DRIVER_NAME,
-		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 	},
 };
 

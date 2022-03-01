@@ -52,6 +52,7 @@
 #endif
 #include <linux/uaccess.h>
 
+#include <asm/pgtable.h>
 #include <asm/irq.h>
 
 #ifdef CONFIG_PCI
@@ -2245,7 +2246,7 @@ static int happy_meal_close(struct net_device *dev)
 #define SXD(x)
 #endif
 
-static void happy_meal_tx_timeout(struct net_device *dev, unsigned int txqueue)
+static void happy_meal_tx_timeout(struct net_device *dev)
 {
 	struct happy_meal *hp = netdev_priv(dev);
 

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /* sysfs entries for device PM */
 #include <linux/device.h>
-#include <linux/kobject.h>
 #include <linux/string.h>
 #include <linux/export.h>
 #include <linux/pm_qos.h>
@@ -102,7 +101,7 @@ static ssize_t control_show(struct device *dev, struct device_attribute *attr,
 			    char *buf)
 {
 	return sysfs_emit(buf, "%s\n",
-			  dev->power.runtime_auto ? ctrl_auto : ctrl_on);
+				dev->power.runtime_auto ? ctrl_auto : ctrl_on);
 }
 
 static ssize_t control_store(struct device * dev, struct device_attribute *attr,
@@ -122,70 +121,66 @@ static ssize_t control_store(struct device * dev, struct device_attribute *attr,
 static DEVICE_ATTR_RW(control);
 
 static ssize_t runtime_active_time_show(struct device *dev,
-					struct device_attribute *attr,
-					char *buf)
+				struct device_attribute *attr, char *buf)
 {
+	int ret;
 	u64 tmp = pm_runtime_active_time(dev);
-
 	do_div(tmp, NSEC_PER_MSEC);
-
-	return sysfs_emit(buf, "%llu\n", tmp);
+	ret = sysfs_emit(buf, "%llu\n", tmp);
+	return ret;
 }
 
 static DEVICE_ATTR_RO(runtime_active_time);
 
 static ssize_t runtime_suspended_time_show(struct device *dev,
-					   struct device_attribute *attr,
-					   char *buf)
+				struct device_attribute *attr, char *buf)
 {
+	int ret;
 	u64 tmp = pm_runtime_suspended_time(dev);
-
 	do_div(tmp, NSEC_PER_MSEC);
-
-	return sysfs_emit(buf, "%llu\n", tmp);
+	ret = sysfs_emit(buf, "%llu\n", tmp);
+	return ret;
 }
 
 static DEVICE_ATTR_RO(runtime_suspended_time);
 
 static ssize_t runtime_status_show(struct device *dev,
-				   struct device_attribute *attr, char *buf)
+				struct device_attribute *attr, char *buf)
 {
-	const char *output;
+	const char *p;
 
 	if (dev->power.runtime_error) {
-		output = "error";
+		p = "error\n";
 	} else if (dev->power.disable_depth) {
-		output = "unsupported";
+		p = "unsupported\n";
 	} else {
 		switch (dev->power.runtime_status) {
 		case RPM_SUSPENDED:
-			output = "suspended";
+			p = "suspended\n";
 			break;
 		case RPM_SUSPENDING:
-			output = "suspending";
+			p = "suspending\n";
 			break;
 		case RPM_RESUMING:
-			output = "resuming";
+			p = "resuming\n";
 			break;
 		case RPM_ACTIVE:
-			output = "active";
+			p = "active\n";
 			break;
 		default:
 			return -EIO;
 		}
 	}
-	return sysfs_emit(buf, "%s\n", output);
+	return sysfs_emit(buf, p);
 }
 
 static DEVICE_ATTR_RO(runtime_status);
 
 static ssize_t autosuspend_delay_ms_show(struct device *dev,
-					 struct device_attribute *attr,
-					 char *buf)
+		struct device_attribute *attr, char *buf)
 {
 	if (!dev->power.use_autosuspend)
 		return -EIO;
-
 	return sysfs_emit(buf, "%d\n", dev->power.autosuspend_delay);
 }
 
@@ -259,9 +254,9 @@ static ssize_t pm_qos_latency_tolerance_us_show(struct device *dev,
 	s32 value = dev_pm_qos_get_user_latency_tolerance(dev);
 
 	if (value < 0)
-		return sysfs_emit(buf, "%s\n", "auto");
+		return sysfs_emit(buf, "auto\n");
 	if (value == PM_QOS_LATENCY_ANY)
-		return sysfs_emit(buf, "%s\n", "any");
+		return sysfs_emit(buf, "any\n");
 
 	return sysfs_emit(buf, "%d\n", value);
 }
@@ -349,7 +344,7 @@ static DEVICE_ATTR_RW(wakeup);
 static ssize_t wakeup_count_show(struct device *dev,
 				 struct device_attribute *attr, char *buf)
 {
-	unsigned long count;
+	unsigned long count = 0;
 	bool enabled = false;
 
 	spin_lock_irq(&dev->power.lock);
@@ -358,10 +353,7 @@ static ssize_t wakeup_count_show(struct device *dev,
 		enabled = true;
 	}
 	spin_unlock_irq(&dev->power.lock);
-
-	if (!enabled)
-		return sysfs_emit(buf, "\n");
-	return sysfs_emit(buf, "%lu\n", count);
+	return enabled ? sprintf(buf, "%lu\n", count) : sprintf(buf, "\n");
 }
 
 static DEVICE_ATTR_RO(wakeup_count);
@@ -370,7 +362,7 @@ static ssize_t wakeup_active_count_show(struct device *dev,
 					struct device_attribute *attr,
 					char *buf)
 {
-	unsigned long count;
+	unsigned long count = 0;
 	bool enabled = false;
 
 	spin_lock_irq(&dev->power.lock);
@@ -379,10 +371,7 @@ static ssize_t wakeup_active_count_show(struct device *dev,
 		enabled = true;
 	}
 	spin_unlock_irq(&dev->power.lock);
-
-	if (!enabled)
-		return sysfs_emit(buf, "\n");
-	return sysfs_emit(buf, "%lu\n", count);
+	return enabled ? sprintf(buf, "%lu\n", count) : sprintf(buf, "\n");
 }
 
 static DEVICE_ATTR_RO(wakeup_active_count);
@@ -391,7 +380,7 @@ static ssize_t wakeup_abort_count_show(struct device *dev,
 				       struct device_attribute *attr,
 				       char *buf)
 {
-	unsigned long count;
+	unsigned long count = 0;
 	bool enabled = false;
 
 	spin_lock_irq(&dev->power.lock);
@@ -400,10 +389,7 @@ static ssize_t wakeup_abort_count_show(struct device *dev,
 		enabled = true;
 	}
 	spin_unlock_irq(&dev->power.lock);
-
-	if (!enabled)
-		return sysfs_emit(buf, "\n");
-	return sysfs_emit(buf, "%lu\n", count);
+	return enabled ? sprintf(buf, "%lu\n", count) : sprintf(buf, "\n");
 }
 
 static DEVICE_ATTR_RO(wakeup_abort_count);
@@ -412,7 +398,7 @@ static ssize_t wakeup_expire_count_show(struct device *dev,
 					struct device_attribute *attr,
 					char *buf)
 {
-	unsigned long count;
+	unsigned long count = 0;
 	bool enabled = false;
 
 	spin_lock_irq(&dev->power.lock);
@@ -421,10 +407,7 @@ static ssize_t wakeup_expire_count_show(struct device *dev,
 		enabled = true;
 	}
 	spin_unlock_irq(&dev->power.lock);
-
-	if (!enabled)
-		return sysfs_emit(buf, "\n");
-	return sysfs_emit(buf, "%lu\n", count);
+	return enabled ? sprintf(buf, "%lu\n", count) : sprintf(buf, "\n");
 }
 
 static DEVICE_ATTR_RO(wakeup_expire_count);
@@ -432,7 +415,7 @@ static DEVICE_ATTR_RO(wakeup_expire_count);
 static ssize_t wakeup_active_show(struct device *dev,
 				  struct device_attribute *attr, char *buf)
 {
-	unsigned int active;
+	unsigned int active = 0;
 	bool enabled = false;
 
 	spin_lock_irq(&dev->power.lock);
@@ -441,10 +424,7 @@ static ssize_t wakeup_active_show(struct device *dev,
 		enabled = true;
 	}
 	spin_unlock_irq(&dev->power.lock);
-
-	if (!enabled)
-		return sysfs_emit(buf, "\n");
-	return sysfs_emit(buf, "%u\n", active);
+	return enabled ? sprintf(buf, "%u\n", active) : sprintf(buf, "\n");
 }
 
 static DEVICE_ATTR_RO(wakeup_active);
@@ -453,7 +433,7 @@ static ssize_t wakeup_total_time_ms_show(struct device *dev,
 					 struct device_attribute *attr,
 					 char *buf)
 {
-	s64 msec;
+	s64 msec = 0;
 	bool enabled = false;
 
 	spin_lock_irq(&dev->power.lock);
@@ -462,10 +442,7 @@ static ssize_t wakeup_total_time_ms_show(struct device *dev,
 		enabled = true;
 	}
 	spin_unlock_irq(&dev->power.lock);
-
-	if (!enabled)
-		return sysfs_emit(buf, "\n");
-	return sysfs_emit(buf, "%lld\n", msec);
+	return enabled ? sprintf(buf, "%lld\n", msec) : sprintf(buf, "\n");
 }
 
 static DEVICE_ATTR_RO(wakeup_total_time_ms);
@@ -473,7 +450,7 @@ static DEVICE_ATTR_RO(wakeup_total_time_ms);
 static ssize_t wakeup_max_time_ms_show(struct device *dev,
 				       struct device_attribute *attr, char *buf)
 {
-	s64 msec;
+	s64 msec = 0;
 	bool enabled = false;
 
 	spin_lock_irq(&dev->power.lock);
@@ -482,10 +459,7 @@ static ssize_t wakeup_max_time_ms_show(struct device *dev,
 		enabled = true;
 	}
 	spin_unlock_irq(&dev->power.lock);
-
-	if (!enabled)
-		return sysfs_emit(buf, "\n");
-	return sysfs_emit(buf, "%lld\n", msec);
+	return enabled ? sprintf(buf, "%lld\n", msec) : sprintf(buf, "\n");
 }
 
 static DEVICE_ATTR_RO(wakeup_max_time_ms);
@@ -494,7 +468,7 @@ static ssize_t wakeup_last_time_ms_show(struct device *dev,
 					struct device_attribute *attr,
 					char *buf)
 {
-	s64 msec;
+	s64 msec = 0;
 	bool enabled = false;
 
 	spin_lock_irq(&dev->power.lock);
@@ -503,18 +477,7 @@ static ssize_t wakeup_last_time_ms_show(struct device *dev,
 		enabled = true;
 	}
 	spin_unlock_irq(&dev->power.lock);
-
-	if (!enabled)
-		return sysfs_emit(buf, "\n");
-	return sysfs_emit(buf, "%lld\n", msec);
-}
-
-static inline int dpm_sysfs_wakeup_change_owner(struct device *dev, kuid_t kuid,
-						kgid_t kgid)
-{
-	if (dev->power.wakeup && dev->power.wakeup->dev)
-		return device_change_owner(dev->power.wakeup->dev, kuid, kgid);
-	return 0;
+	return enabled ? sprintf(buf, "%lld\n", msec) : sprintf(buf, "\n");
 }
 
 static DEVICE_ATTR_RO(wakeup_last_time_ms);
@@ -524,7 +487,7 @@ static ssize_t wakeup_prevent_sleep_time_ms_show(struct device *dev,
 						 struct device_attribute *attr,
 						 char *buf)
 {
-	s64 msec;
+	s64 msec = 0;
 	bool enabled = false;
 
 	spin_lock_irq(&dev->power.lock);
@@ -533,21 +496,12 @@ static ssize_t wakeup_prevent_sleep_time_ms_show(struct device *dev,
 		enabled = true;
 	}
 	spin_unlock_irq(&dev->power.lock);
-
-	if (!enabled)
-		return sysfs_emit(buf, "\n");
-	return sysfs_emit(buf, "%lld\n", msec);
+	return enabled ? sprintf(buf, "%lld\n", msec) : sprintf(buf, "\n");
 }
 
 static DEVICE_ATTR_RO(wakeup_prevent_sleep_time_ms);
 #endif /* CONFIG_PM_AUTOSLEEP */
-#else /* CONFIG_PM_SLEEP */
-static inline int dpm_sysfs_wakeup_change_owner(struct device *dev, kuid_t kuid,
-						kgid_t kgid)
-{
-	return 0;
-}
-#endif
+#endif /* CONFIG_PM_SLEEP */
 
 #ifdef CONFIG_PM_ADVANCED_DEBUG
 static ssize_t runtime_usage_show(struct device *dev,
@@ -569,18 +523,13 @@ static DEVICE_ATTR_RO(runtime_active_kids);
 static ssize_t runtime_enabled_show(struct device *dev,
 				    struct device_attribute *attr, char *buf)
 {
-	const char *output;
-
-	if (dev->power.disable_depth && !dev->power.runtime_auto)
-		output = "disabled & forbidden";
-	else if (dev->power.disable_depth)
-		output = "disabled";
-	else if (!dev->power.runtime_auto)
-		output = "forbidden";
-	else
-		output = "enabled";
-
-	return sysfs_emit(buf, "%s\n", output);
+	if (dev->power.disable_depth && (dev->power.runtime_auto == false))
+		return sysfs_emit(buf, "disabled & forbidden\n");
+	if (dev->power.disable_depth)
+		return sysfs_emit(buf, "disabled\n");
+	if (dev->power.runtime_auto == false)
+		return sysfs_emit(buf, "forbidden\n");
+	return sysfs_emit(buf, "enabled\n");
 }
 static DEVICE_ATTR_RO(runtime_enabled);
 
@@ -703,7 +652,7 @@ int dpm_sysfs_add(struct device *dev)
 	if (rc)
 		return rc;
 
-	if (!pm_runtime_has_no_callbacks(dev)) {
+	if (pm_runtime_callbacks_present(dev)) {
 		rc = sysfs_merge_group(&dev->kobj, &pm_runtime_attr_group);
 		if (rc)
 			goto err_out;
@@ -735,59 +684,14 @@ int dpm_sysfs_add(struct device *dev)
 	return rc;
 }
 
-int dpm_sysfs_change_owner(struct device *dev, kuid_t kuid, kgid_t kgid)
-{
-	int rc;
-
-	if (device_pm_not_required(dev))
-		return 0;
-
-	rc = sysfs_group_change_owner(&dev->kobj, &pm_attr_group, kuid, kgid);
-	if (rc)
-		return rc;
-
-	if (!pm_runtime_has_no_callbacks(dev)) {
-		rc = sysfs_group_change_owner(
-			&dev->kobj, &pm_runtime_attr_group, kuid, kgid);
-		if (rc)
-			return rc;
-	}
-
-	if (device_can_wakeup(dev)) {
-		rc = sysfs_group_change_owner(&dev->kobj, &pm_wakeup_attr_group,
-					      kuid, kgid);
-		if (rc)
-			return rc;
-
-		rc = dpm_sysfs_wakeup_change_owner(dev, kuid, kgid);
-		if (rc)
-			return rc;
-	}
-
-	if (dev->power.set_latency_tolerance) {
-		rc = sysfs_group_change_owner(
-			&dev->kobj, &pm_qos_latency_tolerance_attr_group, kuid,
-			kgid);
-		if (rc)
-			return rc;
-	}
-	return 0;
-}
-
 int wakeup_sysfs_add(struct device *dev)
 {
-	int ret = sysfs_merge_group(&dev->kobj, &pm_wakeup_attr_group);
-
-	if (!ret)
-		kobject_uevent(&dev->kobj, KOBJ_CHANGE);
-
-	return ret;
+	return sysfs_merge_group(&dev->kobj, &pm_wakeup_attr_group);
 }
 
 void wakeup_sysfs_remove(struct device *dev)
 {
 	sysfs_unmerge_group(&dev->kobj, &pm_wakeup_attr_group);
-	kobject_uevent(&dev->kobj, KOBJ_CHANGE);
 }
 
 int pm_qos_sysfs_add_resume_latency(struct device *dev)

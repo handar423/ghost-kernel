@@ -28,22 +28,26 @@ extern inline pmd_t *pmd_alloc_kernel(pgd_t *pgd, unsigned long address)
 	return (pmd_t *) pgd;
 }
 
-#define pmd_populate(mm, pmd, pte) (pmd_val(*pmd) = (unsigned long)(pte))
+#define pmd_alloc_one_fast(mm, address) ({ BUG(); ((pmd_t *)1); })
+#define pmd_alloc_one(mm, address)      ({ BUG(); ((pmd_t *)2); })
 
-#define pmd_populate_kernel pmd_populate
+#define pmd_populate(mm, pmd, page) (pmd_val(*pmd) = \
+	(unsigned long)(page_address(page)))
 
-#define pmd_pgtable(pmd) pfn_to_virt(pmd_val(pmd) >> PAGE_SHIFT)
+#define pmd_populate_kernel(mm, pmd, pte) (pmd_val(*pmd) = (unsigned long)(pte))
 
-static inline void __pte_free_tlb(struct mmu_gather *tlb, pgtable_t pgtable,
+#define pmd_pgtable(pmd) pmd_page(pmd)
+
+static inline void __pte_free_tlb(struct mmu_gather *tlb, pgtable_t page,
 				  unsigned long address)
 {
-	struct page *page = virt_to_page(pgtable);
-
 	pgtable_pte_page_dtor(page);
 	__free_page(page);
 }
 
-static inline pgtable_t pte_alloc_one(struct mm_struct *mm)
+#define __pmd_free_tlb(tlb, pmd, address) do { } while (0)
+
+static inline struct page *pte_alloc_one(struct mm_struct *mm)
 {
 	struct page *page = alloc_pages(GFP_DMA, 0);
 	pte_t *pte;
@@ -55,16 +59,20 @@ static inline pgtable_t pte_alloc_one(struct mm_struct *mm)
 		return NULL;
 	}
 
-	pte = page_address(page);
-	clear_page(pte);
+	pte = kmap(page);
+	if (pte) {
+		clear_page(pte);
+		__flush_page_to_ram(pte);
+		flush_tlb_kernel_page(pte);
+		nocache_page(pte);
+	}
+	kunmap(page);
 
-	return pte;
+	return page;
 }
 
-static inline void pte_free(struct mm_struct *mm, pgtable_t pgtable)
+static inline void pte_free(struct mm_struct *mm, struct page *page)
 {
-	struct page *page = virt_to_page(pgtable);
-
 	pgtable_pte_page_dtor(page);
 	__free_page(page);
 }
@@ -87,9 +95,11 @@ static inline pgd_t *pgd_alloc(struct mm_struct *mm)
 	new_pgd = (pgd_t *)__get_free_page(GFP_DMA | __GFP_NOWARN);
 	if (!new_pgd)
 		return NULL;
-	memcpy(new_pgd, swapper_pg_dir, PTRS_PER_PGD * sizeof(pgd_t));
+	memcpy(new_pgd, swapper_pg_dir, PAGE_SIZE);
 	memset(new_pgd, 0, PAGE_OFFSET >> PGDIR_SHIFT);
 	return new_pgd;
 }
+
+#define pgd_populate(mm, pmd, pte) BUG()
 
 #endif /* M68K_MCF_PGALLOC_H */

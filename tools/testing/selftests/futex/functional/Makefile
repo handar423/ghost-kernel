@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0
 INCLUDES := -I../include -I../../
 CFLAGS := $(CFLAGS) -g -O2 -Wall -D_GNU_SOURCE -pthread $(INCLUDES)
-LDLIBS := -lpthread -lrt
+LDFLAGS := $(LDFLAGS) -pthread -lrt
 
 HEADERS := \
 	../include/futextest.h \

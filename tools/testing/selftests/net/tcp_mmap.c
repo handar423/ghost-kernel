@@ -71,7 +71,7 @@
 #define MSG_ZEROCOPY    0x4000000
 #endif
 
-#define FILE_SZ (1ULL << 35)
+#define FILE_SZ (1UL << 35)
 static int cfg_family = AF_INET6;
 static socklen_t cfg_alen = sizeof(struct sockaddr_in6);
 static int cfg_port = 8787;
@@ -82,9 +82,7 @@ static int zflg; /* zero copy option. (MSG_ZEROCOPY for sender, mmap() for recei
 static int xflg; /* hash received data (simple xor) (-h option) */
 static int keepflag; /* -k option: receiver shall keep all received file in memory (no munmap() calls) */
 
-static size_t chunk_size  = 512*1024;
-
-static size_t map_align;
+static int chunk_size  = 512*1024;
 
 unsigned long htotal;
 
@@ -120,31 +118,6 @@ void hash_zone(void *zone, unsigned int length)
 	htotal = temp;
 }
 
-#define ALIGN_UP(x, align_to)	(((x) + ((align_to)-1)) & ~((align_to)-1))
-#define ALIGN_PTR_UP(p, ptr_align_to)	((typeof(p))ALIGN_UP((unsigned long)(p), ptr_align_to))
-
-
-static void *mmap_large_buffer(size_t need, size_t *allocated)
-{
-	void *buffer;
-	size_t sz;
-
-	/* Attempt to use huge pages if possible. */
-	sz = ALIGN_UP(need, map_align);
-	buffer = mmap(NULL, sz, PROT_READ | PROT_WRITE,
-		      MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
-
-	if (buffer == (void *)-1) {
-		sz = need;
-		buffer = mmap(NULL, sz, PROT_READ | PROT_WRITE,
-			      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-		if (buffer != (void *)-1)
-			fprintf(stderr, "MAP_HUGETLB attempt failed, look at /sys/kernel/mm/hugepages for optimal performance\n");
-	}
-	*allocated = sz;
-	return buffer;
-}
-
 void *child_thread(void *arg)
 {
 	unsigned long total_mmap = 0, total = 0;
@@ -153,11 +126,9 @@ void *child_thread(void *arg)
 	int flags = MAP_SHARED;
 	struct timeval t0, t1;
 	char *buffer = NULL;
-	void *raddr = NULL;
 	void *addr = NULL;
 	double throughput;
 	struct rusage ru;
-	size_t buffer_sz;
 	int lu, fd;
 
 	fd = (int)(unsigned long)arg;
@@ -165,19 +136,15 @@ void *child_thread(void *arg)
 	gettimeofday(&t0, NULL);
 
 	fcntl(fd, F_SETFL, O_NDELAY);
-	buffer = mmap_large_buffer(chunk_size, &buffer_sz);
-	if (buffer == (void *)-1) {
-		perror("mmap");
+	buffer = malloc(chunk_size);
+	if (!buffer) {
+		perror("malloc");
 		goto error;
 	}
 	if (zflg) {
-		raddr = mmap(NULL, chunk_size + map_align, PROT_READ, flags, fd, 0);
-		if (raddr == (void *)-1) {
-			perror("mmap");
+		addr = mmap(NULL, chunk_size, PROT_READ, flags, fd, 0);
+		if (addr == (void *)-1)
 			zflg = 0;
-		} else {
-			addr = ALIGN_PTR_UP(raddr, map_align);
-		}
 	}
 	while (1) {
 		struct pollfd pfd = { .fd = fd, .events = POLLIN, };
@@ -188,10 +155,9 @@ void *child_thread(void *arg)
 			socklen_t zc_len = sizeof(zc);
 			int res;
 
-			memset(&zc, 0, sizeof(zc));
-			zc.address = (__u64)((unsigned long)addr);
+			zc.address = (__u64)addr;
 			zc.length = chunk_size;
-
+			zc.recv_skip_hint = 0;
 			res = getsockopt(fd, IPPROTO_TCP, TCP_ZEROCOPY_RECEIVE,
 					 &zc, &zc_len);
 			if (res == -1)
@@ -202,10 +168,6 @@ void *child_thread(void *arg)
 				total_mmap += zc.length;
 				if (xflg)
 					hash_zone(addr, zc.length);
-				/* It is more efficient to unmap the pages right now,
-				 * instead of doing this in next TCP_ZEROCOPY_RECEIVE.
-				 */
-				madvise(addr, zc.length, MADV_DONTNEED);
 				total += zc.length;
 			}
 			if (zc.recv_skip_hint) {
@@ -257,10 +219,10 @@ end:
 				ru.ru_nvcsw);
 	}
 error:
-	munmap(buffer, buffer_sz);
+	free(buffer);
 	close(fd);
 	if (zflg)
-		munmap(raddr, chunk_size + map_align);
+		munmap(addr, chunk_size);
 	pthread_exit(0);
 }
 
@@ -308,15 +270,8 @@ static void setup_sockaddr(int domain, const char *str_addr,
 
 static void do_accept(int fdlisten)
 {
-	pthread_attr_t attr;
-	int rcvlowat;
-
-	pthread_attr_init(&attr);
-	pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-
-	rcvlowat = chunk_size;
 	if (setsockopt(fdlisten, SOL_SOCKET, SO_RCVLOWAT,
-		       &rcvlowat, sizeof(rcvlowat)) == -1) {
+		       &chunk_size, sizeof(chunk_size)) == -1) {
 		perror("setsockopt SO_RCVLOWAT");
 	}
 
@@ -333,7 +288,7 @@ static void do_accept(int fdlisten)
 			perror("accept");
 			continue;
 		}
-		res = pthread_create(&th, &attr, child_thread,
+		res = pthread_create(&th, NULL, child_thread,
 				     (void *)(unsigned long)fd);
 		if (res) {
 			errno = res;
@@ -343,43 +298,18 @@ static void do_accept(int fdlisten)
 	}
 }
 
-/* Each thread should reserve a big enough vma to avoid
- * spinlock collisions in ptl locks.
- * This size is 2MB on x86_64, and is exported in /proc/meminfo.
- */
-static unsigned long default_huge_page_size(void)
-{
-	FILE *f = fopen("/proc/meminfo", "r");
-	unsigned long hps = 0;
-	size_t linelen = 0;
-	char *line = NULL;
-
-	if (!f)
-		return 0;
-	while (getline(&line, &linelen, f) > 0) {
-		if (sscanf(line, "Hugepagesize:       %lu kB", &hps) == 1) {
-			hps <<= 10;
-			break;
-		}
-	}
-	free(line);
-	fclose(f);
-	return hps;
-}
-
 int main(int argc, char *argv[])
 {
 	struct sockaddr_storage listenaddr, addr;
 	unsigned int max_pacing_rate = 0;
-	uint64_t total = 0;
+	unsigned long total = 0;
 	char *host = NULL;
 	int fd, c, on = 1;
-	size_t buffer_sz;
 	char *buffer;
 	int sflg = 0;
 	int mss = 0;
 
-	while ((c = getopt(argc, argv, "46p:svr:w:H:zxkP:M:C:a:")) != -1) {
+	while ((c = getopt(argc, argv, "46p:svr:w:H:zxkP:M:")) != -1) {
 		switch (c) {
 		case '4':
 			cfg_family = PF_INET;
@@ -419,23 +349,9 @@ int main(int argc, char *argv[])
 		case 'P':
 			max_pacing_rate = atoi(optarg) ;
 			break;
-		case 'C':
-			chunk_size = atol(optarg);
-			break;
-		case 'a':
-			map_align = atol(optarg);
-			break;
 		default:
 			exit(1);
 		}
-	}
-	if (!map_align) {
-		map_align = default_huge_page_size();
-		/* if really /proc/meminfo is not helping,
-		 * we use the default x86_64 hugepagesize.
-		 */
-		if (!map_align)
-			map_align = 2*1024*1024;
 	}
 	if (sflg) {
 		int fdlisten = socket(cfg_family, SOCK_STREAM, 0);
@@ -465,8 +381,8 @@ int main(int argc, char *argv[])
 		}
 		do_accept(fdlisten);
 	}
-
-	buffer = mmap_large_buffer(chunk_size, &buffer_sz);
+	buffer = mmap(NULL, chunk_size, PROT_READ | PROT_WRITE,
+			      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	if (buffer == (char *)-1) {
 		perror("mmap");
 		exit(1);
@@ -501,17 +417,17 @@ int main(int argc, char *argv[])
 		zflg = 0;
 	}
 	while (total < FILE_SZ) {
-		int64_t wr = FILE_SZ - total;
+		long wr = FILE_SZ - total;
 
 		if (wr > chunk_size)
 			wr = chunk_size;
 		/* Note : we just want to fill the pipe with 0 bytes */
-		wr = send(fd, buffer, (size_t)wr, zflg ? MSG_ZEROCOPY : 0);
+		wr = send(fd, buffer, wr, zflg ? MSG_ZEROCOPY : 0);
 		if (wr <= 0)
 			break;
 		total += wr;
 	}
 	close(fd);
-	munmap(buffer, buffer_sz);
+	munmap(buffer, chunk_size);
 	return 0;
 }

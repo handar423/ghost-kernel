@@ -11,6 +11,7 @@
 #include "dm.h"
 #include "fw.h"
 #include "hw.h"
+#include "sw.h"
 #include "trx.h"
 #include "led.h"
 
@@ -65,8 +66,8 @@ static void rtl92se_fw_cb(const struct firmware *firmware, void *context)
 	struct rt_firmware *pfirmware = NULL;
 	char *fw_name = "rtlwifi/rtl8192sefw.bin";
 
-	rtl_dbg(rtlpriv, COMP_ERR, DBG_LOUD,
-		"Firmware callback routine entered!\n");
+	RT_TRACE(rtlpriv, COMP_ERR, DBG_LOUD,
+			 "Firmware callback routine entered!\n");
 	complete(&rtlpriv->firmware_loading_complete);
 	if (!firmware) {
 		pr_err("Firmware %s not available\n", fw_name);

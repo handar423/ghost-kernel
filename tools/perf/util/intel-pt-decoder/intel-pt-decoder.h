@@ -17,6 +17,7 @@
 #define INTEL_PT_ABORT_TX	(1 << 1)
 #define INTEL_PT_ASYNC		(1 << 2)
 #define INTEL_PT_FUP_IP		(1 << 3)
+#define INTEL_PT_SAMPLE_IPC	(1 << 4)
 
 enum intel_pt_sample_type {
 	INTEL_PT_BRANCH		= 1 << 0,
@@ -250,7 +251,6 @@ struct intel_pt_params {
 	uint32_t tsc_ctc_ratio_n;
 	uint32_t tsc_ctc_ratio_d;
 	enum intel_pt_param_flags flags;
-	unsigned int quick;
 };
 
 struct intel_pt_decoder;

@@ -103,6 +103,8 @@
 
 #define TX_TIMEOUT      (5*HZ)
 
+const char gfar_driver_version[] = "2.0";
+
 MODULE_AUTHOR("Freescale Semiconductor, Inc");
 MODULE_DESCRIPTION("Gianfar Ethernet Driver");
 MODULE_LICENSE("GPL");
@@ -364,7 +366,11 @@ static void gfar_set_mac_for_addr(struct net_device *dev, int num,
 
 static int gfar_set_mac_addr(struct net_device *dev, void *p)
 {
-	eth_mac_addr(dev, p);
+	int ret;
+
+	ret = eth_mac_addr(dev, p);
+	if (ret)
+		return ret;
 
 	gfar_set_mac_for_addr(dev, 0, dev->dev_addr);
 
@@ -639,7 +645,6 @@ static int gfar_of_init(struct platform_device *ofdev, struct net_device **pdev)
 	const char *model;
 	const void *mac_addr;
 	int err = 0, i;
-	phy_interface_t interface;
 	struct net_device *dev = NULL;
 	struct gfar_private *priv = NULL;
 	struct device_node *np = ofdev->dev.of_node;
@@ -781,12 +786,8 @@ static int gfar_of_init(struct platform_device *ofdev, struct net_device **pdev)
 
 	mac_addr = of_get_mac_address(np);
 
-	if (!IS_ERR(mac_addr)) {
+	if (!IS_ERR(mac_addr))
 		ether_addr_copy(dev->dev_addr, mac_addr);
-	} else {
-		eth_hw_addr_random(dev);
-		dev_info(&ofdev->dev, "Using random MAC address: %pM\n", dev->dev_addr);
-	}
 
 	if (model && !strcasecmp(model, "TSEC"))
 		priv->device_flags |= FSL_GIANFAR_DEV_HAS_GIGABIT |
@@ -810,9 +811,9 @@ static int gfar_of_init(struct platform_device *ofdev, struct net_device **pdev)
 	 * rgmii-id really needs to be specified. Other types can be
 	 * detected by hardware
 	 */
-	err = of_get_phy_mode(np, &interface);
-	if (!err)
-		priv->interface = interface;
+	err = of_get_phy_mode(np);
+	if (err >= 0)
+		priv->interface = err;
 	else
 		priv->interface = gfar_get_interface(dev);
 
@@ -2089,7 +2090,7 @@ static void gfar_reset_task(struct work_struct *work)
 	reset_gfar(priv->ndev);
 }
 
-static void gfar_timeout(struct net_device *dev, unsigned int txqueue)
+static void gfar_timeout(struct net_device *dev)
 {
 	struct gfar_private *priv = netdev_priv(dev);
 
@@ -2391,6 +2392,10 @@ static bool gfar_add_rx_frag(struct gfar_rx_buff *rxb, u32 lstatus,
 		if (lstatus & BD_LFLAG(RXBD_LAST))
 			size -= skb->len;
 
+		WARN(size < 0, "gianfar: rx fragment size underflow");
+		if (size < 0)
+			return false;
+
 		skb_add_rx_frag(skb, skb_shinfo(skb)->nr_frags, page,
 				rxb->page_offset + RXBUF_ALIGNMENT,
 				size, GFAR_RXB_TRUESIZE);
@@ -2552,6 +2557,17 @@ static int gfar_clean_rx_ring(struct gfar_priv_rx_q *rx_queue,
 		lstatus = be32_to_cpu(bdp->lstatus);
 		if (lstatus & BD_LFLAG(RXBD_EMPTY))
 			break;
+
+		/* lost RXBD_LAST descriptor due to overrun */
+		if (skb &&
+		    (lstatus & BD_LFLAG(RXBD_FIRST))) {
+			/* discard faulty buffer */
+			dev_kfree_skb(skb);
+			skb = NULL;
+			rx_queue->stats.rx_dropped++;
+
+			/* can continue normally */
+		}
 
 		/* order rx buffer descriptor reads */
 		rmb();

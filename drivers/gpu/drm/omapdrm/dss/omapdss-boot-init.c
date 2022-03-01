@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (C) 2014 Texas Instruments Incorporated - https://www.ti.com/
+ * Copyright (C) 2014 Texas Instruments Incorporated - http://www.ti.com/
  * Author: Tomi Valkeinen <tomi.valkeinen@ti.com>
  */
 
@@ -174,28 +174,18 @@ static const struct of_device_id omapdss_of_match[] __initconst = {
 };
 
 static const struct of_device_id omapdss_of_fixups_whitelist[] __initconst = {
+	{ .compatible = "composite-video-connector" },
+	{ .compatible = "hdmi-connector" },
 	{ .compatible = "panel-dsi-cm" },
+	{ .compatible = "svideo-connector" },
+	{ .compatible = "ti,opa362" },
+	{ .compatible = "ti,tpd12s015" },
 	{},
 };
 
-static void __init omapdss_find_children(struct device_node *np)
-{
-	struct device_node *child;
-
-	for_each_available_child_of_node(np, child) {
-		if (!of_find_property(child, "compatible", NULL))
-			continue;
-
-		omapdss_walk_device(child, true);
-
-		if (of_device_is_compatible(child, "ti,sysc"))
-			omapdss_find_children(child);
-	}
-}
-
 static int __init omapdss_boot_init(void)
 {
-	struct device_node *dss;
+	struct device_node *dss, *child;
 
 	INIT_LIST_HEAD(&dss_conv_list);
 
@@ -205,7 +195,13 @@ static int __init omapdss_boot_init(void)
 		goto put_node;
 
 	omapdss_walk_device(dss, true);
-	omapdss_find_children(dss);
+
+	for_each_available_child_of_node(dss, child) {
+		if (!of_find_property(child, "compatible", NULL))
+			continue;
+
+		omapdss_walk_device(child, true);
+	}
 
 	while (!list_empty(&dss_conv_list)) {
 		struct dss_conv_node *n;

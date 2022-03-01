@@ -131,7 +131,7 @@ static inline unsigned iproc_pin_to_gpio(unsigned pin)
  *  iproc_set_bit - set or clear one bit (corresponding to the GPIO pin) in a
  *  Iproc GPIO register
  *
- *  @chip: Iproc GPIO device
+ *  @iproc_gpio: Iproc GPIO device
  *  @reg: register offset
  *  @gpio: GPIO pin
  *  @set: set or clear
@@ -286,12 +286,6 @@ static int iproc_gpio_irq_set_type(struct irq_data *d, unsigned int type)
 	iproc_set_bit(chip, IPROC_GPIO_INT_DE_OFFSET, gpio, dual_edge);
 	iproc_set_bit(chip, IPROC_GPIO_INT_EDGE_OFFSET, gpio,
 		       rising_or_high);
-
-	if (type & IRQ_TYPE_EDGE_BOTH)
-		irq_set_handler_locked(d, handle_edge_irq);
-	else
-		irq_set_handler_locked(d, handle_level_irq);
-
 	raw_spin_unlock_irqrestore(&chip->lock, flags);
 
 	dev_dbg(chip->dev,
@@ -363,10 +357,7 @@ static int iproc_gpio_get_direction(struct gpio_chip *gc, unsigned int gpio)
 	unsigned int offset = IPROC_GPIO_REG(gpio, IPROC_GPIO_OUT_EN_OFFSET);
 	unsigned int shift = IPROC_GPIO_SHIFT(gpio);
 
-	if (readl(chip->base + offset) & BIT(shift))
-		return GPIO_LINE_DIRECTION_OUT;
-
-	return GPIO_LINE_DIRECTION_IN;
+	return !(readl(chip->base + offset) & BIT(shift));
 }
 
 static void iproc_gpio_set(struct gpio_chip *gc, unsigned gpio, int val)
@@ -804,7 +795,8 @@ static int iproc_gpio_probe(struct platform_device *pdev)
 	chip->dev = dev;
 	platform_set_drvdata(pdev, chip);
 
-	chip->base = devm_platform_ioremap_resource(pdev, 0);
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	chip->base = devm_ioremap_resource(dev, res);
 	if (IS_ERR(chip->base)) {
 		dev_err(dev, "unable to map I/O memory\n");
 		return PTR_ERR(chip->base);
@@ -852,13 +844,13 @@ static int iproc_gpio_probe(struct platform_device *pdev)
 							"gpio-ranges");
 
 	/* optional GPIO interrupt support */
-	irq = platform_get_irq_optional(pdev, 0);
+	irq = platform_get_irq(pdev, 0);
 	if (irq > 0) {
 		struct irq_chip *irqc;
 		struct gpio_irq_chip *girq;
 
 		irqc = &chip->irqchip;
-		irqc->name = dev_name(dev);
+		irqc->name = "bcm-iproc-gpio";
 		irqc->irq_ack = iproc_gpio_irq_ack;
 		irqc->irq_mask = iproc_gpio_irq_mask;
 		irqc->irq_unmask = iproc_gpio_irq_unmask;
@@ -877,7 +869,7 @@ static int iproc_gpio_probe(struct platform_device *pdev)
 			return -ENOMEM;
 		girq->parents[0] = irq;
 		girq->default_type = IRQ_TYPE_NONE;
-		girq->handler = handle_bad_irq;
+		girq->handler = handle_simple_irq;
 	}
 
 	ret = gpiochip_add_data(gc, chip);

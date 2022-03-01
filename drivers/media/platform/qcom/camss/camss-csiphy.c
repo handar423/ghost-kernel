@@ -113,7 +113,9 @@ static int csiphy_set_clock_rates(struct csiphy_device *csiphy)
 	for (i = 0; i < csiphy->nclocks; i++) {
 		struct camss_clock *clock = &csiphy->clock[i];
 
-		if (csiphy->rate_set[i]) {
+		if (!strcmp(clock->name, "csiphy0_timer") ||
+		    !strcmp(clock->name, "csiphy1_timer") ||
+		    !strcmp(clock->name, "csiphy2_timer")) {
 			u8 bpp = csiphy_get_bpp(csiphy->formats,
 					csiphy->nformats,
 					csiphy->fmt[MSM_CSIPHY_PAD_SINK].code);
@@ -552,8 +554,7 @@ int msm_csiphy_subdev_init(struct camss *camss,
 		csiphy->ops = &csiphy_ops_2ph_1_0;
 		csiphy->formats = csiphy_formats_8x16;
 		csiphy->nformats = ARRAY_SIZE(csiphy_formats_8x16);
-	} else if (camss->version == CAMSS_8x96 ||
-		   camss->version == CAMSS_660) {
+	} else if (camss->version == CAMSS_8x96) {
 		csiphy->ops = &csiphy_ops_3ph_1_0;
 		csiphy->formats = csiphy_formats_8x96;
 		csiphy->nformats = ARRAY_SIZE(csiphy_formats_8x96);
@@ -611,13 +612,6 @@ int msm_csiphy_subdev_init(struct camss *camss,
 	if (!csiphy->clock)
 		return -ENOMEM;
 
-	csiphy->rate_set = devm_kcalloc(dev,
-					csiphy->nclocks,
-					sizeof(*csiphy->rate_set),
-					GFP_KERNEL);
-	if (!csiphy->rate_set)
-		return -ENOMEM;
-
 	for (i = 0; i < csiphy->nclocks; i++) {
 		struct camss_clock *clock = &csiphy->clock[i];
 
@@ -645,17 +639,6 @@ int msm_csiphy_subdev_init(struct camss *camss,
 
 		for (j = 0; j < clock->nfreqs; j++)
 			clock->freq[j] = res->clock_rate[i][j];
-
-		if (!strcmp(clock->name, "csiphy0_timer") ||
-		    !strcmp(clock->name, "csiphy1_timer") ||
-		    !strcmp(clock->name, "csiphy2_timer"))
-			csiphy->rate_set[i] = true;
-
-		if (camss->version == CAMSS_660 &&
-		    (!strcmp(clock->name, "csi0_phy") ||
-		     !strcmp(clock->name, "csi1_phy") ||
-		     !strcmp(clock->name, "csi2_phy")))
-			csiphy->rate_set[i] = true;
 	}
 
 	return 0;
@@ -756,7 +739,7 @@ int msm_csiphy_register_entity(struct csiphy_device *csiphy,
 	pads[MSM_CSIPHY_PAD_SINK].flags = MEDIA_PAD_FL_SINK;
 	pads[MSM_CSIPHY_PAD_SRC].flags = MEDIA_PAD_FL_SOURCE;
 
-	sd->entity.function = MEDIA_ENT_F_PROC_VIDEO_PIXEL_FORMATTER;
+	sd->entity.function = MEDIA_ENT_F_IO_V4L;
 	sd->entity.ops = &csiphy_media_ops;
 	ret = media_entity_pads_init(&sd->entity, MSM_CSIPHY_PADS_NUM, pads);
 	if (ret < 0) {

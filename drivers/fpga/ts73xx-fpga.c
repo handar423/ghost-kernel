@@ -119,15 +119,28 @@ static int ts73xx_fpga_probe(struct platform_device *pdev)
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	priv->io_base = devm_ioremap_resource(kdev, res);
-	if (IS_ERR(priv->io_base))
+	if (IS_ERR(priv->io_base)) {
+		dev_err(kdev, "unable to remap registers\n");
 		return PTR_ERR(priv->io_base);
+	}
 
 	mgr = devm_fpga_mgr_create(kdev, "TS-73xx FPGA Manager",
 				   &ts73xx_fpga_ops, priv);
 	if (!mgr)
 		return -ENOMEM;
 
-	return devm_fpga_mgr_register(kdev, mgr);
+	platform_set_drvdata(pdev, mgr);
+
+	return fpga_mgr_register(mgr);
+}
+
+static int ts73xx_fpga_remove(struct platform_device *pdev)
+{
+	struct fpga_manager *mgr = platform_get_drvdata(pdev);
+
+	fpga_mgr_unregister(mgr);
+
+	return 0;
 }
 
 static struct platform_driver ts73xx_fpga_driver = {
@@ -135,6 +148,7 @@ static struct platform_driver ts73xx_fpga_driver = {
 		.name	= "ts73xx-fpga-mgr",
 	},
 	.probe	= ts73xx_fpga_probe,
+	.remove	= ts73xx_fpga_remove,
 };
 module_platform_driver(ts73xx_fpga_driver);
 

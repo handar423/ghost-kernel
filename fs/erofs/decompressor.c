@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2019 HUAWEI, Inc.
- *             https://www.huawei.com/
+ *             http://www.huawei.com/
  * Created by Gao Xiang <gaoxiang25@huawei.com>
  */
 #include "compress.h"
@@ -73,10 +73,10 @@ static int z_erofs_lz4_prepare_destpages(struct z_erofs_decompress_req *rq,
 			victim = availables[--top];
 			get_page(victim);
 		} else {
-			victim = erofs_allocpage(pagepool, GFP_KERNEL);
+			victim = erofs_allocpage(pagepool, GFP_KERNEL, false);
 			if (!victim)
 				return -ENOMEM;
-			set_page_private(victim, Z_EROFS_SHORTLIVED_PAGE);
+			victim->mapping = Z_EROFS_MAPPING_STAGING;
 		}
 		rq->out[i] = victim;
 	}
@@ -157,27 +157,17 @@ static int z_erofs_lz4_decompress(struct z_erofs_decompress_req *rq, u8 *out)
 		}
 	}
 
-	/* legacy format could compress extra data in a pcluster. */
-	if (rq->partial_decoding || !support_0padding)
-		ret = LZ4_decompress_safe_partial(src + inputmargin, out,
-						  inlen, rq->outputsize,
-						  rq->outputsize);
-	else
-		ret = LZ4_decompress_safe(src + inputmargin, out,
-					  inlen, rq->outputsize);
-
-	if (ret != rq->outputsize) {
-		erofs_err(rq->sb, "failed to decompress %d in[%u, %u] out[%u]",
-			  ret, inlen, inputmargin, rq->outputsize);
-
+	ret = LZ4_decompress_safe_partial(src + inputmargin, out,
+					  inlen, rq->outputsize,
+					  rq->outputsize);
+	if (ret < 0) {
+		erofs_err(rq->sb, "failed to decompress, in[%u, %u] out[%u]",
+			  inlen, inputmargin, rq->outputsize);
 		WARN_ON(1);
 		print_hex_dump(KERN_DEBUG, "[ in]: ", DUMP_PREFIX_OFFSET,
 			       16, 1, src + inputmargin, inlen, true);
 		print_hex_dump(KERN_DEBUG, "[out]: ", DUMP_PREFIX_OFFSET,
 			       16, 1, out, rq->outputsize, true);
-
-		if (ret >= 0)
-			memset(out + ret, 0, rq->outputsize - ret);
 		ret = -EIO;
 	}
 
@@ -274,7 +264,7 @@ static int z_erofs_decompress_generic(struct z_erofs_decompress_req *rq,
 
 	i = 0;
 	while (1) {
-		dst = vm_map_ram(rq->out, nrpages_out, -1);
+		dst = vm_map_ram(rq->out, nrpages_out, -1, PAGE_KERNEL);
 
 		/* retry two more times (totally 3 times) */
 		if (dst || ++i >= 3)

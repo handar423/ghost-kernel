@@ -77,6 +77,11 @@
  * dependencies on include/config/my/option.h for every
  * CONFIG_MY_OPTION encountered in any of the prerequisites.
  *
+ * It will also filter out all the dependencies on *.ver. We need
+ * to make sure that the generated version checksum are globally up
+ * to date before even starting the recursive build, so it's too late
+ * at this point anyway.
+ *
  * We don't even try to really parse the header files, but
  * merely grep, i.e. if CONFIG_FOO is mentioned in a comment, it will
  * be picked up as well. It's not a problem with respect to
@@ -160,7 +165,7 @@ struct item {
 	struct item	*next;
 	unsigned int	len;
 	unsigned int	hash;
-	char		name[];
+	char		name[0];
 };
 
 #define HASHSZ 256
@@ -246,7 +251,7 @@ static void parse_config_file(const char *p)
 		}
 		p += 7;
 		q = p;
-		while (isalnum(*q) || *q == '_')
+		while (*q && (isalnum(*q) || *q == '_'))
 			q++;
 		if (str_ends_with(p, q - p, "_MODULE"))
 			r = q - 7;
@@ -294,7 +299,8 @@ static void *read_file(const char *filename)
 static int is_ignored_file(const char *s, int len)
 {
 	return str_ends_with(s, len, "include/generated/autoconf.h") ||
-	       str_ends_with(s, len, "include/generated/autoksyms.h");
+	       str_ends_with(s, len, "include/generated/autoksyms.h") ||
+	       str_ends_with(s, len, ".ver");
 }
 
 /*

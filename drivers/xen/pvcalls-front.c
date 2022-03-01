@@ -368,12 +368,12 @@ out:
 	return -ENOMEM;
 }
 
-static int create_active(struct sock_mapping *map, evtchn_port_t *evtchn)
+static int create_active(struct sock_mapping *map, int *evtchn)
 {
 	void *bytes;
-	int ret, irq = -1, i;
+	int ret = -ENOMEM, irq = -1, i;
 
-	*evtchn = 0;
+	*evtchn = -1;
 	init_waitqueue_head(&map->active.inflight_conn_req);
 
 	bytes = map->active.data.in;
@@ -404,7 +404,7 @@ static int create_active(struct sock_mapping *map, evtchn_port_t *evtchn)
 	return 0;
 
 out_error:
-	if (*evtchn > 0)
+	if (*evtchn >= 0)
 		xenbus_free_evtchn(pvcalls_front_dev, *evtchn);
 	return ret;
 }
@@ -415,8 +415,7 @@ int pvcalls_front_connect(struct socket *sock, struct sockaddr *addr,
 	struct pvcalls_bedata *bedata;
 	struct sock_mapping *map = NULL;
 	struct xen_pvcalls_request *req;
-	int notify, req_id, ret;
-	evtchn_port_t evtchn;
+	int notify, req_id, ret, evtchn;
 
 	if (addr->sa_family != AF_INET || sock->type != SOCK_STREAM)
 		return -EOPNOTSUPP;
@@ -766,8 +765,7 @@ int pvcalls_front_accept(struct socket *sock, struct socket *newsock, int flags)
 	struct sock_mapping *map;
 	struct sock_mapping *map2 = NULL;
 	struct xen_pvcalls_request *req;
-	int notify, req_id, ret, nonblock;
-	evtchn_port_t evtchn;
+	int notify, req_id, ret, evtchn, nonblock;
 
 	map = pvcalls_enter_sock(sock);
 	if (IS_ERR(map))
@@ -1127,8 +1125,7 @@ static int pvcalls_front_remove(struct xenbus_device *dev)
 static int pvcalls_front_probe(struct xenbus_device *dev,
 			  const struct xenbus_device_id *id)
 {
-	int ret = -ENOMEM, i;
-	evtchn_port_t evtchn;
+	int ret = -ENOMEM, evtchn, i;
 	unsigned int max_page_order, function_calls, len;
 	char *versions;
 	grant_ref_t gref_head = 0;
@@ -1263,7 +1260,7 @@ static void pvcalls_front_changed(struct xenbus_device *dev,
 		if (dev->state == XenbusStateClosed)
 			break;
 		/* Missed the backend's CLOSING state */
-		fallthrough;
+		/* fall through */
 	case XenbusStateClosing:
 		xenbus_frontend_closed(dev);
 		break;

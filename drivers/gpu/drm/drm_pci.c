@@ -30,12 +30,11 @@
 #include <drm/drm.h>
 #include <drm/drm_agpsupport.h>
 #include <drm/drm_drv.h>
+#include <drm/drm_pci.h>
 #include <drm/drm_print.h>
 
 #include "drm_internal.h"
 #include "drm_legacy.h"
-
-#ifdef CONFIG_DRM_LEGACY
 
 /**
  * drm_pci_alloc - Allocate a PCI consistent memory block, for DMA.
@@ -76,7 +75,20 @@ drm_dma_handle_t *drm_pci_alloc(struct drm_device * dev, size_t size, size_t ali
 
 	return dmah;
 }
+
 EXPORT_SYMBOL(drm_pci_alloc);
+
+/*
+ * Free a PCI consistent memory block without freeing its descriptor.
+ *
+ * This function is for internal use in the Linux-specific DRM core code.
+ */
+void __drm_legacy_pci_free(struct drm_device * dev, drm_dma_handle_t * dmah)
+{
+	if (dmah->vaddr)
+		dma_free_coherent(&dev->pdev->dev, dmah->size, dmah->vaddr,
+				  dmah->busaddr);
+}
 
 /**
  * drm_pci_free - Free a PCI consistent memory block
@@ -88,13 +100,13 @@ EXPORT_SYMBOL(drm_pci_alloc);
  */
 void drm_pci_free(struct drm_device * dev, drm_dma_handle_t * dmah)
 {
-	dma_free_coherent(&dev->pdev->dev, dmah->size, dmah->vaddr,
-			  dmah->busaddr);
+	__drm_legacy_pci_free(dev, dmah);
 	kfree(dmah);
 }
 
 EXPORT_SYMBOL(drm_pci_free);
-#endif
+
+#ifdef CONFIG_PCI
 
 static int drm_get_pci_domain(struct drm_device *dev)
 {
@@ -139,7 +151,7 @@ static int drm_pci_irq_by_busid(struct drm_device *dev, struct drm_irq_busid *p)
 }
 
 /**
- * drm_legacy_irq_by_busid - Get interrupt from bus ID
+ * drm_irq_by_busid - Get interrupt from bus ID
  * @dev: DRM device
  * @data: IOCTL parameter pointing to a drm_irq_busid structure
  * @file_priv: DRM file private.
@@ -150,8 +162,8 @@ static int drm_pci_irq_by_busid(struct drm_device *dev, struct drm_irq_busid *p)
  *
  * Return: 0 on success or a negative error code on failure.
  */
-int drm_legacy_irq_by_busid(struct drm_device *dev, void *data,
-			    struct drm_file *file_priv)
+int drm_irq_by_busid(struct drm_device *dev, void *data,
+		     struct drm_file *file_priv)
 {
 	struct drm_irq_busid *p = data;
 
@@ -168,18 +180,6 @@ int drm_legacy_irq_by_busid(struct drm_device *dev, void *data,
 	return drm_pci_irq_by_busid(dev, p);
 }
 
-void drm_pci_agp_destroy(struct drm_device *dev)
-{
-	if (dev->agp) {
-		arch_phys_wc_del(dev->agp->agp_mtrr);
-		drm_legacy_agp_clear(dev);
-		kfree(dev->agp);
-		dev->agp = NULL;
-	}
-}
-
-#ifdef CONFIG_DRM_LEGACY
-
 static void drm_pci_agp_init(struct drm_device *dev)
 {
 	if (drm_core_check_feature(dev, DRIVER_USE_AGP)) {
@@ -194,9 +194,33 @@ static void drm_pci_agp_init(struct drm_device *dev)
 	}
 }
 
-static int drm_get_pci_dev(struct pci_dev *pdev,
-			   const struct pci_device_id *ent,
-			   struct drm_driver *driver)
+void drm_pci_agp_destroy(struct drm_device *dev)
+{
+	if (dev->agp) {
+		arch_phys_wc_del(dev->agp->agp_mtrr);
+		drm_legacy_agp_clear(dev);
+		kfree(dev->agp);
+		dev->agp = NULL;
+	}
+}
+
+/**
+ * drm_get_pci_dev - Register a PCI device with the DRM subsystem
+ * @pdev: PCI device
+ * @ent: entry from the PCI ID table that matches @pdev
+ * @driver: DRM device driver
+ *
+ * Attempt to gets inter module "drm" information. If we are first
+ * then register the character device and inter module information.
+ * Try and register, if we fail to register, backout previous work.
+ *
+ * NOTE: This function is deprecated, please use drm_dev_alloc() and
+ * drm_dev_register() instead and remove your &drm_driver.load callback.
+ *
+ * Return: 0 on success or a negative error code on failure.
+ */
+int drm_get_pci_dev(struct pci_dev *pdev, const struct pci_device_id *ent,
+		    struct drm_driver *driver)
 {
 	struct drm_device *dev;
 	int ret;
@@ -239,6 +263,7 @@ err_free:
 	drm_dev_put(dev);
 	return ret;
 }
+EXPORT_SYMBOL(drm_get_pci_dev);
 
 /**
  * drm_legacy_pci_init - shadow-attach a legacy DRM PCI driver
@@ -287,6 +312,17 @@ int drm_legacy_pci_init(struct drm_driver *driver, struct pci_driver *pdriver)
 }
 EXPORT_SYMBOL(drm_legacy_pci_init);
 
+#else
+
+void drm_pci_agp_destroy(struct drm_device *dev) {}
+
+int drm_irq_by_busid(struct drm_device *dev, void *data,
+		     struct drm_file *file_priv)
+{
+	return -EINVAL;
+}
+#endif
+
 /**
  * drm_legacy_pci_exit - unregister shadow-attach legacy DRM driver
  * @driver: DRM device driver
@@ -298,7 +334,6 @@ EXPORT_SYMBOL(drm_legacy_pci_init);
 void drm_legacy_pci_exit(struct drm_driver *driver, struct pci_driver *pdriver)
 {
 	struct drm_device *dev, *tmp;
-
 	DRM_DEBUG("\n");
 
 	if (!(driver->driver_features & DRIVER_LEGACY)) {
@@ -313,5 +348,3 @@ void drm_legacy_pci_exit(struct drm_driver *driver, struct pci_driver *pdriver)
 	DRM_INFO("Module unloaded\n");
 }
 EXPORT_SYMBOL(drm_legacy_pci_exit);
-
-#endif

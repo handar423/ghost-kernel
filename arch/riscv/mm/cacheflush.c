@@ -3,23 +3,16 @@
  * Copyright (C) 2017 SiFive
  */
 
+#include <asm/pgtable.h>
 #include <asm/cacheflush.h>
 
 #ifdef CONFIG_SMP
 
 #include <asm/sbi.h>
 
-static void ipi_remote_fence_i(void *info)
-{
-	return local_flush_icache_all();
-}
-
 void flush_icache_all(void)
 {
-	if (IS_ENABLED(CONFIG_RISCV_SBI))
-		sbi_remote_fence_i(NULL);
-	else
-		on_each_cpu(ipi_remote_fence_i, NULL, 1);
+	sbi_remote_fence_i(NULL);
 }
 EXPORT_SYMBOL(flush_icache_all);
 
@@ -36,7 +29,7 @@ EXPORT_SYMBOL(flush_icache_all);
 void flush_icache_mm(struct mm_struct *mm, bool local)
 {
 	unsigned int cpu;
-	cpumask_t others, *mask;
+	cpumask_t others, hmask, *mask;
 
 	preempt_disable();
 
@@ -54,7 +47,10 @@ void flush_icache_mm(struct mm_struct *mm, bool local)
 	 */
 	cpumask_andnot(&others, mm_cpumask(mm), cpumask_of(cpu));
 	local |= cpumask_empty(&others);
-	if (mm == current->active_mm && local) {
+	if (mm != current->active_mm || !local) {
+		riscv_cpuid_to_hartid_mask(&others, &hmask);
+		sbi_remote_fence_i(hmask.bits);
+	} else {
 		/*
 		 * It's assumed that at least one strongly ordered operation is
 		 * performed on this hart between setting a hart's cpumask bit
@@ -64,13 +60,6 @@ void flush_icache_mm(struct mm_struct *mm, bool local)
 		 * with flush_icache_deferred().
 		 */
 		smp_mb();
-	} else if (IS_ENABLED(CONFIG_RISCV_SBI)) {
-		cpumask_t hartid_mask;
-
-		riscv_cpuid_to_hartid_mask(&others, &hartid_mask);
-		sbi_remote_fence_i(cpumask_bits(&hartid_mask));
-	} else {
-		on_each_cpu_mask(&others, ipi_remote_fence_i, NULL, 1);
 	}
 
 	preempt_enable();
@@ -78,7 +67,6 @@ void flush_icache_mm(struct mm_struct *mm, bool local)
 
 #endif /* CONFIG_SMP */
 
-#ifdef CONFIG_MMU
 void flush_icache_pte(pte_t pte)
 {
 	struct page *page = pte_page(pte);
@@ -86,4 +74,3 @@ void flush_icache_pte(pte_t pte)
 	if (!test_and_set_bit(PG_dcache_clean, &page->flags))
 		flush_icache_all();
 }
-#endif /* CONFIG_MMU */

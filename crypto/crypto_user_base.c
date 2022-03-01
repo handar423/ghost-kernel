@@ -323,8 +323,7 @@ static int crypto_del_alg(struct sk_buff *skb, struct nlmsghdr *nlh,
 	if (refcount_read(&alg->cra_refcnt) > 2)
 		goto drop_alg;
 
-	crypto_unregister_instance((struct crypto_instance *)alg);
-	err = 0;
+	err = crypto_unregister_instance((struct crypto_instance *)alg);
 
 drop_alg:
 	crypto_mod_put(alg);

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 
 #include <linux/bpf.h>
-#include <bpf/bpf_helpers.h>
+#include "bpf_helpers.h"
 
 /* Permit pretty deep stack traces */
 #define MAX_STACK_RAWTP 100
@@ -57,9 +57,8 @@ struct {
 SEC("raw_tracepoint/sys_enter")
 int bpf_prog1(void *ctx)
 {
-	int max_len, max_buildid_len, total_size;
+	int max_len, max_buildid_len, usize, ksize, total_size;
 	struct stack_trace_t *data;
-	long usize, ksize;
 	void *raw_data;
 	__u32 key = 0;
 
@@ -100,3 +99,4 @@ int bpf_prog1(void *ctx)
 }
 
 char _license[] SEC("license") = "GPL";
+__u32 _version SEC("version") = 1; /* ignored by tracepoints, required by libbpf.a */

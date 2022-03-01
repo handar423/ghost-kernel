@@ -271,10 +271,15 @@ dw_apb_clockevent_init(int cpu, const char *name, unsigned rating,
 	dw_ced->ced.rating = rating;
 	dw_ced->ced.name = name;
 
+	dw_ced->irqaction.name		= dw_ced->ced.name;
+	dw_ced->irqaction.handler	= dw_apb_clockevent_irq;
+	dw_ced->irqaction.dev_id	= &dw_ced->ced;
+	dw_ced->irqaction.irq		= irq;
+	dw_ced->irqaction.flags		= IRQF_TIMER | IRQF_IRQPOLL |
+					  IRQF_NOBALANCING;
+
 	dw_ced->eoi = apbt_eoi;
-	err = request_irq(irq, dw_apb_clockevent_irq,
-			  IRQF_TIMER | IRQF_IRQPOLL | IRQF_NOBALANCING,
-			  dw_ced->ced.name, &dw_ced->ced);
+	err = setup_irq(irq, &dw_ced->irqaction);
 	if (err) {
 		pr_err("failed to request timer irq\n");
 		kfree(dw_ced);

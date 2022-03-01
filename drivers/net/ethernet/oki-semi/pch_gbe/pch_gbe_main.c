@@ -107,7 +107,7 @@ static int pch_ptp_match(struct sk_buff *skb, u16 uid_hi, u32 uid_lo, u16 seqid)
 {
 	u8 *data = skb->data;
 	unsigned int offset;
-	u16 *hi, *id;
+	u16 hi, id;
 	u32 lo;
 
 	if (ptp_classify_raw(skb) == PTP_CLASS_NONE)
@@ -118,14 +118,11 @@ static int pch_ptp_match(struct sk_buff *skb, u16 uid_hi, u32 uid_lo, u16 seqid)
 	if (skb->len < offset + OFF_PTP_SEQUENCE_ID + sizeof(seqid))
 		return 0;
 
-	hi = (u16 *)(data + offset + OFF_PTP_SOURCE_UUID);
-	id = (u16 *)(data + offset + OFF_PTP_SEQUENCE_ID);
+	hi = get_unaligned_be16(data + offset + OFF_PTP_SOURCE_UUID + 0);
+	lo = get_unaligned_be32(data + offset + OFF_PTP_SOURCE_UUID + 2);
+	id = get_unaligned_be16(data + offset + OFF_PTP_SEQUENCE_ID);
 
-	memcpy(&lo, &hi[1], sizeof(lo));
-
-	return (uid_hi == *hi &&
-		uid_lo == lo &&
-		seqid  == *id);
+	return (uid_hi == hi && uid_lo == lo && seqid == id);
 }
 
 static void
@@ -135,7 +132,6 @@ pch_rx_timestamp(struct pch_gbe_adapter *adapter, struct sk_buff *skb)
 	struct pci_dev *pdev;
 	u64 ns;
 	u32 hi, lo, val;
-	u16 uid, seq;
 
 	if (!adapter->hwts_rx_en)
 		return;
@@ -151,10 +147,7 @@ pch_rx_timestamp(struct pch_gbe_adapter *adapter, struct sk_buff *skb)
 	lo = pch_src_uuid_lo_read(pdev);
 	hi = pch_src_uuid_hi_read(pdev);
 
-	uid = hi & 0xffff;
-	seq = (hi >> 16) & 0xffff;
-
-	if (!pch_ptp_match(skb, htons(uid), htonl(lo), htons(seq)))
+	if (!pch_ptp_match(skb, hi, lo, hi >> 16))
 		goto out;
 
 	ns = pch_rx_snap_read(pdev);
@@ -295,7 +288,7 @@ static s32 pch_gbe_mac_read_mac_addr(struct pch_gbe_hw *hw)
 /**
  * pch_gbe_wait_clr_bit - Wait to clear a bit
  * @reg:	Pointer of register
- * @bit:	Busy bit
+ * @busy:	Busy bit
  */
 static void pch_gbe_wait_clr_bit(void *reg, u32 bit)
 {
@@ -1034,7 +1027,7 @@ static void pch_gbe_set_mode(struct pch_gbe_adapter *adapter, u16 speed,
 
 /**
  * pch_gbe_watchdog - Watchdog process
- * @t:  timer list containing a Board private structure
+ * @data:  Board private structure
  */
 static void pch_gbe_watchdog(struct timer_list *t)
 {
@@ -1816,8 +1809,7 @@ void pch_gbe_free_tx_resources(struct pch_gbe_adapter *adapter,
 	pch_gbe_clean_tx_ring(adapter, tx_ring);
 	vfree(tx_ring->buffer_info);
 	tx_ring->buffer_info = NULL;
-	dma_free_coherent(&pdev->dev, tx_ring->size, tx_ring->desc,
-			  tx_ring->dma);
+	pci_free_consistent(pdev, tx_ring->size, tx_ring->desc, tx_ring->dma);
 	tx_ring->desc = NULL;
 }
 
@@ -1834,8 +1826,7 @@ void pch_gbe_free_rx_resources(struct pch_gbe_adapter *adapter,
 	pch_gbe_clean_rx_ring(adapter, rx_ring);
 	vfree(rx_ring->buffer_info);
 	rx_ring->buffer_info = NULL;
-	dma_free_coherent(&pdev->dev, rx_ring->size, rx_ring->desc,
-			  rx_ring->dma);
+	pci_free_consistent(pdev, rx_ring->size, rx_ring->desc, rx_ring->dma);
 	rx_ring->desc = NULL;
 }
 
@@ -1956,8 +1947,8 @@ void pch_gbe_down(struct pch_gbe_adapter *adapter)
 	pch_gbe_clean_tx_ring(adapter, adapter->tx_ring);
 	pch_gbe_clean_rx_ring(adapter, adapter->rx_ring);
 
-	dma_free_coherent(&adapter->pdev->dev, rx_ring->rx_buff_pool_size,
-			  rx_ring->rx_buff_pool, rx_ring->rx_buff_pool_logic);
+	pci_free_consistent(adapter->pdev, rx_ring->rx_buff_pool_size,
+			    rx_ring->rx_buff_pool, rx_ring->rx_buff_pool_logic);
 	rx_ring->rx_buff_pool_logic = 0;
 	rx_ring->rx_buff_pool_size = 0;
 	rx_ring->rx_buff_pool = NULL;
@@ -2066,7 +2057,7 @@ static int pch_gbe_stop(struct net_device *netdev)
  *	- NETDEV_TX_OK:   Normal end
  *	- NETDEV_TX_BUSY: Error end
  */
-static netdev_tx_t pch_gbe_xmit_frame(struct sk_buff *skb, struct net_device *netdev)
+static int pch_gbe_xmit_frame(struct sk_buff *skb, struct net_device *netdev)
 {
 	struct pch_gbe_adapter *adapter = netdev_priv(netdev);
 	struct pch_gbe_tx_ring *tx_ring = adapter->tx_ring;
@@ -2272,9 +2263,8 @@ static int pch_gbe_ioctl(struct net_device *netdev, struct ifreq *ifr, int cmd)
 /**
  * pch_gbe_tx_timeout - Respond to a Tx Hang
  * @netdev:   Network interface device structure
- * @txqueue: index of hanging queue
  */
-static void pch_gbe_tx_timeout(struct net_device *netdev, unsigned int txqueue)
+static void pch_gbe_tx_timeout(struct net_device *netdev)
 {
 	struct pch_gbe_adapter *adapter = netdev_priv(netdev);
 
@@ -2414,6 +2404,7 @@ static int __pch_gbe_suspend(struct pci_dev *pdev)
 	struct pch_gbe_adapter *adapter = netdev_priv(netdev);
 	struct pch_gbe_hw *hw = &adapter->hw;
 	u32 wufc = adapter->wake_up_evt;
+	int retval = 0;
 
 	netif_device_detach(netdev);
 	if (netif_running(netdev))
@@ -2433,7 +2424,7 @@ static int __pch_gbe_suspend(struct pci_dev *pdev)
 		pch_gbe_mac_set_wol_event(hw, wufc);
 		pci_disable_device(pdev);
 	}
-	return 0;
+	return retval;
 }
 
 #ifdef CONFIG_PM
@@ -2504,11 +2495,17 @@ static int pch_gbe_probe(struct pci_dev *pdev,
 	if (ret)
 		return ret;
 
-	if (dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64))) {
-		ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
+	if (pci_set_dma_mask(pdev, DMA_BIT_MASK(64))
+		|| pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(64))) {
+		ret = pci_set_dma_mask(pdev, DMA_BIT_MASK(32));
 		if (ret) {
-			dev_err(&pdev->dev, "ERR: No usable DMA configuration, aborting\n");
-			return ret;
+			ret = pci_set_consistent_dma_mask(pdev,
+							  DMA_BIT_MASK(32));
+			if (ret) {
+				dev_err(&pdev->dev, "ERR: No usable DMA "
+					"configuration, aborting\n");
+				return ret;
+			}
 		}
 	}
 
@@ -2531,9 +2528,13 @@ static int pch_gbe_probe(struct pci_dev *pdev,
 	adapter->pdev = pdev;
 	adapter->hw.back = adapter;
 	adapter->hw.reg = pcim_iomap_table(pdev)[PCH_GBE_PCI_BAR];
+
 	adapter->pdata = (struct pch_gbe_privdata *)pci_id->driver_data;
-	if (adapter->pdata && adapter->pdata->platform_init)
-		adapter->pdata->platform_init(pdev);
+	if (adapter->pdata && adapter->pdata->platform_init) {
+		ret = adapter->pdata->platform_init(pdev);
+		if (ret)
+			goto err_free_netdev;
+	}
 
 	adapter->ptp_pdev =
 		pci_get_domain_bus_and_slot(pci_domain_nr(adapter->pdev->bus),
@@ -2628,7 +2629,7 @@ err_free_netdev:
  */
 static int pch_gbe_minnow_platform_init(struct pci_dev *pdev)
 {
-	unsigned long flags = GPIOF_DIR_OUT | GPIOF_INIT_HIGH | GPIOF_EXPORT;
+	unsigned long flags = GPIOF_OUT_INIT_HIGH;
 	unsigned gpio = MINNOW_PHY_RESET_GPIO;
 	int ret;
 

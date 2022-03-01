@@ -20,7 +20,7 @@
 	BPF_EXIT_INSN(),
 	},
 	.fixup_map_hash_8b = { 3 },
-	.errstr = "R0 max value is outside of the allowed memory range",
+	.errstr = "R0 max value is outside of the array range",
 	.result = REJECT,
 },
 {
@@ -146,7 +146,7 @@
 	BPF_EXIT_INSN(),
 	},
 	.fixup_map_hash_8b = { 3 },
-	.errstr = "R0 min value is outside of the allowed memory range",
+	.errstr = "R0 min value is outside of the array range",
 	.result = REJECT
 },
 {
@@ -238,7 +238,7 @@
 	BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -8),
 	BPF_LD_MAP_FD(BPF_REG_1, 0),
 	BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_map_lookup_elem),
-	BPF_JMP_IMM(BPF_JEQ, BPF_REG_0, 0, 8),
+	BPF_JMP_IMM(BPF_JEQ, BPF_REG_0, 0, 9),
 	/* r1 = [0x00, 0xff] */
 	BPF_LDX_MEM(BPF_B, BPF_REG_1, BPF_REG_0, 0),
 	BPF_ALU64_IMM(BPF_ADD, BPF_REG_1, 0xffffff80 >> 1),
@@ -253,18 +253,22 @@
 	 *      [0xffff'ffff'0000'0080, 0xffff'ffff'ffff'ffff]
 	 */
 	BPF_ALU64_IMM(BPF_SUB, BPF_REG_1, 0xffffff80 >> 1),
-	/* error on OOB pointer computation */
+	/* r1 = 0 or
+	 *      [0x00ff'ffff'ff00'0000, 0x00ff'ffff'ffff'ffff]
+	 */
+	BPF_ALU64_IMM(BPF_RSH, BPF_REG_1, 8),
+	/* no-op or OOB pointer computation */
 	BPF_ALU64_REG(BPF_ADD, BPF_REG_0, BPF_REG_1),
+	/* potentially OOB access */
+	BPF_LDX_MEM(BPF_B, BPF_REG_0, BPF_REG_0, 0),
 	/* exit */
 	BPF_MOV64_IMM(BPF_REG_0, 0),
 	BPF_EXIT_INSN(),
 	},
 	.fixup_map_hash_8b = { 3 },
 	/* not actually fully unbounded, but the bound is very high */
-	.errstr_unpriv = "R1 has unknown scalar with mixed signed bounds, pointer arithmetic with it prohibited for !root",
-	.result_unpriv = REJECT,
-	.errstr = "value -4294967168 makes map_value pointer be out of bounds",
-	.result = REJECT,
+	.errstr = "R0 unbounded memory access",
+	.result = REJECT
 },
 {
 	"bounds check after truncation of boundary-crossing range (2)",
@@ -274,7 +278,7 @@
 	BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -8),
 	BPF_LD_MAP_FD(BPF_REG_1, 0),
 	BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_map_lookup_elem),
-	BPF_JMP_IMM(BPF_JEQ, BPF_REG_0, 0, 8),
+	BPF_JMP_IMM(BPF_JEQ, BPF_REG_0, 0, 9),
 	/* r1 = [0x00, 0xff] */
 	BPF_LDX_MEM(BPF_B, BPF_REG_1, BPF_REG_0, 0),
 	BPF_ALU64_IMM(BPF_ADD, BPF_REG_1, 0xffffff80 >> 1),
@@ -291,18 +295,22 @@
 	 *      [0xffff'ffff'0000'0080, 0xffff'ffff'ffff'ffff]
 	 */
 	BPF_ALU64_IMM(BPF_SUB, BPF_REG_1, 0xffffff80 >> 1),
-	/* error on OOB pointer computation */
+	/* r1 = 0 or
+	 *      [0x00ff'ffff'ff00'0000, 0x00ff'ffff'ffff'ffff]
+	 */
+	BPF_ALU64_IMM(BPF_RSH, BPF_REG_1, 8),
+	/* no-op or OOB pointer computation */
 	BPF_ALU64_REG(BPF_ADD, BPF_REG_0, BPF_REG_1),
+	/* potentially OOB access */
+	BPF_LDX_MEM(BPF_B, BPF_REG_0, BPF_REG_0, 0),
 	/* exit */
 	BPF_MOV64_IMM(BPF_REG_0, 0),
 	BPF_EXIT_INSN(),
 	},
 	.fixup_map_hash_8b = { 3 },
 	/* not actually fully unbounded, but the bound is very high */
-	.errstr_unpriv = "R1 has unknown scalar with mixed signed bounds, pointer arithmetic with it prohibited for !root",
-	.result_unpriv = REJECT,
-	.errstr = "value -4294967168 makes map_value pointer be out of bounds",
-	.result = REJECT,
+	.errstr = "R0 unbounded memory access",
+	.result = REJECT
 },
 {
 	"bounds check after wrapping 32-bit addition",
@@ -354,7 +362,7 @@
 	BPF_EXIT_INSN(),
 	},
 	.fixup_map_hash_8b = { 3 },
-	.errstr = "R0 max value is outside of the allowed memory range",
+	.errstr = "R0 max value is outside of the array range",
 	.result = REJECT
 },
 {
@@ -403,14 +411,16 @@
 	BPF_ALU32_IMM(BPF_RSH, BPF_REG_1, 31),
 	/* r1 = 0xffff'fffe (NOT 0!) */
 	BPF_ALU32_IMM(BPF_SUB, BPF_REG_1, 2),
-	/* error on computing OOB pointer */
+	/* computes OOB pointer */
 	BPF_ALU64_REG(BPF_ADD, BPF_REG_0, BPF_REG_1),
+	/* OOB access */
+	BPF_LDX_MEM(BPF_B, BPF_REG_0, BPF_REG_0, 0),
 	/* exit */
 	BPF_MOV64_IMM(BPF_REG_0, 0),
 	BPF_EXIT_INSN(),
 	},
 	.fixup_map_hash_8b = { 3 },
-	.errstr = "math between map_value pointer and 4294967294 is not allowed",
+	.errstr = "R0 invalid mem access",
 	.result = REJECT,
 },
 {
@@ -497,7 +507,7 @@
 	.result = REJECT
 },
 {
-	"bounds check mixed 32bit and 64bit arithmetic. test1",
+	"bounds check mixed 32bit and 64bit arithmatic. test1",
 	.insns = {
 	BPF_MOV64_IMM(BPF_REG_0, 0),
 	BPF_MOV64_IMM(BPF_REG_1, -1),
@@ -513,10 +523,12 @@
 	BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_0, -1),
 	BPF_EXIT_INSN(),
 	},
+	.errstr_unpriv = "R0 invalid mem access 'inv'",
+	.result_unpriv = REJECT,
 	.result = ACCEPT
 },
 {
-	"bounds check mixed 32bit and 64bit arithmetic. test2",
+	"bounds check mixed 32bit and 64bit arithmatic. test2",
 	.insns = {
 	BPF_MOV64_IMM(BPF_REG_0, 0),
 	BPF_MOV64_IMM(BPF_REG_1, -1),
@@ -533,6 +545,8 @@
 	BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_0, -1),
 	BPF_EXIT_INSN(),
 	},
+	.errstr_unpriv = "R0 invalid mem access 'inv'",
+	.result_unpriv = REJECT,
 	.result = ACCEPT
 },
 {
@@ -556,191 +570,4 @@
 	.prog_type = BPF_PROG_TYPE_SCHED_CLS,
 	.result = ACCEPT,
 	.flags = F_NEEDS_EFFICIENT_UNALIGNED_ACCESS,
-},
-{
-	"bounds check for reg = 0, reg xor 1",
-	.insns = {
-	BPF_ST_MEM(BPF_DW, BPF_REG_10, -8, 0),
-	BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
-	BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -8),
-	BPF_LD_MAP_FD(BPF_REG_1, 0),
-	BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_map_lookup_elem),
-	BPF_JMP_IMM(BPF_JNE, BPF_REG_0, 0, 1),
-	BPF_EXIT_INSN(),
-	BPF_MOV64_IMM(BPF_REG_1, 0),
-	BPF_ALU64_IMM(BPF_XOR, BPF_REG_1, 1),
-	BPF_JMP_IMM(BPF_JNE, BPF_REG_1, 0, 1),
-	BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_0, 8),
-	BPF_MOV64_IMM(BPF_REG_0, 0),
-	BPF_EXIT_INSN(),
-	},
-	.fixup_map_hash_8b = { 3 },
-	.result = ACCEPT,
-},
-{
-	"bounds check for reg32 = 0, reg32 xor 1",
-	.insns = {
-	BPF_ST_MEM(BPF_DW, BPF_REG_10, -8, 0),
-	BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
-	BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -8),
-	BPF_LD_MAP_FD(BPF_REG_1, 0),
-	BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_map_lookup_elem),
-	BPF_JMP_IMM(BPF_JNE, BPF_REG_0, 0, 1),
-	BPF_EXIT_INSN(),
-	BPF_MOV32_IMM(BPF_REG_1, 0),
-	BPF_ALU32_IMM(BPF_XOR, BPF_REG_1, 1),
-	BPF_JMP32_IMM(BPF_JNE, BPF_REG_1, 0, 1),
-	BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_0, 8),
-	BPF_MOV64_IMM(BPF_REG_0, 0),
-	BPF_EXIT_INSN(),
-	},
-	.fixup_map_hash_8b = { 3 },
-	.result = ACCEPT,
-},
-{
-	"bounds check for reg = 2, reg xor 3",
-	.insns = {
-	BPF_ST_MEM(BPF_DW, BPF_REG_10, -8, 0),
-	BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
-	BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -8),
-	BPF_LD_MAP_FD(BPF_REG_1, 0),
-	BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_map_lookup_elem),
-	BPF_JMP_IMM(BPF_JNE, BPF_REG_0, 0, 1),
-	BPF_EXIT_INSN(),
-	BPF_MOV64_IMM(BPF_REG_1, 2),
-	BPF_ALU64_IMM(BPF_XOR, BPF_REG_1, 3),
-	BPF_JMP_IMM(BPF_JGT, BPF_REG_1, 0, 1),
-	BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_0, 8),
-	BPF_MOV64_IMM(BPF_REG_0, 0),
-	BPF_EXIT_INSN(),
-	},
-	.fixup_map_hash_8b = { 3 },
-	.result = ACCEPT,
-},
-{
-	"bounds check for reg = any, reg xor 3",
-	.insns = {
-	BPF_ST_MEM(BPF_DW, BPF_REG_10, -8, 0),
-	BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
-	BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -8),
-	BPF_LD_MAP_FD(BPF_REG_1, 0),
-	BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_map_lookup_elem),
-	BPF_JMP_IMM(BPF_JNE, BPF_REG_0, 0, 1),
-	BPF_EXIT_INSN(),
-	BPF_LDX_MEM(BPF_DW, BPF_REG_1, BPF_REG_0, 0),
-	BPF_ALU64_IMM(BPF_XOR, BPF_REG_1, 3),
-	BPF_JMP_IMM(BPF_JNE, BPF_REG_1, 0, 1),
-	BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_0, 8),
-	BPF_MOV64_IMM(BPF_REG_0, 0),
-	BPF_EXIT_INSN(),
-	},
-	.fixup_map_hash_8b = { 3 },
-	.result = REJECT,
-	.errstr = "invalid access to map value",
-	.errstr_unpriv = "invalid access to map value",
-},
-{
-	"bounds check for reg32 = any, reg32 xor 3",
-	.insns = {
-	BPF_ST_MEM(BPF_DW, BPF_REG_10, -8, 0),
-	BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
-	BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -8),
-	BPF_LD_MAP_FD(BPF_REG_1, 0),
-	BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_map_lookup_elem),
-	BPF_JMP_IMM(BPF_JNE, BPF_REG_0, 0, 1),
-	BPF_EXIT_INSN(),
-	BPF_LDX_MEM(BPF_DW, BPF_REG_1, BPF_REG_0, 0),
-	BPF_ALU32_IMM(BPF_XOR, BPF_REG_1, 3),
-	BPF_JMP32_IMM(BPF_JNE, BPF_REG_1, 0, 1),
-	BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_0, 8),
-	BPF_MOV64_IMM(BPF_REG_0, 0),
-	BPF_EXIT_INSN(),
-	},
-	.fixup_map_hash_8b = { 3 },
-	.result = REJECT,
-	.errstr = "invalid access to map value",
-	.errstr_unpriv = "invalid access to map value",
-},
-{
-	"bounds check for reg > 0, reg xor 3",
-	.insns = {
-	BPF_ST_MEM(BPF_DW, BPF_REG_10, -8, 0),
-	BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
-	BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -8),
-	BPF_LD_MAP_FD(BPF_REG_1, 0),
-	BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_map_lookup_elem),
-	BPF_JMP_IMM(BPF_JNE, BPF_REG_0, 0, 1),
-	BPF_EXIT_INSN(),
-	BPF_LDX_MEM(BPF_DW, BPF_REG_1, BPF_REG_0, 0),
-	BPF_JMP_IMM(BPF_JLE, BPF_REG_1, 0, 3),
-	BPF_ALU64_IMM(BPF_XOR, BPF_REG_1, 3),
-	BPF_JMP_IMM(BPF_JGE, BPF_REG_1, 0, 1),
-	BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_0, 8),
-	BPF_MOV64_IMM(BPF_REG_0, 0),
-	BPF_EXIT_INSN(),
-	},
-	.fixup_map_hash_8b = { 3 },
-	.result = ACCEPT,
-},
-{
-	"bounds check for reg32 > 0, reg32 xor 3",
-	.insns = {
-	BPF_ST_MEM(BPF_DW, BPF_REG_10, -8, 0),
-	BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
-	BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -8),
-	BPF_LD_MAP_FD(BPF_REG_1, 0),
-	BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_map_lookup_elem),
-	BPF_JMP_IMM(BPF_JNE, BPF_REG_0, 0, 1),
-	BPF_EXIT_INSN(),
-	BPF_LDX_MEM(BPF_DW, BPF_REG_1, BPF_REG_0, 0),
-	BPF_JMP32_IMM(BPF_JLE, BPF_REG_1, 0, 3),
-	BPF_ALU32_IMM(BPF_XOR, BPF_REG_1, 3),
-	BPF_JMP32_IMM(BPF_JGE, BPF_REG_1, 0, 1),
-	BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_0, 8),
-	BPF_MOV64_IMM(BPF_REG_0, 0),
-	BPF_EXIT_INSN(),
-	},
-	.fixup_map_hash_8b = { 3 },
-	.result = ACCEPT,
-},
-{
-	"bounds checks after 32-bit truncation. test 1",
-	.insns = {
-	BPF_ST_MEM(BPF_DW, BPF_REG_10, -8, 0),
-	BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
-	BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -8),
-	BPF_LD_MAP_FD(BPF_REG_1, 0),
-	BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_map_lookup_elem),
-	BPF_JMP_IMM(BPF_JEQ, BPF_REG_0, 0, 4),
-	BPF_LDX_MEM(BPF_W, BPF_REG_1, BPF_REG_0, 0),
-	/* This used to reduce the max bound to 0x7fffffff */
-	BPF_JMP_IMM(BPF_JEQ, BPF_REG_1, 0, 1),
-	BPF_JMP_IMM(BPF_JGT, BPF_REG_1, 0x7fffffff, 1),
-	BPF_MOV64_IMM(BPF_REG_0, 0),
-	BPF_EXIT_INSN(),
-	},
-	.fixup_map_hash_8b = { 3 },
-	.errstr_unpriv = "R0 leaks addr",
-	.result_unpriv = REJECT,
-	.result = ACCEPT,
-},
-{
-	"bounds checks after 32-bit truncation. test 2",
-	.insns = {
-	BPF_ST_MEM(BPF_DW, BPF_REG_10, -8, 0),
-	BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
-	BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -8),
-	BPF_LD_MAP_FD(BPF_REG_1, 0),
-	BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_map_lookup_elem),
-	BPF_JMP_IMM(BPF_JEQ, BPF_REG_0, 0, 4),
-	BPF_LDX_MEM(BPF_W, BPF_REG_1, BPF_REG_0, 0),
-	BPF_JMP_IMM(BPF_JSLT, BPF_REG_1, 1, 1),
-	BPF_JMP32_IMM(BPF_JSLT, BPF_REG_1, 0, 1),
-	BPF_MOV64_IMM(BPF_REG_0, 0),
-	BPF_EXIT_INSN(),
-	},
-	.fixup_map_hash_8b = { 3 },
-	.errstr_unpriv = "R0 leaks addr",
-	.result_unpriv = REJECT,
-	.result = ACCEPT,
 },

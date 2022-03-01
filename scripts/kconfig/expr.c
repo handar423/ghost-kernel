@@ -13,6 +13,7 @@
 
 #define DEBUG_EXPR	0
 
+static int expr_eq(struct expr *e1, struct expr *e2);
 static struct expr *expr_eliminate_yn(struct expr *e);
 
 struct expr *expr_alloc_symbol(struct symbol *sym)
@@ -249,7 +250,7 @@ void expr_eliminate_eq(struct expr **ep1, struct expr **ep2)
  * equals some operand in the other (operands do not need to appear in the same
  * order), recursively.
  */
-int expr_eq(struct expr *e1, struct expr *e2)
+static int expr_eq(struct expr *e1, struct expr *e2)
 {
 	int res, old_count;
 

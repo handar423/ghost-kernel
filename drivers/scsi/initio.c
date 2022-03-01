@@ -1640,7 +1640,7 @@ static int initio_state_6(struct initio_host * host)
  *
  */
 
-static int initio_state_7(struct initio_host * host)
+int initio_state_7(struct initio_host * host)
 {
 	int cnt, i;
 
@@ -2962,8 +2962,20 @@ static struct pci_driver initio_pci_driver = {
 	.probe		= initio_probe_one,
 	.remove		= initio_remove_one,
 };
-module_pci_driver(initio_pci_driver);
+
+static int __init initio_init_driver(void)
+{
+	return pci_register_driver(&initio_pci_driver);
+}
+
+static void __exit initio_exit_driver(void)
+{
+	pci_unregister_driver(&initio_pci_driver);
+}
 
 MODULE_DESCRIPTION("Initio INI-9X00U/UW SCSI device driver");
 MODULE_AUTHOR("Initio Corporation");
 MODULE_LICENSE("GPL");
+
+module_init(initio_init_driver);
+module_exit(initio_exit_driver);

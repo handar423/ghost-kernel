@@ -183,7 +183,7 @@ struct nfp_eth_table {
 		bool is_split;
 
 		unsigned int fec_modes_supported;
-	} ports[];
+	} ports[0];
 };
 
 struct nfp_eth_table *nfp_eth_read_ports(struct nfp_cpp *cpp);

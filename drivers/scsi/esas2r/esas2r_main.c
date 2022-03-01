@@ -346,7 +346,8 @@ static struct pci_driver
 	.id_table	= esas2r_pci_table,
 	.probe		= esas2r_probe,
 	.remove		= esas2r_remove,
-	.driver.pm	= &esas2r_pm_ops,
+	.suspend	= esas2r_suspend,
+	.resume		= esas2r_resume,
 };
 
 static int esas2r_probe(struct pci_dev *pcid,
@@ -612,15 +613,8 @@ static int __init esas2r_init(void)
 
 /* Handle ioctl calls to "/proc/scsi/esas2r/ATTOnode" */
 static const struct file_operations esas2r_proc_fops = {
-	.compat_ioctl	= compat_ptr_ioctl,
+	.compat_ioctl	= esas2r_proc_ioctl,
 	.unlocked_ioctl = esas2r_proc_ioctl,
-};
-
-static const struct proc_ops esas2r_proc_ops = {
-	.proc_ioctl		= esas2r_proc_ioctl,
-#ifdef CONFIG_COMPAT
-	.proc_compat_ioctl	= compat_ptr_ioctl,
-#endif
 };
 
 static struct Scsi_Host *esas2r_proc_host;
@@ -734,7 +728,7 @@ const char *esas2r_info(struct Scsi_Host *sh)
 
 			pde = proc_create(ATTONODE_NAME, 0,
 					  sh->hostt->proc_dir,
-					  &esas2r_proc_ops);
+					  &esas2r_proc_fops);
 
 			if (!pde) {
 				esas2r_log_dev(ESAS2R_LOG_WARN,
@@ -893,11 +887,15 @@ static void complete_task_management_request(struct esas2r_adapter *a,
 	esas2r_free_request(a, rq);
 }
 
-/*
+/**
  * Searches the specified queue for the specified queue for the command
  * to abort.
  *
- * Return 0 on failure, 1 if command was not found, 2 if command was found
+ * @param [in] a
+ * @param [in] abort_request
+ * @param [in] cmd
+ * t
+ * @return 0 on failure, 1 if command was not found, 2 if command was found
  */
 static int esas2r_check_active_queue(struct esas2r_adapter *a,
 				     struct esas2r_request **abort_request,

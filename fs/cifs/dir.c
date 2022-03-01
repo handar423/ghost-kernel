@@ -33,7 +33,6 @@
 #include "cifs_debug.h"
 #include "cifs_fs_sb.h"
 #include "cifs_unicode.h"
-#include "fs_context.h"
 
 static void
 renew_parental_timestamps(struct dentry *direntry)
@@ -47,10 +46,10 @@ renew_parental_timestamps(struct dentry *direntry)
 }
 
 char *
-cifs_build_path_to_root(struct smb3_fs_context *ctx, struct cifs_sb_info *cifs_sb,
+cifs_build_path_to_root(struct smb_vol *vol, struct cifs_sb_info *cifs_sb,
 			struct cifs_tcon *tcon, int add_treename)
 {
-	int pplen = ctx->prepath ? strlen(ctx->prepath) + 1 : 0;
+	int pplen = vol->prepath ? strlen(vol->prepath) + 1 : 0;
 	int dfsplen;
 	char *full_path = NULL;
 
@@ -72,7 +71,7 @@ cifs_build_path_to_root(struct smb3_fs_context *ctx, struct cifs_sb_info *cifs_s
 	if (dfsplen)
 		memcpy(full_path, tcon->treeName, dfsplen);
 	full_path[dfsplen] = CIFS_DIR_SEP(cifs_sb);
-	memcpy(full_path + dfsplen + 1, ctx->prepath, pplen);
+	memcpy(full_path + dfsplen + 1, vol->prepath, pplen);
 	convert_delimiter(full_path, CIFS_DIR_SEP(cifs_sb));
 	return full_path;
 }
@@ -245,8 +244,10 @@ cifs_do_create(struct inode *inode, struct dentry *direntry, unsigned int xid,
 		*oplock = REQ_OPLOCK;
 
 	full_path = build_path_from_dentry(direntry);
-	if (!full_path)
-		return -ENOMEM;
+	if (full_path == NULL) {
+		rc = -ENOMEM;
+		goto out;
+	}
 
 	if (tcon->unix_ext && cap_unix(tcon->ses) && !tcon->broken_posix_open &&
 	    (CIFS_UNIX_POSIX_PATH_OPS_CAP &
@@ -356,10 +357,13 @@ cifs_do_create(struct inode *inode, struct dentry *direntry, unsigned int xid,
 	if (!tcon->unix_ext && (mode & S_IWUGO) == 0)
 		create_options |= CREATE_OPTION_READONLY;
 
+	if (backup_cred(cifs_sb))
+		create_options |= CREATE_OPEN_BACKUP_INTENT;
+
 	oparms.tcon = tcon;
 	oparms.cifs_sb = cifs_sb;
 	oparms.desired_access = desired_access;
-	oparms.create_options = cifs_create_options(cifs_sb, create_options);
+	oparms.create_options = create_options;
 	oparms.disposition = disposition;
 	oparms.path = full_path;
 	oparms.fid = fid;
@@ -412,7 +416,6 @@ cifs_create_get_file_info:
 		rc = cifs_get_inode_info_unix(&newinode, full_path, inode->i_sb,
 					      xid);
 	else {
-		/* TODO: Add support for calling POSIX query info here, but passing in fid */
 		rc = cifs_get_inode_info(&newinode, full_path, buf, inode->i_sb,
 					 xid, fid);
 		if (newinode) {
@@ -702,9 +705,7 @@ cifs_lookup(struct inode *parent_dir_inode, struct dentry *direntry,
 	cifs_dbg(FYI, "Full path: %s inode = 0x%p\n",
 		 full_path, d_inode(direntry));
 
-	if (pTcon->posix_extensions)
-		rc = smb311_posix_get_inode_info(&newInode, full_path, parent_dir_inode->i_sb, xid);
-	else if (pTcon->unix_ext) {
+	if (pTcon->unix_ext) {
 		rc = cifs_get_inode_info_unix(&newInode, full_path,
 					      parent_dir_inode->i_sb, xid);
 	} else {

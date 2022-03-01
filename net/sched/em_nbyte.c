@@ -16,7 +16,7 @@
 
 struct nbyte_data {
 	struct tcf_em_nbyte	hdr;
-	char			pattern[];
+	char			pattern[0];
 };
 
 static int em_nbyte_change(struct net *net, void *data, int data_len,

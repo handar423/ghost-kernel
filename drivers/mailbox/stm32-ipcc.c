@@ -52,6 +52,7 @@ struct stm32_ipcc {
 	struct clk *clk;
 	spinlock_t lock; /* protect access to IPCC registers */
 	int irqs[IPCC_IRQ_NUM];
+	int wkp;
 	u32 proc_id;
 	u32 n_chans;
 	u32 xcr;
@@ -144,11 +145,11 @@ static irqreturn_t stm32_ipcc_tx_irq(int irq, void *data)
 
 static int stm32_ipcc_send_data(struct mbox_chan *link, void *data)
 {
-	unsigned long chan = (unsigned long)link->con_priv;
+	unsigned int chan = (unsigned int)link->con_priv;
 	struct stm32_ipcc *ipcc = container_of(link->mbox, struct stm32_ipcc,
 					       controller);
 
-	dev_dbg(ipcc->controller.dev, "%s: chan:%lu\n", __func__, chan);
+	dev_dbg(ipcc->controller.dev, "%s: chan:%d\n", __func__, chan);
 
 	/* set channel n occupied */
 	stm32_ipcc_set_bits(&ipcc->lock, ipcc->reg_proc + IPCC_XSCR,
@@ -163,7 +164,7 @@ static int stm32_ipcc_send_data(struct mbox_chan *link, void *data)
 
 static int stm32_ipcc_startup(struct mbox_chan *link)
 {
-	unsigned long chan = (unsigned long)link->con_priv;
+	unsigned int chan = (unsigned int)link->con_priv;
 	struct stm32_ipcc *ipcc = container_of(link->mbox, struct stm32_ipcc,
 					       controller);
 	int ret;
@@ -183,7 +184,7 @@ static int stm32_ipcc_startup(struct mbox_chan *link)
 
 static void stm32_ipcc_shutdown(struct mbox_chan *link)
 {
-	unsigned long chan = (unsigned long)link->con_priv;
+	unsigned int chan = (unsigned int)link->con_priv;
 	struct stm32_ipcc *ipcc = container_of(link->mbox, struct stm32_ipcc,
 					       controller);
 
@@ -206,7 +207,7 @@ static int stm32_ipcc_probe(struct platform_device *pdev)
 	struct device_node *np = dev->of_node;
 	struct stm32_ipcc *ipcc;
 	struct resource *res;
-	unsigned long i;
+	unsigned int i;
 	int ret;
 	u32 ip_ver;
 	static const char * const irq_name[] = {"rx", "tx"};
@@ -257,6 +258,9 @@ static int stm32_ipcc_probe(struct platform_device *pdev)
 	for (i = 0; i < IPCC_IRQ_NUM; i++) {
 		ipcc->irqs[i] = platform_get_irq_byname(pdev, irq_name[i]);
 		if (ipcc->irqs[i] < 0) {
+			if (ipcc->irqs[i] != -EPROBE_DEFER)
+				dev_err(dev, "no IRQ specified %s\n",
+					irq_name[i]);
 			ret = ipcc->irqs[i];
 			goto err_clk;
 		}
@@ -265,7 +269,7 @@ static int stm32_ipcc_probe(struct platform_device *pdev)
 						irq_thread[i], IRQF_ONESHOT,
 						dev_name(dev), ipcc);
 		if (ret) {
-			dev_err(dev, "failed to request irq %lu (%d)\n", i, ret);
+			dev_err(dev, "failed to request irq %d (%d)\n", i, ret);
 			goto err_clk;
 		}
 	}
@@ -278,9 +282,16 @@ static int stm32_ipcc_probe(struct platform_device *pdev)
 
 	/* wakeup */
 	if (of_property_read_bool(np, "wakeup-source")) {
-		device_set_wakeup_capable(dev, true);
+		ipcc->wkp = platform_get_irq_byname(pdev, "wakeup");
+		if (ipcc->wkp < 0) {
+			if (ipcc->wkp != -EPROBE_DEFER)
+				dev_err(dev, "could not get wakeup IRQ\n");
+			ret = ipcc->wkp;
+			goto err_clk;
+		}
 
-		ret = dev_pm_set_wake_irq(dev, ipcc->irqs[IPCC_IRQ_RX]);
+		device_set_wakeup_capable(dev, true);
+		ret = dev_pm_set_dedicated_wake_irq(dev, ipcc->wkp);
 		if (ret) {
 			dev_err(dev, "Failed to set wake up irq\n");
 			goto err_init_wkp;
@@ -323,10 +334,10 @@ static int stm32_ipcc_probe(struct platform_device *pdev)
 	return 0;
 
 err_irq_wkp:
-	if (of_property_read_bool(np, "wakeup-source"))
+	if (ipcc->wkp)
 		dev_pm_clear_wake_irq(dev);
 err_init_wkp:
-	device_set_wakeup_capable(dev, false);
+	device_init_wakeup(dev, false);
 err_clk:
 	clk_disable_unprepare(ipcc->clk);
 	return ret;
@@ -334,17 +345,27 @@ err_clk:
 
 static int stm32_ipcc_remove(struct platform_device *pdev)
 {
-	struct device *dev = &pdev->dev;
+	struct stm32_ipcc *ipcc = platform_get_drvdata(pdev);
 
-	if (of_property_read_bool(dev->of_node, "wakeup-source"))
+	if (ipcc->wkp)
 		dev_pm_clear_wake_irq(&pdev->dev);
 
-	device_set_wakeup_capable(dev, false);
+	device_init_wakeup(&pdev->dev, false);
 
 	return 0;
 }
 
 #ifdef CONFIG_PM_SLEEP
+static void stm32_ipcc_set_irq_wake(struct device *dev, bool enable)
+{
+	struct stm32_ipcc *ipcc = dev_get_drvdata(dev);
+	unsigned int i;
+
+	if (device_may_wakeup(dev))
+		for (i = 0; i < IPCC_IRQ_NUM; i++)
+			irq_set_irq_wake(ipcc->irqs[i], enable);
+}
+
 static int stm32_ipcc_suspend(struct device *dev)
 {
 	struct stm32_ipcc *ipcc = dev_get_drvdata(dev);
@@ -352,12 +373,16 @@ static int stm32_ipcc_suspend(struct device *dev)
 	ipcc->xmr = readl_relaxed(ipcc->reg_proc + IPCC_XMR);
 	ipcc->xcr = readl_relaxed(ipcc->reg_proc + IPCC_XCR);
 
+	stm32_ipcc_set_irq_wake(dev, true);
+
 	return 0;
 }
 
 static int stm32_ipcc_resume(struct device *dev)
 {
 	struct stm32_ipcc *ipcc = dev_get_drvdata(dev);
+
+	stm32_ipcc_set_irq_wake(dev, false);
 
 	writel_relaxed(ipcc->xmr, ipcc->reg_proc + IPCC_XMR);
 	writel_relaxed(ipcc->xcr, ipcc->reg_proc + IPCC_XCR);

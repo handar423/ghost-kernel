@@ -11,6 +11,7 @@
 #include <linux/adfs_fs.h>
 
 #include "check.h"
+#include "acorn.h"
 
 /*
  * Partition types. (Oh for reusability)

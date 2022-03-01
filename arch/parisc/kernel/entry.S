@@ -19,6 +19,7 @@
 #include <asm/psw.h>
 #include <asm/cache.h>		/* for L1_CACHE_SHIFT */
 #include <asm/assembly.h>	/* for LDREG/STREG defines */
+#include <asm/pgtable.h>
 #include <asm/signal.h>
 #include <asm/unistd.h>
 #include <asm/ldcw.h>
@@ -27,7 +28,6 @@
 #include <asm/alternative.h>
 
 #include <linux/linkage.h>
-#include <linux/pgtable.h>
 
 #ifdef CONFIG_64BIT
 	.level 2.0w
@@ -887,7 +887,7 @@ intr_check_sig:
 	/* As above */
 	mfctl   %cr30,%r1
 	LDREG	TI_FLAGS(%r1),%r19
-	ldi	(_TIF_USER_WORK_MASK & ~_TIF_NEED_RESCHED), %r20
+	ldi	(_TIF_SIGPENDING|_TIF_NOTIFY_RESUME), %r20
 	and,COND(<>)	%r19, %r20, %r0
 	b,n	intr_restore	/* skip past if we've nothing to do */
 
@@ -899,19 +899,19 @@ intr_check_sig:
 	 * Only do signals if we are returning to user space
 	 */
 	LDREG	PT_IASQ0(%r16), %r20
-	cmpib,COND(=),n LINUX_GATEWAY_SPACE, %r20, intr_restore /* forward */
+	cmpib,COND(=),n LINUX_GATEWAY_SPACE, %r20, intr_restore /* backward */
 	LDREG	PT_IASQ1(%r16), %r20
-	cmpib,COND(=),n LINUX_GATEWAY_SPACE, %r20, intr_restore /* forward */
+	cmpib,COND(=),n LINUX_GATEWAY_SPACE, %r20, intr_restore /* backward */
+
+	/* NOTE: We need to enable interrupts if we have to deliver
+	 * signals. We used to do this earlier but it caused kernel
+	 * stack overflows. */
+	ssm     PSW_SM_I, %r0
 
 	copy	%r0, %r25			/* long in_syscall = 0 */
 #ifdef CONFIG_64BIT
 	ldo	-16(%r30),%r29			/* Reference param save area */
 #endif
-
-	/* NOTE: We need to enable interrupts if we have to deliver
-	 * signals. We used to do this earlier but it caused kernel
-	 * stack overflows. */
-	ssm	PSW_SM_I, %r0
 
 	BL	do_notify_resume,%r2
 	copy	%r16, %r26			/* struct pt_regs *regs */
@@ -942,14 +942,14 @@ intr_restore:
 	rfi
 	nop
 
-#ifndef CONFIG_PREEMPTION
+#ifndef CONFIG_PREEMPT
 # define intr_do_preempt	intr_restore
-#endif /* !CONFIG_PREEMPTION */
+#endif /* !CONFIG_PREEMPT */
 
 	.import schedule,code
 intr_do_resched:
 	/* Only call schedule on return to userspace. If we're returning
-	 * to kernel space, we may schedule if CONFIG_PREEMPTION, otherwise
+	 * to kernel space, we may schedule if CONFIG_PREEMPT, otherwise
 	 * we jump back to intr_restore.
 	 */
 	LDREG	PT_IASQ0(%r16), %r20
@@ -981,7 +981,7 @@ intr_do_resched:
 	 * and preempt_count is 0. otherwise, we continue on
 	 * our merry way back to the current running task.
 	 */
-#ifdef CONFIG_PREEMPTION
+#ifdef CONFIG_PREEMPT
 	.import preempt_schedule_irq,code
 intr_do_preempt:
 	rsm	PSW_SM_I, %r0		/* disable interrupts */
@@ -997,18 +997,11 @@ intr_do_preempt:
 	bb,<,n	%r20, 31 - PSW_SM_I, intr_restore
 	nop
 
-	/* ssm PSW_SM_I done later in intr_restore */
-#ifdef CONFIG_MLONGCALLS
-	ldil	L%intr_restore, %r2
-	load32	preempt_schedule_irq, %r1
-	bv	%r0(%r1)
-	ldo	R%intr_restore(%r2), %r2
-#else
-	ldil	L%intr_restore, %r1
 	BL	preempt_schedule_irq, %r2
-	ldo	R%intr_restore(%r1), %r2
-#endif
-#endif /* CONFIG_PREEMPTION */
+	nop
+
+	b,n	intr_restore		/* ssm PSW_SM_I done by intr_restore */
+#endif /* CONFIG_PREEMPT */
 
 	/*
 	 * External interrupts.
@@ -1817,7 +1810,7 @@ syscall_check_resched:
 	.import do_signal,code
 syscall_check_sig:
 	LDREG	TI_FLAGS-THREAD_SZ_ALGN-FRAME_SIZE(%r30),%r19
-	ldi	(_TIF_USER_WORK_MASK & ~_TIF_NEED_RESCHED), %r26
+	ldi	(_TIF_SIGPENDING|_TIF_NOTIFY_RESUME), %r26
 	and,COND(<>)	%r19, %r26, %r0
 	b,n	syscall_restore	/* skip past if we've nothing to do */
 
@@ -1848,8 +1841,8 @@ syscall_restore:
 	LDREG	TI_TASK-THREAD_SZ_ALGN-FRAME_SIZE(%r30),%r1
 
 	/* Are we being ptraced? */
-	ldw	TASK_FLAGS(%r1),%r19
-	ldi	_TIF_SYSCALL_TRACE_MASK,%r2
+	LDREG	TI_FLAGS-THREAD_SZ_ALGN-FRAME_SIZE(%r30),%r19
+	ldi	_TIF_SINGLESTEP|_TIF_BLOCKSTEP,%r2
 	and,COND(=)	%r19,%r2,%r0
 	b,n	syscall_restore_rfi
 

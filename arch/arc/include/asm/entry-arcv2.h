@@ -4,7 +4,6 @@
 #define __ASM_ARC_ENTRY_ARCV2_H
 
 #include <asm/asm-offsets.h>
-#include <asm/dsp-impl.h>
 #include <asm/irqflags-arcv2.h>
 #include <asm/thread_info.h>	/* For THREAD_SIZE */
 
@@ -163,11 +162,9 @@
 #endif
 
 #ifdef CONFIG_ARC_HAS_ACCL_REGS
-	ST2	r58, r59, PT_r58
+	ST2	r58, r59, PT_sp + 12
 #endif
 
-	/* clobbers r10, r11 registers pair */
-	DSP_SAVE_REGFILE_IRQ
 .endm
 
 /*------------------------------------------------------------------------*/
@@ -175,8 +172,8 @@
 
 	LD2	gp, fp, PT_r26		; gp (r26), fp (r27)
 
-	ld	r12, [sp, PT_r12]
-	ld	r30, [sp, PT_r30]
+	ld	r12, [sp, PT_sp + 4]
+	ld	r30, [sp, PT_sp + 8]
 
 	; Restore SP (into AUX_USER_SP) only if returning to U mode
 	;  - for K mode, it will be implicitly restored as stack is unwound
@@ -192,11 +189,8 @@
 	ld	r25, [sp, PT_user_r25]
 #endif
 
-	/* clobbers r10, r11 registers pair */
-	DSP_RESTORE_REGFILE_IRQ
-
 #ifdef CONFIG_ARC_HAS_ACCL_REGS
-	LD2	r58, r59, PT_r58
+	LD2	r58, r59, PT_sp + 12
 #endif
 .endm
 
@@ -233,8 +227,6 @@
 
 #ifdef CONFIG_ARC_IRQ_NO_AUTOSAVE
 	__RESTORE_REGFILE_HARD
-
-	; SP points to PC/STAT32: hw restores them despite NO_AUTOSAVE
 	add	sp, sp, SZ_PT_REGS - 8
 #else
 	add	sp, sp, PT_r0

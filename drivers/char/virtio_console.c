@@ -112,7 +112,7 @@ struct port_buffer {
 	unsigned int sgpages;
 
 	/* sg is used if spages > 0. sg must be the last in is struct */
-	struct scatterlist sg[];
+	struct scatterlist sg[0];
 };
 
 /*
@@ -475,7 +475,7 @@ static struct port_buffer *get_inbuf(struct port *port)
 
 	buf = virtqueue_get_buf(port->in_vq, &len);
 	if (buf) {
-		buf->len = len;
+		buf->len = min_t(size_t, len, buf->size);
 		buf->offset = 0;
 		port->stats.bytes_received += len;
 	}
@@ -871,7 +871,7 @@ static int pipe_to_sg(struct pipe_inode_info *pipe, struct pipe_buffer *buf,
 		return 0;
 
 	/* Try lock this page */
-	if (pipe_buf_try_steal(pipe, buf)) {
+	if (pipe_buf_steal(pipe, buf) == 0) {
 		/* Get reference and unlock page for moving */
 		get_page(buf->page);
 		unlock_page(buf->page);
@@ -919,7 +919,6 @@ static ssize_t port_fops_splice_write(struct pipe_inode_info *pipe,
 		.pos = *ppos,
 		.u.data = &sgl,
 	};
-	unsigned int occupancy;
 
 	/*
 	 * Rproc_serial does not yet support splice. To support splice
@@ -930,18 +929,21 @@ static ssize_t port_fops_splice_write(struct pipe_inode_info *pipe,
 	if (is_rproc_serial(port->out_vq->vdev))
 		return -EINVAL;
 
+	/*
+	 * pipe->nrbufs == 0 means there are no data to transfer,
+	 * so this returns just 0 for no data.
+	 */
 	pipe_lock(pipe);
-	ret = 0;
-	if (pipe_empty(pipe->head, pipe->tail))
+	if (!pipe->nrbufs) {
+		ret = 0;
 		goto error_out;
+	}
 
 	ret = wait_port_writable(port, filp->f_flags & O_NONBLOCK);
 	if (ret < 0)
 		goto error_out;
 
-	occupancy = pipe_occupancy(pipe->head, pipe->tail);
-	buf = alloc_buf(port->portdev->vdev, 0, occupancy);
-
+	buf = alloc_buf(port->portdev->vdev, 0, pipe->nrbufs);
 	if (!buf) {
 		ret = -ENOMEM;
 		goto error_out;
@@ -949,7 +951,7 @@ static ssize_t port_fops_splice_write(struct pipe_inode_info *pipe,
 
 	sgl.n = 0;
 	sgl.len = 0;
-	sgl.size = occupancy;
+	sgl.size = pipe->nrbufs;
 	sgl.sg = buf->sg;
 	sg_init_table(sgl.sg, sgl.size);
 	ret = __splice_from_pipe(pipe, &sd, pipe_to_sg);
@@ -1712,7 +1714,7 @@ static void control_work_handler(struct work_struct *work)
 	while ((buf = virtqueue_get_buf(vq, &len))) {
 		spin_unlock(&portdev->c_ivq_lock);
 
-		buf->len = len;
+		buf->len = min_t(size_t, len, buf->size);
 		buf->offset = 0;
 
 		handle_control_message(vq->vdev, portdev, buf);
@@ -2112,18 +2114,18 @@ fail:
 	return err;
 }
 
-static const struct virtio_device_id id_table[] = {
+static struct virtio_device_id id_table[] = {
 	{ VIRTIO_ID_CONSOLE, VIRTIO_DEV_ANY_ID },
 	{ 0 },
 };
 MODULE_DEVICE_TABLE(virtio, id_table);
 
-static const unsigned int features[] = {
+static unsigned int features[] = {
 	VIRTIO_CONSOLE_F_SIZE,
 	VIRTIO_CONSOLE_F_MULTIPORT,
 };
 
-static const struct virtio_device_id rproc_serial_id_table[] = {
+static struct virtio_device_id rproc_serial_id_table[] = {
 #if IS_ENABLED(CONFIG_REMOTEPROC)
 	{ VIRTIO_ID_RPROC_SERIAL, VIRTIO_DEV_ANY_ID },
 #endif
@@ -2131,7 +2133,7 @@ static const struct virtio_device_id rproc_serial_id_table[] = {
 };
 MODULE_DEVICE_TABLE(virtio, rproc_serial_id_table);
 
-static const unsigned int rproc_serial_features[] = {
+static unsigned int rproc_serial_features[] = {
 };
 
 #ifdef CONFIG_PM_SLEEP

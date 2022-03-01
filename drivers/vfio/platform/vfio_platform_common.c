@@ -289,7 +289,7 @@ err_irq:
 	vfio_platform_regions_cleanup(vdev);
 err_reg:
 	mutex_unlock(&driver_lock);
-	module_put(THIS_MODULE);
+	module_put(vdev->parent_module);
 	return ret;
 }
 
@@ -408,7 +408,7 @@ static ssize_t vfio_platform_read_mmio(struct vfio_platform_region *reg,
 
 	if (!reg->ioaddr) {
 		reg->ioaddr =
-			ioremap(reg->addr, reg->size);
+			ioremap_nocache(reg->addr, reg->size);
 
 		if (!reg->ioaddr)
 			return -ENOMEM;
@@ -485,7 +485,7 @@ static ssize_t vfio_platform_write_mmio(struct vfio_platform_region *reg,
 
 	if (!reg->ioaddr) {
 		reg->ioaddr =
-			ioremap(reg->addr, reg->size);
+			ioremap_nocache(reg->addr, reg->size);
 
 		if (!reg->ioaddr)
 			return -ENOMEM;

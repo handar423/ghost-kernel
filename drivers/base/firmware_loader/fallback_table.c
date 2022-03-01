@@ -21,7 +21,7 @@ struct firmware_fallback_config fw_fallback_config = {
 	.loading_timeout = 60,
 	.old_timeout = 60,
 };
-EXPORT_SYMBOL_NS_GPL(fw_fallback_config, FIRMWARE_LOADER_PRIVATE);
+EXPORT_SYMBOL_GPL(fw_fallback_config);
 
 #ifdef CONFIG_SYSCTL
 struct ctl_table firmware_config_table[] = {
@@ -45,4 +45,5 @@ struct ctl_table firmware_config_table[] = {
 	},
 	{ }
 };
+EXPORT_SYMBOL_GPL(firmware_config_table);
 #endif

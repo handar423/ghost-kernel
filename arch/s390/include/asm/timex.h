@@ -49,11 +49,9 @@ static inline void set_clock_comparator(__u64 time)
 	asm volatile("sckc %0" : : "Q" (time));
 }
 
-static inline void set_tod_programmable_field(u16 val)
+static inline void store_clock_comparator(__u64 *time)
 {
-	register unsigned long reg0 asm("0") = val;
-
-	asm volatile("sckpf" : : "d" (reg0));
+	asm volatile("stckc %0" : "=Q" (*time));
 }
 
 void clock_comparator_work(void);
@@ -182,6 +180,7 @@ static inline cycles_t get_cycles(void)
 
 int get_phys_clock(unsigned long *clock);
 void init_cpu_timer(void);
+unsigned long long monotonic_clock(void);
 
 extern unsigned char tod_clock_base[16] __aligned(8);
 

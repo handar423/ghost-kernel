@@ -82,6 +82,9 @@ static ssize_t ee1004_eeprom_read(struct i2c_client *client, char *buf,
 	if (unlikely(offset + count > EE1004_PAGE_SIZE))
 		count = EE1004_PAGE_SIZE - offset;
 
+	if (count > I2C_SMBUS_BLOCK_MAX)
+		count = I2C_SMBUS_BLOCK_MAX;
+
 	status = i2c_smbus_read_i2c_block_data_or_emulated(client, offset,
 							   count, buf);
 	dev_dbg(&client->dev, "read %zu@%d --> %d\n", count, offset, status);
@@ -280,7 +283,18 @@ static struct i2c_driver ee1004_driver = {
 	.remove = ee1004_remove,
 	.id_table = ee1004_ids,
 };
-module_i2c_driver(ee1004_driver);
+
+static int __init ee1004_init(void)
+{
+	return i2c_add_driver(&ee1004_driver);
+}
+module_init(ee1004_init);
+
+static void __exit ee1004_exit(void)
+{
+	i2c_del_driver(&ee1004_driver);
+}
+module_exit(ee1004_exit);
 
 MODULE_DESCRIPTION("Driver for EE1004-compliant DDR4 SPD EEPROMs");
 MODULE_AUTHOR("Jean Delvare");

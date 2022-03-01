@@ -74,7 +74,6 @@
 #define SMMU_PMCG_CFGR_NCTR             GENMASK(5, 0)
 #define SMMU_PMCG_CR                    0xE04
 #define SMMU_PMCG_CR_ENABLE             BIT(0)
-#define SMMU_PMCG_IIDR                  0xE08
 #define SMMU_PMCG_CEID0                 0xE20
 #define SMMU_PMCG_CEID1                 0xE28
 #define SMMU_PMCG_IRQ_CTRL              0xE50
@@ -113,7 +112,6 @@ struct smmu_pmu {
 	void __iomem *reloc_base;
 	u64 counter_mask;
 	u32 options;
-	u32 iidr;
 	bool global_filter;
 };
 
@@ -277,7 +275,7 @@ static int smmu_pmu_apply_event_filter(struct smmu_pmu *smmu_pmu,
 				       struct perf_event *event, int idx)
 {
 	u32 span, sid;
-	unsigned int num_ctrs = smmu_pmu->num_counters;
+	unsigned int cur_idx, num_ctrs = smmu_pmu->num_counters;
 	bool filter_en = !!get_filter_enable(event);
 
 	span = filter_en ? get_filter_span(event) :
@@ -285,17 +283,19 @@ static int smmu_pmu_apply_event_filter(struct smmu_pmu *smmu_pmu,
 	sid = filter_en ? get_filter_stream_id(event) :
 			   SMMU_PMCG_DEFAULT_FILTER_SID;
 
-	/* Support individual filter settings */
-	if (!smmu_pmu->global_filter) {
+	cur_idx = find_first_bit(smmu_pmu->used_counters, num_ctrs);
+	/*
+	 * Per-counter filtering, or scheduling the first globally-filtered
+	 * event into an empty PMU so idx == 0 and it works out equivalent.
+	 */
+	if (!smmu_pmu->global_filter || cur_idx == num_ctrs) {
 		smmu_pmu_set_event_filter(event, idx, span, sid);
 		return 0;
 	}
 
-	/* Requested settings same as current global settings*/
-	idx = find_first_bit(smmu_pmu->used_counters, num_ctrs);
-	if (idx == num_ctrs ||
-	    smmu_pmu_check_global_filter(smmu_pmu->events[idx], event)) {
-		smmu_pmu_set_event_filter(event, 0, span, sid);
+	/* Otherwise, must match whatever's currently scheduled */
+	if (smmu_pmu_check_global_filter(smmu_pmu->events[cur_idx], event)) {
+		smmu_pmu_set_evtyper(smmu_pmu, idx, get_event(event));
 		return 0;
 	}
 
@@ -554,40 +554,6 @@ static struct attribute_group smmu_pmu_events_group = {
 	.is_visible = smmu_pmu_event_is_visible,
 };
 
-static ssize_t smmu_pmu_identifier_attr_show(struct device *dev,
-					struct device_attribute *attr,
-					char *page)
-{
-	struct smmu_pmu *smmu_pmu = to_smmu_pmu(dev_get_drvdata(dev));
-
-	return snprintf(page, PAGE_SIZE, "0x%08x\n", smmu_pmu->iidr);
-}
-
-static umode_t smmu_pmu_identifier_attr_visible(struct kobject *kobj,
-						struct attribute *attr,
-						int n)
-{
-	struct device *dev = kobj_to_dev(kobj);
-	struct smmu_pmu *smmu_pmu = to_smmu_pmu(dev_get_drvdata(dev));
-
-	if (!smmu_pmu->iidr)
-		return 0;
-	return attr->mode;
-}
-
-static struct device_attribute smmu_pmu_identifier_attr =
-	__ATTR(identifier, 0444, smmu_pmu_identifier_attr_show, NULL);
-
-static struct attribute *smmu_pmu_identifier_attrs[] = {
-	&smmu_pmu_identifier_attr.attr,
-	NULL
-};
-
-static struct attribute_group smmu_pmu_identifier_group = {
-	.attrs = smmu_pmu_identifier_attrs,
-	.is_visible = smmu_pmu_identifier_attr_visible,
-};
-
 /* Formats */
 PMU_FORMAT_ATTR(event,		   "config:0-15");
 PMU_FORMAT_ATTR(filter_stream_id,  "config1:0-31");
@@ -611,7 +577,6 @@ static const struct attribute_group *smmu_pmu_attr_grps[] = {
 	&smmu_pmu_cpumask_group,
 	&smmu_pmu_events_group,
 	&smmu_pmu_format_group,
-	&smmu_pmu_identifier_group,
 	NULL
 };
 
@@ -764,7 +729,7 @@ static void smmu_pmu_get_acpi_options(struct smmu_pmu *smmu_pmu)
 static int smmu_pmu_probe(struct platform_device *pdev)
 {
 	struct smmu_pmu *smmu_pmu;
-	struct resource *res_0;
+	struct resource *res_0, *res_1;
 	u32 cfgr, reg_size;
 	u64 ceid_64[2];
 	int irq, err;
@@ -793,7 +758,8 @@ static int smmu_pmu_probe(struct platform_device *pdev)
 		.capabilities	= PERF_PMU_CAP_NO_EXCLUDE,
 	};
 
-	smmu_pmu->reg_base = devm_platform_get_and_ioremap_resource(pdev, 0, &res_0);
+	res_0 = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	smmu_pmu->reg_base = devm_ioremap_resource(dev, res_0);
 	if (IS_ERR(smmu_pmu->reg_base))
 		return PTR_ERR(smmu_pmu->reg_base);
 
@@ -801,7 +767,8 @@ static int smmu_pmu_probe(struct platform_device *pdev)
 
 	/* Determine if page 1 is present */
 	if (cfgr & SMMU_PMCG_CFGR_RELOC_CTRS) {
-		smmu_pmu->reloc_base = devm_platform_ioremap_resource(pdev, 1);
+		res_1 = platform_get_resource(pdev, IORESOURCE_MEM, 1);
+		smmu_pmu->reloc_base = devm_ioremap_resource(dev, res_1);
 		if (IS_ERR(smmu_pmu->reloc_base))
 			return PTR_ERR(smmu_pmu->reloc_base);
 	} else {
@@ -831,8 +798,6 @@ static int smmu_pmu_probe(struct platform_device *pdev)
 		dev_err(dev, "Setup irq failed, PMU @%pa\n", &res_0->start);
 		return err;
 	}
-
-	smmu_pmu->iidr = readl_relaxed(smmu_pmu->reg_base + SMMU_PMCG_IIDR);
 
 	name = devm_kasprintf(&pdev->dev, GFP_KERNEL, "smmuv3_pmcg_%llx",
 			      (res_0->start) >> SMMU_PMCG_PA_SHIFT);

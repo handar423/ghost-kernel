@@ -693,14 +693,13 @@ static ssize_t uinput_read(struct file *file, char __user *buffer,
 static __poll_t uinput_poll(struct file *file, poll_table *wait)
 {
 	struct uinput_device *udev = file->private_data;
-	__poll_t mask = EPOLLOUT | EPOLLWRNORM; /* uinput is always writable */
 
 	poll_wait(file, &udev->waitq, wait);
 
 	if (udev->head != udev->tail)
-		mask |= EPOLLIN | EPOLLRDNORM;
+		return EPOLLIN | EPOLLRDNORM;
 
-	return mask;
+	return 0;
 }
 
 static int uinput_release(struct inode *inode, struct file *file)

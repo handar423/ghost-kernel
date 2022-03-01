@@ -5,7 +5,6 @@
 
 #include <linux/delay.h>
 #include <linux/io.h>
-#include <linux/iopoll.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/phy/phy.h>
@@ -110,15 +109,19 @@ static inline void bcm_usb_reg32_setbits(void __iomem *addr, uint32_t set)
 
 static int bcm_usb_pll_lock_check(void __iomem *addr, u32 bit)
 {
-	u32 data;
-	int ret;
+	int retry;
+	u32 rd_data;
 
-	ret = readl_poll_timeout_atomic(addr, data, (data & bit), 1,
-					PLL_LOCK_RETRY_COUNT);
-	if (ret)
-		pr_err("%s: FAIL\n", __func__);
+	retry = PLL_LOCK_RETRY_COUNT;
+	do {
+		rd_data = readl(addr);
+		if (rd_data & bit)
+			return 0;
+		udelay(1);
+	} while (--retry > 0);
 
-	return ret;
+	pr_err("%s: FAIL\n", __func__);
+	return -ETIMEDOUT;
 }
 
 static int bcm_usb_ss_phy_init(struct bcm_usb_phy_cfg *phy_cfg)
@@ -202,7 +205,7 @@ static int bcm_usb_phy_init(struct phy *phy)
 	return ret;
 }
 
-static const struct phy_ops sr_phy_ops = {
+static struct phy_ops sr_phy_ops = {
 	.init		= bcm_usb_phy_init,
 	.reset		= bcm_usb_phy_reset,
 	.owner		= THIS_MODULE,
@@ -300,12 +303,14 @@ static int bcm_usb_phy_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct device_node *dn = dev->of_node;
 	const struct of_device_id *of_id;
+	struct resource *res;
 	void __iomem *regs;
 	int ret;
 	enum bcm_usb_phy_version version;
 	struct phy_provider *phy_provider;
 
-	regs = devm_platform_ioremap_resource(pdev, 0);
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	regs = devm_ioremap_resource(dev, res);
 	if (IS_ERR(regs))
 		return PTR_ERR(regs);
 

@@ -8,7 +8,6 @@
  */
 
 #include <linux/device.h>
-#include <linux/io.h>
 #include <linux/mm.h>
 #include <linux/delay.h>
 #include "../common/sst-dsp.h"
@@ -245,7 +244,7 @@ static int
 skl_cldma_copy_to_buf(struct sst_dsp *ctx, const void *bin,
 			u32 total_size, bool wait)
 {
-	int ret;
+	int ret = 0;
 	bool start = true;
 	unsigned int excess_bytes;
 	u32 size;

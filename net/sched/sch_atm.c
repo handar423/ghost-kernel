@@ -58,7 +58,7 @@ struct atm_flow_data {
 	struct atm_flow_data	*excess;	/* flow for excess traffic;
 						   NULL to set CLP instead */
 	int			hdr_len;
-	unsigned char		hdr[];		/* header data; MUST BE LAST */
+	unsigned char		hdr[0];		/* header data; MUST BE LAST */
 };
 
 struct atm_qdisc_data {
@@ -466,10 +466,10 @@ drop: __maybe_unused
  * non-ATM interfaces.
  */
 
-static void sch_atm_dequeue(struct tasklet_struct *t)
+static void sch_atm_dequeue(unsigned long data)
 {
-	struct atm_qdisc_data *p = from_tasklet(p, t, task);
-	struct Qdisc *sch = qdisc_from_priv(p);
+	struct Qdisc *sch = (struct Qdisc *)data;
+	struct atm_qdisc_data *p = qdisc_priv(sch);
 	struct atm_flow_data *flow;
 	struct sk_buff *skb;
 
@@ -563,7 +563,7 @@ static int atm_tc_init(struct Qdisc *sch, struct nlattr *opt,
 	if (err)
 		return err;
 
-	tasklet_setup(&p->task, sch_atm_dequeue);
+	tasklet_init(&p->task, sch_atm_dequeue, (unsigned long)sch);
 	return 0;
 }
 

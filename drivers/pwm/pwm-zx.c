@@ -196,6 +196,7 @@ static const struct pwm_ops zx_pwm_ops = {
 static int zx_pwm_probe(struct platform_device *pdev)
 {
 	struct zx_pwm_chip *zpc;
+	struct resource *res;
 	unsigned int i;
 	int ret;
 
@@ -203,7 +204,8 @@ static int zx_pwm_probe(struct platform_device *pdev)
 	if (!zpc)
 		return -ENOMEM;
 
-	zpc->base = devm_platform_ioremap_resource(pdev, 0);
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	zpc->base = devm_ioremap_resource(&pdev->dev, res);
 	if (IS_ERR(zpc->base))
 		return PTR_ERR(zpc->base);
 

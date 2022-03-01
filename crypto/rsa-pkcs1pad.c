@@ -14,7 +14,6 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/random.h>
-#include <linux/scatterlist.h>
 
 /*
  * Hash algorithm OIDs plus ASN.1 DER wrappings [RFC4880 sec 5.2.2].
@@ -200,7 +199,7 @@ static int pkcs1pad_encrypt_sign_complete(struct akcipher_request *req, int err)
 	sg_copy_from_buffer(req->dst,
 			    sg_nents_for_len(req->dst, ctx->key_size),
 			    out_buf, ctx->key_size);
-	kfree_sensitive(out_buf);
+	kzfree(out_buf);
 
 out:
 	req->dst_len = ctx->key_size;
@@ -323,7 +322,7 @@ static int pkcs1pad_decrypt_complete(struct akcipher_request *req, int err)
 				out_buf + pos, req->dst_len);
 
 done:
-	kfree_sensitive(req_ctx->out_buf);
+	kzfree(req_ctx->out_buf);
 
 	return err;
 }
@@ -501,7 +500,7 @@ static int pkcs1pad_verify_complete(struct akcipher_request *req, int err)
 		   req->dst_len) != 0)
 		err = -EKEYREJECTED;
 done:
-	kfree_sensitive(req_ctx->out_buf);
+	kzfree(req_ctx->out_buf);
 
 	return err;
 }
@@ -597,62 +596,81 @@ static void pkcs1pad_free(struct akcipher_instance *inst)
 
 static int pkcs1pad_create(struct crypto_template *tmpl, struct rtattr **tb)
 {
-	u32 mask;
+	const struct rsa_asn1_template *digest_info;
+	struct crypto_attr_type *algt;
 	struct akcipher_instance *inst;
 	struct pkcs1pad_inst_ctx *ctx;
+	struct crypto_akcipher_spawn *spawn;
 	struct akcipher_alg *rsa_alg;
+	const char *rsa_alg_name;
 	const char *hash_name;
 	int err;
 
-	err = crypto_check_attr_type(tb, CRYPTO_ALG_TYPE_AKCIPHER, &mask);
-	if (err)
-		return err;
+	algt = crypto_get_attr_type(tb);
+	if (IS_ERR(algt))
+		return PTR_ERR(algt);
+
+	if ((algt->type ^ CRYPTO_ALG_TYPE_AKCIPHER) & algt->mask)
+		return -EINVAL;
+
+	rsa_alg_name = crypto_attr_alg_name(tb[1]);
+	if (IS_ERR(rsa_alg_name))
+		return PTR_ERR(rsa_alg_name);
+
+	hash_name = crypto_attr_alg_name(tb[2]);
+	if (IS_ERR(hash_name))
+		hash_name = NULL;
+
+	if (hash_name) {
+		digest_info = rsa_lookup_asn1(hash_name);
+		if (!digest_info)
+			return -EINVAL;
+	} else
+		digest_info = NULL;
 
 	inst = kzalloc(sizeof(*inst) + sizeof(*ctx), GFP_KERNEL);
 	if (!inst)
 		return -ENOMEM;
 
 	ctx = akcipher_instance_ctx(inst);
+	spawn = &ctx->spawn;
+	ctx->digest_info = digest_info;
 
-	err = crypto_grab_akcipher(&ctx->spawn, akcipher_crypto_instance(inst),
-				   crypto_attr_alg_name(tb[1]), 0, mask);
+	crypto_set_spawn(&spawn->base, akcipher_crypto_instance(inst));
+	err = crypto_grab_akcipher(spawn, rsa_alg_name, 0,
+			crypto_requires_sync(algt->type, algt->mask));
 	if (err)
-		goto err_free_inst;
+		goto out_free_inst;
 
-	rsa_alg = crypto_spawn_akcipher_alg(&ctx->spawn);
+	rsa_alg = crypto_spawn_akcipher_alg(spawn);
 
 	err = -ENAMETOOLONG;
-	hash_name = crypto_attr_alg_name(tb[2]);
-	if (IS_ERR(hash_name)) {
+
+	if (!hash_name) {
 		if (snprintf(inst->alg.base.cra_name,
 			     CRYPTO_MAX_ALG_NAME, "pkcs1pad(%s)",
 			     rsa_alg->base.cra_name) >= CRYPTO_MAX_ALG_NAME)
-			goto err_free_inst;
+			goto out_drop_alg;
 
 		if (snprintf(inst->alg.base.cra_driver_name,
 			     CRYPTO_MAX_ALG_NAME, "pkcs1pad(%s)",
 			     rsa_alg->base.cra_driver_name) >=
 			     CRYPTO_MAX_ALG_NAME)
-			goto err_free_inst;
+			goto out_drop_alg;
 	} else {
-		ctx->digest_info = rsa_lookup_asn1(hash_name);
-		if (!ctx->digest_info) {
-			err = -EINVAL;
-			goto err_free_inst;
-		}
-
 		if (snprintf(inst->alg.base.cra_name, CRYPTO_MAX_ALG_NAME,
 			     "pkcs1pad(%s,%s)", rsa_alg->base.cra_name,
 			     hash_name) >= CRYPTO_MAX_ALG_NAME)
-			goto err_free_inst;
+			goto out_drop_alg;
 
 		if (snprintf(inst->alg.base.cra_driver_name,
 			     CRYPTO_MAX_ALG_NAME, "pkcs1pad(%s,%s)",
 			     rsa_alg->base.cra_driver_name,
 			     hash_name) >= CRYPTO_MAX_ALG_NAME)
-			goto err_free_inst;
+			goto out_drop_alg;
 	}
 
+	inst->alg.base.cra_flags = rsa_alg->base.cra_flags & CRYPTO_ALG_ASYNC;
 	inst->alg.base.cra_priority = rsa_alg->base.cra_priority;
 	inst->alg.base.cra_ctxsize = sizeof(struct pkcs1pad_ctx);
 
@@ -671,10 +689,15 @@ static int pkcs1pad_create(struct crypto_template *tmpl, struct rtattr **tb)
 	inst->free = pkcs1pad_free;
 
 	err = akcipher_register_instance(tmpl, inst);
-	if (err) {
-err_free_inst:
-		pkcs1pad_free(inst);
-	}
+	if (err)
+		goto out_drop_alg;
+
+	return 0;
+
+out_drop_alg:
+	crypto_drop_akcipher(spawn);
+out_free_inst:
+	kfree(inst);
 	return err;
 }
 

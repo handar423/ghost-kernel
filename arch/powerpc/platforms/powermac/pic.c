@@ -250,6 +250,20 @@ static unsigned int pmac_pic_get_irq(void)
 	return irq_linear_revmap(pmac_pic_host, irq);
 }
 
+#ifdef CONFIG_XMON
+static struct irqaction xmon_action = {
+	.handler	= xmon_irq,
+	.flags		= IRQF_NO_THREAD,
+	.name		= "NMI - XMON"
+};
+#endif
+
+static struct irqaction gatwick_cascade_action = {
+	.handler	= gatwick_action,
+	.flags		= IRQF_NO_THREAD,
+	.name		= "cascade",
+};
+
 static int pmac_pic_host_match(struct irq_domain *h, struct device_node *node,
 			       enum irq_domain_bus_token bus_token)
 {
@@ -370,17 +384,12 @@ static void __init pmac_pic_probe_oldstyle(void)
 		out_le32(&pmac_irq_hw[i]->enable, 0);
 
 	/* Hookup cascade irq */
-	if (slave && pmac_irq_cascade) {
-		if (request_irq(pmac_irq_cascade, gatwick_action,
-				IRQF_NO_THREAD, "cascade", NULL))
-			pr_err("Failed to register cascade interrupt\n");
-	}
+	if (slave && pmac_irq_cascade)
+		setup_irq(pmac_irq_cascade, &gatwick_cascade_action);
 
 	printk(KERN_INFO "irq: System has %d possible interrupts\n", max_irqs);
 #ifdef CONFIG_XMON
-	i = irq_create_mapping(NULL, 20);
-	if (request_irq(i, xmon_irq, IRQF_NO_THREAD, "NMI - XMON", NULL))
-		pr_err("Failed to register NMI-XMON interrupt\n");
+	setup_irq(irq_create_mapping(NULL, 20), &xmon_action);
 #endif
 }
 
@@ -432,9 +441,7 @@ static void __init pmac_pic_setup_mpic_nmi(struct mpic *mpic)
 		nmi_irq = irq_of_parse_and_map(pswitch, 0);
 		if (nmi_irq) {
 			mpic_irq_set_priority(nmi_irq, 9);
-			if (request_irq(nmi_irq, xmon_irq, IRQF_NO_THREAD,
-					"NMI - XMON", NULL))
-				pr_err("Failed to register NMI-XMON interrupt\n");
+			setup_irq(nmi_irq, &xmon_action);
 		}
 		of_node_put(pswitch);
 	}

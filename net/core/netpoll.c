@@ -70,11 +70,10 @@ module_param(carrier_timeout, uint, 0644);
 #define np_notice(np, fmt, ...)				\
 	pr_notice("%s: " fmt, np->name, ##__VA_ARGS__)
 
-static netdev_tx_t netpoll_start_xmit(struct sk_buff *skb,
-				      struct net_device *dev,
-				      struct netdev_queue *txq)
+static int netpoll_start_xmit(struct sk_buff *skb, struct net_device *dev,
+			      struct netdev_queue *txq)
 {
-	netdev_tx_t status = NETDEV_TX_OK;
+	int status = NETDEV_TX_OK;
 	netdev_features_t features;
 
 	features = netif_skb_features(skb);
@@ -298,7 +297,7 @@ static int netpoll_owner_active(struct net_device *dev)
 {
 	struct napi_struct *napi;
 
-	list_for_each_entry_rcu(napi, &dev->napi_list, dev_list) {
+	list_for_each_entry(napi, &dev->napi_list, dev_list) {
 		if (napi->poll_owner == smp_processor_id())
 			return 1;
 	}
@@ -306,22 +305,20 @@ static int netpoll_owner_active(struct net_device *dev)
 }
 
 /* call with IRQ disabled */
-static netdev_tx_t __netpoll_send_skb(struct netpoll *np, struct sk_buff *skb)
+void netpoll_send_skb_on_dev(struct netpoll *np, struct sk_buff *skb,
+			     struct net_device *dev)
 {
-	netdev_tx_t status = NETDEV_TX_BUSY;
-	struct net_device *dev;
+	int status = NETDEV_TX_BUSY;
 	unsigned long tries;
 	/* It is up to the caller to keep npinfo alive. */
 	struct netpoll_info *npinfo;
 
 	lockdep_assert_irqs_disabled();
 
-	dev = np->dev;
-	npinfo = rcu_dereference_bh(dev->npinfo);
-
+	npinfo = rcu_dereference_bh(np->dev->npinfo);
 	if (!npinfo || !netif_running(dev) || !netif_device_present(dev)) {
 		dev_kfree_skb_irq(skb);
-		return NET_XMIT_DROP;
+		return;
 	}
 
 	/* don't get messages out of order, and no recursion */
@@ -360,25 +357,8 @@ static netdev_tx_t __netpoll_send_skb(struct netpoll *np, struct sk_buff *skb)
 		skb_queue_tail(&npinfo->txq, skb);
 		schedule_delayed_work(&npinfo->tx_work,0);
 	}
-	return NETDEV_TX_OK;
 }
-
-netdev_tx_t netpoll_send_skb(struct netpoll *np, struct sk_buff *skb)
-{
-	unsigned long flags;
-	netdev_tx_t ret;
-
-	if (unlikely(!np)) {
-		dev_kfree_skb_irq(skb);
-		ret = NET_XMIT_DROP;
-	} else {
-		local_irq_save(flags);
-		ret = __netpoll_send_skb(np, skb);
-		local_irq_restore(flags);
-	}
-	return ret;
-}
-EXPORT_SYMBOL(netpoll_send_skb);
+EXPORT_SYMBOL(netpoll_send_skb_on_dev);
 
 void netpoll_send_udp(struct netpoll *np, const char *msg, int len)
 {

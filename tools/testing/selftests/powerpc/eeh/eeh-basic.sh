@@ -43,11 +43,6 @@ for dev in `ls -1 /sys/bus/pci/devices/ | grep '\.0$'` ; do
 		continue;
 	fi
 
-	if [ "ahci" = "$(basename $(realpath /sys/bus/pci/devices/$dev/driver))" ] ; then
-		echo "$dev, Skipped: ahci doesn't support recovery"
-		continue
-	fi
-
 	# Don't inject errosr into an already-frozen PE. This happens with
 	# PEs that contain multiple PCI devices (e.g. multi-function cards)
 	# and injecting new errors during the recovery process will probably
@@ -86,5 +81,5 @@ echo "$failed devices failed to recover ($dev_count tested)"
 lspci | diff -u $pre_lspci -
 rm -f $pre_lspci
 
-test "$failed" == 0
+test "$failed" -eq 0
 exit $?

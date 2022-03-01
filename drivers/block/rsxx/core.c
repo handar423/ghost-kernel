@@ -165,15 +165,17 @@ static ssize_t rsxx_cram_read(struct file *fp, char __user *ubuf,
 {
 	struct rsxx_cardinfo *card = file_inode(fp)->i_private;
 	char *buf;
-	ssize_t st;
+	int st;
 
 	buf = kzalloc(cnt, GFP_KERNEL);
 	if (!buf)
 		return -ENOMEM;
 
 	st = rsxx_creg_read(card, CREG_ADD_CRAM + (u32)*ppos, cnt, buf, 1);
-	if (!st)
-		st = copy_to_user(ubuf, buf, cnt);
+	if (!st) {
+		if (copy_to_user(ubuf, buf, cnt))
+			st = -EFAULT;
+	}
 	kfree(buf);
 	if (st)
 		return st;
@@ -425,7 +427,7 @@ static void card_state_change(struct rsxx_cardinfo *card,
 		 * Fall through so the DMA devices can be attached and
 		 * the user can attempt to pull off their data.
 		 */
-		fallthrough;
+		/* fall through */
 	case CARD_STATE_GOOD:
 		st = rsxx_get_card_size8(card, &card->size8);
 		if (st)
@@ -439,7 +441,7 @@ static void card_state_change(struct rsxx_cardinfo *card,
 	case CARD_STATE_FAULT:
 		dev_crit(CARD_TO_DEV(card),
 			"Hardware Fault reported!\n");
-		fallthrough;
+		/* Fall through. */
 
 	/* Everything else, detach DMA interface if it's attached. */
 	case CARD_STATE_SHUTDOWN:
@@ -562,15 +564,13 @@ static int rsxx_eeh_frozen(struct pci_dev *dev)
 
 	for (i = 0; i < card->n_targets; i++) {
 		if (card->ctrl[i].status.buf)
-			dma_free_coherent(&card->dev->dev,
-					  STATUS_BUFFER_SIZE8,
-					  card->ctrl[i].status.buf,
-					  card->ctrl[i].status.dma_addr);
+			pci_free_consistent(card->dev, STATUS_BUFFER_SIZE8,
+					    card->ctrl[i].status.buf,
+					    card->ctrl[i].status.dma_addr);
 		if (card->ctrl[i].cmd.buf)
-			dma_free_coherent(&card->dev->dev,
-					  COMMAND_BUFFER_SIZE8,
-					  card->ctrl[i].cmd.buf,
-					  card->ctrl[i].cmd.dma_addr);
+			pci_free_consistent(card->dev, COMMAND_BUFFER_SIZE8,
+					    card->ctrl[i].cmd.buf,
+					    card->ctrl[i].cmd.dma_addr);
 	}
 
 	return 0;
@@ -627,7 +627,7 @@ static int rsxx_eeh_fifo_flush_poll(struct rsxx_cardinfo *card)
 }
 
 static pci_ers_result_t rsxx_error_detected(struct pci_dev *dev,
-					    pci_channel_state_t error)
+					    enum pci_channel_state error)
 {
 	int st;
 
@@ -713,15 +713,15 @@ static pci_ers_result_t rsxx_slot_reset(struct pci_dev *dev)
 failed_hw_buffers_init:
 	for (i = 0; i < card->n_targets; i++) {
 		if (card->ctrl[i].status.buf)
-			dma_free_coherent(&card->dev->dev,
-					  STATUS_BUFFER_SIZE8,
-					  card->ctrl[i].status.buf,
-					  card->ctrl[i].status.dma_addr);
+			pci_free_consistent(card->dev,
+					STATUS_BUFFER_SIZE8,
+					card->ctrl[i].status.buf,
+					card->ctrl[i].status.dma_addr);
 		if (card->ctrl[i].cmd.buf)
-			dma_free_coherent(&card->dev->dev,
-					  COMMAND_BUFFER_SIZE8,
-					  card->ctrl[i].cmd.buf,
-					  card->ctrl[i].cmd.dma_addr);
+			pci_free_consistent(card->dev,
+					COMMAND_BUFFER_SIZE8,
+					card->ctrl[i].cmd.buf,
+					card->ctrl[i].cmd.dma_addr);
 	}
 failed_hw_setup:
 	rsxx_eeh_failure(dev);
@@ -869,6 +869,7 @@ static int rsxx_pci_probe(struct pci_dev *dev,
 	card->event_wq = create_singlethread_workqueue(DRIVER_NAME"_event");
 	if (!card->event_wq) {
 		dev_err(CARD_TO_DEV(card), "Failed card event setup.\n");
+		st = -ENOMEM;
 		goto failed_event_handler;
 	}
 

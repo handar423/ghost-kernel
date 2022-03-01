@@ -3,7 +3,7 @@
  *
  * Copyright (C) 2018 CMC NV
  *
- * https://www.analog.com/media/en/technical-documentation/data-sheets/AD7949.pdf
+ * http://www.analog.com/media/en/technical-documentation/data-sheets/AD7949.pdf
  */
 
 #include <linux/delay.h>
@@ -39,7 +39,7 @@ static const struct ad7949_adc_spec ad7949_adc_spec[] = {
  * struct ad7949_adc_chip - AD ADC chip
  * @lock: protects write sequences
  * @vref: regulator generating Vref
- * @indio_dev: reference to iio structure
+ * @iio_dev: reference to iio structure
  * @spi: reference to spi structure
  * @resolution: resolution of the chip
  * @cfg: copy of the configuration register
@@ -54,7 +54,7 @@ struct ad7949_adc_chip {
 	u8 resolution;
 	u16 cfg;
 	unsigned int current_channel;
-	u16 buffer ____cacheline_aligned;
+	u32 buffer ____cacheline_aligned;
 };
 
 static int ad7949_spi_write_cfg(struct ad7949_adc_chip *ad7949_adc, u16 val,
@@ -67,7 +67,7 @@ static int ad7949_spi_write_cfg(struct ad7949_adc_chip *ad7949_adc, u16 val,
 	struct spi_transfer tx[] = {
 		{
 			.tx_buf = &ad7949_adc->buffer,
-			.len = 2,
+			.len = 4,
 			.bits_per_word = bits_per_word,
 		},
 	};
@@ -91,12 +91,12 @@ static int ad7949_spi_read_channel(struct ad7949_adc_chip *ad7949_adc, int *val,
 	int ret;
 	int i;
 	int bits_per_word = ad7949_adc->resolution;
-	int mask = GENMASK(ad7949_adc->resolution, 0);
+	int mask = GENMASK(ad7949_adc->resolution - 1, 0);
 	struct spi_message msg;
 	struct spi_transfer tx[] = {
 		{
 			.rx_buf = &ad7949_adc->buffer,
-			.len = 2,
+			.len = 4,
 			.bits_per_word = bits_per_word,
 		},
 	};
@@ -243,6 +243,8 @@ static int ad7949_spi_probe(struct spi_device *spi)
 		return -ENOMEM;
 	}
 
+	indio_dev->dev.parent = dev;
+	indio_dev->dev.of_node = dev->of_node;
 	indio_dev->info = &ad7949_spi_info;
 	indio_dev->name = spi_get_device_id(spi)->name;
 	indio_dev->modes = INDIO_DIRECT_MODE;

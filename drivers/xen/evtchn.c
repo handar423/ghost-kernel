@@ -83,7 +83,7 @@ struct per_user_data {
 struct user_evtchn {
 	struct rb_node node;
 	struct per_user_data *user;
-	evtchn_port_t port;
+	unsigned port;
 	bool enabled;
 };
 
@@ -138,8 +138,7 @@ static void del_evtchn(struct per_user_data *u, struct user_evtchn *evtchn)
 	kfree(evtchn);
 }
 
-static struct user_evtchn *find_evtchn(struct per_user_data *u,
-				       evtchn_port_t port)
+static struct user_evtchn *find_evtchn(struct per_user_data *u, unsigned port)
 {
 	struct rb_node *node = u->evtchns.rb_node;
 
@@ -164,7 +163,7 @@ static irqreturn_t evtchn_interrupt(int irq, void *data)
 	struct per_user_data *u = evtchn->user;
 
 	WARN(!evtchn->enabled,
-	     "Interrupt for port %u, but apparently not enabled; per-user %p\n",
+	     "Interrupt for port %d, but apparently not enabled; per-user %p\n",
 	     evtchn->port, u);
 
 	evtchn->enabled = false;
@@ -286,7 +285,7 @@ static ssize_t evtchn_write(struct file *file, const char __user *buf,
 	mutex_lock(&u->bind_mutex);
 
 	for (i = 0; i < (count/sizeof(evtchn_port_t)); i++) {
-		evtchn_port_t port = kbuf[i];
+		unsigned port = kbuf[i];
 		struct user_evtchn *evtchn;
 
 		evtchn = find_evtchn(u, port);
@@ -361,7 +360,7 @@ static int evtchn_resize_ring(struct per_user_data *u)
 	return 0;
 }
 
-static int evtchn_bind_to_user(struct per_user_data *u, evtchn_port_t port)
+static int evtchn_bind_to_user(struct per_user_data *u, int port)
 {
 	struct user_evtchn *evtchn;
 	struct evtchn_close close;
@@ -421,6 +420,36 @@ static void evtchn_unbind_from_user(struct per_user_data *u,
 	del_evtchn(u, evtchn);
 }
 
+static DEFINE_PER_CPU(int, bind_last_selected_cpu);
+
+static void evtchn_bind_interdom_next_vcpu(int evtchn)
+{
+	unsigned int selected_cpu, irq;
+	struct irq_desc *desc;
+	unsigned long flags;
+
+	irq = irq_from_evtchn(evtchn);
+	desc = irq_to_desc(irq);
+
+	if (!desc)
+		return;
+
+	raw_spin_lock_irqsave(&desc->lock, flags);
+	selected_cpu = this_cpu_read(bind_last_selected_cpu);
+	selected_cpu = cpumask_next_and(selected_cpu,
+			desc->irq_common_data.affinity, cpu_online_mask);
+
+	if (unlikely(selected_cpu >= nr_cpu_ids))
+		selected_cpu = cpumask_first_and(desc->irq_common_data.affinity,
+				cpu_online_mask);
+
+	this_cpu_write(bind_last_selected_cpu, selected_cpu);
+
+	/* unmask expects irqs to be disabled */
+	xen_set_affinity_evtchn(desc, selected_cpu);
+	raw_spin_unlock_irqrestore(&desc->lock, flags);
+}
+
 static long evtchn_ioctl(struct file *file,
 			 unsigned int cmd, unsigned long arg)
 {
@@ -478,8 +507,10 @@ static long evtchn_ioctl(struct file *file,
 			break;
 
 		rc = evtchn_bind_to_user(u, bind_interdomain.local_port);
-		if (rc == 0)
+		if (rc == 0) {
 			rc = bind_interdomain.local_port;
+			evtchn_bind_interdom_next_vcpu(rc);
+		}
 		break;
 	}
 

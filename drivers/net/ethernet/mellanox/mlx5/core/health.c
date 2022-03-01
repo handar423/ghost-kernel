@@ -36,6 +36,7 @@
 #include <linux/vmalloc.h>
 #include <linux/hardirq.h>
 #include <linux/mlx5/driver.h>
+#include <linux/mlx5/cmd.h>
 #include "mlx5_core.h"
 #include "lib/eq.h"
 #include "lib/mlx5.h"
@@ -110,7 +111,7 @@ static bool sensor_fw_synd_rfr(struct mlx5_core_dev *dev)
 	return rfr && synd;
 }
 
-u32 mlx5_health_check_fatal_sensors(struct mlx5_core_dev *dev)
+static u32 check_fatal_sensors(struct mlx5_core_dev *dev)
 {
 	if (sensor_pci_not_working(dev))
 		return MLX5_SENSOR_PCI_COMM_ERR;
@@ -173,7 +174,7 @@ static bool reset_fw_if_needed(struct mlx5_core_dev *dev)
 	 * Check again to avoid a redundant 2nd reset. If the fatal erros was
 	 * PCI related a reset won't help.
 	 */
-	fatal_error = mlx5_health_check_fatal_sensors(dev);
+	fatal_error = check_fatal_sensors(dev);
 	if (fatal_error == MLX5_SENSOR_PCI_COMM_ERR ||
 	    fatal_error == MLX5_SENSOR_NIC_DISABLED ||
 	    fatal_error == MLX5_SENSOR_NIC_SW_RESET) {
@@ -195,7 +196,7 @@ void mlx5_enter_error_state(struct mlx5_core_dev *dev, bool force)
 	bool err_detected = false;
 
 	/* Mark the device as fatal in order to abort FW commands */
-	if ((mlx5_health_check_fatal_sensors(dev) || force) &&
+	if ((check_fatal_sensors(dev) || force) &&
 	    dev->state == MLX5_DEVICE_STATE_UP) {
 		dev->state = MLX5_DEVICE_STATE_INTERNAL_ERROR;
 		err_detected = true;
@@ -208,7 +209,7 @@ void mlx5_enter_error_state(struct mlx5_core_dev *dev, bool force)
 		goto unlock;
 	}
 
-	if (mlx5_health_check_fatal_sensors(dev) || force) { /* protected state setting */
+	if (check_fatal_sensors(dev) || force) { /* protected state setting */
 		dev->state = MLX5_DEVICE_STATE_INTERNAL_ERROR;
 		mlx5_cmd_flush(dev);
 	}
@@ -231,7 +232,7 @@ void mlx5_error_sw_reset(struct mlx5_core_dev *dev)
 
 	mlx5_core_err(dev, "start\n");
 
-	if (mlx5_health_check_fatal_sensors(dev) == MLX5_SENSOR_FW_SYND_RFR) {
+	if (check_fatal_sensors(dev) == MLX5_SENSOR_FW_SYND_RFR) {
 		/* Get cr-dump and reset FW semaphore */
 		lock = lock_sem_sw_reset(dev, true);
 
@@ -308,31 +309,26 @@ static void mlx5_handle_bad_state(struct mlx5_core_dev *dev)
 
 /* How much time to wait until health resetting the driver (in msecs) */
 #define MLX5_RECOVERY_WAIT_MSECS 60000
-int mlx5_health_wait_pci_up(struct mlx5_core_dev *dev)
+static int mlx5_health_try_recover(struct mlx5_core_dev *dev)
 {
 	unsigned long end;
 
-	end = jiffies + msecs_to_jiffies(MLX5_RECOVERY_WAIT_MSECS);
-	while (sensor_pci_not_working(dev)) {
-		if (time_after(jiffies, end))
-			return -ETIMEDOUT;
-		msleep(100);
-	}
-	return 0;
-}
-
-static int mlx5_health_try_recover(struct mlx5_core_dev *dev)
-{
 	mlx5_core_warn(dev, "handling bad device here\n");
 	mlx5_handle_bad_state(dev);
-	if (mlx5_health_wait_pci_up(dev)) {
-		mlx5_core_err(dev, "health recovery flow aborted, PCI reads still not working\n");
-		return -EIO;
+	end = jiffies + msecs_to_jiffies(MLX5_RECOVERY_WAIT_MSECS);
+	while (sensor_pci_not_working(dev)) {
+		if (time_after(jiffies, end)) {
+			mlx5_core_err(dev,
+				      "health recovery flow aborted, PCI reads still not working\n");
+			return -EIO;
+		}
+		msleep(100);
 	}
+
 	mlx5_core_err(dev, "starting health recovery flow\n");
 	mlx5_recover_device(dev);
 	if (!test_bit(MLX5_INTERFACE_STATE_UP, &dev->intf_state) ||
-	    mlx5_health_check_fatal_sensors(dev)) {
+	    check_fatal_sensors(dev)) {
 		mlx5_core_err(dev, "health recovery failed\n");
 		return -EIO;
 	}
@@ -402,8 +398,7 @@ static void print_health_info(struct mlx5_core_dev *dev)
 
 static int
 mlx5_fw_reporter_diagnose(struct devlink_health_reporter *reporter,
-			  struct devlink_fmsg *fmsg,
-			  struct netlink_ext_ack *extack)
+			  struct devlink_fmsg *fmsg)
 {
 	struct mlx5_core_dev *dev = devlink_health_reporter_priv(reporter);
 	struct mlx5_core_health *health = &dev->priv.health;
@@ -504,8 +499,7 @@ mlx5_fw_reporter_heath_buffer_data_put(struct mlx5_core_dev *dev,
 
 static int
 mlx5_fw_reporter_dump(struct devlink_health_reporter *reporter,
-		      struct devlink_fmsg *fmsg, void *priv_ctx,
-		      struct netlink_ext_ack *extack)
+		      struct devlink_fmsg *fmsg, void *priv_ctx)
 {
 	struct mlx5_core_dev *dev = devlink_health_reporter_priv(reporter);
 	int err;
@@ -559,22 +553,23 @@ static const struct devlink_health_reporter_ops mlx5_fw_reporter_ops = {
 
 static int
 mlx5_fw_fatal_reporter_recover(struct devlink_health_reporter *reporter,
-			       void *priv_ctx,
-			       struct netlink_ext_ack *extack)
+			       void *priv_ctx)
 {
 	struct mlx5_core_dev *dev = devlink_health_reporter_priv(reporter);
 
 	return mlx5_health_try_recover(dev);
 }
 
+#define MLX5_CR_DUMP_CHUNK_SIZE 256
 static int
 mlx5_fw_fatal_reporter_dump(struct devlink_health_reporter *reporter,
-			    struct devlink_fmsg *fmsg, void *priv_ctx,
-			    struct netlink_ext_ack *extack)
+			    struct devlink_fmsg *fmsg, void *priv_ctx)
 {
 	struct mlx5_core_dev *dev = devlink_health_reporter_priv(reporter);
 	u32 crdump_size = dev->priv.health.crdump_size;
 	u32 *cr_data;
+	u32 data_size;
+	u32 offset;
 	int err;
 
 	if (!mlx5_core_is_pf(dev))
@@ -595,7 +590,20 @@ mlx5_fw_fatal_reporter_dump(struct devlink_health_reporter *reporter,
 			goto free_data;
 	}
 
-	err = devlink_fmsg_binary_pair_put(fmsg, "crdump_data", cr_data, crdump_size);
+	err = devlink_fmsg_arr_pair_nest_start(fmsg, "crdump_data");
+	if (err)
+		goto free_data;
+	for (offset = 0; offset < crdump_size; offset += data_size) {
+		if (crdump_size - offset < MLX5_CR_DUMP_CHUNK_SIZE)
+			data_size = crdump_size - offset;
+		else
+			data_size = MLX5_CR_DUMP_CHUNK_SIZE;
+		err = devlink_fmsg_binary_put(fmsg, (char *)cr_data + offset,
+					      data_size);
+		if (err)
+			goto free_data;
+	}
+	err = devlink_fmsg_arr_pair_nest_end(fmsg);
 
 free_data:
 	kvfree(cr_data);
@@ -639,7 +647,7 @@ static void mlx5_fw_reporters_create(struct mlx5_core_dev *dev)
 
 	health->fw_reporter =
 		devlink_health_reporter_create(devlink, &mlx5_fw_reporter_ops,
-					       0, dev);
+					       0, false, dev);
 	if (IS_ERR(health->fw_reporter))
 		mlx5_core_warn(dev, "Failed to create fw reporter, err = %ld\n",
 			       PTR_ERR(health->fw_reporter));
@@ -648,7 +656,7 @@ static void mlx5_fw_reporters_create(struct mlx5_core_dev *dev)
 		devlink_health_reporter_create(devlink,
 					       &mlx5_fw_fatal_reporter_ops,
 					       MLX5_REPORTER_FW_GRACEFUL_PERIOD,
-					       dev);
+					       true, dev);
 	if (IS_ERR(health->fw_fatal_reporter))
 		mlx5_core_warn(dev, "Failed to create fw fatal reporter, err = %ld\n",
 			       PTR_ERR(health->fw_fatal_reporter));
@@ -701,7 +709,7 @@ static void poll_health(struct timer_list *t)
 	if (dev->state == MLX5_DEVICE_STATE_INTERNAL_ERROR)
 		goto out;
 
-	fatal_error = mlx5_health_check_fatal_sensors(dev);
+	fatal_error = check_fatal_sensors(dev);
 
 	if (fatal_error && !health->fatal_error) {
 		mlx5_core_err(dev, "Fatal error %u detected\n", fatal_error);

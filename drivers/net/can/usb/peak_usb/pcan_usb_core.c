@@ -295,16 +295,15 @@ static void peak_usb_write_bulk_callback(struct urb *urb)
 		netif_trans_update(netdev);
 		break;
 
-	case -EPROTO:
-	case -ENOENT:
-	case -ECONNRESET:
-	case -ESHUTDOWN:
-		break;
-
 	default:
 		if (net_ratelimit())
 			netdev_err(netdev, "Tx urb aborted (%d)\n",
 				   urb->status);
+	case -EPROTO:
+	case -ENOENT:
+	case -ECONNRESET:
+	case -ESHUTDOWN:
+
 		break;
 	}
 
@@ -387,7 +386,7 @@ static netdev_tx_t peak_usb_ndo_start_xmit(struct sk_buff *skb,
 		default:
 			netdev_warn(netdev, "tx urb submitting failed err=%d\n",
 				    err);
-			fallthrough;
+			/* fall through */
 		case -ENOENT:
 			/* cable unplugged */
 			stats->tx_dropped++;
@@ -857,7 +856,7 @@ static int peak_usb_create_dev(const struct peak_usb_adapter *peak_usb_adapter,
 	if (dev->adapter->dev_set_bus) {
 		err = dev->adapter->dev_set_bus(dev, 0);
 		if (err)
-			goto lbl_unregister_candev;
+			goto adap_dev_free;
 	}
 
 	/* get device number early */
@@ -868,6 +867,10 @@ static int peak_usb_create_dev(const struct peak_usb_adapter *peak_usb_adapter,
 			peak_usb_adapter->name, ctrl_idx, dev->device_number);
 
 	return 0;
+
+adap_dev_free:
+	if (dev->adapter->dev_free)
+		dev->adapter->dev_free(dev);
 
 lbl_unregister_candev:
 	unregister_candev(netdev);

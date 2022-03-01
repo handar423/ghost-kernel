@@ -857,6 +857,9 @@ static void via_sdc_data_isr(struct via_crdr_mmc_host *host, u16 intmask)
 {
 	BUG_ON(intmask == 0);
 
+	if (!host->data)
+		return;
+
 	if (intmask & VIA_CRDR_SDSTS_DT)
 		host->data->error = -ETIMEDOUT;
 	else if (intmask & (VIA_CRDR_SDSTS_RC | VIA_CRDR_SDSTS_WC))
@@ -1111,7 +1114,7 @@ static int via_sd_probe(struct pci_dev *pcidev,
 
 	len = pci_resource_len(pcidev, 0);
 	base = pci_resource_start(pcidev, 0);
-	sdhost->mmiobase = ioremap(base, len);
+	sdhost->mmiobase = ioremap_nocache(base, len);
 	if (!sdhost->mmiobase) {
 		ret = -ENOMEM;
 		goto free_mmc_host;
@@ -1220,7 +1223,9 @@ static void via_sd_remove(struct pci_dev *pcidev)
 		pci_name(pcidev), (int)pcidev->vendor, (int)pcidev->device);
 }
 
-static void __maybe_unused via_init_sdc_pm(struct via_crdr_mmc_host *host)
+#ifdef CONFIG_PM
+
+static void via_init_sdc_pm(struct via_crdr_mmc_host *host)
 {
 	struct sdhcreg *pm_sdhcreg;
 	void __iomem *addrbase;
@@ -1254,30 +1259,33 @@ static void __maybe_unused via_init_sdc_pm(struct via_crdr_mmc_host *host)
 	via_print_sdchc(host);
 }
 
-static int __maybe_unused via_sd_suspend(struct device *dev)
+static int via_sd_suspend(struct pci_dev *pcidev, pm_message_t state)
 {
 	struct via_crdr_mmc_host *host;
 	unsigned long flags;
 
-	host = dev_get_drvdata(dev);
+	host = pci_get_drvdata(pcidev);
 
 	spin_lock_irqsave(&host->lock, flags);
 	via_save_pcictrlreg(host);
 	via_save_sdcreg(host);
 	spin_unlock_irqrestore(&host->lock, flags);
 
-	device_wakeup_enable(dev);
+	pci_save_state(pcidev);
+	pci_enable_wake(pcidev, pci_choose_state(pcidev, state), 0);
+	pci_disable_device(pcidev);
+	pci_set_power_state(pcidev, pci_choose_state(pcidev, state));
 
 	return 0;
 }
 
-static int __maybe_unused via_sd_resume(struct device *dev)
+static int via_sd_resume(struct pci_dev *pcidev)
 {
 	struct via_crdr_mmc_host *sdhost;
 	int ret = 0;
 	u8 gatt;
 
-	sdhost = dev_get_drvdata(dev);
+	sdhost = pci_get_drvdata(pcidev);
 
 	gatt = VIA_CRDR_PCICLKGATT_PAD_PWRON;
 	if (sdhost->power == MMC_VDD_165_195)
@@ -1292,20 +1300,32 @@ static int __maybe_unused via_sd_resume(struct device *dev)
 
 	msleep(100);
 
+	pci_set_power_state(pcidev, PCI_D0);
+	pci_restore_state(pcidev);
+	ret = pci_enable_device(pcidev);
+	if (ret)
+		return ret;
+
 	via_restore_pcictrlreg(sdhost);
 	via_init_sdc_pm(sdhost);
 
 	return ret;
 }
 
-static SIMPLE_DEV_PM_OPS(via_sd_pm_ops, via_sd_suspend, via_sd_resume);
+#else /* CONFIG_PM */
+
+#define via_sd_suspend NULL
+#define via_sd_resume NULL
+
+#endif /* CONFIG_PM */
 
 static struct pci_driver via_sd_driver = {
 	.name = DRV_NAME,
 	.id_table = via_ids,
 	.probe = via_sd_probe,
 	.remove = via_sd_remove,
-	.driver.pm = &via_sd_pm_ops,
+	.suspend = via_sd_suspend,
+	.resume = via_sd_resume,
 };
 
 module_pci_driver(via_sd_driver);

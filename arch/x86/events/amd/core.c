@@ -14,10 +14,6 @@
 static DEFINE_PER_CPU(unsigned long, perf_nmi_tstamp);
 static unsigned long perf_nmi_window;
 
-/* AMD Event 0xFFF: Merge.  Used with Large Increment per Cycle events */
-#define AMD_MERGE_EVENT ((0xFULL << 32) | 0xFFULL)
-#define AMD_MERGE_EVENT_ENABLE (AMD_MERGE_EVENT | ARCH_PERFMON_EVENTSEL_ENABLE)
-
 static __initconst const u64 amd_hw_cache_event_ids
 				[PERF_COUNT_HW_CACHE_MAX]
 				[PERF_COUNT_HW_CACHE_OP_MAX]
@@ -340,9 +336,6 @@ static int amd_core_hw_config(struct perf_event *event)
 	else if (event->attr.exclude_guest)
 		event->hw.config |= AMD64_EVENTSEL_HOSTONLY;
 
-	if ((x86_pmu.flags & PMU_FL_PAIR) && amd_is_pair_event_code(&event->hw))
-		event->hw.flags |= PERF_X86_EVENT_PAIR;
-
 	return 0;
 }
 
@@ -538,7 +531,7 @@ static void amd_pmu_cpu_starting(int cpu)
 	if (!x86_pmu.amd_nb_constraints)
 		return;
 
-	nb_id = topology_die_id(cpu);
+	nb_id = amd_get_nb_id(cpu);
 	WARN_ON_ONCE(nb_id == BAD_APICID);
 
 	for_each_online_cpu(i) {
@@ -671,7 +664,15 @@ static void amd_pmu_disable_event(struct perf_event *event)
  */
 static int amd_pmu_handle_irq(struct pt_regs *regs)
 {
-	int handled;
+	struct cpu_hw_events *cpuc = this_cpu_ptr(&cpu_hw_events);
+	int active, handled;
+
+	/*
+	 * Obtain the active count before calling x86_pmu_handle_irq() since
+	 * it is possible that x86_pmu_handle_irq() may make a counter
+	 * inactive (through x86_pmu_stop).
+	 */
+	active = __bitmap_weight(cpuc->active_mask, X86_PMC_IDX_MAX);
 
 	/* Process any counter overflows */
 	handled = x86_pmu_handle_irq(regs);
@@ -681,7 +682,8 @@ static int amd_pmu_handle_irq(struct pt_regs *regs)
 	 * NMIs will be claimed if arriving within that window.
 	 */
 	if (handled) {
-		this_cpu_write(perf_nmi_tstamp, jiffies + perf_nmi_window);
+		this_cpu_write(perf_nmi_tstamp,
+			       jiffies + perf_nmi_window);
 
 		return handled;
 	}
@@ -888,15 +890,6 @@ amd_get_event_constraints_f17h(struct cpu_hw_events *cpuc, int idx,
 	return &unconstrained;
 }
 
-static void amd_put_event_constraints_f17h(struct cpu_hw_events *cpuc,
-					   struct perf_event *event)
-{
-	struct hw_perf_event *hwc = &event->hw;
-
-	if (is_counter_pair(hwc))
-		--cpuc->n_pair;
-}
-
 static ssize_t amd_event_sysfs_show(char *page, u64 config)
 {
 	u64 event = (config & ARCH_PERFMON_EVENTSEL_EVENT) |
@@ -984,8 +977,6 @@ static int __init amd_core_pmu_init(void)
 				    PERF_X86_EVENT_PAIR);
 
 		x86_pmu.get_event_constraints = amd_get_event_constraints_f17h;
-		x86_pmu.put_event_constraints = amd_put_event_constraints_f17h;
-		x86_pmu.perf_ctr_pair_en = AMD_MERGE_EVENT_ENABLE;
 		x86_pmu.flags |= PMU_FL_PAIR;
 	}
 

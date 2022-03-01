@@ -150,6 +150,8 @@ static long geodewdt_ioctl(struct file *file, unsigned int cmd,
 	case WDIOC_GETSUPPORT:
 		return copy_to_user(argp, &ident,
 				    sizeof(ident)) ? -EFAULT : 0;
+		break;
+
 	case WDIOC_GETSTATUS:
 	case WDIOC_GETBOOTSTATUS:
 		return put_user(0, p);
@@ -183,7 +185,7 @@ static long geodewdt_ioctl(struct file *file, unsigned int cmd,
 
 		if (geodewdt_set_heartbeat(interval))
 			return -EINVAL;
-		fallthrough;
+	/* Fall through */
 	case WDIOC_GETTIMEOUT:
 		return put_user(timeout, p);
 
@@ -199,7 +201,6 @@ static const struct file_operations geodewdt_fops = {
 	.llseek         = no_llseek,
 	.write          = geodewdt_write,
 	.unlocked_ioctl = geodewdt_ioctl,
-	.compat_ioctl	= compat_ptr_ioctl,
 	.open           = geodewdt_open,
 	.release        = geodewdt_release,
 };

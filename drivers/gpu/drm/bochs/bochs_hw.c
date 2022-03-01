@@ -4,7 +4,6 @@
 
 #include <linux/pci.h>
 
-#include <drm/drm_drv.h>
 #include <drm/drm_fourcc.h>
 
 #include "bochs.h"
@@ -193,8 +192,6 @@ void bochs_hw_fini(struct drm_device *dev)
 {
 	struct bochs_device *bochs = dev->dev_private;
 
-	/* TODO: shot down existing vram mappings */
-
 	if (bochs->mmio)
 		iounmap(bochs->mmio);
 	if (bochs->ioports)
@@ -208,11 +205,6 @@ void bochs_hw_fini(struct drm_device *dev)
 void bochs_hw_setmode(struct bochs_device *bochs,
 		      struct drm_display_mode *mode)
 {
-	int idx;
-
-	if (!drm_dev_enter(bochs->dev, &idx))
-		return;
-
 	bochs->xres = mode->hdisplay;
 	bochs->yres = mode->vdisplay;
 	bochs->bpp = 32;
@@ -238,18 +230,11 @@ void bochs_hw_setmode(struct bochs_device *bochs,
 
 	bochs_dispi_write(bochs, VBE_DISPI_INDEX_ENABLE,
 			  VBE_DISPI_ENABLED | VBE_DISPI_LFB_ENABLED);
-
-	drm_dev_exit(idx);
 }
 
 void bochs_hw_setformat(struct bochs_device *bochs,
 			const struct drm_format_info *format)
 {
-	int idx;
-
-	if (!drm_dev_enter(bochs->dev, &idx))
-		return;
-
 	DRM_DEBUG_DRIVER("format %c%c%c%c\n",
 			 (format->format >>  0) & 0xff,
 			 (format->format >>  8) & 0xff,
@@ -268,19 +253,14 @@ void bochs_hw_setformat(struct bochs_device *bochs,
 		DRM_ERROR("%s: Huh? Got framebuffer format 0x%x",
 			  __func__, format->format);
 		break;
-	}
-
-	drm_dev_exit(idx);
+	};
 }
 
 void bochs_hw_setbase(struct bochs_device *bochs,
 		      int x, int y, int stride, u64 addr)
 {
 	unsigned long offset;
-	unsigned int vx, vy, vwidth, idx;
-
-	if (!drm_dev_enter(bochs->dev, &idx))
-		return;
+	unsigned int vx, vy, vwidth;
 
 	bochs->stride = stride;
 	offset = (unsigned long)addr +
@@ -295,6 +275,4 @@ void bochs_hw_setbase(struct bochs_device *bochs,
 	bochs_dispi_write(bochs, VBE_DISPI_INDEX_VIRT_WIDTH, vwidth);
 	bochs_dispi_write(bochs, VBE_DISPI_INDEX_X_OFFSET, vx);
 	bochs_dispi_write(bochs, VBE_DISPI_INDEX_Y_OFFSET, vy);
-
-	drm_dev_exit(idx);
 }

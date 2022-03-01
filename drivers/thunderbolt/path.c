@@ -220,8 +220,7 @@ err:
  * Creates path between two ports starting with given @src_hopid. Reserves
  * HopIDs for each port (they can be different from @src_hopid depending on
  * how many HopIDs each port already have reserved). If there are dual
- * links on the path, prioritizes using @link_nr but takes into account
- * that the lanes may be bonded.
+ * links on the path, prioritizes using @link_nr.
  *
  * Return: Returns a tb_path on success or NULL on failure.
  */
@@ -229,7 +228,7 @@ struct tb_path *tb_path_alloc(struct tb *tb, struct tb_port *src, int src_hopid,
 			      struct tb_port *dst, int dst_hopid, int link_nr,
 			      const char *name)
 {
-	struct tb_port *in_port, *out_port, *first_port, *last_port;
+	struct tb_port *in_port, *out_port;
 	int in_hopid, out_hopid;
 	struct tb_path *path;
 	size_t num_hops;
@@ -239,23 +238,12 @@ struct tb_path *tb_path_alloc(struct tb *tb, struct tb_port *src, int src_hopid,
 	if (!path)
 		return NULL;
 
-	first_port = last_port = NULL;
-	i = 0;
-	tb_for_each_port_on_path(src, dst, in_port) {
-		if (!first_port)
-			first_port = in_port;
-		last_port = in_port;
-		i++;
-	}
-
-	/* Check that src and dst are reachable */
-	if (first_port != src || last_port != dst) {
-		kfree(path);
-		return NULL;
-	}
-
-	/* Each hop takes two ports */
-	num_hops = i / 2;
+	/*
+	 * Number of hops on a path is the distance between the two
+	 * switches plus the source adapter port.
+	 */
+	num_hops = abs(tb_route_length(tb_route(src->sw)) -
+		       tb_route_length(tb_route(dst->sw))) + 1;
 
 	path->hops = kcalloc(num_hops, sizeof(*path->hops), GFP_KERNEL);
 	if (!path->hops) {
@@ -271,9 +259,7 @@ struct tb_path *tb_path_alloc(struct tb *tb, struct tb_port *src, int src_hopid,
 		if (!in_port)
 			goto err;
 
-		/* When lanes are bonded primary link must be used */
-		if (!in_port->bonded && in_port->dual_link_port &&
-		    in_port->link_nr != link_nr)
+		if (in_port->dual_link_port && in_port->link_nr != link_nr)
 			in_port = in_port->dual_link_port;
 
 		ret = tb_port_alloc_in_hopid(in_port, in_hopid, in_hopid);
@@ -285,27 +271,8 @@ struct tb_path *tb_path_alloc(struct tb *tb, struct tb_port *src, int src_hopid,
 		if (!out_port)
 			goto err;
 
-		/*
-		 * Pick up right port when going from non-bonded to
-		 * bonded or from bonded to non-bonded.
-		 */
-		if (out_port->dual_link_port) {
-			if (!in_port->bonded && out_port->bonded &&
-			    out_port->link_nr) {
-				/*
-				 * Use primary link when going from
-				 * non-bonded to bonded.
-				 */
-				out_port = out_port->dual_link_port;
-			} else if (!out_port->bonded &&
-				   out_port->link_nr != link_nr) {
-				/*
-				 * If out port is not bonded follow
-				 * link_nr.
-				 */
-				out_port = out_port->dual_link_port;
-			}
-		}
+		if (out_port->dual_link_port && out_port->link_nr != link_nr)
+			out_port = out_port->dual_link_port;
 
 		if (i == num_hops - 1)
 			ret = tb_port_alloc_out_hopid(out_port, dst_hopid,
@@ -406,17 +373,10 @@ static int __tb_path_deactivate_hop(struct tb_port *port, int hop_index,
 
 		if (!hop.pending) {
 			if (clear_fc) {
-				/*
-				 * Clear flow control. Protocol adapters
-				 * IFC and ISE bits are vendor defined
-				 * in the USB4 spec so we clear them
-				 * only for pre-USB4 adapters.
-				 */
-				if (!tb_switch_is_usb4(port->sw)) {
-					hop.ingress_fc = 0;
-					hop.ingress_shared_buffer = 0;
-				}
+				/* Clear flow control */
+				hop.ingress_fc = 0;
 				hop.egress_fc = 0;
+				hop.ingress_shared_buffer = 0;
 				hop.egress_shared_buffer = 0;
 
 				return tb_port_write(port, &hop, TB_CFG_HOPS,
@@ -454,7 +414,7 @@ void tb_path_deactivate(struct tb_path *path)
 		return;
 	}
 	tb_dbg(path->tb,
-	       "deactivating %s path from %llx:%u to %llx:%u\n",
+	       "deactivating %s path from %llx:%x to %llx:%x\n",
 	       path->name, tb_route(path->hops[0].in_port->sw),
 	       path->hops[0].in_port->port,
 	       tb_route(path->hops[path->path_length - 1].out_port->sw),
@@ -482,7 +442,7 @@ int tb_path_activate(struct tb_path *path)
 	}
 
 	tb_dbg(path->tb,
-	       "activating %s path from %llx:%u to %llx:%u\n",
+	       "activating %s path from %llx:%x to %llx:%x\n",
 	       path->name, tb_route(path->hops[0].in_port->sw),
 	       path->hops[0].in_port->port,
 	       tb_route(path->hops[path->path_length - 1].out_port->sw),
@@ -573,26 +533,5 @@ bool tb_path_is_invalid(struct tb_path *path)
 		if (path->hops[i].out_port->sw->is_unplugged)
 			return true;
 	}
-	return false;
-}
-
-/**
- * tb_path_port_on_path() - Does the path go through certain port
- * @path: Path to check
- * @port: Switch to check
- *
- * Goes over all hops on path and checks if @port is any of them.
- * Direction does not matter.
- */
-bool tb_path_port_on_path(const struct tb_path *path, const struct tb_port *port)
-{
-	int i;
-
-	for (i = 0; i < path->path_length; i++) {
-		if (path->hops[i].in_port == port ||
-		    path->hops[i].out_port == port)
-			return true;
-	}
-
 	return false;
 }

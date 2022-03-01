@@ -110,15 +110,10 @@ nfs3_proc_getattr(struct nfs_server *server, struct nfs_fh *fhandle,
 		.rpc_resp	= fattr,
 	};
 	int	status;
-	unsigned short task_flags = 0;
-
-	/* Is this is an attribute revalidation, subject to softreval? */
-	if (inode && (server->flags & NFS_MOUNT_SOFTREVAL))
-		task_flags |= RPC_TASK_TIMEOUT;
 
 	dprintk("NFS call  getattr\n");
 	nfs_fattr_init(fattr);
-	status = rpc_call_sync(server->client, &msg, task_flags);
+	status = rpc_call_sync(server->client, &msg, 0);
 	dprintk("NFS reply getattr: %d\n", status);
 	return status;
 }
@@ -145,23 +140,23 @@ nfs3_proc_setattr(struct dentry *dentry, struct nfs_fattr *fattr,
 	nfs_fattr_init(fattr);
 	status = rpc_call_sync(NFS_CLIENT(inode), &msg, 0);
 	if (status == 0) {
-		nfs_setattr_update_inode(inode, sattr, fattr);
 		if (NFS_I(inode)->cache_validity & NFS_INO_INVALID_ACL)
 			nfs_zap_acl_cache(inode);
+		nfs_setattr_update_inode(inode, sattr, fattr);
 	}
 	dprintk("NFS reply setattr: %d\n", status);
 	return status;
 }
 
 static int
-__nfs3_proc_lookup(struct inode *dir, const char *name, size_t len,
-		   struct nfs_fh *fhandle, struct nfs_fattr *fattr,
-		   unsigned short task_flags)
+nfs3_proc_lookup(struct inode *dir, const struct qstr *name,
+		 struct nfs_fh *fhandle, struct nfs_fattr *fattr,
+		 struct nfs4_label *label)
 {
 	struct nfs3_diropargs	arg = {
 		.fh		= NFS_FH(dir),
-		.name		= name,
-		.len		= len
+		.name		= name->name,
+		.len		= name->len
 	};
 	struct nfs3_diropres	res = {
 		.fh		= fhandle,
@@ -174,53 +169,23 @@ __nfs3_proc_lookup(struct inode *dir, const char *name, size_t len,
 	};
 	int			status;
 
+	dprintk("NFS call  lookup %s\n", name->name);
 	res.dir_attr = nfs_alloc_fattr();
 	if (res.dir_attr == NULL)
 		return -ENOMEM;
 
 	nfs_fattr_init(fattr);
-	status = rpc_call_sync(NFS_CLIENT(dir), &msg, task_flags);
+	status = rpc_call_sync(NFS_CLIENT(dir), &msg, 0);
 	nfs_refresh_inode(dir, res.dir_attr);
 	if (status >= 0 && !(fattr->valid & NFS_ATTR_FATTR)) {
 		msg.rpc_proc = &nfs3_procedures[NFS3PROC_GETATTR];
 		msg.rpc_argp = fhandle;
 		msg.rpc_resp = fattr;
-		status = rpc_call_sync(NFS_CLIENT(dir), &msg, task_flags);
+		status = rpc_call_sync(NFS_CLIENT(dir), &msg, 0);
 	}
 	nfs_free_fattr(res.dir_attr);
 	dprintk("NFS reply lookup: %d\n", status);
 	return status;
-}
-
-static int
-nfs3_proc_lookup(struct inode *dir, struct dentry *dentry,
-		 struct nfs_fh *fhandle, struct nfs_fattr *fattr,
-		 struct nfs4_label *label)
-{
-	unsigned short task_flags = 0;
-
-	/* Is this is an attribute revalidation, subject to softreval? */
-	if (nfs_lookup_is_soft_revalidate(dentry))
-		task_flags |= RPC_TASK_TIMEOUT;
-
-	dprintk("NFS call  lookup %pd2\n", dentry);
-	return __nfs3_proc_lookup(dir, dentry->d_name.name,
-				  dentry->d_name.len, fhandle, fattr,
-				  task_flags);
-}
-
-static int nfs3_proc_lookupp(struct inode *inode, struct nfs_fh *fhandle,
-			     struct nfs_fattr *fattr, struct nfs4_label *label)
-{
-	const char dotdot[] = "..";
-	const size_t len = strlen(dotdot);
-	unsigned short task_flags = 0;
-
-	if (NFS_SERVER(inode)->flags & NFS_MOUNT_SOFTREVAL)
-		task_flags |= RPC_TASK_TIMEOUT;
-
-	return __nfs3_proc_lookup(inode, dotdot, len, fhandle, fattr,
-				  task_flags);
 }
 
 static int nfs3_proc_access(struct inode *inode, struct nfs_access_entry *entry)
@@ -385,7 +350,7 @@ nfs3_proc_create(struct inode *dir, struct dentry *dentry, struct iattr *sattr,
 				break;
 
 			case NFS3_CREATE_UNCHECKED:
-				goto out;
+				goto out_release_acls;
 		}
 		nfs_fattr_init(data->res.dir_attr);
 		nfs_fattr_init(data->res.fattr);
@@ -662,36 +627,37 @@ out:
  * Also note that this implementation handles both plain readdir and
  * readdirplus.
  */
-static int nfs3_proc_readdir(struct nfs_readdir_arg *nr_arg,
-			     struct nfs_readdir_res *nr_res)
+static int
+nfs3_proc_readdir(struct dentry *dentry, const struct cred *cred,
+		  u64 cookie, struct page **pages, unsigned int count, bool plus)
 {
-	struct inode		*dir = d_inode(nr_arg->dentry);
+	struct inode		*dir = d_inode(dentry);
+	__be32			*verf = NFS_I(dir)->cookieverf;
 	struct nfs3_readdirargs	arg = {
 		.fh		= NFS_FH(dir),
-		.cookie		= nr_arg->cookie,
-		.plus		= nr_arg->plus,
-		.count		= nr_arg->page_len,
-		.pages		= nr_arg->pages
+		.cookie		= cookie,
+		.verf		= {verf[0], verf[1]},
+		.plus		= plus,
+		.count		= count,
+		.pages		= pages
 	};
 	struct nfs3_readdirres	res = {
-		.verf		= nr_res->verf,
-		.plus		= nr_arg->plus,
+		.verf		= verf,
+		.plus		= plus
 	};
 	struct rpc_message	msg = {
 		.rpc_proc	= &nfs3_procedures[NFS3PROC_READDIR],
 		.rpc_argp	= &arg,
 		.rpc_resp	= &res,
-		.rpc_cred	= nr_arg->cred,
+		.rpc_cred	= cred,
 	};
 	int status = -ENOMEM;
 
-	if (nr_arg->plus)
+	if (plus)
 		msg.rpc_proc = &nfs3_procedures[NFS3PROC_READDIRPLUS];
-	if (arg.cookie)
-		memcpy(arg.verf, nr_arg->verf, sizeof(arg.verf));
 
-	dprintk("NFS call  readdir%s %llu\n", nr_arg->plus ? "plus" : "",
-		(unsigned long long)nr_arg->cookie);
+	dprintk("NFS call  readdir%s %d\n",
+			plus? "plus" : "", (unsigned int) cookie);
 
 	res.dir_attr = nfs_alloc_fattr();
 	if (res.dir_attr == NULL)
@@ -704,8 +670,8 @@ static int nfs3_proc_readdir(struct nfs_readdir_arg *nr_arg,
 
 	nfs_free_fattr(res.dir_attr);
 out:
-	dprintk("NFS reply readdir%s: %d\n", nr_arg->plus ? "plus" : "",
-		status);
+	dprintk("NFS reply readdir%s: %d\n",
+			plus? "plus" : "", status);
 	return status;
 }
 
@@ -751,7 +717,7 @@ nfs3_proc_mknod(struct inode *dir, struct dentry *dentry, struct iattr *sattr,
 		break;
 	default:
 		status = -EINVAL;
-		goto out;
+		goto out_release_acls;
 	}
 
 	d_alias = nfs3_do_create(dir, dentry, data);
@@ -1024,11 +990,10 @@ const struct nfs_rpc_ops nfs_v3_clientops = {
 	.nlmclnt_ops	= &nlmclnt_fl_close_lock_ops,
 	.getroot	= nfs3_proc_get_root,
 	.submount	= nfs_submount,
-	.try_get_tree	= nfs_try_get_tree,
+	.try_mount	= nfs_try_mount,
 	.getattr	= nfs3_proc_getattr,
 	.setattr	= nfs3_proc_setattr,
 	.lookup		= nfs3_proc_lookup,
-	.lookupp	= nfs3_proc_lookupp,
 	.access		= nfs3_proc_access,
 	.readlink	= nfs3_proc_readlink,
 	.create		= nfs3_proc_create,

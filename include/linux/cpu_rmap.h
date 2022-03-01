@@ -28,7 +28,7 @@ struct cpu_rmap {
 	struct {
 		u16	index;
 		u16	dist;
-	}		near[];
+	}		near[0];
 };
 #define CPU_RMAP_DIST_INF 0xffff
 

@@ -11,6 +11,13 @@
 	cpus {
 		cpu@0 {
 			cpu0-supply = <&vcc>;
+			operating-points = <
+				/* kHz    uV */
+				300000  1012500
+				600000  1200000
+				800000  1325000
+				1000000	1375000
+			>;
 		};
 	};
 
@@ -341,11 +348,6 @@
 	status = "disabled";
 };
 
-/* RNG not directly accessible on N950/N9. */
-&rng_target {
-	status = "disabled";
-};
-
 &usb_otg_hs {
 	interface-type = <0>;
 	usb-phy = <&usb2_phy>;
@@ -493,12 +495,4 @@
 		clocks = <&vctcxo>;
 		clock-names = "sysclk";
 	};
-};
-
-&aes1_target {
-	status = "disabled";
-};
-
-&aes2_target {
-	status = "disabled";
 };

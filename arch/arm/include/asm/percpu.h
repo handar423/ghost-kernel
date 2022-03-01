@@ -5,7 +5,7 @@
 #ifndef _ASM_ARM_PERCPU_H_
 #define _ASM_ARM_PERCPU_H_
 
-register unsigned long current_stack_pointer asm ("sp");
+#include <asm/thread_info.h>
 
 /*
  * Same as asm-generic/percpu.h, except that we store the per cpu offset

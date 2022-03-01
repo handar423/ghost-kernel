@@ -14,7 +14,6 @@
 #include <drm/drm_gem_cma_helper.h>
 #include <drm/drm_gem_framebuffer_helper.h>
 #include <drm/drm_irq.h>
-#include <drm/drm_managed.h>
 #include <drm/drm_probe_helper.h>
 #include <drm/drm_vblank.h>
 
@@ -49,8 +48,6 @@ static irqreturn_t komeda_kms_irq_handler(int irq, void *data)
 	memset(&evts, 0, sizeof(evts));
 	status = mdev->funcs->irq_handler(mdev, &evts);
 
-	komeda_print_events(&evts, drm);
-
 	/* Notify the crtc to handle the events */
 	for (i = 0; i < kms->n_crtcs; i++)
 		komeda_crtc_handle_event(&kms->crtcs[i], &evts);
@@ -58,10 +55,19 @@ static irqreturn_t komeda_kms_irq_handler(int irq, void *data)
 	return status;
 }
 
-static const struct drm_driver komeda_kms_driver = {
+static struct drm_driver komeda_kms_driver = {
 	.driver_features = DRIVER_GEM | DRIVER_MODESET | DRIVER_ATOMIC,
 	.lastclose			= drm_fb_helper_lastclose,
-	DRM_GEM_CMA_DRIVER_OPS_WITH_DUMB_CREATE(komeda_gem_cma_dumb_create),
+	.gem_free_object_unlocked	= drm_gem_cma_free_object,
+	.gem_vm_ops			= &drm_gem_cma_vm_ops,
+	.dumb_create			= komeda_gem_cma_dumb_create,
+	.prime_handle_to_fd		= drm_gem_prime_handle_to_fd,
+	.prime_fd_to_handle		= drm_gem_prime_fd_to_handle,
+	.gem_prime_get_sg_table		= drm_gem_cma_prime_get_sg_table,
+	.gem_prime_import_sg_table	= drm_gem_cma_prime_import_sg_table,
+	.gem_prime_vmap			= drm_gem_cma_prime_vmap,
+	.gem_prime_vunmap		= drm_gem_cma_prime_vunmap,
+	.gem_prime_mmap			= drm_gem_cma_prime_mmap,
 	.fops = &komeda_cma_fops,
 	.name = "komeda",
 	.desc = "Arm Komeda Display Processor driver",
@@ -81,9 +87,9 @@ static void komeda_kms_commit_tail(struct drm_atomic_state *old_state)
 
 	drm_atomic_helper_commit_modeset_enables(dev, old_state);
 
-	drm_atomic_helper_commit_hw_done(old_state);
-
 	drm_atomic_helper_wait_for_flip_done(dev, old_state);
+
+	drm_atomic_helper_commit_hw_done(old_state);
 
 	drm_atomic_helper_cleanup_planes(dev, old_state);
 }
@@ -252,16 +258,17 @@ static void komeda_kms_mode_config_init(struct komeda_kms_dev *kms,
 
 struct komeda_kms_dev *komeda_kms_attach(struct komeda_dev *mdev)
 {
-	struct komeda_kms_dev *kms;
+	struct komeda_kms_dev *kms = kzalloc(sizeof(*kms), GFP_KERNEL);
 	struct drm_device *drm;
 	int err;
 
-	kms = devm_drm_dev_alloc(mdev->dev, &komeda_kms_driver,
-				 struct komeda_kms_dev, base);
-	if (IS_ERR(kms))
-		return kms;
+	if (!kms)
+		return ERR_PTR(-ENOMEM);
 
 	drm = &kms->base;
+	err = drm_dev_init(drm, &komeda_kms_driver, mdev->dev);
+	if (err)
+		goto free_kms;
 
 	drm->dev_private = mdev;
 
@@ -299,6 +306,10 @@ struct komeda_kms_dev *komeda_kms_attach(struct komeda_dev *mdev)
 	if (err)
 		goto free_component_binding;
 
+	err = mdev->funcs->enable_irq(mdev);
+	if (err)
+		goto free_component_binding;
+
 	drm->irq_enabled = true;
 
 	drm_kms_helper_poll_init(drm);
@@ -312,12 +323,16 @@ struct komeda_kms_dev *komeda_kms_attach(struct komeda_dev *mdev)
 free_interrupts:
 	drm_kms_helper_poll_fini(drm);
 	drm->irq_enabled = false;
+	mdev->funcs->disable_irq(mdev);
 free_component_binding:
 	component_unbind_all(mdev->dev, drm);
 cleanup_mode_config:
 	drm_mode_config_cleanup(drm);
 	komeda_kms_cleanup_private_objs(kms);
 	drm->dev_private = NULL;
+	drm_dev_put(drm);
+free_kms:
+	kfree(kms);
 	return ERR_PTR(err);
 }
 
@@ -330,8 +345,10 @@ void komeda_kms_detach(struct komeda_kms_dev *kms)
 	drm_kms_helper_poll_fini(drm);
 	drm_atomic_helper_shutdown(drm);
 	drm->irq_enabled = false;
+	mdev->funcs->disable_irq(mdev);
 	component_unbind_all(mdev->dev, drm);
 	drm_mode_config_cleanup(drm);
 	komeda_kms_cleanup_private_objs(kms);
 	drm->dev_private = NULL;
+	drm_dev_put(drm);
 }

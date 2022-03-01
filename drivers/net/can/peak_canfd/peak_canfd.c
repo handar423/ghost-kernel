@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* Copyright (C) 2007, 2011 Wolfgang Grandegger <wg@grandegger.com>
+/*
+ * Copyright (C) 2007, 2011 Wolfgang Grandegger <wg@grandegger.com>
  * Copyright (C) 2012 Stephane Grosjean <s.grosjean@peak-system.com>
  *
  * Copyright (C) 2016  PEAK System-Technik GmbH
@@ -121,8 +122,7 @@ static int pucan_set_timing_slow(struct peak_canfd_priv *priv,
 	cmd = pucan_add_cmd(pucan_init_cmd(priv), PUCAN_CMD_TIMING_SLOW);
 
 	cmd->sjw_t = PUCAN_TSLOW_SJW_T(pbt->sjw - 1,
-				       priv->can.ctrlmode &
-				       CAN_CTRLMODE_3_SAMPLES);
+				priv->can.ctrlmode & CAN_CTRLMODE_3_SAMPLES);
 	cmd->tseg1 = PUCAN_TSLOW_TSEG1(pbt->prop_seg + pbt->phase_seg1 - 1);
 	cmd->tseg2 = PUCAN_TSLOW_TSEG2(pbt->phase_seg2 - 1);
 	cmd->brp = cpu_to_le16(PUCAN_TSLOW_BRP(pbt->brp - 1));
@@ -232,20 +232,6 @@ static int pucan_setup_rx_barrier(struct peak_canfd_priv *priv)
 	return pucan_write_cmd(priv);
 }
 
-static int pucan_netif_rx(struct sk_buff *skb, __le32 ts_low, __le32 ts_high)
-{
-	struct skb_shared_hwtstamps *hwts = skb_hwtstamps(skb);
-	u64 ts_us;
-
-	ts_us = (u64)le32_to_cpu(ts_high) << 32;
-	ts_us |= le32_to_cpu(ts_low);
-
-	/* IP core timestamps are µs. */
-	hwts->hwtstamp = ns_to_ktime(ts_us * NSEC_PER_USEC);
-
-	return netif_rx(skb);
-}
-
 /* handle the reception of one CAN frame */
 static int pucan_handle_can_rx(struct peak_canfd_priv *priv,
 			       struct pucan_rx_msg *msg)
@@ -257,9 +243,9 @@ static int pucan_handle_can_rx(struct peak_canfd_priv *priv,
 	u8 cf_len;
 
 	if (rx_msg_flags & PUCAN_MSG_EXT_DATA_LEN)
-		cf_len = can_fd_dlc2len(pucan_msg_get_dlc(msg));
+		cf_len = can_dlc2len(get_canfd_dlc(pucan_msg_get_dlc(msg)));
 	else
-		cf_len = can_cc_dlc2len(pucan_msg_get_dlc(msg));
+		cf_len = get_can_dlc(pucan_msg_get_dlc(msg));
 
 	/* if this frame is an echo, */
 	if (rx_msg_flags & PUCAN_MSG_LOOPED_BACK) {
@@ -318,7 +304,7 @@ static int pucan_handle_can_rx(struct peak_canfd_priv *priv,
 	stats->rx_bytes += cf->len;
 	stats->rx_packets++;
 
-	pucan_netif_rx(skb, msg->ts_low, msg->ts_high);
+	netif_rx(skb);
 
 	return 0;
 }
@@ -344,6 +330,7 @@ static int pucan_handle_status(struct peak_canfd_priv *priv,
 
 	/* this STATUS is the CNF of the RX_BARRIER: Tx path can be setup */
 	if (pucan_status_is_rx_barrier(msg)) {
+
 		if (priv->enable_tx_path) {
 			int err = priv->enable_tx_path(priv);
 
@@ -351,8 +338,8 @@ static int pucan_handle_status(struct peak_canfd_priv *priv,
 				return err;
 		}
 
-		/* start network queue (echo_skb array is empty) */
-		netif_start_queue(ndev);
+		/* wake network queue up (echo_skb array is empty) */
+		netif_wake_queue(ndev);
 
 		return 0;
 	}
@@ -410,8 +397,8 @@ static int pucan_handle_status(struct peak_canfd_priv *priv,
 	}
 
 	stats->rx_packets++;
-	stats->rx_bytes += cf->len;
-	pucan_netif_rx(skb, msg->ts_low, msg->ts_high);
+	stats->rx_bytes += cf->can_dlc;
+	netif_rx(skb);
 
 	return 0;
 }
@@ -438,7 +425,7 @@ static int pucan_handle_cache_critical(struct peak_canfd_priv *priv)
 	cf->data[6] = priv->bec.txerr;
 	cf->data[7] = priv->bec.rxerr;
 
-	stats->rx_bytes += cf->len;
+	stats->rx_bytes += cf->can_dlc;
 	stats->rx_packets++;
 	netif_rx(skb);
 
@@ -652,7 +639,7 @@ static netdev_tx_t peak_canfd_start_xmit(struct sk_buff *skb,
 	unsigned long flags;
 	bool should_stop_tx_queue;
 	int room_left;
-	u8 len;
+	u8 can_dlc;
 
 	if (can_dropped_invalid_skb(ndev, skb))
 		return NETDEV_TX_OK;
@@ -682,7 +669,7 @@ static netdev_tx_t peak_canfd_start_xmit(struct sk_buff *skb,
 
 	if (can_is_canfd_skb(skb)) {
 		/* CAN FD frame format */
-		len = can_fd_len2dlc(cf->len);
+		can_dlc = can_len2dlc(cf->len);
 
 		msg_flags |= PUCAN_MSG_EXT_DATA_LEN;
 
@@ -693,7 +680,7 @@ static netdev_tx_t peak_canfd_start_xmit(struct sk_buff *skb,
 			msg_flags |= PUCAN_MSG_ERROR_STATE_IND;
 	} else {
 		/* CAN 2.0 frame format */
-		len = cf->len;
+		can_dlc = cf->len;
 
 		if (cf->can_id & CAN_RTR_FLAG)
 			msg_flags |= PUCAN_MSG_RTR;
@@ -707,7 +694,7 @@ static netdev_tx_t peak_canfd_start_xmit(struct sk_buff *skb,
 		msg_flags |= PUCAN_MSG_SELF_RECEIVE;
 
 	msg->flags = cpu_to_le16(msg_flags);
-	msg->channel_dlc = PUCAN_MSG_CHANNEL_DLC(priv->index, len);
+	msg->channel_dlc = PUCAN_MSG_CHANNEL_DLC(priv->index, can_dlc);
 	memcpy(msg->d, cf->data, cf->len);
 
 	/* struct msg client field is used as an index in the echo skbs ring */

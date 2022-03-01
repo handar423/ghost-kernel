@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Copyright (c) 2017, 2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017, The Linux Foundation. All rights reserved.
  */
 
 #include <linux/clk.h>
@@ -66,24 +66,12 @@
 #define IMP_RES_OFFSET_MASK			GENMASK(5, 0)
 #define IMP_RES_OFFSET_SHIFT			0x0
 
-/* QUSB2PHY_PLL_BIAS_CONTROL_2 register bits */
-#define BIAS_CTRL2_RES_OFFSET_MASK		GENMASK(5, 0)
-#define BIAS_CTRL2_RES_OFFSET_SHIFT		0x0
-
-/* QUSB2PHY_CHG_CONTROL_2 register bits */
-#define CHG_CTRL2_OFFSET_MASK			GENMASK(5, 4)
-#define CHG_CTRL2_OFFSET_SHIFT			0x4
-
 /* QUSB2PHY_PORT_TUNE1 register bits */
 #define HSTX_TRIM_MASK				GENMASK(7, 4)
 #define HSTX_TRIM_SHIFT				0x4
 #define PREEMPH_WIDTH_HALF_BIT			BIT(2)
 #define PREEMPHASIS_EN_MASK			GENMASK(1, 0)
 #define PREEMPHASIS_EN_SHIFT			0x0
-
-/* QUSB2PHY_PORT_TUNE2 register bits */
-#define HSDISC_TRIM_MASK			GENMASK(1, 0)
-#define HSDISC_TRIM_SHIFT			0x0
 
 #define QUSB2PHY_PLL_ANALOG_CONTROLS_TWO	0x04
 #define QUSB2PHY_PLL_CLOCK_INVERTERS		0x18c
@@ -189,7 +177,7 @@ static const struct qusb2_phy_init_tbl msm8998_init_tbl[] = {
 	QUSB2_PHY_INIT_CFG(QUSB2PHY_PLL_DIGITAL_TIMERS_TWO, 0x19),
 };
 
-static const unsigned int qusb2_v2_regs_layout[] = {
+static const unsigned int sdm845_regs_layout[] = {
 	[QUSB2PHY_PLL_CORE_INPUT_OVERRIDE] = 0xa8,
 	[QUSB2PHY_PLL_STATUS]		= 0x1a0,
 	[QUSB2PHY_PORT_TUNE1]		= 0x240,
@@ -203,7 +191,7 @@ static const unsigned int qusb2_v2_regs_layout[] = {
 	[QUSB2PHY_INTR_CTRL]		= 0x230,
 };
 
-static const struct qusb2_phy_init_tbl qusb2_v2_init_tbl[] = {
+static const struct qusb2_phy_init_tbl sdm845_init_tbl[] = {
 	QUSB2_PHY_INIT_CFG(QUSB2PHY_PLL_ANALOG_CONTROLS_TWO, 0x03),
 	QUSB2_PHY_INIT_CFG(QUSB2PHY_PLL_CLOCK_INVERTERS, 0x7c),
 	QUSB2_PHY_INIT_CFG(QUSB2PHY_PLL_CMODE, 0x80),
@@ -270,10 +258,10 @@ static const struct qusb2_phy_cfg msm8998_phy_cfg = {
 	.update_tune1_with_efuse = true,
 };
 
-static const struct qusb2_phy_cfg qusb2_v2_phy_cfg = {
-	.tbl		= qusb2_v2_init_tbl,
-	.tbl_num	= ARRAY_SIZE(qusb2_v2_init_tbl),
-	.regs		= qusb2_v2_regs_layout,
+static const struct qusb2_phy_cfg sdm845_phy_cfg = {
+	.tbl		= sdm845_init_tbl,
+	.tbl_num	= ARRAY_SIZE(sdm845_init_tbl),
+	.regs		= sdm845_regs_layout,
 
 	.disable_ctrl	= (PWR_CTRL1_VREF_SUPPLY_TRIM | PWR_CTRL1_CLAMP_N_EN |
 			   POWER_DOWN),
@@ -288,34 +276,6 @@ static const char * const qusb2_phy_vreg_names[] = {
 };
 
 #define QUSB2_NUM_VREGS		ARRAY_SIZE(qusb2_phy_vreg_names)
-
-/* struct override_param - structure holding qusb2 v2 phy overriding param
- * set override true if the  device tree property exists and read and assign
- * to value
- */
-struct override_param {
-	bool override;
-	u8 value;
-};
-
-/*struct override_params - structure holding qusb2 v2 phy overriding params
- * @imp_res_offset: rescode offset to be updated in IMP_CTRL1 register
- * @hstx_trim: HSTX_TRIM to be updated in TUNE1 register
- * @preemphasis: Amplitude Pre-Emphasis to be updated in TUNE1 register
- * @preemphasis_width: half/full-width Pre-Emphasis updated via TUNE1
- * @bias_ctrl: bias ctrl to be updated in BIAS_CONTROL_2 register
- * @charge_ctrl: charge ctrl to be updated in CHG_CTRL2 register
- * @hsdisc_trim: disconnect threshold to be updated in TUNE2 register
- */
-struct override_params {
-	struct override_param imp_res_offset;
-	struct override_param hstx_trim;
-	struct override_param preemphasis;
-	struct override_param preemphasis_width;
-	struct override_param bias_ctrl;
-	struct override_param charge_ctrl;
-	struct override_param hsdisc_trim;
-};
 
 /**
  * struct qusb2_phy - structure holding qusb2 phy attributes
@@ -332,7 +292,14 @@ struct override_params {
  * @tcsr: TCSR syscon register map
  * @cell: nvmem cell containing phy tuning value
  *
- * @overrides: pointer to structure for all overriding tuning params
+ * @override_imp_res_offset: PHY should use different rescode offset
+ * @imp_res_offset_value: rescode offset to be updated in IMP_CTRL1 register
+ * @override_hstx_trim: PHY should use different HSTX o/p current value
+ * @hstx_trim_value: HSTX_TRIM value to be updated in TUNE1 register
+ * @override_preemphasis: PHY should use different pre-amphasis amplitude
+ * @preemphasis_level: Amplitude Pre-Emphasis to be updated in TUNE1 register
+ * @override_preemphasis_width: PHY should use different pre-emphasis duration
+ * @preemphasis_width: half/full-width Pre-Emphasis updated via TUNE1
  *
  * @cfg: phy config data
  * @has_se_clk_scheme: indicate if PHY has single-ended ref clock scheme
@@ -352,7 +319,14 @@ struct qusb2_phy {
 	struct regmap *tcsr;
 	struct nvmem_cell *cell;
 
-	struct override_params overrides;
+	bool override_imp_res_offset;
+	u8 imp_res_offset_value;
+	bool override_hstx_trim;
+	u8 hstx_trim_value;
+	bool override_preemphasis;
+	u8 preemphasis_level;
+	bool override_preemphasis_width;
+	u8 preemphasis_width;
 
 	const struct qusb2_phy_cfg *cfg;
 	bool has_se_clk_scheme;
@@ -420,35 +394,24 @@ void qcom_qusb2_phy_configure(void __iomem *base,
 static void qusb2_phy_override_phy_params(struct qusb2_phy *qphy)
 {
 	const struct qusb2_phy_cfg *cfg = qphy->cfg;
-	struct override_params *or = &qphy->overrides;
 
-	if (or->imp_res_offset.override)
+	if (qphy->override_imp_res_offset)
 		qusb2_write_mask(qphy->base, QUSB2PHY_IMP_CTRL1,
-		or->imp_res_offset.value << IMP_RES_OFFSET_SHIFT,
+			     qphy->imp_res_offset_value << IMP_RES_OFFSET_SHIFT,
 			     IMP_RES_OFFSET_MASK);
 
-	if (or->bias_ctrl.override)
-		qusb2_write_mask(qphy->base, QUSB2PHY_PLL_BIAS_CONTROL_2,
-		or->bias_ctrl.value << BIAS_CTRL2_RES_OFFSET_SHIFT,
-			   BIAS_CTRL2_RES_OFFSET_MASK);
-
-	if (or->charge_ctrl.override)
-		qusb2_write_mask(qphy->base, QUSB2PHY_CHG_CTRL2,
-		or->charge_ctrl.value << CHG_CTRL2_OFFSET_SHIFT,
-			     CHG_CTRL2_OFFSET_MASK);
-
-	if (or->hstx_trim.override)
+	if (qphy->override_hstx_trim)
 		qusb2_write_mask(qphy->base, cfg->regs[QUSB2PHY_PORT_TUNE1],
-		or->hstx_trim.value << HSTX_TRIM_SHIFT,
+				 qphy->hstx_trim_value << HSTX_TRIM_SHIFT,
 				 HSTX_TRIM_MASK);
 
-	if (or->preemphasis.override)
+	if (qphy->override_preemphasis)
 		qusb2_write_mask(qphy->base, cfg->regs[QUSB2PHY_PORT_TUNE1],
-		or->preemphasis.value << PREEMPHASIS_EN_SHIFT,
+				qphy->preemphasis_level << PREEMPHASIS_EN_SHIFT,
 				PREEMPHASIS_EN_MASK);
 
-	if (or->preemphasis_width.override) {
-		if (or->preemphasis_width.value ==
+	if (qphy->override_preemphasis_width) {
+		if (qphy->preemphasis_width ==
 		    QUSB2_V2_PREEMPHASIS_WIDTH_HALF_BIT)
 			qusb2_setbits(qphy->base,
 				      cfg->regs[QUSB2PHY_PORT_TUNE1],
@@ -458,11 +421,6 @@ static void qusb2_phy_override_phy_params(struct qusb2_phy *qphy)
 				      cfg->regs[QUSB2PHY_PORT_TUNE1],
 				      PREEMPH_WIDTH_HALF_BIT);
 	}
-
-	if (or->hsdisc_trim.override)
-		qusb2_write_mask(qphy->base, cfg->regs[QUSB2PHY_PORT_TUNE2],
-		or->hsdisc_trim.value << HSDISC_TRIM_SHIFT,
-				 HSDISC_TRIM_MASK);
 }
 
 /*
@@ -474,7 +432,7 @@ static void qusb2_phy_set_tune2_param(struct qusb2_phy *qphy)
 {
 	struct device *dev = &qphy->phy->dev;
 	const struct qusb2_phy_cfg *cfg = qphy->cfg;
-	u8 *val;
+	u8 *val, hstx_trim;
 
 	/* efuse register is optional */
 	if (!qphy->cell)
@@ -488,7 +446,13 @@ static void qusb2_phy_set_tune2_param(struct qusb2_phy *qphy)
 	 * set while configuring the phy.
 	 */
 	val = nvmem_cell_read(qphy->cell, NULL);
-	if (IS_ERR(val) || !val[0]) {
+	if (IS_ERR(val)) {
+		dev_dbg(dev, "failed to read a valid hs-tx trim value\n");
+		return;
+	}
+	hstx_trim = val[0];
+	kfree(val);
+	if (!hstx_trim) {
 		dev_dbg(dev, "failed to read a valid hs-tx trim value\n");
 		return;
 	}
@@ -496,12 +460,10 @@ static void qusb2_phy_set_tune2_param(struct qusb2_phy *qphy)
 	/* Fused TUNE1/2 value is the higher nibble only */
 	if (cfg->update_tune1_with_efuse)
 		qusb2_write_mask(qphy->base, cfg->regs[QUSB2PHY_PORT_TUNE1],
-				 val[0] << HSTX_TRIM_SHIFT,
-				 HSTX_TRIM_MASK);
+				 hstx_trim << HSTX_TRIM_SHIFT, HSTX_TRIM_MASK);
 	else
 		qusb2_write_mask(qphy->base, cfg->regs[QUSB2PHY_PORT_TUNE2],
-				 val[0] << HSTX_TRIM_SHIFT,
-				 HSTX_TRIM_MASK);
+				 hstx_trim << HSTX_TRIM_SHIFT, HSTX_TRIM_MASK);
 }
 
 static int qusb2_phy_set_mode(struct phy *phy,
@@ -810,24 +772,14 @@ static const struct phy_ops qusb2_phy_gen_ops = {
 
 static const struct of_device_id qusb2_phy_of_match_table[] = {
 	{
-		.compatible	= "qcom,ipq8074-qusb2-phy",
-		.data		= &msm8996_phy_cfg,
-	}, {
 		.compatible	= "qcom,msm8996-qusb2-phy",
 		.data		= &msm8996_phy_cfg,
 	}, {
 		.compatible	= "qcom,msm8998-qusb2-phy",
 		.data		= &msm8998_phy_cfg,
 	}, {
-		/*
-		 * Deprecated. Only here to support legacy device
-		 * trees that didn't include "qcom,qusb2-v2-phy"
-		 */
 		.compatible	= "qcom,sdm845-qusb2-phy",
-		.data		= &qusb2_v2_phy_cfg,
-	}, {
-		.compatible	= "qcom,qusb2-v2-phy",
-		.data		= &qusb2_v2_phy_cfg,
+		.data		= &sdm845_phy_cfg,
 	},
 	{ },
 };
@@ -844,17 +796,17 @@ static int qusb2_phy_probe(struct platform_device *pdev)
 	struct qusb2_phy *qphy;
 	struct phy_provider *phy_provider;
 	struct phy *generic_phy;
+	struct resource *res;
 	int ret, i;
 	int num;
 	u32 value;
-	struct override_params *or;
 
 	qphy = devm_kzalloc(dev, sizeof(*qphy), GFP_KERNEL);
 	if (!qphy)
 		return -ENOMEM;
-	or = &qphy->overrides;
 
-	qphy->base = devm_platform_ioremap_resource(pdev, 0);
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	qphy->base = devm_ioremap_resource(dev, res);
 	if (IS_ERR(qphy->base))
 		return PTR_ERR(qphy->base);
 
@@ -916,44 +868,26 @@ static int qusb2_phy_probe(struct platform_device *pdev)
 
 	if (!of_property_read_u32(dev->of_node, "qcom,imp-res-offset-value",
 				  &value)) {
-		or->imp_res_offset.value = (u8)value;
-		or->imp_res_offset.override = true;
-	}
-
-	if (!of_property_read_u32(dev->of_node, "qcom,bias-ctrl-value",
-				  &value)) {
-		or->bias_ctrl.value = (u8)value;
-		or->bias_ctrl.override = true;
-	}
-
-	if (!of_property_read_u32(dev->of_node, "qcom,charge-ctrl-value",
-				  &value)) {
-		or->charge_ctrl.value = (u8)value;
-		or->charge_ctrl.override = true;
+		qphy->imp_res_offset_value = (u8)value;
+		qphy->override_imp_res_offset = true;
 	}
 
 	if (!of_property_read_u32(dev->of_node, "qcom,hstx-trim-value",
 				  &value)) {
-		or->hstx_trim.value = (u8)value;
-		or->hstx_trim.override = true;
+		qphy->hstx_trim_value = (u8)value;
+		qphy->override_hstx_trim = true;
 	}
 
 	if (!of_property_read_u32(dev->of_node, "qcom,preemphasis-level",
 				     &value)) {
-		or->preemphasis.value = (u8)value;
-		or->preemphasis.override = true;
+		qphy->preemphasis_level = (u8)value;
+		qphy->override_preemphasis = true;
 	}
 
 	if (!of_property_read_u32(dev->of_node, "qcom,preemphasis-width",
 				     &value)) {
-		or->preemphasis_width.value = (u8)value;
-		or->preemphasis_width.override = true;
-	}
-
-	if (!of_property_read_u32(dev->of_node, "qcom,hsdisc-trim-value",
-				  &value)) {
-		or->hsdisc_trim.value = (u8)value;
-		or->hsdisc_trim.override = true;
+		qphy->preemphasis_width = (u8)value;
+		qphy->override_preemphasis_width = true;
 	}
 
 	pm_runtime_set_active(dev);

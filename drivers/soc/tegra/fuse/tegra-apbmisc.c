@@ -3,7 +3,6 @@
  * Copyright (c) 2014, NVIDIA CORPORATION.  All rights reserved.
  */
 
-#include <linux/export.h>
 #include <linux/kernel.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
@@ -22,15 +21,18 @@
 #define PMC_STRAPPING_OPT_A_RAM_CODE_MASK_SHORT	\
 	(0x3 << PMC_STRAPPING_OPT_A_RAM_CODE_SHIFT)
 
+static void __iomem *apbmisc_base;
+static void __iomem *strapping_base;
 static bool long_ram_code;
-static u32 strapping;
-static u32 chipid;
 
 u32 tegra_read_chipid(void)
 {
-	WARN(!chipid, "Tegra APB MISC not yet available\n");
+	if (!apbmisc_base) {
+		WARN(1, "Tegra Chip ID not yet available\n");
+		return 0;
+	}
 
-	return chipid;
+	return readl_relaxed(apbmisc_base + 4);
 }
 
 u8 tegra_get_chip_id(void)
@@ -38,46 +40,12 @@ u8 tegra_get_chip_id(void)
 	return (tegra_read_chipid() >> 8) & 0xff;
 }
 
-u8 tegra_get_major_rev(void)
-{
-	return (tegra_read_chipid() >> 4) & 0xf;
-}
-
-u8 tegra_get_minor_rev(void)
-{
-	return (tegra_read_chipid() >> 16) & 0xf;
-}
-
-u8 tegra_get_platform(void)
-{
-	return (tegra_read_chipid() >> 20) & 0xf;
-}
-
-bool tegra_is_silicon(void)
-{
-	switch (tegra_get_chip_id()) {
-	case TEGRA194:
-	case TEGRA234:
-		if (tegra_get_platform() == 0)
-			return true;
-
-		return false;
-	}
-
-	/*
-	 * Chips prior to Tegra194 have a different way of determining whether
-	 * they are silicon or not. Since we never supported simulation on the
-	 * older Tegra chips, don't bother extracting the information and just
-	 * report that we're running on silicon.
-	 */
-	return true;
-}
-
 u32 tegra_read_straps(void)
 {
-	WARN(!chipid, "Tegra ABP MISC not yet available\n");
-
-	return strapping;
+	if (strapping_base)
+		return readl_relaxed(strapping_base);
+	else
+		return 0;
 }
 
 u32 tegra_read_ram_code(void)
@@ -91,50 +59,50 @@ u32 tegra_read_ram_code(void)
 
 	return straps >> PMC_STRAPPING_OPT_A_RAM_CODE_SHIFT;
 }
-EXPORT_SYMBOL_GPL(tegra_read_ram_code);
 
 static const struct of_device_id apbmisc_match[] __initconst = {
 	{ .compatible = "nvidia,tegra20-apbmisc", },
 	{ .compatible = "nvidia,tegra186-misc", },
-	{ .compatible = "nvidia,tegra194-misc", },
-	{ .compatible = "nvidia,tegra234-misc", },
 	{},
 };
 
 void __init tegra_init_revision(void)
 {
-	u8 chip_id, minor_rev;
+	u32 id, chip_id, minor_rev;
+	int rev;
 
-	chip_id = tegra_get_chip_id();
-	minor_rev = tegra_get_minor_rev();
+	id = tegra_read_chipid();
+	chip_id = (id >> 8) & 0xff;
+	minor_rev = (id >> 16) & 0xf;
 
 	switch (minor_rev) {
 	case 1:
-		tegra_sku_info.revision = TEGRA_REVISION_A01;
+		rev = TEGRA_REVISION_A01;
 		break;
 	case 2:
-		tegra_sku_info.revision = TEGRA_REVISION_A02;
+		rev = TEGRA_REVISION_A02;
 		break;
 	case 3:
 		if (chip_id == TEGRA20 && (tegra_fuse_read_spare(18) ||
 					   tegra_fuse_read_spare(19)))
-			tegra_sku_info.revision = TEGRA_REVISION_A03p;
+			rev = TEGRA_REVISION_A03p;
 		else
-			tegra_sku_info.revision = TEGRA_REVISION_A03;
+			rev = TEGRA_REVISION_A03;
 		break;
 	case 4:
-		tegra_sku_info.revision = TEGRA_REVISION_A04;
+		rev = TEGRA_REVISION_A04;
 		break;
 	default:
-		tegra_sku_info.revision = TEGRA_REVISION_UNKNOWN;
+		rev = TEGRA_REVISION_UNKNOWN;
 	}
+
+	tegra_sku_info.revision = rev;
 
 	tegra_sku_info.sku_id = tegra_fuse_read_early(FUSE_SKU_INFO);
 }
 
 void __init tegra_init_apbmisc(void)
 {
-	void __iomem *apbmisc_base, *strapping_base;
 	struct resource apbmisc, straps;
 	struct device_node *np;
 
@@ -191,21 +159,13 @@ void __init tegra_init_apbmisc(void)
 		}
 	}
 
-	apbmisc_base = ioremap(apbmisc.start, resource_size(&apbmisc));
-	if (!apbmisc_base) {
+	apbmisc_base = ioremap_nocache(apbmisc.start, resource_size(&apbmisc));
+	if (!apbmisc_base)
 		pr_err("failed to map APBMISC registers\n");
-	} else {
-		chipid = readl_relaxed(apbmisc_base + 4);
-		iounmap(apbmisc_base);
-	}
 
-	strapping_base = ioremap(straps.start, resource_size(&straps));
-	if (!strapping_base) {
+	strapping_base = ioremap_nocache(straps.start, resource_size(&straps));
+	if (!strapping_base)
 		pr_err("failed to map strapping options registers\n");
-	} else {
-		strapping = readl_relaxed(strapping_base);
-		iounmap(strapping_base);
-	}
 
 	long_ram_code = of_property_read_bool(np, "nvidia,long-ram-code");
 }

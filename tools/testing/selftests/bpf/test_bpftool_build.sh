@@ -1,30 +1,6 @@
 #!/bin/bash
 # SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
 
-case $1 in
-	-h|--help)
-		echo -e "$0 [-j <n>]"
-		echo -e "\tTest the different ways of building bpftool."
-		echo -e ""
-		echo -e "\tOptions:"
-		echo -e "\t\t-j <n>:\tPass -j flag to 'make'."
-		exit 0
-		;;
-esac
-
-J=$*
-
-# Assume script is located under tools/testing/selftests/bpf/. We want to start
-# build attempts from the top of kernel repository.
-SCRIPT_REL_PATH=$(realpath --relative-to=$PWD $0)
-SCRIPT_REL_DIR=$(dirname $SCRIPT_REL_PATH)
-KDIR_ROOT_DIR=$(realpath $PWD/$SCRIPT_REL_DIR/../../../../)
-cd $KDIR_ROOT_DIR
-if [ ! -e tools/bpf/bpftool/Makefile ]; then
-	echo -e "skip:    bpftool files not found!\n"
-	exit 0
-fi
-
 ERROR=0
 TMPDIR=
 
@@ -36,6 +12,26 @@ return_value() {
 	exit $ERROR
 }
 trap return_value EXIT
+
+case $1 in
+	-h|--help)
+		echo -e "$0 [-j <n>]"
+		echo -e "\tTest the different ways of building bpftool."
+		echo -e ""
+		echo -e "\tOptions:"
+		echo -e "\t\t-j <n>:\tPass -j flag to 'make'."
+		exit
+		;;
+esac
+
+J=$*
+
+# Assume script is located under tools/testing/selftests/bpf/. We want to start
+# build attempts from the top of kernel repository.
+SCRIPT_REL_PATH=$(realpath --relative-to=$PWD $0)
+SCRIPT_REL_DIR=$(dirname $SCRIPT_REL_PATH)
+KDIR_ROOT_DIR=$(realpath $PWD/$SCRIPT_REL_DIR/../../../../)
+cd $KDIR_ROOT_DIR
 
 check() {
 	local dir=$(realpath $1)
@@ -82,23 +78,6 @@ make_with_tmpdir() {
 	fi
 	check $TMPDIR
 	rm -rf -- $TMPDIR
-	echo
-}
-
-make_doc_and_clean() {
-	echo -e "\$PWD:    $PWD"
-	echo -e "command: make -s $* doc >/dev/null"
-	RST2MAN_OPTS="--exit-status=1" make $J -s $* doc
-	if [ $? -ne 0 ] ; then
-		ERROR=1
-		printf "FAILURE: Errors or warnings when building documentation\n"
-	fi
-	(
-		if [ $# -ge 1 ] ; then
-			cd ${@: -1}
-		fi
-		make -s doc-clean
-	)
 	echo
 }
 
@@ -162,7 +141,3 @@ make_and_clean
 make_with_tmpdir OUTPUT
 
 make_with_tmpdir O
-
-echo -e "Checking documentation build\n"
-# From tools/bpf/bpftool
-make_doc_and_clean

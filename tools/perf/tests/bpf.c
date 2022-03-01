@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 #include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <sys/epoll.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -9,11 +10,12 @@
 #include <util/util.h>
 #include <util/bpf-loader.h>
 #include <util/evlist.h>
+#include <linux/bpf.h>
 #include <linux/filter.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <api/fs/fs.h>
-#include <perf/mmap.h>
+#include <bpf/bpf.h>
 #include "tests.h"
 #include "llvm.h"
 #include "debug.h"
@@ -23,8 +25,6 @@
 #define PERF_TEST_BPF_PATH "/sys/fs/bpf/perf_test"
 
 #ifdef HAVE_LIBBPF_SUPPORT
-#include <linux/bpf.h>
-#include <bpf/bpf.h>
 
 static int epoll_pwait_loop(void)
 {
@@ -144,23 +144,23 @@ static int do_test(struct bpf_object *obj, int (*func)(void),
 	pid[sizeof(pid) - 1] = '\0';
 	opts.target.tid = opts.target.pid = pid;
 
-	/* Instead of evlist__new_default, don't add default events */
+	/* Instead of perf_evlist__new_default, don't add default events */
 	evlist = evlist__new();
 	if (!evlist) {
 		pr_debug("Not enough memory to create evlist\n");
 		return TEST_FAIL;
 	}
 
-	err = evlist__create_maps(evlist, &opts.target);
+	err = perf_evlist__create_maps(evlist, &opts.target);
 	if (err < 0) {
 		pr_debug("Not enough memory to create thread/cpu maps\n");
 		goto out_delete_evlist;
 	}
 
-	evlist__splice_list_tail(evlist, &parse_state.list);
+	perf_evlist__splice_list_tail(evlist, &parse_state.list);
 	evlist->nr_groups = parse_state.nr_groups;
 
-	evlist__config(evlist, &opts, NULL);
+	perf_evlist__config(evlist, &opts, NULL);
 
 	err = evlist__open(evlist);
 	if (err < 0) {
@@ -185,19 +185,19 @@ static int do_test(struct bpf_object *obj, int (*func)(void),
 		struct mmap *md;
 
 		md = &evlist->mmap[i];
-		if (perf_mmap__read_init(&md->core) < 0)
+		if (perf_mmap__read_init(md) < 0)
 			continue;
 
-		while ((event = perf_mmap__read_event(&md->core)) != NULL) {
+		while ((event = perf_mmap__read_event(md)) != NULL) {
 			const u32 type = event->header.type;
 
 			if (type == PERF_RECORD_SAMPLE)
 				count ++;
 		}
-		perf_mmap__read_done(&md->core);
+		perf_mmap__read_done(md);
 	}
 
-	if (count != expect * evlist->core.nr_entries) {
+	if (count != expect) {
 		pr_debug("BPF filter result incorrect, expected %d, got %d samples\n", expect, count);
 		goto out_delete_evlist;
 	}
@@ -283,6 +283,7 @@ static int __test__bpf(int idx)
 	}
 
 out:
+	free(obj_buf);
 	bpf__clear();
 	return ret;
 }

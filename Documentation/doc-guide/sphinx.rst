@@ -48,12 +48,12 @@ or ``virtualenv``, depending on how your distribution packaged Python 3.
       those versions, you should run ``pip install 'docutils==0.12'``.
 
    #) It is recommended to use the RTD theme for html output. Depending
-      on the Sphinx version, it should be installed separately,
+      on the Sphinx version, it should be installed  in separate,
       with ``pip install sphinx_rtd_theme``.
 
-   #) Some ReST pages contain math expressions. Due to the way Sphinx works,
+   #) Some ReST pages contain math expressions. Due to the way Sphinx work,
       those expressions are written using LaTeX notation. It needs texlive
-      installed with amsfonts and amsmath in order to evaluate them.
+      installed with amdfonts and amsmath in order to evaluate them.
 
 In summary, if you want to install Sphinx version 1.7.9, you should do::
 
@@ -128,7 +128,7 @@ Sphinx Build
 ============
 
 The usual way to generate the documentation is to run ``make htmldocs`` or
-``make pdfdocs``. There are also other formats available: see the documentation
+``make pdfdocs``. There are also other formats available, see the documentation
 section of ``make help``. The generated documentation is placed in
 format-specific subdirectories under ``Documentation/output``.
 
@@ -303,17 +303,17 @@ and *targets* (e.g. a ref to ``:ref:`last row <last row>``` / :ref:`last row
         - head col 3
         - head col 4
 
-      * - row 1
+      * - column 1
         - field 1.1
         - field 1.2 with autospan
 
-      * - row 2
+      * - column 2
         - field 2.1
         - :rspan:`1` :cspan:`1` field 2.2 - 3.3
 
       * .. _`last row`:
 
-        - row 3
+        - column 3
 
 Rendered as:
 
@@ -325,34 +325,17 @@ Rendered as:
         - head col 3
         - head col 4
 
-      * - row 1
+      * - column 1
         - field 1.1
         - field 1.2 with autospan
 
-      * - row 2
+      * - column 2
         - field 2.1
         - :rspan:`1` :cspan:`1` field 2.2 - 3.3
 
       * .. _`last row`:
 
-        - row 3
-
-Cross-referencing
------------------
-
-Cross-referencing from one documentation page to another can be done by passing
-the path to the file starting from the Documentation folder.
-For example, to cross-reference to this page (the .rst extension is optional)::
-
-    See Documentation/doc-guide/sphinx.rst.
-
-If you want to use a relative path, you need to use Sphinx's ``doc`` directive.
-For example, referencing this page from the same directory would be done as::
-
-    See :doc:`sphinx`.
-
-For information on cross-referencing to kernel-doc functions or types, see
-Documentation/doc-guide/kernel-doc.rst.
+        - column 3
 
 .. _sphinx_kfigure:
 
@@ -361,7 +344,7 @@ Figures & Images
 
 If you want to add an image, you should use the ``kernel-figure`` and
 ``kernel-image`` directives. E.g. to insert a figure with a scalable
-image format, use SVG (:ref:`svg_image_example`)::
+image format use SVG (:ref:`svg_image_example`)::
 
     .. kernel-figure::  svg_image.svg
        :alt:    simple SVG image
@@ -375,7 +358,7 @@ image format, use SVG (:ref:`svg_image_example`)::
 
    SVG image example
 
-The kernel figure (and image) directive supports **DOT** formatted files, see
+The kernel figure (and image) directive support **DOT** formated files, see
 
 * DOT: http://graphviz.org/pdf/dotguide.pdf
 * Graphviz: http://www.graphviz.org/content/dot-language
@@ -394,7 +377,7 @@ A simple example (:ref:`hello_dot_file`)::
 
    DOT's hello world example
 
-Embedded *render* markups (or languages) like Graphviz's **DOT** are provided by the
+Embed *render* markups (or languages) like Graphviz's **DOT** is provided by the
 ``kernel-render`` directives.::
 
   .. kernel-render:: DOT
@@ -406,7 +389,7 @@ Embedded *render* markups (or languages) like Graphviz's **DOT** are provided by
      }
 
 How this will be rendered depends on the installed tools. If Graphviz is
-installed, you will see a vector image. If not, the raw markup is inserted as
+installed, you will see an vector image. If not the raw markup is inserted as
 *literal-block* (:ref:`hello_dot_render`).
 
 .. _hello_dot_render:
@@ -421,8 +404,8 @@ installed, you will see a vector image. If not, the raw markup is inserted as
 
 The *render* directive has all the options known from the *figure* directive,
 plus option ``caption``.  If ``caption`` has a value, a *figure* node is
-inserted. If not, an *image* node is inserted. A ``caption`` is also needed, if
-you want to refer to it (:ref:`hello_svg_render`).
+inserted. If not, a *image* node is inserted. A ``caption`` is also needed, if
+you want to refer it (:ref:`hello_svg_render`).
 
 Embedded **SVG**::
 

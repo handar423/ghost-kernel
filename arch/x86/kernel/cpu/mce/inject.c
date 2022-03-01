@@ -146,9 +146,9 @@ static void raise_exception(struct mce *m, struct pt_regs *pregs)
 		regs.cs = m->cs;
 		pregs = &regs;
 	}
-	/* do_machine_check() expects interrupts disabled -- at least */
+	/* in mcheck exeception handler, irq will be disabled */
 	local_irq_save(flags);
-	do_machine_check(pregs);
+	do_machine_check(pregs, 0);
 	local_irq_restore(flags);
 	m->finished = 0;
 }
@@ -199,7 +199,7 @@ static int raise_local(void)
 			 * calling irq_enter, but the necessary
 			 * machinery isn't exported currently.
 			 */
-			fallthrough;
+			/*FALL THROUGH*/
 		case MCJ_CTX_PROCESS:
 			raise_exception(m, NULL);
 			break;
@@ -347,7 +347,7 @@ static ssize_t flags_write(struct file *filp, const char __user *ubuf,
 	char buf[MAX_FLAG_OPT_SIZE], *__buf;
 	int err;
 
-	if (cnt > MAX_FLAG_OPT_SIZE)
+	if (!cnt || cnt > MAX_FLAG_OPT_SIZE)
 		return -EINVAL;
 
 	if (copy_from_user(&buf, ubuf, cnt))
@@ -494,7 +494,7 @@ static void do_inject(void)
 		i_mce.status |= MCI_STATUS_SYNDV;
 
 	if (inj_type == SW_INJ) {
-		mce_log(&i_mce);
+		mce_inject_log(&i_mce);
 		return;
 	}
 
@@ -522,8 +522,8 @@ static void do_inject(void)
 	if (boot_cpu_has(X86_FEATURE_AMD_DCM) &&
 	    b == 4 &&
 	    boot_cpu_data.x86 < 0x17) {
-		toggle_nb_mca_mst_cpu(topology_die_id(cpu));
-		cpu = get_nbc_for_node(topology_die_id(cpu));
+		toggle_nb_mca_mst_cpu(amd_get_nb_id(cpu));
+		cpu = get_nbc_for_node(amd_get_nb_id(cpu));
 	}
 
 	get_online_cpus();

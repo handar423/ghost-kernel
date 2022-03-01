@@ -12,7 +12,6 @@
 #include <linux/string.h>
 #include <perf/cpumap.h>
 #include <perf/evlist.h>
-#include <perf/mmap.h>
 
 static int exited;
 static int nr_exit;
@@ -23,7 +22,7 @@ static void sig_handler(int sig __maybe_unused)
 }
 
 /*
- * evlist__prepare_workload will send a SIGUSR1 if the fork fails, since
+ * perf_evlist__prepare_workload will send a SIGUSR1 if the fork fails, since
  * we asked by setting its exec_error to this handler.
  */
 static void workload_exec_failed_signal(int signo __maybe_unused,
@@ -58,16 +57,16 @@ int test__task_exit(struct test *test __maybe_unused, int subtest __maybe_unused
 
 	signal(SIGCHLD, sig_handler);
 
-	evlist = evlist__new_default();
+	evlist = perf_evlist__new_default();
 	if (evlist == NULL) {
-		pr_debug("evlist__new_default\n");
+		pr_debug("perf_evlist__new_default\n");
 		return -1;
 	}
 
 	/*
 	 * Create maps of threads and cpus to monitor. In this case
 	 * we start with all threads and cpus (-1, -1) but then in
-	 * evlist__prepare_workload we'll fill in the only thread
+	 * perf_evlist__prepare_workload we'll fill in the only thread
 	 * we're monitoring, the one forked there.
 	 */
 	cpus = perf_cpu_map__dummy_new();
@@ -83,7 +82,8 @@ int test__task_exit(struct test *test __maybe_unused, int subtest __maybe_unused
 	cpus	= NULL;
 	threads = NULL;
 
-	err = evlist__prepare_workload(evlist, &target, argv, false, workload_exec_failed_signal);
+	err = perf_evlist__prepare_workload(evlist, &target, argv, false,
+					    workload_exec_failed_signal);
 	if (err < 0) {
 		pr_debug("Couldn't run the workload!\n");
 		goto out_delete_evlist;
@@ -115,20 +115,20 @@ int test__task_exit(struct test *test __maybe_unused, int subtest __maybe_unused
 		goto out_delete_evlist;
 	}
 
-	evlist__start_workload(evlist);
+	perf_evlist__start_workload(evlist);
 
 retry:
 	md = &evlist->mmap[0];
-	if (perf_mmap__read_init(&md->core) < 0)
+	if (perf_mmap__read_init(md) < 0)
 		goto out_init;
 
-	while ((event = perf_mmap__read_event(&md->core)) != NULL) {
+	while ((event = perf_mmap__read_event(md)) != NULL) {
 		if (event->header.type == PERF_RECORD_EXIT)
 			nr_exit++;
 
-		perf_mmap__consume(&md->core);
+		perf_mmap__consume(md);
 	}
-	perf_mmap__read_done(&md->core);
+	perf_mmap__read_done(md);
 
 out_init:
 	if (!exited || !nr_exit) {

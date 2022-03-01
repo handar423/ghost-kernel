@@ -289,7 +289,6 @@ static void rsnd_adg_set_ssi_clk(struct rsnd_mod *ssi_mod, u32 val)
 int rsnd_adg_clk_query(struct rsnd_priv *priv, unsigned int rate)
 {
 	struct rsnd_adg *adg = rsnd_priv_to_adg(priv);
-	struct clk *clk;
 	int i;
 	int sel_table[] = {
 		[CLKA] = 0x1,
@@ -302,10 +301,9 @@ int rsnd_adg_clk_query(struct rsnd_priv *priv, unsigned int rate)
 	 * find suitable clock from
 	 * AUDIO_CLKA/AUDIO_CLKB/AUDIO_CLKC/AUDIO_CLKI.
 	 */
-	for_each_rsnd_clk(clk, adg, i) {
+	for (i = 0; i < CLKMAX; i++)
 		if (rate == adg->clk_rate[i])
 			return sel_table[i];
-	}
 
 	/*
 	 * find divided clock from BRGA/BRGB
@@ -366,27 +364,25 @@ void rsnd_adg_clk_control(struct rsnd_priv *priv, int enable)
 	struct rsnd_adg *adg = rsnd_priv_to_adg(priv);
 	struct device *dev = rsnd_priv_to_dev(priv);
 	struct clk *clk;
-	int i;
+	int i, ret;
 
 	for_each_rsnd_clk(clk, adg, i) {
+		ret = 0;
 		if (enable) {
-			int ret = clk_prepare_enable(clk);
+			ret = clk_prepare_enable(clk);
 
 			/*
 			 * We shouldn't use clk_get_rate() under
 			 * atomic context. Let's keep it when
 			 * rsnd_adg_clk_enable() was called
 			 */
-			adg->clk_rate[i] = 0;
-			if (ret < 0)
-				dev_warn(dev, "can't use clk %d\n", i);
-			else
-				adg->clk_rate[i] = clk_get_rate(clk);
+			adg->clk_rate[i] = clk_get_rate(adg->clk[i]);
 		} else {
-			if (adg->clk_rate[i])
-				clk_disable_unprepare(clk);
-			adg->clk_rate[i] = 0;
+			clk_disable_unprepare(clk);
 		}
+
+		if (ret < 0)
+			dev_warn(dev, "can't use clk %d\n", i);
 	}
 }
 

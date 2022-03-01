@@ -31,6 +31,7 @@ static int qrtr_tun_send(struct qrtr_endpoint *ep, struct sk_buff *skb)
 static int qrtr_tun_open(struct inode *inode, struct file *filp)
 {
 	struct qrtr_tun *tun;
+	int ret;
 
 	tun = kzalloc(sizeof(*tun), GFP_KERNEL);
 	if (!tun)
@@ -43,7 +44,16 @@ static int qrtr_tun_open(struct inode *inode, struct file *filp)
 
 	filp->private_data = tun;
 
-	return qrtr_endpoint_register(&tun->ep, QRTR_EP_NID_AUTO);
+	ret = qrtr_endpoint_register(&tun->ep, QRTR_EP_NID_AUTO);
+	if (ret)
+		goto out;
+
+	return 0;
+
+out:
+	filp->private_data = NULL;
+	kfree(tun);
+	return ret;
 }
 
 static ssize_t qrtr_tun_read_iter(struct kiocb *iocb, struct iov_iter *to)
@@ -117,11 +127,15 @@ static __poll_t qrtr_tun_poll(struct file *filp, poll_table *wait)
 static int qrtr_tun_release(struct inode *inode, struct file *filp)
 {
 	struct qrtr_tun *tun = filp->private_data;
+	struct sk_buff *skb;
 
 	qrtr_endpoint_unregister(&tun->ep);
 
 	/* Discard all SKBs */
-	skb_queue_purge(&tun->queue);
+	while (!skb_queue_empty(&tun->queue)) {
+		skb = skb_dequeue(&tun->queue);
+		kfree_skb(skb);
+	}
 
 	kfree(tun);
 

@@ -195,24 +195,32 @@ static inline struct flowi *flowi4_to_flowi(struct flowi4 *fl4)
 	return container_of(fl4, struct flowi, u.ip4);
 }
 
-static inline struct flowi_common *flowi4_to_flowi_common(struct flowi4 *fl4)
-{
-	return &(flowi4_to_flowi(fl4)->u.__fl_common);
-}
-
 static inline struct flowi *flowi6_to_flowi(struct flowi6 *fl6)
 {
 	return container_of(fl6, struct flowi, u.ip6);
 }
 
-static inline struct flowi_common *flowi6_to_flowi_common(struct flowi6 *fl6)
-{
-	return &(flowi6_to_flowi(fl6)->u.__fl_common);
-}
-
 static inline struct flowi *flowidn_to_flowi(struct flowidn *fldn)
 {
 	return container_of(fldn, struct flowi, u.dn);
+}
+
+typedef unsigned long flow_compare_t;
+
+static inline unsigned int flow_key_size(u16 family)
+{
+	switch (family) {
+	case AF_INET:
+		BUILD_BUG_ON(sizeof(struct flowi4) % sizeof(flow_compare_t));
+		return sizeof(struct flowi4) / sizeof(flow_compare_t);
+	case AF_INET6:
+		BUILD_BUG_ON(sizeof(struct flowi6) % sizeof(flow_compare_t));
+		return sizeof(struct flowi6) / sizeof(flow_compare_t);
+	case AF_DECnet:
+		BUILD_BUG_ON(sizeof(struct flowidn) % sizeof(flow_compare_t));
+		return sizeof(struct flowidn) / sizeof(flow_compare_t);
+	}
+	return 0;
 }
 
 __u32 __get_hash_from_flowi6(const struct flowi6 *fl6, struct flow_keys *keys);

@@ -9,7 +9,7 @@
  * Copyright (c) 2009-2010 by:
  *	 Mauro Carvalho Chehab
  *
- * Red Hat Inc. https://www.redhat.com
+ * Red Hat Inc. http://www.redhat.com
  *
  * Forked and adapted from the i5400_edac driver
  *
@@ -585,7 +585,8 @@ static int get_dimm_config(struct mem_ctl_info *mci)
 			if (!DIMM_PRESENT(dimm_dod[j]))
 				continue;
 
-			dimm = edac_get_dimm(mci, i, j, 0);
+			dimm = EDAC_DIMM_PTR(mci->layers, mci->dimms, mci->n_layers,
+				       i, j, 0);
 			banks = numbank(MC_DOD_NUMBANK(dimm_dod[j]));
 			ranks = numrank(MC_DOD_NUMRANK(dimm_dod[j]));
 			rows = numrow(MC_DOD_NUMROW(dimm_dod[j]));
@@ -1815,7 +1816,7 @@ static int i7core_mce_check_error(struct notifier_block *nb, unsigned long val,
 	struct mem_ctl_info *mci;
 
 	i7_dev = get_i7core_dev(mce->socketid);
-	if (!i7_dev || (mce->kflags & MCE_HANDLED_CEC))
+	if (!i7_dev)
 		return NOTIFY_DONE;
 
 	mci = i7_dev->mci;
@@ -1834,8 +1835,7 @@ static int i7core_mce_check_error(struct notifier_block *nb, unsigned long val,
 	i7core_check_error(mci, mce);
 
 	/* Advise mcelog that the errors were handled */
-	mce->kflags |= MCE_HANDLED_EDAC;
-	return NOTIFY_OK;
+	return NOTIFY_STOP;
 }
 
 static struct notifier_block i7_mce_dec = {
@@ -2391,7 +2391,7 @@ module_exit(i7core_exit);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Mauro Carvalho Chehab");
-MODULE_AUTHOR("Red Hat Inc. (https://www.redhat.com)");
+MODULE_AUTHOR("Red Hat Inc. (http://www.redhat.com)");
 MODULE_DESCRIPTION("MC Driver for Intel i7 Core memory controllers - "
 		   I7CORE_REVISION);
 

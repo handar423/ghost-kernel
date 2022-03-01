@@ -6,7 +6,7 @@
  */
 #include <errno.h>
 #include <fcntl.h>
-#include <bpf/libbpf.h>
+#include <libbpf.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -21,7 +21,7 @@
 #include <sys/mman.h>
 #include <sys/syscall.h>
 
-#include <bpf/bpf.h>
+#include <bpf.h>
 #include <perf-sys.h>
 
 #include "main.h"
@@ -39,7 +39,7 @@ struct event_ring_info {
 
 struct perf_event_sample {
 	struct perf_event_header header;
-	__u64 time;
+	u64 time;
 	__u32 size;
 	unsigned char data[];
 };

@@ -19,7 +19,7 @@
 void afs_put_addrlist(struct afs_addr_list *alist)
 {
 	if (alist && refcount_dec_and_test(&alist->usage))
-		kfree_rcu(alist, rcu);
+		call_rcu(&alist->rcu, (rcu_callback_t)kfree);
 }
 
 /*

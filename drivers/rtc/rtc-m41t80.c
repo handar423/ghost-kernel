@@ -235,6 +235,9 @@ static int m41t80_rtc_set_time(struct device *dev, struct rtc_time *tm)
 	unsigned char buf[8];
 	int err, flags;
 
+	if (tm->tm_year < 100 || tm->tm_year > 199)
+		return -EINVAL;
+
 	buf[M41T80_REG_SSEC] = 0;
 	buf[M41T80_REG_SEC] = bin2bcd(tm->tm_sec);
 	buf[M41T80_REG_MIN] = bin2bcd(tm->tm_min);
@@ -702,6 +705,7 @@ static ssize_t wdt_read(struct file *file, char __user *buf,
 
 /**
  *	wdt_ioctl:
+ *	@inode: inode of the device
  *	@file: file handle to the device
  *	@cmd: watchdog command
  *	@arg: argument pointer
@@ -740,7 +744,7 @@ static int wdt_ioctl(struct file *file, unsigned int cmd,
 			return -EINVAL;
 		wdt_margin = new_margin;
 		wdt_ping();
-		fallthrough;
+		/* Fall through */
 	case WDIOC_GETTIMEOUT:
 		return put_user(wdt_margin, (int __user *)arg);
 
@@ -836,7 +840,6 @@ static const struct file_operations wdt_fops = {
 	.owner	= THIS_MODULE,
 	.read	= wdt_read,
 	.unlocked_ioctl = wdt_unlocked_ioctl,
-	.compat_ioctl = compat_ptr_ioctl,
 	.write	= wdt_write,
 	.open	= wdt_open,
 	.release = wdt_release,
@@ -922,8 +925,6 @@ static int m41t80_probe(struct i2c_client *client,
 	}
 
 	m41t80_data->rtc->ops = &m41t80_rtc_ops;
-	m41t80_data->rtc->range_min = RTC_TIMESTAMP_BEGIN_2000;
-	m41t80_data->rtc->range_max = RTC_TIMESTAMP_END_2099;
 
 	if (client->irq <= 0) {
 		/* We cannot support UIE mode if we do not have an IRQ line */
@@ -977,7 +978,7 @@ static int m41t80_probe(struct i2c_client *client,
 		m41t80_sqw_register_clk(m41t80_data);
 #endif
 
-	rc = devm_rtc_register_device(m41t80_data->rtc);
+	rc = rtc_register_device(m41t80_data->rtc);
 	if (rc)
 		return rc;
 

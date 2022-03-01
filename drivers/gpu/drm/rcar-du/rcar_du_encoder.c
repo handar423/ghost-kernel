@@ -9,11 +9,9 @@
 
 #include <linux/export.h>
 
-#include <drm/drm_bridge.h>
 #include <drm/drm_crtc.h>
 #include <drm/drm_modeset_helper_vtables.h>
 #include <drm/drm_panel.h>
-#include <drm/drm_simple_kms_helper.h>
 
 #include "rcar_du_drv.h"
 #include "rcar_du_encoder.h"
@@ -23,6 +21,13 @@
 /* -----------------------------------------------------------------------------
  * Encoder
  */
+
+static const struct drm_encoder_helper_funcs encoder_helper_funcs = {
+};
+
+static const struct drm_encoder_funcs encoder_funcs = {
+	.destroy = drm_encoder_cleanup,
+};
 
 static unsigned int rcar_du_encoder_count_ports(struct device_node *node)
 {
@@ -79,8 +84,8 @@ int rcar_du_encoder_init(struct rcar_du_device *rcdu,
 			goto done;
 		}
 
-		bridge = devm_drm_panel_bridge_add_typed(rcdu->dev, panel,
-							 DRM_MODE_CONNECTOR_DPI);
+		bridge = devm_drm_panel_bridge_add(rcdu->dev, panel,
+						   DRM_MODE_CONNECTOR_DPI);
 		if (IS_ERR(bridge)) {
 			ret = PTR_ERR(bridge);
 			goto done;
@@ -104,16 +109,18 @@ int rcar_du_encoder_init(struct rcar_du_device *rcdu,
 		}
 	}
 
-	ret = drm_simple_encoder_init(rcdu->ddev, encoder,
-				      DRM_MODE_ENCODER_NONE);
+	ret = drm_encoder_init(rcdu->ddev, encoder, &encoder_funcs,
+			       DRM_MODE_ENCODER_NONE, NULL);
 	if (ret < 0)
 		goto done;
+
+	drm_encoder_helper_add(encoder, &encoder_helper_funcs);
 
 	/*
 	 * Attach the bridge to the encoder. The bridge will create the
 	 * connector.
 	 */
-	ret = drm_bridge_attach(encoder, bridge, NULL, 0);
+	ret = drm_bridge_attach(encoder, bridge, NULL);
 	if (ret) {
 		drm_encoder_cleanup(encoder);
 		return ret;

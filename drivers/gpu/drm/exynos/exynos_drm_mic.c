@@ -21,7 +21,6 @@
 #include <video/of_videomode.h>
 #include <video/videomode.h>
 
-#include <drm/drm_bridge.h>
 #include <drm/drm_encoder.h>
 #include <drm/drm_print.h>
 
@@ -88,7 +87,7 @@
 
 #define MIC_BS_SIZE_2D(x)	((x) & 0x3fff)
 
-static const char *const clk_names[] = { "pclk_mic0", "sclk_rgb_vclk_to_mic0" };
+static char *clk_names[] = { "pclk_mic0", "sclk_rgb_vclk_to_mic0" };
 #define NUM_CLKS		ARRAY_SIZE(clk_names)
 static DEFINE_MUTEX(mic_mutex);
 

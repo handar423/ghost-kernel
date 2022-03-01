@@ -454,7 +454,7 @@ static int ti_hecc_get_berr_counter(const struct net_device *ndev,
 /* ti_hecc_xmit: HECC Transmit
  *
  * The transmit mailboxes start from 0 to HECC_MAX_TX_MBOX. In HECC the
- * priority of the mailbox for transmission is dependent upon priority setting
+ * priority of the mailbox for tranmission is dependent upon priority setting
  * field in mailbox registers. The mailbox with highest value in priority field
  * is transmitted first. Only when two mailboxes have the same value in
  * priority field the highest numbered mailbox is transmitted first.
@@ -496,7 +496,7 @@ static netdev_tx_t ti_hecc_xmit(struct sk_buff *skb, struct net_device *ndev)
 	spin_unlock_irqrestore(&priv->mbx_lock, flags);
 
 	/* Prepare mailbox for transmission */
-	data = cf->len | (get_tx_head_prio(priv) << 8);
+	data = cf->can_dlc | (get_tx_head_prio(priv) << 8);
 	if (cf->can_id & CAN_RTR_FLAG) /* Remote transmission request */
 		data |= HECC_CANMCF_RTR;
 	hecc_write_mbx(priv, mbxno, HECC_CANMCF, data);
@@ -508,7 +508,7 @@ static netdev_tx_t ti_hecc_xmit(struct sk_buff *skb, struct net_device *ndev)
 	hecc_write_mbx(priv, mbxno, HECC_CANMID, data);
 	hecc_write_mbx(priv, mbxno, HECC_CANMDL,
 		       be32_to_cpu(*(__be32 *)(cf->data)));
-	if (cf->len > 4)
+	if (cf->can_dlc > 4)
 		hecc_write_mbx(priv, mbxno, HECC_CANMDH,
 			       be32_to_cpu(*(__be32 *)(cf->data + 4)));
 	else
@@ -535,28 +535,15 @@ struct ti_hecc_priv *rx_offload_to_priv(struct can_rx_offload *offload)
 	return container_of(offload, struct ti_hecc_priv, offload);
 }
 
-static struct sk_buff *ti_hecc_mailbox_read(struct can_rx_offload *offload,
-					    unsigned int mbxno, u32 *timestamp,
-					    bool drop)
+static unsigned int ti_hecc_mailbox_read(struct can_rx_offload *offload,
+					 struct can_frame *cf,
+					 u32 *timestamp, unsigned int mbxno)
 {
 	struct ti_hecc_priv *priv = rx_offload_to_priv(offload);
-	struct sk_buff *skb;
-	struct can_frame *cf;
 	u32 data, mbx_mask;
+	int ret = 1;
 
 	mbx_mask = BIT(mbxno);
-
-	if (unlikely(drop)) {
-		skb = ERR_PTR(-ENOBUFS);
-		goto mark_as_read;
-	}
-
-	skb = alloc_can_skb(offload->dev, &cf);
-	if (unlikely(!skb)) {
-		skb = ERR_PTR(-ENOMEM);
-		goto mark_as_read;
-	}
-
 	data = hecc_read_mbx(priv, mbxno, HECC_CANMID);
 	if (data & HECC_CANMID_IDE)
 		cf->can_id = (data & CAN_EFF_MASK) | CAN_EFF_FLAG;
@@ -566,11 +553,11 @@ static struct sk_buff *ti_hecc_mailbox_read(struct can_rx_offload *offload,
 	data = hecc_read_mbx(priv, mbxno, HECC_CANMCF);
 	if (data & HECC_CANMCF_RTR)
 		cf->can_id |= CAN_RTR_FLAG;
-	cf->len = can_cc_dlc2len(data & 0xF);
+	cf->can_dlc = get_can_dlc(data & 0xF);
 
 	data = hecc_read_mbx(priv, mbxno, HECC_CANMDL);
 	*(__be32 *)(cf->data) = cpu_to_be32(data);
-	if (cf->len > 4) {
+	if (cf->can_dlc > 4) {
 		data = hecc_read_mbx(priv, mbxno, HECC_CANMDH);
 		*(__be32 *)(cf->data + 4) = cpu_to_be32(data);
 	}
@@ -591,12 +578,11 @@ static struct sk_buff *ti_hecc_mailbox_read(struct can_rx_offload *offload,
 	 */
 	if (unlikely(mbxno == HECC_RX_LAST_MBOX &&
 		     hecc_read(priv, HECC_CANRML) & mbx_mask))
-		skb = ERR_PTR(-ENOBUFS);
+		ret = -ENOBUFS;
 
- mark_as_read:
 	hecc_write(priv, HECC_CANRMP, mbx_mask);
 
-	return skb;
+	return ret;
 }
 
 static int ti_hecc_error(struct net_device *ndev, int int_status,
@@ -857,7 +843,7 @@ static int ti_hecc_probe(struct platform_device *pdev)
 	struct net_device *ndev = (struct net_device *)0;
 	struct ti_hecc_priv *priv;
 	struct device_node *np = pdev->dev.of_node;
-	struct resource *irq;
+	struct resource *res, *irq;
 	struct regulator *reg_xceiver;
 	int err = -ENODEV;
 
@@ -878,7 +864,13 @@ static int ti_hecc_probe(struct platform_device *pdev)
 	priv = netdev_priv(ndev);
 
 	/* handle hecc memory */
-	priv->base = devm_platform_ioremap_resource_byname(pdev, "hecc");
+	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "hecc");
+	if (!res) {
+		dev_err(&pdev->dev, "can't get IORESOURCE_MEM hecc\n");
+		return -EINVAL;
+	}
+
+	priv->base = devm_ioremap_resource(&pdev->dev, res);
 	if (IS_ERR(priv->base)) {
 		dev_err(&pdev->dev, "hecc ioremap failed\n");
 		err = PTR_ERR(priv->base);
@@ -886,8 +878,13 @@ static int ti_hecc_probe(struct platform_device *pdev)
 	}
 
 	/* handle hecc-ram memory */
-	priv->hecc_ram = devm_platform_ioremap_resource_byname(pdev,
-							       "hecc-ram");
+	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "hecc-ram");
+	if (!res) {
+		dev_err(&pdev->dev, "can't get IORESOURCE_MEM hecc-ram\n");
+		return -EINVAL;
+	}
+
+	priv->hecc_ram = devm_ioremap_resource(&pdev->dev, res);
 	if (IS_ERR(priv->hecc_ram)) {
 		dev_err(&pdev->dev, "hecc-ram ioremap failed\n");
 		err = PTR_ERR(priv->hecc_ram);
@@ -895,7 +892,13 @@ static int ti_hecc_probe(struct platform_device *pdev)
 	}
 
 	/* handle mbx memory */
-	priv->mbx = devm_platform_ioremap_resource_byname(pdev, "mbx");
+	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "mbx");
+	if (!res) {
+		dev_err(&pdev->dev, "can't get IORESOURCE_MEM mbx\n");
+		return -EINVAL;
+	}
+
+	priv->mbx = devm_ioremap_resource(&pdev->dev, res);
 	if (IS_ERR(priv->mbx)) {
 		dev_err(&pdev->dev, "mbx ioremap failed\n");
 		err = PTR_ERR(priv->mbx);

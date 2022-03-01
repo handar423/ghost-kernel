@@ -13,7 +13,6 @@
 #include "util/mmap.h"
 #include <errno.h>
 #include <linux/string.h>
-#include <perf/mmap.h>
 
 #define NR_ITERS 111
 
@@ -38,8 +37,8 @@ static int count_samples(struct evlist *evlist, int *sample_count,
 		struct mmap *map = &evlist->overwrite_mmap[i];
 		union perf_event *event;
 
-		perf_mmap__read_init(&map->core);
-		while ((event = perf_mmap__read_event(&map->core)) != NULL) {
+		perf_mmap__read_init(map);
+		while ((event = perf_mmap__read_event(map)) != NULL) {
 			const u32 type = event->header.type;
 
 			switch (type) {
@@ -54,7 +53,7 @@ static int count_samples(struct evlist *evlist, int *sample_count,
 				return TEST_FAIL;
 			}
 		}
-		perf_mmap__read_done(&map->core);
+		perf_mmap__read_done(map);
 	}
 	return TEST_OK;
 }
@@ -109,7 +108,7 @@ int test__backward_ring_buffer(struct test *test __maybe_unused, int subtest __m
 		return TEST_FAIL;
 	}
 
-	err = evlist__create_maps(evlist, &opts.target);
+	err = perf_evlist__create_maps(evlist, &opts.target);
 	if (err < 0) {
 		pr_debug("Not enough memory to create thread/cpu maps\n");
 		goto out_delete_evlist;
@@ -127,7 +126,7 @@ int test__backward_ring_buffer(struct test *test __maybe_unused, int subtest __m
 		goto out_delete_evlist;
 	}
 
-	evlist__config(evlist, &opts, NULL);
+	perf_evlist__config(evlist, &opts, NULL);
 
 	err = evlist__open(evlist);
 	if (err < 0) {

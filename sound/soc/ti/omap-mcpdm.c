@@ -253,7 +253,7 @@ static int omap_mcpdm_dai_startup(struct snd_pcm_substream *substream,
 
 	mutex_lock(&mcpdm->mutex);
 
-	if (!snd_soc_dai_active(dai))
+	if (!dai->active)
 		omap_mcpdm_open_streams(mcpdm);
 
 	mutex_unlock(&mcpdm->mutex);
@@ -271,7 +271,7 @@ static void omap_mcpdm_dai_shutdown(struct snd_pcm_substream *substream,
 
 	mutex_lock(&mcpdm->mutex);
 
-	if (!snd_soc_dai_active(dai)) {
+	if (!dai->active) {
 		if (omap_mcpdm_active(mcpdm)) {
 			omap_mcpdm_stop(mcpdm);
 			omap_mcpdm_close_streams(mcpdm);
@@ -281,10 +281,10 @@ static void omap_mcpdm_dai_shutdown(struct snd_pcm_substream *substream,
 	}
 
 	if (mcpdm->latency[stream2])
-		cpu_latency_qos_update_request(&mcpdm->pm_qos_req,
-					       mcpdm->latency[stream2]);
+		pm_qos_update_request(&mcpdm->pm_qos_req,
+				      mcpdm->latency[stream2]);
 	else if (mcpdm->latency[stream1])
-		cpu_latency_qos_remove_request(&mcpdm->pm_qos_req);
+		pm_qos_remove_request(&mcpdm->pm_qos_req);
 
 	mcpdm->latency[stream1] = 0;
 
@@ -309,19 +309,19 @@ static int omap_mcpdm_dai_hw_params(struct snd_pcm_substream *substream,
 			/* up to 3 channels for capture */
 			return -EINVAL;
 		link_mask |= 1 << 4;
-		fallthrough;
+		/* fall through */
 	case 4:
 		if (stream == SNDRV_PCM_STREAM_CAPTURE)
 			/* up to 3 channels for capture */
 			return -EINVAL;
 		link_mask |= 1 << 3;
-		fallthrough;
+		/* fall through */
 	case 3:
 		link_mask |= 1 << 2;
-		fallthrough;
+		/* fall through */
 	case 2:
 		link_mask |= 1 << 1;
-		fallthrough;
+		/* fall through */
 	case 1:
 		link_mask |= 1 << 0;
 		break;
@@ -386,10 +386,10 @@ static int omap_mcpdm_prepare(struct snd_pcm_substream *substream,
 	if (!latency || mcpdm->latency[stream1] < latency)
 		latency = mcpdm->latency[stream1];
 
-	if (cpu_latency_qos_request_active(pm_qos_req))
-		cpu_latency_qos_update_request(pm_qos_req, latency);
+	if (pm_qos_request_active(pm_qos_req))
+		pm_qos_update_request(pm_qos_req, latency);
 	else if (latency)
-		cpu_latency_qos_add_request(pm_qos_req, latency);
+		pm_qos_add_request(pm_qos_req, PM_QOS_CPU_DMA_LATENCY, latency);
 
 	if (!omap_mcpdm_active(mcpdm)) {
 		omap_mcpdm_start(mcpdm);
@@ -451,18 +451,18 @@ static int omap_mcpdm_remove(struct snd_soc_dai *dai)
 	free_irq(mcpdm->irq, (void *)mcpdm);
 	pm_runtime_disable(mcpdm->dev);
 
-	if (cpu_latency_qos_request_active(&mcpdm->pm_qos_req))
-		cpu_latency_qos_remove_request(&mcpdm->pm_qos_req);
+	if (pm_qos_request_active(&mcpdm->pm_qos_req))
+		pm_qos_remove_request(&mcpdm->pm_qos_req);
 
 	return 0;
 }
 
 #ifdef CONFIG_PM_SLEEP
-static int omap_mcpdm_suspend(struct snd_soc_component *component)
+static int omap_mcpdm_suspend(struct snd_soc_dai *dai)
 {
-	struct omap_mcpdm *mcpdm = snd_soc_component_get_drvdata(component);
+	struct omap_mcpdm *mcpdm = snd_soc_dai_get_drvdata(dai);
 
-	if (snd_soc_component_active(component)) {
+	if (dai->active) {
 		omap_mcpdm_stop(mcpdm);
 		omap_mcpdm_close_streams(mcpdm);
 	}
@@ -476,15 +476,15 @@ static int omap_mcpdm_suspend(struct snd_soc_component *component)
 	return 0;
 }
 
-static int omap_mcpdm_resume(struct snd_soc_component *component)
+static int omap_mcpdm_resume(struct snd_soc_dai *dai)
 {
-	struct omap_mcpdm *mcpdm = snd_soc_component_get_drvdata(component);
+	struct omap_mcpdm *mcpdm = snd_soc_dai_get_drvdata(dai);
 
 	if (mcpdm->pm_active_count) {
 		while (mcpdm->pm_active_count--)
 			pm_runtime_get_sync(mcpdm->dev);
 
-		if (snd_soc_component_active(component)) {
+		if (dai->active) {
 			omap_mcpdm_open_streams(mcpdm);
 			omap_mcpdm_start(mcpdm);
 		}
@@ -504,6 +504,8 @@ static int omap_mcpdm_resume(struct snd_soc_component *component)
 static struct snd_soc_dai_driver omap_mcpdm_dai = {
 	.probe = omap_mcpdm_probe,
 	.remove = omap_mcpdm_remove,
+	.suspend = omap_mcpdm_suspend,
+	.resume = omap_mcpdm_resume,
 	.probe_order = SND_SOC_COMP_ORDER_LATE,
 	.remove_order = SND_SOC_COMP_ORDER_EARLY,
 	.playback = {
@@ -525,14 +527,12 @@ static struct snd_soc_dai_driver omap_mcpdm_dai = {
 
 static const struct snd_soc_component_driver omap_mcpdm_component = {
 	.name		= "omap-mcpdm",
-	.suspend	= omap_mcpdm_suspend,
-	.resume		= omap_mcpdm_resume,
 };
 
 void omap_mcpdm_configure_dn_offsets(struct snd_soc_pcm_runtime *rtd,
 				    u8 rx1, u8 rx2)
 {
-	struct omap_mcpdm *mcpdm = snd_soc_dai_get_drvdata(asoc_rtd_to_cpu(rtd, 0));
+	struct omap_mcpdm *mcpdm = snd_soc_dai_get_drvdata(rtd->cpu_dai);
 
 	mcpdm->dn_rx_offset = MCPDM_DNOFST_RX1(rx1) | MCPDM_DNOFST_RX2(rx2);
 }

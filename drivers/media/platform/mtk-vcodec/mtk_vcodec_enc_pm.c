@@ -12,6 +12,8 @@
 
 #include "mtk_vcodec_enc_pm.h"
 #include "mtk_vcodec_util.h"
+#include "mtk_vpu.h"
+
 
 int mtk_vcodec_init_enc_pm(struct mtk_vcodec_dev *mtkdev)
 {
@@ -108,8 +110,6 @@ put_larbvenc:
 
 void mtk_vcodec_release_enc_pm(struct mtk_vcodec_dev *mtkdev)
 {
-	put_device(mtkdev->pm.larbvenclt);
-	put_device(mtkdev->pm.larbvenc);
 }
 
 

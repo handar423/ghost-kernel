@@ -211,14 +211,23 @@ void kvmppc_create_vcpu_debugfs(struct kvm_vcpu *vcpu, unsigned int id)
 
 	snprintf(dbg_fname, sizeof(dbg_fname), "vm%u_vcpu%u_timing",
 		 current->pid, id);
-	debugfs_file = debugfs_create_file(dbg_fname, 0666, kvm_debugfs_dir,
-						vcpu, &kvmppc_exit_timing_fops);
+	debugfs_file = debugfs_create_file(dbg_fname, 0666,
+					kvm_debugfs_dir, vcpu,
+					&kvmppc_exit_timing_fops);
+
+	if (!debugfs_file) {
+		printk(KERN_ERR"%s: error creating debugfs file %s\n",
+			__func__, dbg_fname);
+		return;
+	}
 
 	vcpu->arch.debugfs_exit_timing = debugfs_file;
 }
 
 void kvmppc_remove_vcpu_debugfs(struct kvm_vcpu *vcpu)
 {
-	debugfs_remove(vcpu->arch.debugfs_exit_timing);
-	vcpu->arch.debugfs_exit_timing = NULL;
+	if (vcpu->arch.debugfs_exit_timing) {
+		debugfs_remove(vcpu->arch.debugfs_exit_timing);
+		vcpu->arch.debugfs_exit_timing = NULL;
+	}
 }

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
    SCSI Tape Driver for Linux version 1.1 and newer. See the accompanying
-   file Documentation/scsi/st.rst for more information.
+   file Documentation/scsi/st.txt for more information.
 
    History:
    Rewritten from Dwayne Forsyth's SCSI tape driver by Kai Makisara.
@@ -22,7 +22,6 @@ static const char *verstr = "20160209";
 
 #include <linux/module.h>
 
-#include <linux/compat.h>
 #include <linux/fs.h>
 #include <linux/kernel.h>
 #include <linux/sched/signal.h>
@@ -45,7 +44,6 @@ static const char *verstr = "20160209";
 
 #include <linux/uaccess.h>
 #include <asm/dma.h>
-#include <asm/unaligned.h>
 
 #include <scsi/scsi.h>
 #include <scsi/scsi_dbg.h>
@@ -339,14 +337,14 @@ static void st_analyze_sense(struct st_request *SRpnt, struct st_cmdstatus *s)
 		switch (sense[0] & 0x7f) {
 		case 0x71:
 			s->deferred = 1;
-			fallthrough;
+			/* fall through */
 		case 0x70:
 			s->fixed_format = 1;
 			s->flags = sense[2] & 0xe0;
 			break;
 		case 0x73:
 			s->deferred = 1;
-			fallthrough;
+			/* fall through */
 		case 0x72:
 			s->fixed_format = 0;
 			ucp = scsi_sense_desc_find(sense, SCSI_SENSE_BUFFERSIZE, 4);
@@ -1269,8 +1267,8 @@ static int st_open(struct inode *inode, struct file *filp)
 	spin_lock(&st_use_lock);
 	if (STp->in_use) {
 		spin_unlock(&st_use_lock);
-		scsi_tape_put(STp);
 		DEBC_printk(STp, "Device already in use.\n");
+		scsi_tape_put(STp);
 		return (-EBUSY);
 	}
 
@@ -1457,6 +1455,7 @@ static int st_flush(struct file *filp, fl_owner_t id)
    accessing this tape. */
 static int st_release(struct inode *inode, struct file *filp)
 {
+	int result = 0;
 	struct scsi_tape *STp = filp->private_data;
 
 	if (STp->door_locked == ST_LOCKED_AUTO)
@@ -1469,9 +1468,9 @@ static int st_release(struct inode *inode, struct file *filp)
 	scsi_autopm_put_device(STp->device);
 	scsi_tape_put(STp);
 
-	return 0;
+	return result;
 }
-
+
 /* The checks common to both reading and writing */
 static ssize_t rw_checks(struct scsi_tape *STp, struct file *filp, size_t count)
 {
@@ -2680,7 +2679,8 @@ static void deb_space_print(struct scsi_tape *STp, int direction, char *units, u
 	if (!debugging)
 		return;
 
-	sc = sign_extend32(get_unaligned_be24(&cmd[2]), 23);
+	sc = cmd[2] & 0x80 ? 0xff000000 : 0;
+	sc |= (cmd[2] << 16) | (cmd[3] << 8) | cmd[4];
 	if (direction)
 		sc = -sc;
 	st_printk(ST_DEB_MSG, STp, "Spacing tape %s over %d %s.\n",
@@ -2723,7 +2723,7 @@ static int st_int_ioctl(struct scsi_tape *STp, unsigned int cmd_in, unsigned lon
 	switch (cmd_in) {
 	case MTFSFM:
 		chg_eof = 0;	/* Changed from the FSF after this */
-		fallthrough;
+		/* fall through */
 	case MTFSF:
 		cmd[0] = SPACE;
 		cmd[1] = 0x01;	/* Space FileMarks */
@@ -2738,7 +2738,7 @@ static int st_int_ioctl(struct scsi_tape *STp, unsigned int cmd_in, unsigned lon
 		break;
 	case MTBSFM:
 		chg_eof = 0;	/* Changed from the FSF after this */
-		fallthrough;
+		/* fall through */
 	case MTBSF:
 		cmd[0] = SPACE;
 		cmd[1] = 0x01;	/* Space FileMarks */
@@ -2846,6 +2846,7 @@ static int st_int_ioctl(struct scsi_tape *STp, unsigned int cmd_in, unsigned lon
 	case MTNOP:
 		DEBC_printk(STp, "No op on tape.\n");
 		return 0;	/* Should do something ? */
+		break;
 	case MTRETEN:
 		cmd[0] = START_STOP;
 		if (STp->immediate) {
@@ -3499,7 +3500,7 @@ out:
 
 
 /* The ioctl command */
-static long st_ioctl_common(struct file *file, unsigned int cmd_in, void __user *p)
+static long st_ioctl(struct file *file, unsigned int cmd_in, unsigned long arg)
 {
 	int i, cmd_nr, cmd_type, bt;
 	int retval = 0;
@@ -3507,6 +3508,7 @@ static long st_ioctl_common(struct file *file, unsigned int cmd_in, void __user 
 	struct scsi_tape *STp = file->private_data;
 	struct st_modedef *STm;
 	struct st_partstat *STps;
+	void __user *p = (void __user *)arg;
 
 	if (mutex_lock_interruptible(&STp->lock))
 		return -ERESTARTSYS;
@@ -3798,11 +3800,14 @@ static long st_ioctl_common(struct file *file, unsigned int cmd_in, void __user 
 		if (STp->cleaning_req)
 			mt_status.mt_gstat |= GMT_CLN(0xffffffff);
 
-		retval = put_user_mtget(p, &mt_status);
-		if (retval)
+		i = copy_to_user(p, &mt_status, sizeof(struct mtget));
+		if (i) {
+			retval = (-EFAULT);
 			goto out;
+		}
 
 		STp->recover_reg = 0;		/* Clear after read */
+		retval = 0;
 		goto out;
 	}			/* End of MTIOCGET */
 	if (cmd_type == _IOC_TYPE(MTIOCPOS) && cmd_nr == _IOC_NR(MTIOCPOS)) {
@@ -3816,24 +3821,16 @@ static long st_ioctl_common(struct file *file, unsigned int cmd_in, void __user 
 			goto out;
 		}
 		mt_pos.mt_blkno = blk;
-		retval = put_user_mtpos(p, &mt_pos);
+		i = copy_to_user(p, &mt_pos, sizeof(struct mtpos));
+		if (i)
+			retval = (-EFAULT);
 		goto out;
 	}
 	mutex_unlock(&STp->lock);
 	switch (cmd_in) {
-		case SCSI_IOCTL_STOP_UNIT:
-			/* unload */
-			retval = scsi_ioctl(STp->device, cmd_in, p);
-			if (!retval) {
-				STp->rew_at_close = 0;
-				STp->ready = ST_NO_TAPE;
-			}
-			return retval;
-
 		case SCSI_IOCTL_GET_IDLUN:
 		case SCSI_IOCTL_GET_BUS_NUMBER:
 			break;
-
 		default:
 			if ((cmd_in == SG_IO ||
 			     cmd_in == SCSI_IOCTL_SEND_COMMAND ||
@@ -3847,46 +3844,30 @@ static long st_ioctl_common(struct file *file, unsigned int cmd_in, void __user 
 				return i;
 			break;
 	}
-	return -ENOTTY;
+	retval = scsi_ioctl(STp->device, cmd_in, p);
+	if (!retval && cmd_in == SCSI_IOCTL_STOP_UNIT) { /* unload */
+		STp->rew_at_close = 0;
+		STp->ready = ST_NO_TAPE;
+	}
+	return retval;
 
  out:
 	mutex_unlock(&STp->lock);
 	return retval;
 }
 
-static long st_ioctl(struct file *file, unsigned int cmd_in, unsigned long arg)
-{
-	void __user *p = (void __user *)arg;
-	struct scsi_tape *STp = file->private_data;
-	int ret;
-
-	ret = st_ioctl_common(file, cmd_in, p);
-	if (ret != -ENOTTY)
-		return ret;
-
-	return scsi_ioctl(STp->device, cmd_in, p);
-}
-
 #ifdef CONFIG_COMPAT
-static long st_compat_ioctl(struct file *file, unsigned int cmd_in, unsigned long arg)
+static long st_compat_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
-	void __user *p = compat_ptr(arg);
 	struct scsi_tape *STp = file->private_data;
-	int ret;
+	struct scsi_device *sdev = STp->device;
+	int ret = -ENOIOCTLCMD;
+	if (sdev->host->hostt->compat_ioctl) { 
 
-	/* argument conversion is handled using put_user_mtpos/put_user_mtget */
-	switch (cmd_in) {
-	case MTIOCPOS32:
-		return st_ioctl_common(file, MTIOCPOS, p);
-	case MTIOCGET32:
-		return st_ioctl_common(file, MTIOCGET, p);
+		ret = sdev->host->hostt->compat_ioctl(sdev, cmd, (void __user *)arg);
+
 	}
-
-	ret = st_ioctl_common(file, cmd_in, p);
-	if (ret != -ENOTTY)
-		return ret;
-
-	return scsi_compat_ioctl(STp->device, cmd_in, p);
+	return ret;
 }
 #endif
 
@@ -4920,7 +4901,7 @@ static int sgl_map_user_pages(struct st_buffer *STbp,
 	unsigned long end = (uaddr + count + PAGE_SIZE - 1) >> PAGE_SHIFT;
 	unsigned long start = uaddr >> PAGE_SHIFT;
 	const int nr_pages = end - start;
-	int res, i;
+	int res, i, j;
 	struct page **pages;
 	struct rq_map_data *mdata = &STbp->map_data;
 
@@ -4942,7 +4923,7 @@ static int sgl_map_user_pages(struct st_buffer *STbp,
 
         /* Try to fault in all of the necessary pages */
         /* rw==READ means read from drive, write into memory area */
-	res = pin_user_pages_fast(uaddr, nr_pages, rw == READ ? FOLL_WRITE : 0,
+	res = get_user_pages_fast(uaddr, nr_pages, rw == READ ? FOLL_WRITE : 0,
 				  pages);
 
 	/* Errors and no page mapped should return here */
@@ -4962,7 +4943,8 @@ static int sgl_map_user_pages(struct st_buffer *STbp,
 	return nr_pages;
  out_unmap:
 	if (res > 0) {
-		unpin_user_pages(pages, res);
+		for (j=0; j < res; j++)
+			put_page(pages[j]);
 		res = 0;
 	}
 	kfree(pages);
@@ -4974,9 +4956,18 @@ static int sgl_map_user_pages(struct st_buffer *STbp,
 static int sgl_unmap_user_pages(struct st_buffer *STbp,
 				const unsigned int nr_pages, int dirtied)
 {
-	/* FIXME: cache flush missing for rw==READ */
-	unpin_user_pages_dirty_lock(STbp->mapped_pages, nr_pages, dirtied);
+	int i;
 
+	for (i=0; i < nr_pages; i++) {
+		struct page *page = STbp->mapped_pages[i];
+
+		if (dirtied)
+			SetPageDirty(page);
+		/* FIXME: cache flush missing for rw==READ
+		 * FIXME: call the correct reference counting function
+		 */
+		put_page(page);
+	}
 	kfree(STbp->mapped_pages);
 	STbp->mapped_pages = NULL;
 

@@ -356,6 +356,7 @@ struct ubifs_gced_idx_leb {
  * @ui_mutex: serializes inode write-back with the rest of VFS operations,
  *            serializes "clean <-> dirty" state changes, serializes bulk-read,
  *            protects @dirty, @bulk_read, @ui_size, and @xattr_size
+ * @xattr_sem: serilizes write operations (remove|set|create) on xattr
  * @ui_lock: protects @synced_i_size
  * @synced_i_size: synchronized size of inode, i.e. the value of inode size
  *                 currently stored on the flash; used only for regular file
@@ -409,6 +410,7 @@ struct ubifs_inode {
 	unsigned int bulk_read:1;
 	unsigned int compr_type:2;
 	struct mutex ui_mutex;
+	struct rw_semaphore xattr_sem;
 	spinlock_t ui_lock;
 	loff_t synced_i_size;
 	loff_t ui_size;
@@ -1504,7 +1506,6 @@ extern const struct file_operations ubifs_dir_operations;
 extern const struct inode_operations ubifs_dir_inode_operations;
 extern const struct inode_operations ubifs_symlink_inode_operations;
 extern struct ubifs_compressor *ubifs_compressors[UBIFS_COMPR_TYPES_CNT];
-extern int ubifs_default_version;
 
 /* auth.c */
 static inline int ubifs_authenticated(const struct ubifs_info *c)
@@ -1719,8 +1720,8 @@ int ubifs_write_node(struct ubifs_info *c, void *node, int len, int lnum,
 		     int offs);
 int ubifs_write_node_hmac(struct ubifs_info *c, void *buf, int len, int lnum,
 			  int offs, int hmac_offs);
-int ubifs_check_node(const struct ubifs_info *c, const void *buf, int len,
-		     int lnum, int offs, int quiet, int must_chk_crc);
+int ubifs_check_node(const struct ubifs_info *c, const void *buf, int lnum,
+		     int offs, int quiet, int must_chk_crc);
 void ubifs_init_node(struct ubifs_info *c, void *buf, int len, int pad);
 void ubifs_crc_node(struct ubifs_info *c, void *buf, int len);
 void ubifs_prepare_node(struct ubifs_info *c, void *buf, int len, int pad);
@@ -2000,19 +2001,17 @@ int ubifs_getattr(const struct path *path, struct kstat *stat,
 int ubifs_check_dir_empty(struct inode *dir);
 
 /* xattr.c */
+extern const struct xattr_handler *ubifs_xattr_handlers[];
+ssize_t ubifs_listxattr(struct dentry *dentry, char *buffer, size_t size);
 int ubifs_xattr_set(struct inode *host, const char *name, const void *value,
 		    size_t size, int flags, bool check_lock);
 ssize_t ubifs_xattr_get(struct inode *host, const char *name, void *buf,
 			size_t size);
 
 #ifdef CONFIG_UBIFS_FS_XATTR
-extern const struct xattr_handler *ubifs_xattr_handlers[];
-ssize_t ubifs_listxattr(struct dentry *dentry, char *buffer, size_t size);
 void ubifs_evict_xattr_inode(struct ubifs_info *c, ino_t xattr_inum);
 int ubifs_purge_xattrs(struct inode *host);
 #else
-#define ubifs_listxattr NULL
-#define ubifs_xattr_handlers NULL
 static inline void ubifs_evict_xattr_inode(struct ubifs_info *c,
 					   ino_t xattr_inum) { }
 static inline int ubifs_purge_xattrs(struct inode *host)
@@ -2097,6 +2096,13 @@ int ubifs_decrypt(const struct inode *inode, struct ubifs_data_node *dn,
 #endif
 
 extern const struct fscrypt_operations ubifs_crypt_operations;
+
+static inline bool ubifs_crypt_is_encrypted(const struct inode *inode)
+{
+	const struct ubifs_inode *ui = ubifs_inode(inode);
+
+	return ui->flags & UBIFS_CRYPT_FL;
+}
 
 /* Normal UBIFS messages */
 __printf(2, 3)

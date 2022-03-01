@@ -37,8 +37,6 @@ enum {
 	NDD_WORK_PENDING = 4,
 	/* ignore / filter NSLABEL_FLAG_LOCAL for this DIMM, i.e. no aliasing */
 	NDD_NOBLK = 5,
-	/* dimm supports namespace labels */
-	NDD_LABELING = 6,
 
 	/* need to set a limit somewhere, but yes, this is likely overkill */
 	ND_IOCTL_MAX_BUFLEN = SZ_4M,
@@ -67,6 +65,13 @@ enum {
 	DPA_RESOURCE_ADJUSTED = 1 << 0,
 };
 
+extern struct attribute_group nvdimm_bus_attribute_group;
+extern struct attribute_group nvdimm_attribute_group;
+extern struct attribute_group nd_device_attribute_group;
+extern struct attribute_group nd_numa_attribute_group;
+extern struct attribute_group nd_region_attribute_group;
+extern struct attribute_group nd_mapping_attribute_group;
+
 struct nvdimm;
 struct nvdimm_bus_descriptor;
 typedef int (*ndctl_fn)(struct nvdimm_bus_descriptor *nd_desc,
@@ -76,9 +81,8 @@ typedef int (*ndctl_fn)(struct nvdimm_bus_descriptor *nd_desc,
 struct device_node;
 struct nvdimm_bus_descriptor {
 	const struct attribute_group **attr_groups;
+	unsigned long bus_dsm_mask;
 	unsigned long cmd_mask;
-	unsigned long dimm_family_mask;
-	unsigned long bus_family_mask;
 	struct module *module;
 	char *provider_name;
 	struct device_node *of_node;
@@ -86,7 +90,6 @@ struct nvdimm_bus_descriptor {
 	int (*flush_probe)(struct nvdimm_bus_descriptor *nd_desc);
 	int (*clear_to_send)(struct nvdimm_bus_descriptor *nd_desc,
 			struct nvdimm *nvdimm, unsigned int cmd, void *data);
-	const struct nvdimm_bus_fw_ops *fw_ops;
 };
 
 struct nd_cmd_desc {
@@ -201,49 +204,6 @@ struct nvdimm_security_ops {
 	int (*query_overwrite)(struct nvdimm *nvdimm);
 };
 
-enum nvdimm_fwa_state {
-	NVDIMM_FWA_INVALID,
-	NVDIMM_FWA_IDLE,
-	NVDIMM_FWA_ARMED,
-	NVDIMM_FWA_BUSY,
-	NVDIMM_FWA_ARM_OVERFLOW,
-};
-
-enum nvdimm_fwa_trigger {
-	NVDIMM_FWA_ARM,
-	NVDIMM_FWA_DISARM,
-};
-
-enum nvdimm_fwa_capability {
-	NVDIMM_FWA_CAP_INVALID,
-	NVDIMM_FWA_CAP_NONE,
-	NVDIMM_FWA_CAP_QUIESCE,
-	NVDIMM_FWA_CAP_LIVE,
-};
-
-enum nvdimm_fwa_result {
-	NVDIMM_FWA_RESULT_INVALID,
-	NVDIMM_FWA_RESULT_NONE,
-	NVDIMM_FWA_RESULT_SUCCESS,
-	NVDIMM_FWA_RESULT_NOTSTAGED,
-	NVDIMM_FWA_RESULT_NEEDRESET,
-	NVDIMM_FWA_RESULT_FAIL,
-};
-
-struct nvdimm_bus_fw_ops {
-	enum nvdimm_fwa_state (*activate_state)
-		(struct nvdimm_bus_descriptor *nd_desc);
-	enum nvdimm_fwa_capability (*capability)
-		(struct nvdimm_bus_descriptor *nd_desc);
-	int (*activate)(struct nvdimm_bus_descriptor *nd_desc);
-};
-
-struct nvdimm_fw_ops {
-	enum nvdimm_fwa_state (*activate_state)(struct nvdimm *nvdimm);
-	enum nvdimm_fwa_result (*activate_result)(struct nvdimm *nvdimm);
-	int (*arm)(struct nvdimm *nvdimm, enum nvdimm_fwa_trigger arg);
-};
-
 void badrange_init(struct badrange *badrange);
 int badrange_add(struct badrange *badrange, u64 addr, u64 length);
 void badrange_forget(struct badrange *badrange, phys_addr_t start,
@@ -269,15 +229,14 @@ struct nvdimm *__nvdimm_create(struct nvdimm_bus *nvdimm_bus,
 		void *provider_data, const struct attribute_group **groups,
 		unsigned long flags, unsigned long cmd_mask, int num_flush,
 		struct resource *flush_wpq, const char *dimm_id,
-		const struct nvdimm_security_ops *sec_ops,
-		const struct nvdimm_fw_ops *fw_ops);
+		const struct nvdimm_security_ops *sec_ops);
 static inline struct nvdimm *nvdimm_create(struct nvdimm_bus *nvdimm_bus,
 		void *provider_data, const struct attribute_group **groups,
 		unsigned long flags, unsigned long cmd_mask, int num_flush,
 		struct resource *flush_wpq)
 {
 	return __nvdimm_create(nvdimm_bus, provider_data, groups, flags,
-			cmd_mask, num_flush, flush_wpq, NULL, NULL, NULL);
+			cmd_mask, num_flush, flush_wpq, NULL, NULL);
 }
 
 const struct nd_cmd_desc *nd_cmd_dimm_desc(int cmd);

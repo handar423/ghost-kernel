@@ -38,7 +38,7 @@ static int info_show(struct seq_file *s, void *private)
 
 	seq_printf(s, "Type: %s, %s\n", cop_to_str(window->cop),
 					window->tx_win ? "Send" : "Receive");
-	seq_printf(s, "Pid : %d\n", vas_window_pid(window));
+	seq_printf(s, "Pid : %d\n", window->pid);
 
 unlock:
 	mutex_unlock(&vas_mutex);
@@ -115,7 +115,7 @@ void vas_window_free_dbgdir(struct vas_window *window)
 
 void vas_window_init_dbgdir(struct vas_window *window)
 {
-	struct dentry *d;
+	struct dentry *f, *d;
 
 	if (!window->vinst->dbgdir)
 		return;
@@ -127,10 +127,28 @@ void vas_window_init_dbgdir(struct vas_window *window)
 	snprintf(window->dbgname, 16, "w%d", window->winid);
 
 	d = debugfs_create_dir(window->dbgname, window->vinst->dbgdir);
+	if (IS_ERR(d))
+		goto free_name;
+
 	window->dbgdir = d;
 
-	debugfs_create_file("info", 0444, d, window, &info_fops);
-	debugfs_create_file("hvwc", 0444, d, window, &hvwc_fops);
+	f = debugfs_create_file("info", 0444, d, window, &info_fops);
+	if (IS_ERR(f))
+		goto remove_dir;
+
+	f = debugfs_create_file("hvwc", 0444, d, window, &hvwc_fops);
+	if (IS_ERR(f))
+		goto remove_dir;
+
+	return;
+
+remove_dir:
+	debugfs_remove_recursive(window->dbgdir);
+	window->dbgdir = NULL;
+
+free_name:
+	kfree(window->dbgname);
+	window->dbgname = NULL;
 }
 
 void vas_instance_init_dbgdir(struct vas_instance *vinst)
@@ -138,6 +156,8 @@ void vas_instance_init_dbgdir(struct vas_instance *vinst)
 	struct dentry *d;
 
 	vas_init_dbgdir();
+	if (!vas_debugfs)
+		return;
 
 	vinst->dbgname = kzalloc(16, GFP_KERNEL);
 	if (!vinst->dbgname)
@@ -146,7 +166,16 @@ void vas_instance_init_dbgdir(struct vas_instance *vinst)
 	snprintf(vinst->dbgname, 16, "v%d", vinst->vas_id);
 
 	d = debugfs_create_dir(vinst->dbgname, vas_debugfs);
+	if (IS_ERR(d))
+		goto free_name;
+
 	vinst->dbgdir = d;
+	return;
+
+free_name:
+	kfree(vinst->dbgname);
+	vinst->dbgname = NULL;
+	vinst->dbgdir = NULL;
 }
 
 /*
@@ -162,4 +191,6 @@ void vas_init_dbgdir(void)
 
 	first_time = false;
 	vas_debugfs = debugfs_create_dir("vas", NULL);
+	if (IS_ERR(vas_debugfs))
+		vas_debugfs = NULL;
 }

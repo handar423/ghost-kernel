@@ -4,7 +4,6 @@
 #include <asm/bitsperlong.h>
 #include <asm/kvm_vcpu_regs.h>
 #include <asm/nospec-branch.h>
-#include <asm/segment.h>
 
 #define WORD_SIZE (BITS_PER_LONG / 8)
 
@@ -28,7 +27,7 @@
 #define VCPU_R15	__VCPU_REGS_R15 * WORD_SIZE
 #endif
 
-.section .noinstr.text, "ax"
+	.text
 
 /**
  * vmx_vmenter - VM-Enter the current loaded VMCS
@@ -44,7 +43,7 @@
  * they VM-Fail, whereas a successful VM-Enter + VM-Exit will jump
  * to vmx_vmexit.
  */
-SYM_FUNC_START(vmx_vmenter)
+ENTRY(vmx_vmenter)
 	/* EFLAGS.ZF is set if VMCS.LAUNCHED == 0 */
 	je 2f
 
@@ -59,10 +58,14 @@ SYM_FUNC_START(vmx_vmenter)
 	ret
 4:	ud2
 
-	_ASM_EXTABLE(1b, 3b)
-	_ASM_EXTABLE(2b, 3b)
+	.pushsection .fixup, "ax"
+5:	jmp 3b
+	.popsection
 
-SYM_FUNC_END(vmx_vmenter)
+	_ASM_EXTABLE(1b, 5b)
+	_ASM_EXTABLE(2b, 5b)
+
+ENDPROC(vmx_vmenter)
 
 /**
  * vmx_vmexit - Handle a VMX VM-Exit
@@ -74,7 +77,7 @@ SYM_FUNC_END(vmx_vmenter)
  * here after hardware loads the host's state, i.e. this is the destination
  * referred to by VMCS.HOST_RIP.
  */
-SYM_FUNC_START(vmx_vmexit)
+ENTRY(vmx_vmexit)
 #ifdef CONFIG_RETPOLINE
 	ALTERNATIVE "jmp .Lvmexit_skip_rsb", "", X86_FEATURE_RETPOLINE
 	/* Preserve guest's RAX, it's used to stuff the RSB. */
@@ -90,7 +93,7 @@ SYM_FUNC_START(vmx_vmexit)
 .Lvmexit_skip_rsb:
 #endif
 	ret
-SYM_FUNC_END(vmx_vmexit)
+ENDPROC(vmx_vmexit)
 
 /**
  * __vmx_vcpu_run - Run a vCPU via a transition to VMX guest mode
@@ -101,7 +104,7 @@ SYM_FUNC_END(vmx_vmexit)
  * Returns:
  *	0 on VM-Exit, 1 on VM-Fail
  */
-SYM_FUNC_START(__vmx_vcpu_run)
+ENTRY(__vmx_vcpu_run)
 	push %_ASM_BP
 	mov  %_ASM_SP, %_ASM_BP
 #ifdef CONFIG_X86_64
@@ -132,15 +135,15 @@ SYM_FUNC_START(__vmx_vcpu_run)
 	mov (%_ASM_SP), %_ASM_AX
 
 	/* Check if vmlaunch or vmresume is needed */
-	testb %bl, %bl
+	cmpb $0, %bl
 
 	/* Load guest registers.  Don't clobber flags. */
+	mov VCPU_RBX(%_ASM_AX), %_ASM_BX
 	mov VCPU_RCX(%_ASM_AX), %_ASM_CX
 	mov VCPU_RDX(%_ASM_AX), %_ASM_DX
-	mov VCPU_RBX(%_ASM_AX), %_ASM_BX
-	mov VCPU_RBP(%_ASM_AX), %_ASM_BP
 	mov VCPU_RSI(%_ASM_AX), %_ASM_SI
 	mov VCPU_RDI(%_ASM_AX), %_ASM_DI
+	mov VCPU_RBP(%_ASM_AX), %_ASM_BP
 #ifdef CONFIG_X86_64
 	mov VCPU_R8 (%_ASM_AX),  %r8
 	mov VCPU_R9 (%_ASM_AX),  %r9
@@ -167,13 +170,13 @@ SYM_FUNC_START(__vmx_vcpu_run)
 	mov WORD_SIZE(%_ASM_SP), %_ASM_AX
 
 	/* Save all guest registers, including RAX from the stack */
-	pop           VCPU_RAX(%_ASM_AX)
-	mov %_ASM_CX, VCPU_RCX(%_ASM_AX)
-	mov %_ASM_DX, VCPU_RDX(%_ASM_AX)
-	mov %_ASM_BX, VCPU_RBX(%_ASM_AX)
-	mov %_ASM_BP, VCPU_RBP(%_ASM_AX)
-	mov %_ASM_SI, VCPU_RSI(%_ASM_AX)
-	mov %_ASM_DI, VCPU_RDI(%_ASM_AX)
+	__ASM_SIZE(pop) VCPU_RAX(%_ASM_AX)
+	mov %_ASM_BX,   VCPU_RBX(%_ASM_AX)
+	mov %_ASM_CX,   VCPU_RCX(%_ASM_AX)
+	mov %_ASM_DX,   VCPU_RDX(%_ASM_AX)
+	mov %_ASM_SI,   VCPU_RSI(%_ASM_AX)
+	mov %_ASM_DI,   VCPU_RDI(%_ASM_AX)
+	mov %_ASM_BP,   VCPU_RBP(%_ASM_AX)
 #ifdef CONFIG_X86_64
 	mov %r8,  VCPU_R8 (%_ASM_AX)
 	mov %r9,  VCPU_R9 (%_ASM_AX)
@@ -197,12 +200,12 @@ SYM_FUNC_START(__vmx_vcpu_run)
 	 * free.  RSP and RAX are exempt as RSP is restored by hardware during
 	 * VM-Exit and RAX is explicitly loaded with 0 or 1 to return VM-Fail.
 	 */
-1:	xor %ecx, %ecx
+1:	xor %ebx, %ebx
+	xor %ecx, %ecx
 	xor %edx, %edx
-	xor %ebx, %ebx
-	xor %ebp, %ebp
 	xor %esi, %esi
 	xor %edi, %edi
+	xor %ebp, %ebp
 #ifdef CONFIG_X86_64
 	xor %r8d,  %r8d
 	xor %r9d,  %r9d
@@ -233,10 +236,7 @@ SYM_FUNC_START(__vmx_vcpu_run)
 	/* VM-Fail.  Out-of-line to avoid a taken Jcc after VM-Exit. */
 2:	mov $1, %eax
 	jmp 1b
-SYM_FUNC_END(__vmx_vcpu_run)
-
-
-.section .text, "ax"
+ENDPROC(__vmx_vcpu_run)
 
 /**
  * vmread_error_trampoline - Trampoline from inline asm to vmread_error()
@@ -246,7 +246,7 @@ SYM_FUNC_END(__vmx_vcpu_run)
  * Save and restore volatile registers across a call to vmread_error().  Note,
  * all parameters are passed on the stack.
  */
-SYM_FUNC_START(vmread_error_trampoline)
+ENTRY(vmread_error_trampoline)
 	push %_ASM_BP
 	mov  %_ASM_SP, %_ASM_BP
 
@@ -294,37 +294,4 @@ SYM_FUNC_START(vmread_error_trampoline)
 	pop %_ASM_BP
 
 	ret
-SYM_FUNC_END(vmread_error_trampoline)
-
-SYM_FUNC_START(vmx_do_interrupt_nmi_irqoff)
-	/*
-	 * Unconditionally create a stack frame, getting the correct RSP on the
-	 * stack (for x86-64) would take two instructions anyways, and RBP can
-	 * be used to restore RSP to make objtool happy (see below).
-	 */
-	push %_ASM_BP
-	mov %_ASM_SP, %_ASM_BP
-
-#ifdef CONFIG_X86_64
-	/*
-	 * Align RSP to a 16-byte boundary (to emulate CPU behavior) before
-	 * creating the synthetic interrupt stack frame for the IRQ/NMI.
-	 */
-	and  $-16, %rsp
-	push $__KERNEL_DS
-	push %rbp
-#endif
-	pushf
-	push $__KERNEL_CS
-	CALL_NOSPEC _ASM_ARG1
-
-	/*
-	 * "Restore" RSP from RBP, even though IRET has already unwound RSP to
-	 * the correct value.  objtool doesn't know the callee will IRET and,
-	 * without the explicit restore, thinks the stack is getting walloped.
-	 * Using an unwind hint is problematic due to x86-64's dynamic alignment.
-	 */
-	mov %_ASM_BP, %_ASM_SP
-	pop %_ASM_BP
-	ret
-SYM_FUNC_END(vmx_do_interrupt_nmi_irqoff)
+ENDPROC(vmread_error_trampoline)

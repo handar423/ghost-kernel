@@ -143,6 +143,13 @@ static irqreturn_t timer_interrupt(int irq, void *devid)
 	return IRQ_HANDLED;
 }
 
+/*  This should also be pulled from devtree  */
+static struct irqaction rtos_timer_intdesc = {
+	.handler = timer_interrupt,
+	.flags = IRQF_TIMER | IRQF_TRIGGER_RISING,
+	.name = "rtos_timer"
+};
+
 /*
  * time_init_deferred - called by start_kernel to set up timer/clock source
  *
@@ -156,7 +163,6 @@ void __init time_init_deferred(void)
 {
 	struct resource *resource = NULL;
 	struct clock_event_device *ce_dev = &hexagon_clockevent_dev;
-	unsigned long flag = IRQF_TIMER | IRQF_TRIGGER_RISING;
 
 	ce_dev->cpumask = cpu_all_mask;
 
@@ -189,8 +195,7 @@ void __init time_init_deferred(void)
 #endif
 
 	clockevents_register_device(ce_dev);
-	if (request_irq(ce_dev->irq, timer_interrupt, flag, "rtos_timer", NULL))
-		pr_err("Failed to register rtos_timer interrupt\n");
+	setup_irq(ce_dev->irq, &rtos_timer_intdesc);
 }
 
 void __init time_init(void)

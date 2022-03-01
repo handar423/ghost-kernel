@@ -319,8 +319,7 @@ int vmw_view_add(struct vmw_cmdbuf_res_manager *man,
 	static const size_t vmw_view_define_sizes[] = {
 		[vmw_view_sr] = sizeof(SVGA3dCmdDXDefineShaderResourceView),
 		[vmw_view_rt] = sizeof(SVGA3dCmdDXDefineRenderTargetView),
-		[vmw_view_ds] = sizeof(SVGA3dCmdDXDefineDepthStencilView),
-		[vmw_view_ua] = sizeof(SVGA3dCmdDXDefineUAView)
+		[vmw_view_ds] = sizeof(SVGA3dCmdDXDefineDepthStencilView)
 	};
 
 	struct vmw_private *dev_priv = ctx->dev_priv;
@@ -500,8 +499,8 @@ struct vmw_resource *vmw_view_lookup(struct vmw_cmdbuf_res_manager *man,
  * Each time a resource is put on the validation list as the result of a
  * view pointing to it, we need to determine whether that resource will
  * be dirtied (written to by the GPU) as a result of the corresponding
- * GPU operation. Currently only rendertarget-, depth-stencil and unordered
- * access views are capable of dirtying its resource.
+ * GPU operation. Currently only rendertarget- and depth-stencil views are
+ * capable of dirtying its resource.
  *
  * Return: Whether the view type of @res dirties the resource it points to.
  */
@@ -510,11 +509,10 @@ u32 vmw_view_dirtying(struct vmw_resource *res)
 	static u32 view_is_dirtying[vmw_view_max] = {
 		[vmw_view_rt] = VMW_RES_DIRTY_SET,
 		[vmw_view_ds] = VMW_RES_DIRTY_SET,
-		[vmw_view_ua] = VMW_RES_DIRTY_SET,
 	};
 
 	/* Update this function as we add more view types */
-	BUILD_BUG_ON(vmw_view_max != 4);
+	BUILD_BUG_ON(vmw_view_max != 3);
 	return view_is_dirtying[vmw_view(res)->view_type];
 }
 
@@ -522,14 +520,12 @@ const u32 vmw_view_destroy_cmds[] = {
 	[vmw_view_sr] = SVGA_3D_CMD_DX_DESTROY_SHADERRESOURCE_VIEW,
 	[vmw_view_rt] = SVGA_3D_CMD_DX_DESTROY_RENDERTARGET_VIEW,
 	[vmw_view_ds] = SVGA_3D_CMD_DX_DESTROY_DEPTHSTENCIL_VIEW,
-	[vmw_view_ua] = SVGA_3D_CMD_DX_DESTROY_UA_VIEW,
 };
 
 const SVGACOTableType vmw_view_cotables[] = {
 	[vmw_view_sr] = SVGA_COTABLE_SRVIEW,
 	[vmw_view_rt] = SVGA_COTABLE_RTVIEW,
 	[vmw_view_ds] = SVGA_COTABLE_DSVIEW,
-	[vmw_view_ua] = SVGA_COTABLE_UAVIEW,
 };
 
 const SVGACOTableType vmw_so_cotables[] = {

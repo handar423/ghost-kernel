@@ -39,15 +39,11 @@ struct tegra_plane_legacy_blending_state {
 struct tegra_plane_state {
 	struct drm_plane_state base;
 
-	struct sg_table *sgt[3];
-	dma_addr_t iova[3];
-
 	struct tegra_bo_tiling tiling;
 	u32 format;
 	u32 swap;
 
-	bool reflect_x;
-	bool reflect_y;
+	bool bottom_up;
 
 	/* used for legacy blending support only */
 	struct tegra_plane_legacy_blending_state blending[2];
@@ -64,11 +60,6 @@ to_tegra_plane_state(struct drm_plane_state *state)
 }
 
 extern const struct drm_plane_funcs tegra_plane_funcs;
-
-int tegra_plane_prepare_fb(struct drm_plane *plane,
-			   struct drm_plane_state *state);
-void tegra_plane_cleanup_fb(struct drm_plane *plane,
-			    struct drm_plane_state *state);
 
 int tegra_plane_state_add(struct tegra_plane *plane,
 			  struct drm_plane_state *state);

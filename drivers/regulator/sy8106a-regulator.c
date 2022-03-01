@@ -61,7 +61,8 @@ static const struct regulator_desc sy8106a_reg = {
 /*
  * I2C driver interface functions
  */
-static int sy8106a_i2c_probe(struct i2c_client *i2c)
+static int sy8106a_i2c_probe(struct i2c_client *i2c,
+			    const struct i2c_device_id *id)
 {
 	struct device *dev = &i2c->dev;
 	struct regulator_dev *rdev;
@@ -123,7 +124,7 @@ static int sy8106a_i2c_probe(struct i2c_client *i2c)
 	return 0;
 }
 
-static const struct of_device_id __maybe_unused sy8106a_i2c_of_match[] = {
+static const struct of_device_id sy8106a_i2c_of_match[] = {
 	{ .compatible = "silergy,sy8106a" },
 	{ },
 };
@@ -140,7 +141,7 @@ static struct i2c_driver sy8106a_regulator_driver = {
 		.name = "sy8106a",
 		.of_match_table	= of_match_ptr(sy8106a_i2c_of_match),
 	},
-	.probe_new = sy8106a_i2c_probe,
+	.probe = sy8106a_i2c_probe,
 	.id_table = sy8106a_i2c_id,
 };
 

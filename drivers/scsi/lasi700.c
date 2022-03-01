@@ -31,6 +31,7 @@
 #include <linux/slab.h>
 
 #include <asm/page.h>
+#include <asm/pgtable.h>
 #include <asm/irq.h>
 #include <asm/hardware.h>
 #include <asm/parisc-device.h>
@@ -97,7 +98,7 @@ lasi700_probe(struct parisc_device *dev)
 
 	hostdata->dev = &dev->dev;
 	dma_set_mask(&dev->dev, DMA_BIT_MASK(32));
-	hostdata->base = ioremap(base, 0x100);
+	hostdata->base = ioremap_nocache(base, 0x100);
 	hostdata->differential = 0;
 
 	if (dev->id.sversion == LASI_700_SVERSION) {

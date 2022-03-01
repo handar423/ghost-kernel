@@ -37,9 +37,10 @@ uint64_t amdgpu_csa_vaddr(struct amdgpu_device *adev)
 int amdgpu_allocate_static_csa(struct amdgpu_device *adev, struct amdgpu_bo **bo,
 				u32 domain, uint32_t size)
 {
+	int r;
 	void *ptr;
 
-	amdgpu_bo_create_kernel(adev, size, PAGE_SIZE,
+	r = amdgpu_bo_create_kernel(adev, size, PAGE_SIZE,
 				domain, bo,
 				NULL, &ptr);
 	if (!*bo)
@@ -79,7 +80,7 @@ int amdgpu_map_static_csa(struct amdgpu_device *adev, struct amdgpu_vm *vm,
 	list_add(&csa_tv.head, &list);
 	amdgpu_vm_get_pd_bo(vm, &list, &pd);
 
-	r = ttm_eu_reserve_buffers(&ticket, &list, true, NULL);
+	r = ttm_eu_reserve_buffers(&ticket, &list, true, NULL, false);
 	if (r) {
 		DRM_ERROR("failed to reserve CSA,PD BOs: err=%d\n", r);
 		return r;

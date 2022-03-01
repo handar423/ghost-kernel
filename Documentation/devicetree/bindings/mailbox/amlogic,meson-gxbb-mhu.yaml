@@ -41,8 +41,6 @@ required:
   - interrupts
   - "#mbox-cells"
 
-additionalProperties: false
-
 examples:
   - |
     mailbox@c883c404 {

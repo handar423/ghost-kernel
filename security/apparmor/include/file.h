@@ -72,7 +72,7 @@ static inline void aa_free_file_ctx(struct aa_file_ctx *ctx)
 {
 	if (ctx) {
 		aa_put_label(rcu_access_pointer(ctx->label));
-		kfree_sensitive(ctx);
+		kzfree(ctx);
 	}
 }
 
@@ -197,7 +197,7 @@ int aa_path_link(struct aa_label *label, struct dentry *old_dentry,
 		 const struct path *new_dir, struct dentry *new_dentry);
 
 int aa_file_perm(const char *op, struct aa_label *label, struct file *file,
-		 u32 request, bool in_atomic);
+		 u32 request);
 
 void aa_inherit_files(const struct cred *cred, struct files_struct *files);
 

@@ -97,9 +97,7 @@ static void ipmr_expire_process(struct timer_list *t);
 
 #ifdef CONFIG_IPV6_MROUTE_MULTIPLE_TABLES
 #define ip6mr_for_each_table(mrt, net) \
-	list_for_each_entry_rcu(mrt, &net->ipv6.mr6_tables, list, \
-				lockdep_rtnl_is_held() || \
-				list_empty(&net->ipv6.mr6_tables))
+	list_for_each_entry_rcu(mrt, &net->ipv6.mr6_tables, list)
 
 static struct mr_table *ip6mr_mr_table_iter(struct net *net,
 					    struct mr_table *mrt)
@@ -248,7 +246,9 @@ static int __net_init ip6mr_rules_init(struct net *net)
 	return 0;
 
 err2:
+	rtnl_lock();
 	ip6mr_free_table(mrt);
+	rtnl_unlock();
 err1:
 	fib_rules_unregister(ops);
 	return err;
@@ -267,10 +267,9 @@ static void __net_exit ip6mr_rules_exit(struct net *net)
 	rtnl_unlock();
 }
 
-static int ip6mr_rules_dump(struct net *net, struct notifier_block *nb,
-			    struct netlink_ext_ack *extack)
+static int ip6mr_rules_dump(struct net *net, struct notifier_block *nb)
 {
-	return fib_rules_dump(net, nb, RTNL_FAMILY_IP6MR, extack);
+	return fib_rules_dump(net, nb, RTNL_FAMILY_IP6MR);
 }
 
 static unsigned int ip6mr_rules_seq_read(struct net *net)
@@ -327,8 +326,7 @@ static void __net_exit ip6mr_rules_exit(struct net *net)
 	rtnl_unlock();
 }
 
-static int ip6mr_rules_dump(struct net *net, struct notifier_block *nb,
-			    struct netlink_ext_ack *extack)
+static int ip6mr_rules_dump(struct net *net, struct notifier_block *nb)
 {
 	return 0;
 }
@@ -1260,11 +1258,10 @@ static unsigned int ip6mr_seq_read(struct net *net)
 	return net->ipv6.ipmr_seq + ip6mr_rules_seq_read(net);
 }
 
-static int ip6mr_dump(struct net *net, struct notifier_block *nb,
-		      struct netlink_ext_ack *extack)
+static int ip6mr_dump(struct net *net, struct notifier_block *nb)
 {
 	return mr_dump(net, nb, RTNL_FAMILY_IP6MR, ip6mr_rules_dump,
-		       ip6mr_mr_table_iter, &mrt_lock, extack);
+		       ip6mr_mr_table_iter, &mrt_lock);
 }
 
 static struct notifier_block ip6_mr_notifier = {
@@ -1629,8 +1626,7 @@ EXPORT_SYMBOL(mroute6_is_socket);
  *	MOSPF/PIM router set up we can clean this up.
  */
 
-int ip6_mroute_setsockopt(struct sock *sk, int optname, sockptr_t optval,
-			  unsigned int optlen)
+int ip6_mroute_setsockopt(struct sock *sk, int optname, char __user *optval, unsigned int optlen)
 {
 	int ret, parent = 0;
 	struct mif6ctl vif;
@@ -1666,7 +1662,7 @@ int ip6_mroute_setsockopt(struct sock *sk, int optname, sockptr_t optval,
 	case MRT6_ADD_MIF:
 		if (optlen < sizeof(vif))
 			return -EINVAL;
-		if (copy_from_sockptr(&vif, optval, sizeof(vif)))
+		if (copy_from_user(&vif, optval, sizeof(vif)))
 			return -EFAULT;
 		if (vif.mif6c_mifi >= MAXMIFS)
 			return -ENFILE;
@@ -1679,7 +1675,7 @@ int ip6_mroute_setsockopt(struct sock *sk, int optname, sockptr_t optval,
 	case MRT6_DEL_MIF:
 		if (optlen < sizeof(mifi_t))
 			return -EINVAL;
-		if (copy_from_sockptr(&mifi, optval, sizeof(mifi_t)))
+		if (copy_from_user(&mifi, optval, sizeof(mifi_t)))
 			return -EFAULT;
 		rtnl_lock();
 		ret = mif6_delete(mrt, mifi, 0, NULL);
@@ -1693,12 +1689,12 @@ int ip6_mroute_setsockopt(struct sock *sk, int optname, sockptr_t optval,
 	case MRT6_ADD_MFC:
 	case MRT6_DEL_MFC:
 		parent = -1;
-		fallthrough;
+		/* fall through */
 	case MRT6_ADD_MFC_PROXY:
 	case MRT6_DEL_MFC_PROXY:
 		if (optlen < sizeof(mfc))
 			return -EINVAL;
-		if (copy_from_sockptr(&mfc, optval, sizeof(mfc)))
+		if (copy_from_user(&mfc, optval, sizeof(mfc)))
 			return -EFAULT;
 		if (parent == 0)
 			parent = mfc.mf6cc_parent;
@@ -1719,7 +1715,7 @@ int ip6_mroute_setsockopt(struct sock *sk, int optname, sockptr_t optval,
 
 		if (optlen != sizeof(flags))
 			return -EINVAL;
-		if (copy_from_sockptr(&flags, optval, sizeof(flags)))
+		if (get_user(flags, (int __user *)optval))
 			return -EFAULT;
 		rtnl_lock();
 		mroute_clean_tables(mrt, flags);
@@ -1736,7 +1732,7 @@ int ip6_mroute_setsockopt(struct sock *sk, int optname, sockptr_t optval,
 
 		if (optlen != sizeof(v))
 			return -EINVAL;
-		if (copy_from_sockptr(&v, optval, sizeof(v)))
+		if (get_user(v, (int __user *)optval))
 			return -EFAULT;
 		mrt->mroute_do_assert = v;
 		return 0;
@@ -1749,7 +1745,7 @@ int ip6_mroute_setsockopt(struct sock *sk, int optname, sockptr_t optval,
 
 		if (optlen != sizeof(v))
 			return -EINVAL;
-		if (copy_from_sockptr(&v, optval, sizeof(v)))
+		if (get_user(v, (int __user *)optval))
 			return -EFAULT;
 		v = !!v;
 		rtnl_lock();
@@ -1770,7 +1766,7 @@ int ip6_mroute_setsockopt(struct sock *sk, int optname, sockptr_t optval,
 
 		if (optlen != sizeof(u32))
 			return -EINVAL;
-		if (copy_from_sockptr(&v, optval, sizeof(v)))
+		if (get_user(v, (u32 __user *)optval))
 			return -EFAULT;
 		/* "pim6reg%u" should not exceed 16 bytes (IFNAMSIZ) */
 		if (v != RT_TABLE_DEFAULT && v >= 100000000)

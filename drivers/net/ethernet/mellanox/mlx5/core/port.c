@@ -154,8 +154,24 @@ int mlx5_set_port_beacon(struct mlx5_core_dev *dev, u16 beacon_duration)
 				    sizeof(out), MLX5_REG_MLCR, 0, 1);
 }
 
-int mlx5_query_ib_port_oper(struct mlx5_core_dev *dev, u16 *link_width_oper,
-			    u16 *proto_oper, u8 local_port)
+int mlx5_query_port_link_width_oper(struct mlx5_core_dev *dev,
+				    u8 *link_width_oper, u8 local_port)
+{
+	u32 out[MLX5_ST_SZ_DW(ptys_reg)];
+	int err;
+
+	err = mlx5_query_port_ptys(dev, out, sizeof(out), MLX5_PTYS_IB, local_port);
+	if (err)
+		return err;
+
+	*link_width_oper = MLX5_GET(ptys_reg, out, ib_link_width_oper);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(mlx5_query_port_link_width_oper);
+
+int mlx5_query_port_ib_proto_oper(struct mlx5_core_dev *dev,
+				  u8 *proto_oper, u8 local_port)
 {
 	u32 out[MLX5_ST_SZ_DW(ptys_reg)];
 	int err;
@@ -165,12 +181,11 @@ int mlx5_query_ib_port_oper(struct mlx5_core_dev *dev, u16 *link_width_oper,
 	if (err)
 		return err;
 
-	*link_width_oper = MLX5_GET(ptys_reg, out, ib_link_width_oper);
 	*proto_oper = MLX5_GET(ptys_reg, out, ib_proto_oper);
 
 	return 0;
 }
-EXPORT_SYMBOL(mlx5_query_ib_port_oper);
+EXPORT_SYMBOL(mlx5_query_port_ib_proto_oper);
 
 /* This function should be used after setting a port register only */
 void mlx5_toggle_port_link(struct mlx5_core_dev *dev)
@@ -809,23 +824,24 @@ EXPORT_SYMBOL_GPL(mlx5_query_port_ets_rate_limit);
 
 int mlx5_set_port_wol(struct mlx5_core_dev *mdev, u8 wol_mode)
 {
-	u32 in[MLX5_ST_SZ_DW(set_wol_rol_in)] = {};
+	u32 in[MLX5_ST_SZ_DW(set_wol_rol_in)]   = {0};
+	u32 out[MLX5_ST_SZ_DW(set_wol_rol_out)] = {0};
 
 	MLX5_SET(set_wol_rol_in, in, opcode, MLX5_CMD_OP_SET_WOL_ROL);
 	MLX5_SET(set_wol_rol_in, in, wol_mode_valid, 1);
 	MLX5_SET(set_wol_rol_in, in, wol_mode, wol_mode);
-	return mlx5_cmd_exec_in(mdev, set_wol_rol, in);
+	return mlx5_cmd_exec(mdev, in, sizeof(in), out, sizeof(out));
 }
 EXPORT_SYMBOL_GPL(mlx5_set_port_wol);
 
 int mlx5_query_port_wol(struct mlx5_core_dev *mdev, u8 *wol_mode)
 {
-	u32 out[MLX5_ST_SZ_DW(query_wol_rol_out)] = {};
-	u32 in[MLX5_ST_SZ_DW(query_wol_rol_in)] = {};
+	u32 in[MLX5_ST_SZ_DW(query_wol_rol_in)]   = {0};
+	u32 out[MLX5_ST_SZ_DW(query_wol_rol_out)] = {0};
 	int err;
 
 	MLX5_SET(query_wol_rol_in, in, opcode, MLX5_CMD_OP_QUERY_WOL_ROL);
-	err = mlx5_cmd_exec_inout(mdev, query_wol_rol, in, out);
+	err = mlx5_cmd_exec(mdev, in, sizeof(in), out, sizeof(out));
 	if (!err)
 		*wol_mode = MLX5_GET(query_wol_rol_out, out, wol_mode);
 

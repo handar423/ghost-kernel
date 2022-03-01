@@ -147,17 +147,11 @@ static int gs_read_register(struct spi_device *spi, u16 addr, u16 *value)
 		{
 			.tx_buf = &buf_addr,
 			.len = 2,
-			.delay = {
-				.value = 1,
-				.unit = SPI_DELAY_UNIT_USECS
-			},
+			.delay_usecs = 1,
 		}, {
 			.rx_buf = &buf_value,
 			.len = 2,
-			.delay = {
-				.value = 1,
-				.unit = SPI_DELAY_UNIT_USECS
-			},
+			.delay_usecs = 1,
 		},
 	};
 
@@ -181,17 +175,11 @@ static int gs_write_register(struct spi_device *spi, u16 addr, u16 value)
 		{
 			.tx_buf = &buf_addr,
 			.len = 2,
-			.delay = {
-				.value = 1,
-				.unit = SPI_DELAY_UNIT_USECS
-			},
+			.delay_usecs = 1,
 		}, {
 			.tx_buf = &buf_value,
 			.len = 2,
-			.delay = {
-				.value = 1,
-				.unit = SPI_DELAY_UNIT_USECS
-			},
+			.delay_usecs = 1,
 		},
 	};
 

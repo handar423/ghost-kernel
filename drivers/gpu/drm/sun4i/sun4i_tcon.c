@@ -16,7 +16,6 @@
 #include <linux/reset.h>
 
 #include <drm/drm_atomic_helper.h>
-#include <drm/drm_bridge.h>
 #include <drm/drm_connector.h>
 #include <drm/drm_crtc.h>
 #include <drm/drm_encoder.h>
@@ -114,71 +113,46 @@ static void sun4i_tcon_channel_set_status(struct sun4i_tcon *tcon, int channel,
 	}
 }
 
-static void sun4i_tcon_setup_lvds_phy(struct sun4i_tcon *tcon,
-				      const struct drm_encoder *encoder)
-{
-	regmap_write(tcon->regs, SUN4I_TCON0_LVDS_ANA0_REG,
-		     SUN4I_TCON0_LVDS_ANA0_CK_EN |
-		     SUN4I_TCON0_LVDS_ANA0_REG_V |
-		     SUN4I_TCON0_LVDS_ANA0_REG_C |
-		     SUN4I_TCON0_LVDS_ANA0_EN_MB |
-		     SUN4I_TCON0_LVDS_ANA0_PD |
-		     SUN4I_TCON0_LVDS_ANA0_DCHS);
-
-	udelay(2); /* delay at least 1200 ns */
-	regmap_update_bits(tcon->regs, SUN4I_TCON0_LVDS_ANA1_REG,
-			   SUN4I_TCON0_LVDS_ANA1_INIT,
-			   SUN4I_TCON0_LVDS_ANA1_INIT);
-	udelay(1); /* delay at least 120 ns */
-	regmap_update_bits(tcon->regs, SUN4I_TCON0_LVDS_ANA1_REG,
-			   SUN4I_TCON0_LVDS_ANA1_UPDATE,
-			   SUN4I_TCON0_LVDS_ANA1_UPDATE);
-	regmap_update_bits(tcon->regs, SUN4I_TCON0_LVDS_ANA0_REG,
-			   SUN4I_TCON0_LVDS_ANA0_EN_MB,
-			   SUN4I_TCON0_LVDS_ANA0_EN_MB);
-}
-
-static void sun6i_tcon_setup_lvds_phy(struct sun4i_tcon *tcon,
-				      const struct drm_encoder *encoder)
-{
-	u8 val;
-
-	regmap_write(tcon->regs, SUN4I_TCON0_LVDS_ANA0_REG,
-		     SUN6I_TCON0_LVDS_ANA0_C(2) |
-		     SUN6I_TCON0_LVDS_ANA0_V(3) |
-		     SUN6I_TCON0_LVDS_ANA0_PD(2) |
-		     SUN6I_TCON0_LVDS_ANA0_EN_LDO);
-	udelay(2);
-
-	regmap_update_bits(tcon->regs, SUN4I_TCON0_LVDS_ANA0_REG,
-			   SUN6I_TCON0_LVDS_ANA0_EN_MB,
-			   SUN6I_TCON0_LVDS_ANA0_EN_MB);
-	udelay(2);
-
-	regmap_update_bits(tcon->regs, SUN4I_TCON0_LVDS_ANA0_REG,
-			   SUN6I_TCON0_LVDS_ANA0_EN_DRVC,
-			   SUN6I_TCON0_LVDS_ANA0_EN_DRVC);
-
-	if (sun4i_tcon_get_pixel_depth(encoder) == 18)
-		val = 7;
-	else
-		val = 0xf;
-
-	regmap_write_bits(tcon->regs, SUN4I_TCON0_LVDS_ANA0_REG,
-			  SUN6I_TCON0_LVDS_ANA0_EN_DRVD(0xf),
-			  SUN6I_TCON0_LVDS_ANA0_EN_DRVD(val));
-}
-
 static void sun4i_tcon_lvds_set_status(struct sun4i_tcon *tcon,
 				       const struct drm_encoder *encoder,
 				       bool enabled)
 {
 	if (enabled) {
+		u8 val;
+
 		regmap_update_bits(tcon->regs, SUN4I_TCON0_LVDS_IF_REG,
 				   SUN4I_TCON0_LVDS_IF_EN,
 				   SUN4I_TCON0_LVDS_IF_EN);
-		if (tcon->quirks->setup_lvds_phy)
-			tcon->quirks->setup_lvds_phy(tcon, encoder);
+
+		/*
+		 * As their name suggest, these values only apply to the A31
+		 * and later SoCs. We'll have to rework this when merging
+		 * support for the older SoCs.
+		 */
+		regmap_write(tcon->regs, SUN4I_TCON0_LVDS_ANA0_REG,
+			     SUN6I_TCON0_LVDS_ANA0_C(2) |
+			     SUN6I_TCON0_LVDS_ANA0_V(3) |
+			     SUN6I_TCON0_LVDS_ANA0_PD(2) |
+			     SUN6I_TCON0_LVDS_ANA0_EN_LDO);
+		udelay(2);
+
+		regmap_update_bits(tcon->regs, SUN4I_TCON0_LVDS_ANA0_REG,
+				   SUN6I_TCON0_LVDS_ANA0_EN_MB,
+				   SUN6I_TCON0_LVDS_ANA0_EN_MB);
+		udelay(2);
+
+		regmap_update_bits(tcon->regs, SUN4I_TCON0_LVDS_ANA0_REG,
+				   SUN6I_TCON0_LVDS_ANA0_EN_DRVC,
+				   SUN6I_TCON0_LVDS_ANA0_EN_DRVC);
+
+		if (sun4i_tcon_get_pixel_depth(encoder) == 18)
+			val = 7;
+		else
+			val = 0xf;
+
+		regmap_write_bits(tcon->regs, SUN4I_TCON0_LVDS_ANA0_REG,
+				  SUN6I_TCON0_LVDS_ANA0_EN_DRVD(0xf),
+				  SUN6I_TCON0_LVDS_ANA0_EN_DRVD(val));
 	} else {
 		regmap_update_bits(tcon->regs, SUN4I_TCON0_LVDS_IF_REG,
 				   SUN4I_TCON0_LVDS_IF_EN, 0);
@@ -195,7 +169,7 @@ void sun4i_tcon_set_status(struct sun4i_tcon *tcon,
 	switch (encoder->encoder_type) {
 	case DRM_MODE_ENCODER_LVDS:
 		is_lvds = true;
-		fallthrough;
+		/* Fallthrough */
 	case DRM_MODE_ENCODER_DSI:
 	case DRM_MODE_ENCODER_NONE:
 		channel = 0;
@@ -342,7 +316,7 @@ static void sun4i_tcon0_mode_set_dithering(struct sun4i_tcon *tcon,
 		/* R and B components are only 5 bits deep */
 		val |= SUN4I_TCON0_FRM_CTL_MODE_R;
 		val |= SUN4I_TCON0_FRM_CTL_MODE_B;
-		fallthrough;
+		/* Fall through */
 	case MEDIA_BUS_FMT_RGB666_1X18:
 	case MEDIA_BUS_FMT_RGB666_1X7X3_SPWG:
 		/* Fall through: enable dithering */
@@ -474,7 +448,9 @@ static void sun4i_tcon0_mode_set_lvds(struct sun4i_tcon *tcon,
 		     SUN4I_TCON0_BASIC2_V_TOTAL(mode->crtc_vtotal * 2) |
 		     SUN4I_TCON0_BASIC2_V_BACKPORCH(bp));
 
-	reg = SUN4I_TCON0_LVDS_IF_CLK_SEL_TCON0;
+	reg = SUN4I_TCON0_LVDS_IF_CLK_SEL_TCON0 |
+		SUN4I_TCON0_LVDS_IF_DATA_POL_NORMAL |
+		SUN4I_TCON0_LVDS_IF_CLK_POL_NORMAL;
 	if (sun4i_tcon_get_pixel_depth(encoder) == 24)
 		reg |= SUN4I_TCON0_LVDS_IF_BITWIDTH_24BITS;
 	else
@@ -569,30 +545,13 @@ static void sun4i_tcon0_mode_set_rgb(struct sun4i_tcon *tcon,
 	if (info->bus_flags & DRM_BUS_FLAG_DE_LOW)
 		val |= SUN4I_TCON0_IO_POL_DE_NEGATIVE;
 
-	/*
-	 * On A20 and similar SoCs, the only way to achieve Positive Edge
-	 * (Rising Edge), is setting dclk clock phase to 2/3(240°).
-	 * By default TCON works in Negative Edge(Falling Edge),
-	 * this is why phase is set to 0 in that case.
-	 * Unfortunately there's no way to logically invert dclk through
-	 * IO_POL register.
-	 * The only acceptable way to work, triple checked with scope,
-	 * is using clock phase set to 0° for Negative Edge and set to 240°
-	 * for Positive Edge.
-	 * On A33 and similar SoCs there would be a 90° phase option,
-	 * but it divides also dclk by 2.
-	 * Following code is a way to avoid quirks all around TCON
-	 * and DOTCLOCK drivers.
-	 */
-	if (info->bus_flags & DRM_BUS_FLAG_PIXDATA_DRIVE_POSEDGE)
-		clk_set_phase(tcon->dclk, 240);
-
 	if (info->bus_flags & DRM_BUS_FLAG_PIXDATA_DRIVE_NEGEDGE)
-		clk_set_phase(tcon->dclk, 0);
+		val |= SUN4I_TCON0_IO_POL_DCLK_DRIVE_NEGEDGE;
 
 	regmap_update_bits(tcon->regs, SUN4I_TCON0_IO_POL_REG,
 			   SUN4I_TCON0_IO_POL_HSYNC_POSITIVE |
 			   SUN4I_TCON0_IO_POL_VSYNC_POSITIVE |
+			   SUN4I_TCON0_IO_POL_DCLK_DRIVE_NEGEDGE |
 			   SUN4I_TCON0_IO_POL_DE_NEGATIVE,
 			   val);
 
@@ -834,8 +793,10 @@ static int sun4i_tcon_init_irq(struct device *dev,
 	int irq, ret;
 
 	irq = platform_get_irq(pdev, 0);
-	if (irq < 0)
+	if (irq < 0) {
+		dev_err(dev, "Couldn't retrieve the TCON interrupt\n");
 		return irq;
+	}
 
 	ret = devm_request_irq(dev, irq, sun4i_tcon_handler, 0,
 			       dev_name(dev), tcon);
@@ -847,7 +808,7 @@ static int sun4i_tcon_init_irq(struct device *dev,
 	return 0;
 }
 
-static const struct regmap_config sun4i_tcon_regmap_config = {
+static struct regmap_config sun4i_tcon_regmap_config = {
 	.reg_bits	= 32,
 	.val_bits	= 32,
 	.reg_stride	= 4,
@@ -1502,16 +1463,6 @@ static const struct sun4i_tcon_quirks sun6i_a31s_quirks = {
 	.dclk_min_div		= 1,
 };
 
-static const struct sun4i_tcon_quirks sun7i_a20_tcon0_quirks = {
-	.supports_lvds		= true,
-	.has_channel_0		= true,
-	.has_channel_1		= true,
-	.dclk_min_div		= 4,
-	/* Same display pipeline structure as A10 */
-	.set_mux		= sun4i_a10_tcon_set_mux,
-	.setup_lvds_phy		= sun4i_tcon_setup_lvds_phy,
-};
-
 static const struct sun4i_tcon_quirks sun7i_a20_quirks = {
 	.has_channel_0		= true,
 	.has_channel_1		= true,
@@ -1524,15 +1475,12 @@ static const struct sun4i_tcon_quirks sun8i_a33_quirks = {
 	.has_channel_0		= true,
 	.has_lvds_alt		= true,
 	.dclk_min_div		= 1,
-	.setup_lvds_phy		= sun6i_tcon_setup_lvds_phy,
-	.supports_lvds		= true,
 };
 
 static const struct sun4i_tcon_quirks sun8i_a83t_lcd_quirks = {
 	.supports_lvds		= true,
 	.has_channel_0		= true,
 	.dclk_min_div		= 1,
-	.setup_lvds_phy		= sun6i_tcon_setup_lvds_phy,
 };
 
 static const struct sun4i_tcon_quirks sun8i_a83t_tv_quirks = {
@@ -1568,7 +1516,7 @@ const struct of_device_id sun4i_tcon_of_table[] = {
 	{ .compatible = "allwinner,sun6i-a31-tcon", .data = &sun6i_a31_quirks },
 	{ .compatible = "allwinner,sun6i-a31s-tcon", .data = &sun6i_a31s_quirks },
 	{ .compatible = "allwinner,sun7i-a20-tcon", .data = &sun7i_a20_quirks },
-	{ .compatible = "allwinner,sun7i-a20-tcon0", .data = &sun7i_a20_tcon0_quirks },
+	{ .compatible = "allwinner,sun7i-a20-tcon0", .data = &sun7i_a20_quirks },
 	{ .compatible = "allwinner,sun7i-a20-tcon1", .data = &sun7i_a20_quirks },
 	{ .compatible = "allwinner,sun8i-a23-tcon", .data = &sun8i_a33_quirks },
 	{ .compatible = "allwinner,sun8i-a33-tcon", .data = &sun8i_a33_quirks },

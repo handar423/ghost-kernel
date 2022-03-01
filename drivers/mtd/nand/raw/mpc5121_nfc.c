@@ -104,7 +104,6 @@
 #define NFC_TIMEOUT		(HZ / 10)	/* 1/10 s */
 
 struct mpc5121_nfc_prv {
-	struct nand_controller	controller;
 	struct nand_chip	chip;
 	int			irq;
 	void __iomem		*regs;
@@ -291,7 +290,6 @@ static int ads5121_chipselect_init(struct mtd_info *mtd)
 /* Control chips select signal on ADS5121 board */
 static void ads5121_select_chip(struct nand_chip *nand, int chip)
 {
-	struct mtd_info *mtd = nand_to_mtd(nand);
 	struct mpc5121_nfc_prv *prv = nand_get_controller_data(nand);
 	u8 v;
 
@@ -439,7 +437,7 @@ static void mpc5121_nfc_copy_spare(struct mtd_info *mtd, uint offset,
 		buffer += blksize;
 		offset += blksize;
 		size -= blksize;
-	}
+	};
 }
 
 /* Copy data from/to NFC main and spare buffers */
@@ -603,20 +601,6 @@ static void mpc5121_nfc_free(struct device *dev, struct mtd_info *mtd)
 		iounmap(prv->csreg);
 }
 
-static int mpc5121_nfc_attach_chip(struct nand_chip *chip)
-{
-	chip->ecc.engine_type = NAND_ECC_ENGINE_TYPE_SOFT;
-
-	if (chip->ecc.algo == NAND_ECC_ALGO_UNKNOWN)
-		chip->ecc.algo = NAND_ECC_ALGO_HAMMING;
-
-	return 0;
-}
-
-static const struct nand_controller_ops mpc5121_nfc_ops = {
-	.attach_chip = mpc5121_nfc_attach_chip,
-};
-
 static int mpc5121_nfc_probe(struct platform_device *op)
 {
 	struct device_node *dn = op->dev.of_node;
@@ -648,10 +632,6 @@ static int mpc5121_nfc_probe(struct platform_device *op)
 
 	chip = &prv->chip;
 	mtd = nand_to_mtd(chip);
-
-	nand_controller_init(&prv->controller);
-	prv->controller.ops = &mpc5121_nfc_ops;
-	chip->controller = &prv->controller;
 
 	mtd->dev.parent = dev;
 	nand_set_controller_data(chip, prv);
@@ -707,6 +687,8 @@ static int mpc5121_nfc_probe(struct platform_device *op)
 	chip->legacy.set_features = nand_get_set_features_notsupp;
 	chip->legacy.get_features = nand_get_set_features_notsupp;
 	chip->bbt_options = NAND_BBT_USE_FLASH;
+	chip->ecc.mode = NAND_ECC_SOFT;
+	chip->ecc.algo = NAND_ECC_HAMMING;
 
 	/* Support external chip-select logic on ADS5121 board */
 	if (of_machine_is_compatible("fsl,mpc5121ads")) {
@@ -822,11 +804,8 @@ static int mpc5121_nfc_remove(struct platform_device *op)
 {
 	struct device *dev = &op->dev;
 	struct mtd_info *mtd = dev_get_drvdata(dev);
-	int ret;
 
-	ret = mtd_device_unregister(mtd);
-	WARN_ON(ret);
-	nand_cleanup(mtd_to_nand(mtd));
+	nand_release(mtd_to_nand(mtd));
 	mpc5121_nfc_free(dev, mtd);
 
 	return 0;

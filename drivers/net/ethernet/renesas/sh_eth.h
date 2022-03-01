@@ -145,6 +145,7 @@ enum {
 
 enum {
 	SH_ETH_REG_GIGABIT,
+	SH_ETH_REG_FAST_RZ,
 	SH_ETH_REG_FAST_RCAR,
 	SH_ETH_REG_FAST_SH4,
 	SH_ETH_REG_FAST_SH3_SH2
@@ -489,7 +490,6 @@ struct sh_eth_cpu_data {
 	unsigned apr:1;		/* EtherC has APR */
 	unsigned mpr:1;		/* EtherC has MPR */
 	unsigned tpauser:1;	/* EtherC has TPAUSER */
-	unsigned gecmr:1;	/* EtherC has GECMR */
 	unsigned bculr:1;	/* EtherC has BCULR */
 	unsigned tsu:1;		/* EtherC has TSU */
 	unsigned hw_swap:1;	/* E-DMAC has DE bit in EDMR */

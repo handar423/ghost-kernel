@@ -39,7 +39,7 @@ enum pwm_polarity {
  * current PWM hardware state.
  */
 struct pwm_args {
-	u64 period;
+	unsigned int period;
 	enum pwm_polarity polarity;
 };
 
@@ -56,8 +56,8 @@ enum {
  * @enabled: PWM enabled status
  */
 struct pwm_state {
-	u64 period;
-	u64 duty_cycle;
+	unsigned int period;
+	unsigned int duty_cycle;
 	enum pwm_polarity polarity;
 	bool enabled;
 };
@@ -71,8 +71,7 @@ struct pwm_state {
  * @chip: PWM chip providing this PWM device
  * @chip_data: chip-private data associated with the PWM device
  * @args: PWM arguments
- * @state: last applied state
- * @last: last implemented state (for PWM_DEBUG)
+ * @state: curent PWM channel state
  */
 struct pwm_device {
 	const char *label;
@@ -84,7 +83,6 @@ struct pwm_device {
 
 	struct pwm_args args;
 	struct pwm_state state;
-	struct pwm_state last;
 };
 
 /**
@@ -107,13 +105,13 @@ static inline bool pwm_is_enabled(const struct pwm_device *pwm)
 	return state.enabled;
 }
 
-static inline void pwm_set_period(struct pwm_device *pwm, u64 period)
+static inline void pwm_set_period(struct pwm_device *pwm, unsigned int period)
 {
 	if (pwm)
 		pwm->state.period = period;
 }
 
-static inline u64 pwm_get_period(const struct pwm_device *pwm)
+static inline unsigned int pwm_get_period(const struct pwm_device *pwm)
 {
 	struct pwm_state state;
 
@@ -128,7 +126,7 @@ static inline void pwm_set_duty_cycle(struct pwm_device *pwm, unsigned int duty)
 		pwm->state.duty_cycle = duty;
 }
 
-static inline u64 pwm_get_duty_cycle(const struct pwm_device *pwm)
+static inline unsigned int pwm_get_duty_cycle(const struct pwm_device *pwm)
 {
 	struct pwm_state state;
 
@@ -245,7 +243,10 @@ pwm_set_relative_duty_cycle(struct pwm_state *state, unsigned int duty_cycle,
  * @request: optional hook for requesting a PWM
  * @free: optional hook for freeing a PWM
  * @capture: capture and report PWM signal
- * @apply: atomically apply a new PWM config
+ * @apply: atomically apply a new PWM config. The state argument
+ *	   should be adjusted with the real hardware config (if the
+ *	   approximate the period or duty_cycle value, state should
+ *	   reflect it)
  * @get_state: get the current PWM state. This function is only
  *	       called once per PWM device when the PWM chip is
  *	       registered.
@@ -469,6 +470,11 @@ static inline void *pwm_get_chip_data(struct pwm_device *pwm)
 }
 
 static inline int pwmchip_add(struct pwm_chip *chip)
+{
+	return -EINVAL;
+}
+
+static inline int pwmchip_add_inversed(struct pwm_chip *chip)
 {
 	return -EINVAL;
 }

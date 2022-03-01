@@ -1043,7 +1043,8 @@ static int using_multi_irqs(struct net_device *dev)
 	struct fe_priv *np = get_nvpriv(dev);
 
 	if (!(np->msi_flags & NV_MSI_X_ENABLED) ||
-	    ((np->msi_flags & NV_MSI_X_VECTORS_MASK) == 0x1))
+	    ((np->msi_flags & NV_MSI_X_ENABLED) &&
+	     ((np->msi_flags & NV_MSI_X_VECTORS_MASK) == 0x1)))
 		return 0;
 	else
 		return 1;
@@ -1665,7 +1666,11 @@ static void nv_update_stats(struct net_device *dev)
 	struct fe_priv *np = netdev_priv(dev);
 	u8 __iomem *base = get_hwbase(dev);
 
-	lockdep_assert_held(&np->hwstats_lock);
+	/* If it happens that this is run in top-half context, then
+	 * replace the spin_lock of hwstats_lock with
+	 * spin_lock_irqsave() in calling functions. */
+	WARN_ONCE(in_irq(), "forcedeth: estats spin_lock(_bh) from top-half");
+	assert_spin_locked(&np->hwstats_lock);
 
 	/* query hardware */
 	np->estats.tx_bytes += readl(base + NvRegTxCnt);
@@ -2220,7 +2225,6 @@ static netdev_tx_t nv_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	struct nv_skb_map *prev_tx_ctx;
 	struct nv_skb_map *tmp_tx_ctx = NULL, *start_tx_ctx = NULL;
 	unsigned long flags;
-	netdev_tx_t ret = NETDEV_TX_OK;
 
 	/* add fragments to entries count */
 	for (i = 0; i < fragments; i++) {
@@ -2236,12 +2240,7 @@ static netdev_tx_t nv_start_xmit(struct sk_buff *skb, struct net_device *dev)
 		netif_stop_queue(dev);
 		np->tx_stop = 1;
 		spin_unlock_irqrestore(&np->lock, flags);
-
-		/* When normal packets and/or xmit_more packets fill up
-		 * tx_desc, it is necessary to trigger NIC tx reg.
-		 */
-		ret = NETDEV_TX_BUSY;
-		goto txkick;
+		return NETDEV_TX_BUSY;
 	}
 	spin_unlock_irqrestore(&np->lock, flags);
 
@@ -2260,10 +2259,7 @@ static netdev_tx_t nv_start_xmit(struct sk_buff *skb, struct net_device *dev)
 			u64_stats_update_begin(&np->swstats_tx_syncp);
 			nv_txrx_stats_inc(stat_tx_dropped);
 			u64_stats_update_end(&np->swstats_tx_syncp);
-
-			ret = NETDEV_TX_OK;
-
-			goto dma_error;
+			return NETDEV_TX_OK;
 		}
 		np->put_tx_ctx->dma_len = bcnt;
 		np->put_tx_ctx->dma_single = 1;
@@ -2309,10 +2305,7 @@ static netdev_tx_t nv_start_xmit(struct sk_buff *skb, struct net_device *dev)
 				u64_stats_update_begin(&np->swstats_tx_syncp);
 				nv_txrx_stats_inc(stat_tx_dropped);
 				u64_stats_update_end(&np->swstats_tx_syncp);
-
-				ret = NETDEV_TX_OK;
-
-				goto dma_error;
+				return NETDEV_TX_OK;
 			}
 
 			np->put_tx_ctx->dma_len = bcnt;
@@ -2364,15 +2357,8 @@ static netdev_tx_t nv_start_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	spin_unlock_irqrestore(&np->lock, flags);
 
-txkick:
-	if (netif_queue_stopped(dev) || !netdev_xmit_more()) {
-		u32 txrxctl_kick;
-dma_error:
-		txrxctl_kick = NVREG_TXRXCTL_KICK | np->txrxctl_bits;
-		writel(txrxctl_kick, get_hwbase(dev) + NvRegTxRxControl);
-	}
-
-	return ret;
+	writel(NVREG_TXRXCTL_KICK|np->txrxctl_bits, get_hwbase(dev) + NvRegTxRxControl);
+	return NETDEV_TX_OK;
 }
 
 static netdev_tx_t nv_start_xmit_optimized(struct sk_buff *skb,
@@ -2395,7 +2381,6 @@ static netdev_tx_t nv_start_xmit_optimized(struct sk_buff *skb,
 	struct nv_skb_map *start_tx_ctx = NULL;
 	struct nv_skb_map *tmp_tx_ctx = NULL;
 	unsigned long flags;
-	netdev_tx_t ret = NETDEV_TX_OK;
 
 	/* add fragments to entries count */
 	for (i = 0; i < fragments; i++) {
@@ -2411,13 +2396,7 @@ static netdev_tx_t nv_start_xmit_optimized(struct sk_buff *skb,
 		netif_stop_queue(dev);
 		np->tx_stop = 1;
 		spin_unlock_irqrestore(&np->lock, flags);
-
-		/* When normal packets and/or xmit_more packets fill up
-		 * tx_desc, it is necessary to trigger NIC tx reg.
-		 */
-		ret = NETDEV_TX_BUSY;
-
-		goto txkick;
+		return NETDEV_TX_BUSY;
 	}
 	spin_unlock_irqrestore(&np->lock, flags);
 
@@ -2437,10 +2416,7 @@ static netdev_tx_t nv_start_xmit_optimized(struct sk_buff *skb,
 			u64_stats_update_begin(&np->swstats_tx_syncp);
 			nv_txrx_stats_inc(stat_tx_dropped);
 			u64_stats_update_end(&np->swstats_tx_syncp);
-
-			ret = NETDEV_TX_OK;
-
-			goto dma_error;
+			return NETDEV_TX_OK;
 		}
 		np->put_tx_ctx->dma_len = bcnt;
 		np->put_tx_ctx->dma_single = 1;
@@ -2487,10 +2463,7 @@ static netdev_tx_t nv_start_xmit_optimized(struct sk_buff *skb,
 				u64_stats_update_begin(&np->swstats_tx_syncp);
 				nv_txrx_stats_inc(stat_tx_dropped);
 				u64_stats_update_end(&np->swstats_tx_syncp);
-
-				ret = NETDEV_TX_OK;
-
-				goto dma_error;
+				return NETDEV_TX_OK;
 			}
 			np->put_tx_ctx->dma_len = bcnt;
 			np->put_tx_ctx->dma_single = 0;
@@ -2569,15 +2542,8 @@ static netdev_tx_t nv_start_xmit_optimized(struct sk_buff *skb,
 
 	spin_unlock_irqrestore(&np->lock, flags);
 
-txkick:
-	if (netif_queue_stopped(dev) || !netdev_xmit_more()) {
-		u32 txrxctl_kick;
-dma_error:
-		txrxctl_kick = NVREG_TXRXCTL_KICK | np->txrxctl_bits;
-		writel(txrxctl_kick, get_hwbase(dev) + NvRegTxRxControl);
-	}
-
-	return ret;
+	writel(NVREG_TXRXCTL_KICK|np->txrxctl_bits, get_hwbase(dev) + NvRegTxRxControl);
+	return NETDEV_TX_OK;
 }
 
 static inline void nv_tx_flip_ownership(struct net_device *dev)
@@ -2734,7 +2700,7 @@ static int nv_tx_done_optimized(struct net_device *dev, int limit)
  * nv_tx_timeout: dev->tx_timeout function
  * Called with netif_tx_lock held.
  */
-static void nv_tx_timeout(struct net_device *dev, unsigned int txqueue)
+static void nv_tx_timeout(struct net_device *dev)
 {
 	struct fe_priv *np = netdev_priv(dev);
 	u8 __iomem *base = get_hwbase(dev);

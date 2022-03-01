@@ -8,7 +8,7 @@
  * Copyright (C) 2004-2008 International Business Machines Corp.
  *   Author(s): Michael A. Halcrow <mahalcro@us.ibm.com>
  *              Trevor S. Highland <trevor.highland@gmail.com>
- *              Tyler Hicks <code@tyhicks.com>
+ *              Tyler Hicks <tyhicks@ou.edu>
  */
 
 #ifndef ECRYPTFS_KERNEL_H

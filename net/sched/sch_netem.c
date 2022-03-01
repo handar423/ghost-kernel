@@ -66,7 +66,7 @@
 
 struct disttable {
 	u32  size;
-	s16 table[];
+	s16 table[0];
 };
 
 struct netem_sched_data {

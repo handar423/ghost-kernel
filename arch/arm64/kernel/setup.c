@@ -206,7 +206,7 @@ static void __init request_standard_resources(void)
 	unsigned long i = 0;
 	size_t res_size;
 
-	kernel_code.start   = __pa_symbol(_stext);
+	kernel_code.start   = __pa_symbol(_text);
 	kernel_code.end     = __pa_symbol(__init_begin - 1);
 	kernel_data.start   = __pa_symbol(_sdata);
 	kernel_data.end     = __pa_symbol(_end - 1);
@@ -217,7 +217,7 @@ static void __init request_standard_resources(void)
 	if (!standard_resources)
 		panic("%s: Failed to allocate %zu bytes\n", __func__, res_size);
 
-	for_each_mem_region(region) {
+	for_each_memblock(memory, region) {
 		res = &standard_resources[i++];
 		if (memblock_is_nomap(region)) {
 			res->name  = "reserved";
@@ -257,7 +257,7 @@ static int __init reserve_memblock_reserved_regions(void)
 		if (!memblock_is_region_reserved(mem->start, mem_size))
 			continue;
 
-		for_each_reserved_mem_range(j, &r_start, &r_end) {
+		for_each_reserved_mem_region(j, &r_start, &r_end) {
 			resource_size_t start, end;
 
 			start = max(PFN_PHYS(PFN_DOWN(r_start)), mem->start);
@@ -276,26 +276,20 @@ arch_initcall(reserve_memblock_reserved_regions);
 
 u64 __cpu_logical_map[NR_CPUS] = { [0 ... NR_CPUS-1] = INVALID_HWID };
 
-u64 cpu_logical_map(unsigned int cpu)
+u64 cpu_logical_map(int cpu)
 {
 	return __cpu_logical_map[cpu];
 }
+EXPORT_SYMBOL_GPL(cpu_logical_map);
 
-void __init __no_sanitize_address setup_arch(char **cmdline_p)
+void __init setup_arch(char **cmdline_p)
 {
-	init_mm.start_code = (unsigned long) _stext;
+	init_mm.start_code = (unsigned long) _text;
 	init_mm.end_code   = (unsigned long) _etext;
 	init_mm.end_data   = (unsigned long) _edata;
 	init_mm.brk	   = (unsigned long) _end;
 
 	*cmdline_p = boot_command_line;
-
-	/*
-	 * If know now we are going to need KPTI then use non-global
-	 * mappings from the start, avoiding the cost of rewriting
-	 * everything later.
-	 */
-	arm64_use_ng_mappings = kaslr_requires_kpti();
 
 	early_fixmap_init();
 	early_ioremap_init();
@@ -324,10 +318,6 @@ void __init __no_sanitize_address setup_arch(char **cmdline_p)
 
 	xen_early_init();
 	efi_init();
-
-	if (!efi_enabled(EFI_BOOT) && ((u64)_text % MIN_KIMG_ALIGN) != 0)
-	     pr_warn(FW_BUG "Kernel image misaligned at boot, please fix your bootloader!");
-
 	arm64_memblock_init();
 
 	paging_init();
@@ -353,12 +343,12 @@ void __init __no_sanitize_address setup_arch(char **cmdline_p)
 	else
 		psci_acpi_init();
 
-	init_bootcpu_ops();
+	cpu_read_bootcpu_ops();
 	smp_init_cpus();
 	smp_build_mpidr_hash();
 
 	/* Init percpu seeds for random tags after cpus are set up. */
-	kasan_init_sw_tags();
+	kasan_init_tags();
 
 #ifdef CONFIG_ARM64_SW_TTBR0_PAN
 	/*
@@ -366,9 +356,12 @@ void __init __no_sanitize_address setup_arch(char **cmdline_p)
 	 * faults in case uaccess_enable() is inadvertently called by the init
 	 * thread.
 	 */
-	init_task.thread_info.ttbr0 = __pa_symbol(reserved_pg_dir);
+	init_task.thread_info.ttbr0 = phys_to_ttbr(__pa_symbol(reserved_pg_dir));
 #endif
 
+#ifdef CONFIG_VT
+	conswitchp = &dummy_con;
+#endif
 	if (boot_args[1] || boot_args[2] || boot_args[3]) {
 		pr_err("WARNING: x1-x3 nonzero in violation of boot protocol:\n"
 			"\tx1: %016llx\n\tx2: %016llx\n\tx3: %016llx\n"
@@ -380,10 +373,8 @@ void __init __no_sanitize_address setup_arch(char **cmdline_p)
 static inline bool cpu_can_disable(unsigned int cpu)
 {
 #ifdef CONFIG_HOTPLUG_CPU
-	const struct cpu_operations *ops = get_cpu_ops(cpu);
-
-	if (ops && ops->cpu_can_disable)
-		return ops->cpu_can_disable(cpu);
+	if (cpu_ops[cpu] && cpu_ops[cpu]->cpu_can_disable)
+		return cpu_ops[cpu]->cpu_can_disable(cpu);
 #endif
 	return false;
 }
@@ -405,7 +396,11 @@ static int __init topology_init(void)
 }
 subsys_initcall(topology_init);
 
-static void dump_kernel_offset(void)
+/*
+ * Dump out kernel offset information on panic.
+ */
+static int dump_kernel_offset(struct notifier_block *self, unsigned long v,
+			      void *p)
 {
 	const unsigned long offset = kaslr_offset();
 
@@ -416,25 +411,17 @@ static void dump_kernel_offset(void)
 	} else {
 		pr_emerg("Kernel Offset: disabled\n");
 	}
-}
-
-static int arm64_panic_block_dump(struct notifier_block *self,
-				  unsigned long v, void *p)
-{
-	dump_kernel_offset();
-	dump_cpu_features();
-	dump_mem_limit();
 	return 0;
 }
 
-static struct notifier_block arm64_panic_block = {
-	.notifier_call = arm64_panic_block_dump
+static struct notifier_block kernel_offset_notifier = {
+	.notifier_call = dump_kernel_offset
 };
 
-static int __init register_arm64_panic_block(void)
+static int __init register_kernel_offset_dumper(void)
 {
 	atomic_notifier_chain_register(&panic_notifier_list,
-				       &arm64_panic_block);
+				       &kernel_offset_notifier);
 	return 0;
 }
-device_initcall(register_arm64_panic_block);
+__initcall(register_kernel_offset_dumper);

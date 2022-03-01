@@ -10,7 +10,7 @@
 #include <asm/simd.h>
 #include <crypto/aes.h>
 #include <crypto/ctr.h>
-#include <crypto/sha2.h>
+#include <crypto/sha.h>
 #include <crypto/internal/hash.h>
 #include <crypto/internal/simd.h>
 #include <crypto/internal/skcipher.h>
@@ -55,7 +55,7 @@ MODULE_DESCRIPTION("AES-ECB/CBC/CTR/XTS using ARMv8 Crypto Extensions");
 #define aes_mac_update		neon_aes_mac_update
 MODULE_DESCRIPTION("AES-ECB/CBC/CTR/XTS using ARMv8 NEON");
 #endif
-#if defined(USE_V8_CRYPTO_EXTENSIONS) || !defined(CONFIG_CRYPTO_AES_ARM64_BS)
+#if defined(USE_V8_CRYPTO_EXTENSIONS) || !IS_ENABLED(CONFIG_CRYPTO_AES_ARM64_BS)
 MODULE_ALIAS_CRYPTO("ecb(aes)");
 MODULE_ALIAS_CRYPTO("cbc(aes)");
 MODULE_ALIAS_CRYPTO("ctr(aes)");
@@ -132,8 +132,13 @@ static int skcipher_aes_setkey(struct crypto_skcipher *tfm, const u8 *in_key,
 			       unsigned int key_len)
 {
 	struct crypto_aes_ctx *ctx = crypto_skcipher_ctx(tfm);
+	int ret;
 
-	return aes_expandkey(ctx, in_key, key_len);
+	ret = aes_expandkey(ctx, in_key, key_len);
+	if (ret)
+		crypto_skcipher_set_flags(tfm, CRYPTO_TFM_RES_BAD_KEY_LEN);
+
+	return ret;
 }
 
 static int __maybe_unused xts_set_key(struct crypto_skcipher *tfm,
@@ -150,7 +155,11 @@ static int __maybe_unused xts_set_key(struct crypto_skcipher *tfm,
 	if (!ret)
 		ret = aes_expandkey(&ctx->key2, &in_key[key_len / 2],
 				    key_len / 2);
-	return ret;
+	if (!ret)
+		return 0;
+
+	crypto_skcipher_set_flags(tfm, CRYPTO_TFM_RES_BAD_KEY_LEN);
+	return -EINVAL;
 }
 
 static int __maybe_unused essiv_cbc_set_key(struct crypto_skcipher *tfm,
@@ -158,16 +167,25 @@ static int __maybe_unused essiv_cbc_set_key(struct crypto_skcipher *tfm,
 					    unsigned int key_len)
 {
 	struct crypto_aes_essiv_cbc_ctx *ctx = crypto_skcipher_ctx(tfm);
+	SHASH_DESC_ON_STACK(desc, ctx->hash);
 	u8 digest[SHA256_DIGEST_SIZE];
 	int ret;
 
 	ret = aes_expandkey(&ctx->key1, in_key, key_len);
 	if (ret)
-		return ret;
+		goto out;
 
-	crypto_shash_tfm_digest(ctx->hash, in_key, key_len, digest);
+	desc->tfm = ctx->hash;
+	crypto_shash_digest(desc, in_key, key_len, digest);
 
-	return aes_expandkey(&ctx->key2, digest, sizeof(digest));
+	ret = aes_expandkey(&ctx->key2, digest, sizeof(digest));
+	if (ret)
+		goto out;
+
+	return 0;
+out:
+	crypto_skcipher_set_flags(tfm, CRYPTO_TFM_RES_BAD_KEY_LEN);
+	return -EINVAL;
 }
 
 static int __maybe_unused ecb_encrypt(struct skcipher_request *req)
@@ -650,7 +668,7 @@ static int __maybe_unused xts_decrypt(struct skcipher_request *req)
 }
 
 static struct skcipher_alg aes_algs[] = { {
-#if defined(USE_V8_CRYPTO_EXTENSIONS) || !defined(CONFIG_CRYPTO_AES_ARM64_BS)
+#if defined(USE_V8_CRYPTO_EXTENSIONS) || !IS_ENABLED(CONFIG_CRYPTO_AES_ARM64_BS)
 	.base = {
 		.cra_name		= "__ecb(aes)",
 		.cra_driver_name	= "__ecb-aes-" MODE,
@@ -773,8 +791,13 @@ static int cbcmac_setkey(struct crypto_shash *tfm, const u8 *in_key,
 			 unsigned int key_len)
 {
 	struct mac_tfm_ctx *ctx = crypto_shash_ctx(tfm);
+	int err;
 
-	return aes_expandkey(&ctx->key, in_key, key_len);
+	err = aes_expandkey(&ctx->key, in_key, key_len);
+	if (err)
+		crypto_shash_set_flags(tfm, CRYPTO_TFM_RES_BAD_KEY_LEN);
+
+	return err;
 }
 
 static void cmac_gf128_mul_by_x(be128 *y, const be128 *x)

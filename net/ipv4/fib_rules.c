@@ -29,7 +29,6 @@
 #include <net/ip_fib.h>
 #include <net/nexthop.h>
 #include <net/fib_rules.h>
-#include <linux/indirect_call_wrapper.h>
 
 struct fib4_rule {
 	struct fib_rule		common;
@@ -66,10 +65,9 @@ bool fib4_rule_default(const struct fib_rule *rule)
 }
 EXPORT_SYMBOL_GPL(fib4_rule_default);
 
-int fib4_rules_dump(struct net *net, struct notifier_block *nb,
-		    struct netlink_ext_ack *extack)
+int fib4_rules_dump(struct net *net, struct notifier_block *nb)
 {
-	return fib_rules_dump(net, nb, AF_INET, extack);
+	return fib_rules_dump(net, nb, AF_INET);
 }
 
 unsigned int fib4_rules_seq_read(struct net *net)
@@ -104,9 +102,8 @@ int __fib_lookup(struct net *net, struct flowi4 *flp,
 }
 EXPORT_SYMBOL_GPL(__fib_lookup);
 
-INDIRECT_CALLABLE_SCOPE int fib4_rule_action(struct fib_rule *rule,
-					     struct flowi *flp, int flags,
-					     struct fib_lookup_arg *arg)
+static int fib4_rule_action(struct fib_rule *rule, struct flowi *flp,
+			    int flags, struct fib_lookup_arg *arg)
 {
 	int err = -EAGAIN;
 	struct fib_table *tbl;
@@ -140,8 +137,7 @@ INDIRECT_CALLABLE_SCOPE int fib4_rule_action(struct fib_rule *rule,
 	return err;
 }
 
-INDIRECT_CALLABLE_SCOPE bool fib4_rule_suppress(struct fib_rule *rule,
-						struct fib_lookup_arg *arg)
+static bool fib4_rule_suppress(struct fib_rule *rule, int flags, struct fib_lookup_arg *arg)
 {
 	struct fib_result *result = (struct fib_result *) arg->result;
 	struct net_device *dev = NULL;
@@ -172,8 +168,7 @@ suppress_route:
 	return true;
 }
 
-INDIRECT_CALLABLE_SCOPE int fib4_rule_match(struct fib_rule *rule,
-					    struct flowi *fl, int flags)
+static int fib4_rule_match(struct fib_rule *rule, struct flowi *fl, int flags)
 {
 	struct fib4_rule *r = (struct fib4_rule *) rule;
 	struct flowi4 *fl4 = &fl->u.ip4;
@@ -263,7 +258,7 @@ static int fib4_rule_configure(struct fib_rule *rule, struct sk_buff *skb,
 	if (tb[FRA_FLOW]) {
 		rule4->tclassid = nla_get_u32(tb[FRA_FLOW]);
 		if (rule4->tclassid)
-			net->ipv4.fib_num_tclassid_users++;
+			atomic_inc(&net->ipv4.fib_num_tclassid_users);
 	}
 #endif
 
@@ -295,7 +290,7 @@ static int fib4_rule_delete(struct fib_rule *rule)
 
 #ifdef CONFIG_IP_ROUTE_CLASSID
 	if (((struct fib4_rule *)rule)->tclassid)
-		net->ipv4.fib_num_tclassid_users--;
+		atomic_dec(&net->ipv4.fib_num_tclassid_users);
 #endif
 	net->ipv4.fib_has_custom_rules = true;
 

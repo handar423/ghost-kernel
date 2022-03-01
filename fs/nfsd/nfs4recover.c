@@ -127,8 +127,16 @@ nfs4_make_rec_clidname(char *dname, const struct xdr_netobj *clname)
  		goto out;
 	}
 
-	status = crypto_shash_tfm_digest(tfm, clname->data, clname->len,
-					 cksum.data);
+	{
+		SHASH_DESC_ON_STACK(desc, tfm);
+
+		desc->tfm = tfm;
+
+		status = crypto_shash_digest(desc, clname->data, clname->len,
+					     cksum.data);
+		shash_desc_zero(desc);
+	}
+
 	if (status)
 		goto out;
 
@@ -747,11 +755,13 @@ struct cld_upcall {
 };
 
 static int
-__cld_pipe_upcall(struct rpc_pipe *pipe, void *cmsg, struct nfsd_net *nn)
+__cld_pipe_upcall(struct rpc_pipe *pipe, void *cmsg)
 {
 	int ret;
 	struct rpc_pipe_msg msg;
 	struct cld_upcall *cup = container_of(cmsg, struct cld_upcall, cu_u);
+	struct nfsd_net *nn = net_generic(pipe->dentry->d_sb->s_fs_info,
+					  nfsd_net_id);
 
 	memset(&msg, 0, sizeof(msg));
 	msg.data = cmsg;
@@ -771,7 +781,7 @@ out:
 }
 
 static int
-cld_pipe_upcall(struct rpc_pipe *pipe, void *cmsg, struct nfsd_net *nn)
+cld_pipe_upcall(struct rpc_pipe *pipe, void *cmsg)
 {
 	int ret;
 
@@ -780,7 +790,7 @@ cld_pipe_upcall(struct rpc_pipe *pipe, void *cmsg, struct nfsd_net *nn)
 	 *  upcalls queued.
 	 */
 	do {
-		ret = __cld_pipe_upcall(pipe, cmsg, nn);
+		ret = __cld_pipe_upcall(pipe, cmsg);
 	} while (ret == -EAGAIN);
 
 	return ret;
@@ -1113,7 +1123,7 @@ nfsd4_cld_create(struct nfs4_client *clp)
 	memcpy(cup->cu_u.cu_msg.cm_u.cm_name.cn_id, clp->cl_name.data,
 			clp->cl_name.len);
 
-	ret = cld_pipe_upcall(cn->cn_pipe, &cup->cu_u.cu_msg, nn);
+	ret = cld_pipe_upcall(cn->cn_pipe, &cup->cu_u.cu_msg);
 	if (!ret) {
 		ret = cup->cu_u.cu_msg.cm_status;
 		set_bit(NFSD4_CLIENT_STABLE, &clp->cl_flags);
@@ -1138,6 +1148,7 @@ nfsd4_cld_create_v2(struct nfs4_client *clp)
 	struct crypto_shash *tfm = cn->cn_tfm;
 	struct xdr_netobj cksum;
 	char *principal = NULL;
+	SHASH_DESC_ON_STACK(desc, tfm);
 
 	/* Don't upcall if it's already stored */
 	if (test_bit(NFSD4_CLIENT_STABLE, &clp->cl_flags))
@@ -1159,14 +1170,16 @@ nfsd4_cld_create_v2(struct nfs4_client *clp)
 	else if (clp->cl_cred.cr_principal)
 		principal = clp->cl_cred.cr_principal;
 	if (principal) {
+		desc->tfm = tfm;
 		cksum.len = crypto_shash_digestsize(tfm);
 		cksum.data = kmalloc(cksum.len, GFP_KERNEL);
 		if (cksum.data == NULL) {
 			ret = -ENOMEM;
 			goto out;
 		}
-		ret = crypto_shash_tfm_digest(tfm, principal, strlen(principal),
-					      cksum.data);
+		ret = crypto_shash_digest(desc, principal, strlen(principal),
+					  cksum.data);
+		shash_desc_zero(desc);
 		if (ret) {
 			kfree(cksum.data);
 			goto out;
@@ -1178,7 +1191,7 @@ nfsd4_cld_create_v2(struct nfs4_client *clp)
 	} else
 		cmsg->cm_u.cm_clntinfo.cc_princhash.cp_len = 0;
 
-	ret = cld_pipe_upcall(cn->cn_pipe, cmsg, nn);
+	ret = cld_pipe_upcall(cn->cn_pipe, cmsg);
 	if (!ret) {
 		ret = cmsg->cm_status;
 		set_bit(NFSD4_CLIENT_STABLE, &clp->cl_flags);
@@ -1216,7 +1229,7 @@ nfsd4_cld_remove(struct nfs4_client *clp)
 	memcpy(cup->cu_u.cu_msg.cm_u.cm_name.cn_id, clp->cl_name.data,
 			clp->cl_name.len);
 
-	ret = cld_pipe_upcall(cn->cn_pipe, &cup->cu_u.cu_msg, nn);
+	ret = cld_pipe_upcall(cn->cn_pipe, &cup->cu_u.cu_msg);
 	if (!ret) {
 		ret = cup->cu_u.cu_msg.cm_status;
 		clear_bit(NFSD4_CLIENT_STABLE, &clp->cl_flags);
@@ -1259,7 +1272,7 @@ nfsd4_cld_check_v0(struct nfs4_client *clp)
 	memcpy(cup->cu_u.cu_msg.cm_u.cm_name.cn_id, clp->cl_name.data,
 			clp->cl_name.len);
 
-	ret = cld_pipe_upcall(cn->cn_pipe, &cup->cu_u.cu_msg, nn);
+	ret = cld_pipe_upcall(cn->cn_pipe, &cup->cu_u.cu_msg);
 	if (!ret) {
 		ret = cup->cu_u.cu_msg.cm_status;
 		set_bit(NFSD4_CLIENT_STABLE, &clp->cl_flags);
@@ -1330,6 +1343,7 @@ nfsd4_cld_check_v2(struct nfs4_client *clp)
 	struct crypto_shash *tfm = cn->cn_tfm;
 	struct xdr_netobj cksum;
 	char *principal = NULL;
+	SHASH_DESC_ON_STACK(desc, tfm);
 
 	/* did we already find that this client is stable? */
 	if (test_bit(NFSD4_CLIENT_STABLE, &clp->cl_flags))
@@ -1367,12 +1381,14 @@ found:
 			principal = clp->cl_cred.cr_principal;
 		if (principal == NULL)
 			return -ENOENT;
+		desc->tfm = tfm;
 		cksum.len = crypto_shash_digestsize(tfm);
 		cksum.data = kmalloc(cksum.len, GFP_KERNEL);
 		if (cksum.data == NULL)
 			return -ENOENT;
-		status = crypto_shash_tfm_digest(tfm, principal,
-						 strlen(principal), cksum.data);
+		status = crypto_shash_digest(desc, principal, strlen(principal),
+					     cksum.data);
+		shash_desc_zero(desc);
 		if (status) {
 			kfree(cksum.data);
 			return -ENOENT;
@@ -1402,7 +1418,7 @@ nfsd4_cld_grace_start(struct nfsd_net *nn)
 	}
 
 	cup->cu_u.cu_msg.cm_cmd = Cld_GraceStart;
-	ret = cld_pipe_upcall(cn->cn_pipe, &cup->cu_u.cu_msg, nn);
+	ret = cld_pipe_upcall(cn->cn_pipe, &cup->cu_u.cu_msg);
 	if (!ret)
 		ret = cup->cu_u.cu_msg.cm_status;
 
@@ -1429,8 +1445,8 @@ nfsd4_cld_grace_done_v0(struct nfsd_net *nn)
 	}
 
 	cup->cu_u.cu_msg.cm_cmd = Cld_GraceDone;
-	cup->cu_u.cu_msg.cm_u.cm_gracetime = nn->boot_time;
-	ret = cld_pipe_upcall(cn->cn_pipe, &cup->cu_u.cu_msg, nn);
+	cup->cu_u.cu_msg.cm_u.cm_gracetime = (int64_t)nn->boot_time;
+	ret = cld_pipe_upcall(cn->cn_pipe, &cup->cu_u.cu_msg);
 	if (!ret)
 		ret = cup->cu_u.cu_msg.cm_status;
 
@@ -1458,7 +1474,7 @@ nfsd4_cld_grace_done(struct nfsd_net *nn)
 	}
 
 	cup->cu_u.cu_msg.cm_cmd = Cld_GraceDone;
-	ret = cld_pipe_upcall(cn->cn_pipe, &cup->cu_u.cu_msg, nn);
+	ret = cld_pipe_upcall(cn->cn_pipe, &cup->cu_u.cu_msg);
 	if (!ret)
 		ret = cup->cu_u.cu_msg.cm_status;
 
@@ -1522,7 +1538,7 @@ nfsd4_cld_get_version(struct nfsd_net *nn)
 		goto out_err;
 	}
 	cup->cu_u.cu_msg.cm_cmd = Cld_GetVersion;
-	ret = cld_pipe_upcall(cn->cn_pipe, &cup->cu_u.cu_msg, nn);
+	ret = cld_pipe_upcall(cn->cn_pipe, &cup->cu_u.cu_msg);
 	if (!ret) {
 		ret = cup->cu_u.cu_msg.cm_status;
 		if (ret)
@@ -1766,7 +1782,7 @@ nfsd4_cltrack_client_has_session(struct nfs4_client *clp)
 }
 
 static char *
-nfsd4_cltrack_grace_start(time64_t grace_start)
+nfsd4_cltrack_grace_start(time_t grace_start)
 {
 	int copied;
 	size_t len;
@@ -1779,7 +1795,7 @@ nfsd4_cltrack_grace_start(time64_t grace_start)
 	if (!result)
 		return result;
 
-	copied = snprintf(result, len, GRACE_START_ENV_PREFIX "%lld",
+	copied = snprintf(result, len, GRACE_START_ENV_PREFIX "%ld",
 				grace_start);
 	if (copied >= len) {
 		/* just return nothing if output was truncated */
@@ -1836,14 +1852,19 @@ nfsd4_umh_cltrack_upcall(char *cmd, char *arg, char *env0, char *env1)
 static char *
 bin_to_hex_dup(const unsigned char *src, int srclen)
 {
-	char *buf;
+	int i;
+	char *buf, *hex;
 
 	/* +1 for terminating NULL */
-	buf = kzalloc((srclen * 2) + 1, GFP_KERNEL);
+	buf = kmalloc((srclen * 2) + 1, GFP_KERNEL);
 	if (!buf)
 		return buf;
 
-	bin2hex(buf, src, srclen);
+	hex = buf;
+	for (i = 0; i < srclen; i++) {
+		sprintf(hex, "%2.2x", *src++);
+		hex += 2;
+	}
 	return buf;
 }
 
@@ -1988,7 +2009,7 @@ nfsd4_umh_cltrack_grace_done(struct nfsd_net *nn)
 	char *legacy;
 	char timestr[22]; /* FIXME: better way to determine max size? */
 
-	sprintf(timestr, "%lld", nn->boot_time);
+	sprintf(timestr, "%ld", nn->boot_time);
 	legacy = nfsd4_cltrack_legacy_topdir();
 	nfsd4_umh_cltrack_upcall("gracedone", timestr, legacy, NULL);
 	kfree(legacy);
@@ -2156,6 +2177,7 @@ static struct notifier_block nfsd4_cld_block = {
 int
 register_cld_notifier(void)
 {
+	WARN_ON(!nfsd_net_id);
 	return rpc_pipefs_notifier_register(&nfsd4_cld_block);
 }
 

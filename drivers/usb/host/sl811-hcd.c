@@ -1287,11 +1287,10 @@ sl811h_hub_control(
 			goto error;
 		put_unaligned_le32(sl811->port1, buf);
 
-#ifndef	VERBOSE
-	if (*(u16*)(buf+2))	/* only if wPortChange is interesting */
-#endif
-		dev_dbg(hcd->self.controller, "GetPortStatus %08x\n",
-			sl811->port1);
+		if (__is_defined(VERBOSE) ||
+		    *(u16*)(buf+2)) /* only if wPortChange is interesting */
+			dev_dbg(hcd->self.controller, "GetPortStatus %08x\n",
+				sl811->port1);
 		break;
 	case SetPortFeature:
 		if (wIndex != 1 || wLength != 0)
@@ -1614,16 +1613,10 @@ sl811h_probe(struct platform_device *dev)
 	void __iomem		*addr_reg;
 	void __iomem		*data_reg;
 	int			retval;
-	u8			tmp, ioaddr;
+	u8			tmp, ioaddr = 0;
 	unsigned long		irqflags;
 
 	if (usb_disabled())
-		return -ENODEV;
-
-	/* the chip may be wired for either kind of addressing */
-	addr = platform_get_mem_or_io(dev, 0);
-	data = platform_get_mem_or_io(dev, 1);
-	if (!addr || !data || resource_type(addr) != resource_type(data))
 		return -ENODEV;
 
 	/* basic sanity checks first.  board-specific init logic should
@@ -1638,8 +1631,16 @@ sl811h_probe(struct platform_device *dev)
 	irq = ires->start;
 	irqflags = ires->flags & IRQF_TRIGGER_MASK;
 
-	ioaddr = resource_type(addr) == IORESOURCE_IO;
-	if (ioaddr) {
+	/* the chip may be wired for either kind of addressing */
+	addr = platform_get_resource(dev, IORESOURCE_MEM, 0);
+	data = platform_get_resource(dev, IORESOURCE_MEM, 1);
+	retval = -EBUSY;
+	if (!addr || !data) {
+		addr = platform_get_resource(dev, IORESOURCE_IO, 0);
+		data = platform_get_resource(dev, IORESOURCE_IO, 1);
+		if (!addr || !data)
+			return -ENODEV;
+		ioaddr = 1;
 		/*
 		 * NOTE: 64-bit resource->start is getting truncated
 		 * to avoid compiler warning, assuming that ->start
@@ -1790,7 +1791,7 @@ struct platform_driver sl811h_driver = {
 	.suspend =	sl811h_suspend,
 	.resume =	sl811h_resume,
 	.driver = {
-		.name =	hcd_name,
+		.name =	(char *) hcd_name,
 	},
 };
 EXPORT_SYMBOL(sl811h_driver);

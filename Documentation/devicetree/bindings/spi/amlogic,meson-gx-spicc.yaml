@@ -22,7 +22,6 @@ properties:
     enum:
       - amlogic,meson-gx-spicc # SPICC controller on Amlogic GX and compatible SoCs
       - amlogic,meson-axg-spicc # SPICC controller on Amlogic AXG and compatible SoCs
-      - amlogic,meson-g12a-spicc # SPICC controller on Amlogic G12A and compatible SoCs
 
   interrupts:
     maxItems: 1
@@ -34,41 +33,12 @@ properties:
     maxItems: 1
 
   clocks:
-    minItems: 1
-    maxItems: 2
-    items:
-      - description: controller register bus clock
-      - description: baud rate generator and delay control clock
+    maxItems: 1
 
   clock-names:
-    minItems: 1
-    maxItems: 2
-
-if:
-  properties:
-    compatible:
-      contains:
-        enum:
-          - amlogic,meson-g12a-spicc
-
-then:
-  properties:
-    clocks:
-      minItems: 2
-
-    clock-names:
-      items:
-        - const: core
-        - const: pclk
-
-else:
-  properties:
-    clocks:
-      maxItems: 1
-
-    clock-names:
-      items:
-        - const: core
+    description: input clock for the baud rate generator
+    items:
+      - const: core
 
 required:
   - compatible
@@ -76,8 +46,6 @@ required:
   - interrupts
   - clocks
   - clock-names
-
-unevaluatedProperties: false
 
 examples:
   - |

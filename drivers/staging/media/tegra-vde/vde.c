@@ -777,7 +777,7 @@ static int tegra_vde_ioctl_decode_h264(struct tegra_vde *vde,
 
 	ret = pm_runtime_get_sync(dev);
 	if (ret < 0)
-		goto put_runtime_pm;
+		goto unlock;
 
 	/*
 	 * We rely on the VDE registers reset value, otherwise VDE
@@ -843,6 +843,8 @@ static int tegra_vde_ioctl_decode_h264(struct tegra_vde *vde,
 put_runtime_pm:
 	pm_runtime_mark_last_busy(dev);
 	pm_runtime_put_autosuspend(dev);
+
+unlock:
 	mutex_unlock(&vde->lock);
 
 release_dpb_frames:
@@ -913,7 +915,7 @@ static irqreturn_t tegra_vde_isr(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
-static __maybe_unused int tegra_vde_runtime_suspend(struct device *dev)
+static int tegra_vde_runtime_suspend(struct device *dev)
 {
 	struct tegra_vde *vde = dev_get_drvdata(dev);
 	int err;
@@ -929,7 +931,7 @@ static __maybe_unused int tegra_vde_runtime_suspend(struct device *dev)
 	return 0;
 }
 
-static __maybe_unused int tegra_vde_runtime_resume(struct device *dev)
+static int tegra_vde_runtime_resume(struct device *dev)
 {
 	struct tegra_vde *vde = dev_get_drvdata(dev);
 	int err;
@@ -947,6 +949,7 @@ static __maybe_unused int tegra_vde_runtime_resume(struct device *dev)
 static int tegra_vde_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
+	struct resource *regs;
 	struct tegra_vde *vde;
 	int irq, err;
 
@@ -956,39 +959,75 @@ static int tegra_vde_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, vde);
 
-	vde->sxe = devm_platform_ioremap_resource_byname(pdev, "sxe");
+	regs = platform_get_resource_byname(pdev, IORESOURCE_MEM, "sxe");
+	if (!regs)
+		return -ENODEV;
+
+	vde->sxe = devm_ioremap_resource(dev, regs);
 	if (IS_ERR(vde->sxe))
 		return PTR_ERR(vde->sxe);
 
-	vde->bsev = devm_platform_ioremap_resource_byname(pdev, "bsev");
+	regs = platform_get_resource_byname(pdev, IORESOURCE_MEM, "bsev");
+	if (!regs)
+		return -ENODEV;
+
+	vde->bsev = devm_ioremap_resource(dev, regs);
 	if (IS_ERR(vde->bsev))
 		return PTR_ERR(vde->bsev);
 
-	vde->mbe = devm_platform_ioremap_resource_byname(pdev, "mbe");
+	regs = platform_get_resource_byname(pdev, IORESOURCE_MEM, "mbe");
+	if (!regs)
+		return -ENODEV;
+
+	vde->mbe = devm_ioremap_resource(dev, regs);
 	if (IS_ERR(vde->mbe))
 		return PTR_ERR(vde->mbe);
 
-	vde->ppe = devm_platform_ioremap_resource_byname(pdev, "ppe");
+	regs = platform_get_resource_byname(pdev, IORESOURCE_MEM, "ppe");
+	if (!regs)
+		return -ENODEV;
+
+	vde->ppe = devm_ioremap_resource(dev, regs);
 	if (IS_ERR(vde->ppe))
 		return PTR_ERR(vde->ppe);
 
-	vde->mce = devm_platform_ioremap_resource_byname(pdev, "mce");
+	regs = platform_get_resource_byname(pdev, IORESOURCE_MEM, "mce");
+	if (!regs)
+		return -ENODEV;
+
+	vde->mce = devm_ioremap_resource(dev, regs);
 	if (IS_ERR(vde->mce))
 		return PTR_ERR(vde->mce);
 
-	vde->tfe = devm_platform_ioremap_resource_byname(pdev, "tfe");
+	regs = platform_get_resource_byname(pdev, IORESOURCE_MEM, "tfe");
+	if (!regs)
+		return -ENODEV;
+
+	vde->tfe = devm_ioremap_resource(dev, regs);
 	if (IS_ERR(vde->tfe))
 		return PTR_ERR(vde->tfe);
 
-	vde->ppb = devm_platform_ioremap_resource_byname(pdev, "ppb");
+	regs = platform_get_resource_byname(pdev, IORESOURCE_MEM, "ppb");
+	if (!regs)
+		return -ENODEV;
+
+	vde->ppb = devm_ioremap_resource(dev, regs);
 	if (IS_ERR(vde->ppb))
 		return PTR_ERR(vde->ppb);
 
-	vde->vdma = devm_platform_ioremap_resource_byname(pdev, "vdma");
+	regs = platform_get_resource_byname(pdev, IORESOURCE_MEM, "vdma");
+	if (!regs)
+		return -ENODEV;
+
+	vde->vdma = devm_ioremap_resource(dev, regs);
 	if (IS_ERR(vde->vdma))
 		return PTR_ERR(vde->vdma);
 
-	vde->frameid = devm_platform_ioremap_resource_byname(pdev, "frameid");
+	regs = platform_get_resource_byname(pdev, IORESOURCE_MEM, "frameid");
+	if (!regs)
+		return -ENODEV;
+
+	vde->frameid = devm_ioremap_resource(dev, regs);
 	if (IS_ERR(vde->frameid))
 		return PTR_ERR(vde->frameid);
 
@@ -1064,15 +1103,16 @@ static int tegra_vde_probe(struct platform_device *pdev)
 	pm_runtime_use_autosuspend(dev);
 	pm_runtime_set_autosuspend_delay(dev, 300);
 
-	/*
-	 * VDE partition may be left ON after bootloader, hence let's
-	 * power-cycle it in order to put hardware into a predictable lower
-	 * power state.
-	 */
-	pm_runtime_get_sync(dev);
-	pm_runtime_put(dev);
+	if (!pm_runtime_enabled(dev)) {
+		err = tegra_vde_runtime_resume(dev);
+		if (err)
+			goto err_misc_unreg;
+	}
 
 	return 0;
+
+err_misc_unreg:
+	misc_deregister(&vde->miscdev);
 
 err_deinit_iommu:
 	tegra_vde_iommu_deinit(vde);
@@ -1088,17 +1128,16 @@ static int tegra_vde_remove(struct platform_device *pdev)
 {
 	struct tegra_vde *vde = platform_get_drvdata(pdev);
 	struct device *dev = &pdev->dev;
+	int err;
 
-	pm_runtime_get_sync(dev);
+	if (!pm_runtime_enabled(dev)) {
+		err = tegra_vde_runtime_suspend(dev);
+		if (err)
+			return err;
+	}
+
 	pm_runtime_dont_use_autosuspend(dev);
 	pm_runtime_disable(dev);
-
-	/*
-	 * Balance RPM state, the VDE power domain is left ON and hardware
-	 * is clock-gated. It's safe to reboot machine now.
-	 */
-	pm_runtime_put_noidle(dev);
-	clk_disable_unprepare(vde->clk);
 
 	misc_deregister(&vde->miscdev);
 
@@ -1111,17 +1150,8 @@ static int tegra_vde_remove(struct platform_device *pdev)
 	return 0;
 }
 
-static void tegra_vde_shutdown(struct platform_device *pdev)
-{
-	/*
-	 * On some devices bootloader isn't ready to a power-gated VDE on
-	 * a warm-reboot, machine will hang in that case.
-	 */
-	if (pm_runtime_status_suspended(&pdev->dev))
-		tegra_vde_runtime_resume(&pdev->dev);
-}
-
-static __maybe_unused int tegra_vde_pm_suspend(struct device *dev)
+#ifdef CONFIG_PM_SLEEP
+static int tegra_vde_pm_suspend(struct device *dev)
 {
 	struct tegra_vde *vde = dev_get_drvdata(dev);
 	int err;
@@ -1135,7 +1165,7 @@ static __maybe_unused int tegra_vde_pm_suspend(struct device *dev)
 	return 0;
 }
 
-static __maybe_unused int tegra_vde_pm_resume(struct device *dev)
+static int tegra_vde_pm_resume(struct device *dev)
 {
 	struct tegra_vde *vde = dev_get_drvdata(dev);
 	int err;
@@ -1148,6 +1178,7 @@ static __maybe_unused int tegra_vde_pm_resume(struct device *dev)
 
 	return 0;
 }
+#endif
 
 static const struct dev_pm_ops tegra_vde_pm_ops = {
 	SET_RUNTIME_PM_OPS(tegra_vde_runtime_suspend,
@@ -1166,7 +1197,6 @@ MODULE_DEVICE_TABLE(of, tegra_vde_of_match);
 static struct platform_driver tegra_vde_driver = {
 	.probe		= tegra_vde_probe,
 	.remove		= tegra_vde_remove,
-	.shutdown	= tegra_vde_shutdown,
 	.driver		= {
 		.name		= "tegra-vde",
 		.of_match_table = tegra_vde_of_match,

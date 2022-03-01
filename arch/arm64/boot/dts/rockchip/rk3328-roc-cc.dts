@@ -34,8 +34,7 @@
 		compatible = "regulator-fixed";
 		gpio = <&gpio0 RK_PD6 GPIO_ACTIVE_LOW>;
 		pinctrl-names = "default";
-		pinctrl-0 = <&sdmmc0m1_pin>;
-		regulator-boot-on;
+		pinctrl-0 = <&sdmmc0m1_gpio>;
 		regulator-name = "vcc_sd";
 		regulator-min-microvolt = <3300000>;
 		regulator-max-microvolt = <3300000>;
@@ -86,7 +85,7 @@
 	leds {
 		compatible = "gpio-leds";
 
-		power_led: led-0 {
+		power {
 			label = "firefly:blue:power";
 			linux,default-trigger = "heartbeat";
 			gpios = <&rk805 1 GPIO_ACTIVE_LOW>;
@@ -94,7 +93,7 @@
 			mode = <0x23>;
 		};
 
-		user_led: led-1 {
+		user {
 			label = "firefly:yellow:user";
 			linux,default-trigger = "mmc1";
 			gpios = <&rk805 0 GPIO_ACTIVE_LOW>;
@@ -102,14 +101,6 @@
 			mode = <0x05>;
 		};
 	};
-};
-
-&analog_sound {
-	status = "okay";
-};
-
-&codec {
-	status = "okay";
 };
 
 &cpu0 {
@@ -166,10 +157,6 @@
 };
 
 &hdmiphy {
-	status = "okay";
-};
-
-&hdmi_sound {
 	status = "okay";
 };
 
@@ -280,14 +267,6 @@
 			};
 		};
 	};
-};
-
-&i2s0 {
-	status = "okay";
-};
-
-&i2s1 {
-	status = "okay";
 };
 
 &io_domains {

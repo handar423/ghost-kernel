@@ -120,7 +120,7 @@ struct sba_request {
 	struct brcm_message msg;
 	struct dma_async_tx_descriptor tx;
 	/* SBA commands */
-	struct brcm_sba_command cmds[];
+	struct brcm_sba_command cmds[0];
 };
 
 enum sba_version {

@@ -199,7 +199,7 @@ static irqreturn_t mms114_interrupt(int irq, void *dev_id)
 	int error;
 
 	mutex_lock(&input_dev->mutex);
-	if (!input_device_enabled(input_dev)) {
+	if (!input_dev->users) {
 		mutex_unlock(&input_dev->mutex);
 		goto out;
 	}
@@ -454,7 +454,8 @@ static int mms114_probe(struct i2c_client *client,
 	data->client = client;
 	data->input_dev = input_dev;
 
-	match_data = device_get_match_data(&client->dev);
+	/* FIXME: switch to device_get_match_data() when available */
+	match_data = of_device_get_match_data(&client->dev);
 	if (!match_data)
 		return -EINVAL;
 
@@ -557,14 +558,14 @@ static int __maybe_unused mms114_suspend(struct device *dev)
 	/* Release all touch */
 	for (id = 0; id < MMS114_MAX_TOUCH; id++) {
 		input_mt_slot(input_dev, id);
-		input_mt_report_slot_inactive(input_dev);
+		input_mt_report_slot_state(input_dev, MT_TOOL_FINGER, false);
 	}
 
 	input_mt_report_pointer_emulation(input_dev, true);
 	input_sync(input_dev);
 
 	mutex_lock(&input_dev->mutex);
-	if (input_device_enabled(input_dev))
+	if (input_dev->users)
 		mms114_stop(data);
 	mutex_unlock(&input_dev->mutex);
 
@@ -579,7 +580,7 @@ static int __maybe_unused mms114_resume(struct device *dev)
 	int error;
 
 	mutex_lock(&input_dev->mutex);
-	if (input_device_enabled(input_dev)) {
+	if (input_dev->users) {
 		error = mms114_start(data);
 		if (error < 0) {
 			mutex_unlock(&input_dev->mutex);

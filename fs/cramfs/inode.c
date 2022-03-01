@@ -534,7 +534,7 @@ static int cramfs_read_super(struct super_block *sb, struct fs_context *fc,
 		/* check for wrong endianness */
 		if (super->magic == CRAMFS_MAGIC_WEND) {
 			if (!silent)
-				errorfc(fc, "wrong endianness");
+				errorf(fc, "cramfs: wrong endianness");
 			return -EINVAL;
 		}
 
@@ -546,22 +546,22 @@ static int cramfs_read_super(struct super_block *sb, struct fs_context *fc,
 		mutex_unlock(&read_mutex);
 		if (super->magic != CRAMFS_MAGIC) {
 			if (super->magic == CRAMFS_MAGIC_WEND && !silent)
-				errorfc(fc, "wrong endianness");
+				errorf(fc, "cramfs: wrong endianness");
 			else if (!silent)
-				errorfc(fc, "wrong magic");
+				errorf(fc, "cramfs: wrong magic");
 			return -EINVAL;
 		}
 	}
 
 	/* get feature flags first */
 	if (super->flags & ~CRAMFS_SUPPORTED_FLAGS) {
-		errorfc(fc, "unsupported filesystem features");
+		errorf(fc, "cramfs: unsupported filesystem features");
 		return -EINVAL;
 	}
 
 	/* Check that the root inode is in a sane state */
 	if (!S_ISDIR(super->root.mode)) {
-		errorfc(fc, "root is not a directory");
+		errorf(fc, "cramfs: root is not a directory");
 		return -EINVAL;
 	}
 	/* correct strange, hard-coded permissions of mkcramfs */
@@ -580,12 +580,12 @@ static int cramfs_read_super(struct super_block *sb, struct fs_context *fc,
 	sbi->magic = super->magic;
 	sbi->flags = super->flags;
 	if (root_offset == 0)
-		infofc(fc, "empty filesystem");
+		infof(fc, "cramfs: empty filesystem");
 	else if (!(super->flags & CRAMFS_FLAG_SHIFTED_ROOT_OFFSET) &&
 		 ((root_offset != sizeof(struct cramfs_super)) &&
 		  (root_offset != 512 + sizeof(struct cramfs_super))))
 	{
-		errorfc(fc, "bad root offset %lu", root_offset);
+		errorf(fc, "cramfs: bad root offset %lu", root_offset);
 		return -EINVAL;
 	}
 
@@ -690,7 +690,8 @@ static int cramfs_statfs(struct dentry *dentry, struct kstatfs *buf)
 	buf->f_bavail = 0;
 	buf->f_files = CRAMFS_SB(sb)->files;
 	buf->f_ffree = 0;
-	buf->f_fsid = u64_to_fsid(id);
+	buf->f_fsid.val[0] = (u32)id;
+	buf->f_fsid.val[1] = (u32)(id >> 32);
 	buf->f_namelen = CRAMFS_MAXPATHLEN;
 	return 0;
 }

@@ -73,8 +73,7 @@ static int pi3usb30532_sw_set(struct typec_switch *sw,
 	return ret;
 }
 
-static int
-pi3usb30532_mux_set(struct typec_mux *mux, struct typec_mux_state *state)
+static int pi3usb30532_mux_set(struct typec_mux *mux, int state)
 {
 	struct pi3usb30532 *pi = typec_mux_get_drvdata(mux);
 	u8 new_conf;
@@ -83,7 +82,7 @@ pi3usb30532_mux_set(struct typec_mux *mux, struct typec_mux_state *state)
 	mutex_lock(&pi->lock);
 	new_conf = pi->conf;
 
-	switch (state->mode) {
+	switch (state) {
 	case TYPEC_STATE_SAFE:
 		new_conf = (new_conf & PI3USB30532_CONF_SWAP) |
 			   PI3USB30532_CONF_OPEN;
@@ -114,8 +113,8 @@ pi3usb30532_mux_set(struct typec_mux *mux, struct typec_mux_state *state)
 static int pi3usb30532_probe(struct i2c_client *client)
 {
 	struct device *dev = &client->dev;
-	struct typec_switch_desc sw_desc = { };
-	struct typec_mux_desc mux_desc = { };
+	struct typec_switch_desc sw_desc;
+	struct typec_mux_desc mux_desc;
 	struct pi3usb30532 *pi;
 	int ret;
 

@@ -12,13 +12,19 @@
 #include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/iio/iio.h>
-#include <linux/property.h>
 #include <linux/regulator/consumer.h>
+#include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/regmap.h>
 #include <asm/unaligned.h>
 #include <linux/iio/common/st_sensors.h>
 
 #include "st_sensors_core.h"
+
+static inline u32 st_sensors_get_unaligned_le24(const u8 *p)
+{
+	return (s32)((p[0] | p[1] << 8 | p[2] << 16) << 8) >> 8;
+}
 
 int st_sensors_write_data_with_mask(struct iio_dev *indio_dev,
 				    u8 reg_addr, u8 mask, u8 data)
@@ -145,7 +151,8 @@ static int st_sensors_set_fullscale(struct iio_dev *indio_dev, unsigned int fs)
 	if (err < 0)
 		goto st_accel_set_fullscale_error;
 
-	sdata->current_fullscale = &sdata->sensor_settings->fs.fs_avl[i];
+	sdata->current_fullscale = (struct st_sensor_fullscale_avl *)
+					&sdata->sensor_settings->fs.fs_avl[i];
 	return err;
 
 st_accel_set_fullscale_error:
@@ -272,7 +279,8 @@ static int st_sensors_set_drdy_int_pin(struct iio_dev *indio_dev,
 	    !sdata->sensor_settings->drdy_irq.int2.addr) {
 		if (pdata->drdy_int_pin)
 			dev_info(&indio_dev->dev,
-				 "DRDY on pin INT%d specified, but sensor does not support interrupts\n",
+				 "DRDY on pin INT%d specified, but sensor "
+				 "does not support interrupts\n",
 				 pdata->drdy_int_pin);
 		return 0;
 	}
@@ -311,51 +319,63 @@ static int st_sensors_set_drdy_int_pin(struct iio_dev *indio_dev,
 	return 0;
 }
 
-static struct st_sensors_platform_data *st_sensors_dev_probe(struct device *dev,
+#ifdef CONFIG_OF
+static struct st_sensors_platform_data *st_sensors_of_probe(struct device *dev,
 		struct st_sensors_platform_data *defdata)
 {
 	struct st_sensors_platform_data *pdata;
+	struct device_node *np = dev->of_node;
 	u32 val;
 
-	if (!dev_fwnode(dev))
+	if (!np)
 		return NULL;
 
 	pdata = devm_kzalloc(dev, sizeof(*pdata), GFP_KERNEL);
-	if (!pdata)
-		return ERR_PTR(-ENOMEM);
-	if (!device_property_read_u32(dev, "st,drdy-int-pin", &val) && (val <= 2))
+	if (!of_property_read_u32(np, "st,drdy-int-pin", &val) && (val <= 2))
 		pdata->drdy_int_pin = (u8) val;
 	else
 		pdata->drdy_int_pin = defdata ? defdata->drdy_int_pin : 0;
 
-	pdata->open_drain = device_property_read_bool(dev, "drive-open-drain");
+	pdata->open_drain = of_property_read_bool(np, "drive-open-drain");
 
 	return pdata;
 }
 
 /**
- * st_sensors_dev_name_probe() - device probe for ST sensor name
+ * st_sensors_of_name_probe() - device tree probe for ST sensor name
  * @dev: driver model representation of the device.
+ * @match: the OF match table for the device, containing compatible strings
+ *	but also a .data field with the corresponding internal kernel name
+ *	used by this sensor.
  * @name: device name buffer reference.
  * @len: device name buffer length.
  *
- * In effect this function matches an ID to an internal kernel
+ * In effect this function matches a compatible string to an internal kernel
  * name for a certain sensor device, so that the rest of the autodetection can
  * rely on that name from this point on. I2C/SPI devices will be renamed
  * to match the internal kernel convention.
  */
-void st_sensors_dev_name_probe(struct device *dev, char *name, int len)
+void st_sensors_of_name_probe(struct device *dev,
+			      const struct of_device_id *match,
+			      char *name, int len)
 {
-	const void *match;
+	const struct of_device_id *of_id;
 
-	match = device_get_match_data(dev);
-	if (!match)
+	of_id = of_match_device(match, dev);
+	if (!of_id || !of_id->data)
 		return;
 
-	/* The name from the match takes precedence if present */
-	strlcpy(name, match, len);
+	/* The name from the OF match takes precedence if present */
+	strlcpy(name, of_id->data, len);
 }
-EXPORT_SYMBOL(st_sensors_dev_name_probe);
+EXPORT_SYMBOL(st_sensors_of_name_probe);
+#else
+static struct st_sensors_platform_data *st_sensors_of_probe(struct device *dev,
+		struct st_sensors_platform_data *defdata)
+{
+	return NULL;
+}
+#endif
 
 int st_sensors_init_sensor(struct iio_dev *indio_dev,
 					struct st_sensors_platform_data *pdata)
@@ -365,9 +385,7 @@ int st_sensors_init_sensor(struct iio_dev *indio_dev,
 	int err = 0;
 
 	/* If OF/DT pdata exists, it will take precedence of anything else */
-	of_pdata = st_sensors_dev_probe(indio_dev->dev.parent, pdata);
-	if (IS_ERR(of_pdata))
-		return PTR_ERR(of_pdata);
+	of_pdata = st_sensors_of_probe(indio_dev->dev.parent, pdata);
 	if (of_pdata)
 		pdata = of_pdata;
 
@@ -538,7 +556,7 @@ static int st_sensors_read_axis_data(struct iio_dev *indio_dev,
 	else if (byte_for_channel == 2)
 		*data = (s16)get_unaligned_le16(outdata);
 	else if (byte_for_channel == 3)
-		*data = (s32)sign_extend32(get_unaligned_le24(outdata), 23);
+		*data = (s32)st_sensors_get_unaligned_le24(outdata);
 
 st_sensors_free_memory:
 	kfree(outdata);

@@ -26,6 +26,7 @@
 
 #define DRV_DESC "QE UCC Gigabit Ethernet Controller"
 #define DRV_NAME "ucc_geth"
+#define DRV_VERSION "1.1"
 
 #define NUM_TX_QUEUES                   8
 #define NUM_RX_QUEUES                   8
@@ -889,6 +890,7 @@ struct ucc_geth_hardware_statistics {
 							   addresses */
 
 #define TX_TIMEOUT                              (1*HZ)
+#define SKB_ALLOC_TIMEOUT                       100000
 #define PHY_INIT_TIMEOUT                        100000
 #define PHY_CHANGE_TIME                         2
 

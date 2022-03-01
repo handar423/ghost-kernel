@@ -30,10 +30,13 @@ enum riscv_regset {
 
 static int riscv_gpr_get(struct task_struct *target,
 			 const struct user_regset *regset,
-			 struct membuf to)
+			 unsigned int pos, unsigned int count,
+			 void *kbuf, void __user *ubuf)
 {
-	return membuf_write(&to, task_pt_regs(target),
-			    sizeof(struct user_regs_struct));
+	struct pt_regs *regs;
+
+	regs = task_pt_regs(target);
+	return user_regset_copyout(&pos, &count, &kbuf, &ubuf, regs, 0, -1);
 }
 
 static int riscv_gpr_set(struct task_struct *target,
@@ -52,13 +55,21 @@ static int riscv_gpr_set(struct task_struct *target,
 #ifdef CONFIG_FPU
 static int riscv_fpr_get(struct task_struct *target,
 			 const struct user_regset *regset,
-			 struct membuf to)
+			 unsigned int pos, unsigned int count,
+			 void *kbuf, void __user *ubuf)
 {
+	int ret;
 	struct __riscv_d_ext_state *fstate = &target->thread.fstate;
 
-	membuf_write(&to, fstate, offsetof(struct __riscv_d_ext_state, fcsr));
-	membuf_store(&to, fstate->fcsr);
-	return membuf_zero(&to, 4);	// explicitly pad
+	ret = user_regset_copyout(&pos, &count, &kbuf, &ubuf, fstate, 0,
+				  offsetof(struct __riscv_d_ext_state, fcsr));
+	if (!ret) {
+		ret = user_regset_copyout(&pos, &count, &kbuf, &ubuf, fstate, 0,
+					  offsetof(struct __riscv_d_ext_state, fcsr) +
+					  sizeof(fstate->fcsr));
+	}
+
+	return ret;
 }
 
 static int riscv_fpr_set(struct task_struct *target,
@@ -87,8 +98,8 @@ static const struct user_regset riscv_user_regset[] = {
 		.n = ELF_NGREG,
 		.size = sizeof(elf_greg_t),
 		.align = sizeof(elf_greg_t),
-		.regset_get = riscv_gpr_get,
-		.set = riscv_gpr_set,
+		.get = &riscv_gpr_get,
+		.set = &riscv_gpr_set,
 	},
 #ifdef CONFIG_FPU
 	[REGSET_F] = {
@@ -96,8 +107,8 @@ static const struct user_regset riscv_user_regset[] = {
 		.n = ELF_NFPREG,
 		.size = sizeof(elf_fpreg_t),
 		.align = sizeof(elf_fpreg_t),
-		.regset_get = riscv_fpr_get,
-		.set = riscv_fpr_set,
+		.get = &riscv_fpr_get,
+		.set = &riscv_fpr_set,
 	},
 #endif
 };
@@ -137,19 +148,11 @@ long arch_ptrace(struct task_struct *child, long request,
  * Allows PTRACE_SYSCALL to work.  These are called from entry.S in
  * {handle,ret_from}_syscall.
  */
-__visible int do_syscall_trace_enter(struct pt_regs *regs)
+__visible void do_syscall_trace_enter(struct pt_regs *regs)
 {
 	if (test_thread_flag(TIF_SYSCALL_TRACE))
 		if (tracehook_report_syscall_entry(regs))
-			return -1;
-
-	/*
-	 * Do the secure computing after ptrace; failures should be fast.
-	 * If this fails we might have return value in a0 from seccomp
-	 * (via SECCOMP_RET_ERRNO/TRACE).
-	 */
-	if (secure_computing() == -1)
-		return -1;
+			syscall_set_nr(current, regs, -1);
 
 #ifdef CONFIG_HAVE_SYSCALL_TRACEPOINTS
 	if (test_thread_flag(TIF_SYSCALL_TRACEPOINT))
@@ -157,7 +160,6 @@ __visible int do_syscall_trace_enter(struct pt_regs *regs)
 #endif
 
 	audit_syscall_entry(regs->a7, regs->a0, regs->a1, regs->a2, regs->a3);
-	return 0;
 }
 
 __visible void do_syscall_trace_exit(struct pt_regs *regs)

@@ -27,6 +27,7 @@
 #else /* !CONFIG_MMU */
 
 #include <linux/swap.h>
+#include <asm/pgalloc.h>
 #include <asm/tlbflush.h>
 
 static inline void __tlb_remove_table(void *_table)
@@ -35,6 +36,10 @@ static inline void __tlb_remove_table(void *_table)
 }
 
 #include <asm-generic/tlb.h>
+
+#ifndef CONFIG_HAVE_RCU_TABLE_FREE
+#define tlb_remove_table(tlb, entry) tlb_remove_page(tlb, entry)
+#endif
 
 static inline void
 __pte_free_tlb(struct mmu_gather *tlb, pgtable_t pte, unsigned long addr)
@@ -59,7 +64,6 @@ __pmd_free_tlb(struct mmu_gather *tlb, pmd_t *pmdp, unsigned long addr)
 #ifdef CONFIG_ARM_LPAE
 	struct page *page = virt_to_page(pmdp);
 
-	pgtable_pmd_page_dtor(page);
 	tlb_remove_table(tlb, page);
 #endif
 }

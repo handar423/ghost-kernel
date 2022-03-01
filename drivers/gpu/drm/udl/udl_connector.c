@@ -7,7 +7,6 @@
  * Copyright (C) 2009 Bernie Thompson <bernie@plugable.com>
  */
 
-#include <drm/drm_atomic_state_helper.h>
 #include <drm/drm_crtc_helper.h>
 #include <drm/drm_probe_helper.h>
 
@@ -20,7 +19,6 @@ static int udl_get_edid_block(void *data, u8 *buf, unsigned int block,
 	int ret, i;
 	u8 *read_buff;
 	struct udl_device *udl = data;
-	struct usb_device *udev = udl_to_usb_device(udl);
 
 	read_buff = kmalloc(2, GFP_KERNEL);
 	if (!read_buff)
@@ -28,9 +26,10 @@ static int udl_get_edid_block(void *data, u8 *buf, unsigned int block,
 
 	for (i = 0; i < len; i++) {
 		int bval = (i + block * EDID_LENGTH) << 8;
-		ret = usb_control_msg(udev, usb_rcvctrlpipe(udev, 0),
-				      0x02, (0x80 | (0x02 << 5)), bval,
-				      0xA1, read_buff, 2, HZ);
+		ret = usb_control_msg(udl->udev,
+				      usb_rcvctrlpipe(udl->udev, 0),
+					  (0x02), (0x80 | (0x02 << 5)), bval,
+					  0xA1, read_buff, 2, 1000);
 		if (ret < 1) {
 			DRM_ERROR("Read EDID byte %d failed err %x\n", i, ret);
 			kfree(read_buff);
@@ -59,7 +58,7 @@ static int udl_get_modes(struct drm_connector *connector)
 static enum drm_mode_status udl_mode_valid(struct drm_connector *connector,
 			  struct drm_display_mode *mode)
 {
-	struct udl_device *udl = to_udl(connector->dev);
+	struct udl_device *udl = connector->dev->dev_private;
 	if (!udl->sku_pixel_limit)
 		return 0;
 
@@ -72,7 +71,7 @@ static enum drm_mode_status udl_mode_valid(struct drm_connector *connector,
 static enum drm_connector_status
 udl_detect(struct drm_connector *connector, bool force)
 {
-	struct udl_device *udl = to_udl(connector->dev);
+	struct udl_device *udl = connector->dev->dev_private;
 	struct udl_drm_connector *udl_connector =
 					container_of(connector,
 					struct udl_drm_connector,
@@ -91,6 +90,20 @@ udl_detect(struct drm_connector *connector, bool force)
 	return connector_status_connected;
 }
 
+static struct drm_encoder*
+udl_best_single_encoder(struct drm_connector *connector)
+{
+	int enc_id = connector->encoder_ids[0];
+	return drm_encoder_find(connector->dev, NULL, enc_id);
+}
+
+static int udl_connector_set_property(struct drm_connector *connector,
+				      struct drm_property *property,
+				      uint64_t val)
+{
+	return 0;
+}
+
 static void udl_connector_destroy(struct drm_connector *connector)
 {
 	struct udl_drm_connector *udl_connector =
@@ -98,6 +111,7 @@ static void udl_connector_destroy(struct drm_connector *connector)
 					struct udl_drm_connector,
 					connector);
 
+	drm_connector_unregister(connector);
 	drm_connector_cleanup(connector);
 	kfree(udl_connector->edid);
 	kfree(connector);
@@ -106,33 +120,35 @@ static void udl_connector_destroy(struct drm_connector *connector)
 static const struct drm_connector_helper_funcs udl_connector_helper_funcs = {
 	.get_modes = udl_get_modes,
 	.mode_valid = udl_mode_valid,
+	.best_encoder = udl_best_single_encoder,
 };
 
 static const struct drm_connector_funcs udl_connector_funcs = {
-	.reset = drm_atomic_helper_connector_reset,
+	.dpms = drm_helper_connector_dpms,
 	.detect = udl_detect,
 	.fill_modes = drm_helper_probe_single_connector_modes,
 	.destroy = udl_connector_destroy,
-	.atomic_duplicate_state = drm_atomic_helper_connector_duplicate_state,
-	.atomic_destroy_state   = drm_atomic_helper_connector_destroy_state,
+	.set_property = udl_connector_set_property,
 };
 
-struct drm_connector *udl_connector_init(struct drm_device *dev)
+int udl_connector_init(struct drm_device *dev, struct drm_encoder *encoder)
 {
 	struct udl_drm_connector *udl_connector;
 	struct drm_connector *connector;
 
 	udl_connector = kzalloc(sizeof(struct udl_drm_connector), GFP_KERNEL);
 	if (!udl_connector)
-		return ERR_PTR(-ENOMEM);
+		return -ENOMEM;
 
 	connector = &udl_connector->connector;
 	drm_connector_init(dev, connector, &udl_connector_funcs,
 			   DRM_MODE_CONNECTOR_DVII);
 	drm_connector_helper_add(connector, &udl_connector_helper_funcs);
 
+	drm_connector_register(connector);
+	drm_connector_attach_encoder(connector, encoder);
 	connector->polled = DRM_CONNECTOR_POLL_HPD |
 		DRM_CONNECTOR_POLL_CONNECT | DRM_CONNECTOR_POLL_DISCONNECT;
 
-	return connector;
+	return 0;
 }

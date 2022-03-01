@@ -19,35 +19,37 @@
 
 /**
  * st_sensors_new_samples_available() - check if more samples came in
- * @indio_dev: IIO device reference.
- * @sdata: Sensor data.
- *
  * returns:
- * false - no new samples available or read error
- * true - new samples available
+ * 0 - no new samples available
+ * 1 - new samples available
+ * negative - error or unknown
  */
-static bool st_sensors_new_samples_available(struct iio_dev *indio_dev,
-					     struct st_sensor_data *sdata)
+static int st_sensors_new_samples_available(struct iio_dev *indio_dev,
+					    struct st_sensor_data *sdata)
 {
 	int ret, status;
 
 	/* How would I know if I can't check it? */
 	if (!sdata->sensor_settings->drdy_irq.stat_drdy.addr)
-		return true;
+		return -EINVAL;
 
 	/* No scan mask, no interrupt */
 	if (!indio_dev->active_scan_mask)
-		return false;
+		return 0;
 
 	ret = regmap_read(sdata->regmap,
 			  sdata->sensor_settings->drdy_irq.stat_drdy.addr,
 			  &status);
 	if (ret < 0) {
-		dev_err(sdata->dev, "error checking samples available\n");
-		return false;
+		dev_err(sdata->dev,
+			"error checking samples available\n");
+		return ret;
 	}
 
-	return !!(status & sdata->sensor_settings->drdy_irq.stat_drdy.mask);
+	if (status & sdata->sensor_settings->drdy_irq.stat_drdy.mask)
+		return 1;
+
+	return 0;
 }
 
 /**
@@ -143,7 +145,9 @@ int st_sensors_allocate_trigger(struct iio_dev *indio_dev,
 	case IRQF_TRIGGER_LOW:
 		if (!sdata->sensor_settings->drdy_irq.addr_ihl) {
 			dev_err(&indio_dev->dev,
-				"falling/low specified for IRQ but hardware supports only rising/high: will request rising/high\n");
+				"falling/low specified for IRQ "
+				"but hardware supports only rising/high: "
+				"will request rising/high\n");
 			if (irq_trig == IRQF_TRIGGER_FALLING)
 				irq_trig = IRQF_TRIGGER_RISING;
 			if (irq_trig == IRQF_TRIGGER_LOW)
@@ -156,7 +160,8 @@ int st_sensors_allocate_trigger(struct iio_dev *indio_dev,
 			if (err < 0)
 				goto iio_trigger_free;
 			dev_info(&indio_dev->dev,
-				 "interrupts on the falling edge or active low level\n");
+				 "interrupts on the falling edge or "
+				 "active low level\n");
 		}
 		break;
 	case IRQF_TRIGGER_RISING:
@@ -170,21 +175,16 @@ int st_sensors_allocate_trigger(struct iio_dev *indio_dev,
 	default:
 		/* This is the most preferred mode, if possible */
 		dev_err(&indio_dev->dev,
-			"unsupported IRQ trigger specified (%lx), enforce rising edge\n", irq_trig);
+			"unsupported IRQ trigger specified (%lx), enforce "
+			"rising edge\n", irq_trig);
 		irq_trig = IRQF_TRIGGER_RISING;
 	}
 
 	/* Tell the interrupt handler that we're dealing with edges */
 	if (irq_trig == IRQF_TRIGGER_FALLING ||
-	    irq_trig == IRQF_TRIGGER_RISING) {
-		if (!sdata->sensor_settings->drdy_irq.stat_drdy.addr) {
-			dev_err(&indio_dev->dev,
-				"edge IRQ not supported w/o stat register.\n");
-			err = -EOPNOTSUPP;
-			goto iio_trigger_free;
-		}
+	    irq_trig == IRQF_TRIGGER_RISING)
 		sdata->edge_irq = true;
-	} else {
+	else
 		/*
 		 * If we're not using edges (i.e. level interrupts) we
 		 * just mask off the IRQ, handle one interrupt, then
@@ -192,7 +192,6 @@ int st_sensors_allocate_trigger(struct iio_dev *indio_dev,
 		 * interrupt handler top half again and start over.
 		 */
 		irq_trig |= IRQF_ONESHOT;
-	}
 
 	/*
 	 * If the interrupt pin is Open Drain, by definition this

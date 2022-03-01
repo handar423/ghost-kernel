@@ -12,21 +12,15 @@
 #include <linux/stddef.h>
 #include <linux/perf_event.h>
 #include <linux/types.h>
-#include "event.h"
 
 struct branch_flags {
-	union {
-		u64 value;
-		struct {
-			u64 mispred:1;
-			u64 predicted:1;
-			u64 in_tx:1;
-			u64 abort:1;
-			u64 cycles:16;
-			u64 type:4;
-			u64 reserved:40;
-		};
-	};
+	u64 mispred:1;
+	u64 predicted:1;
+	u64 in_tx:1;
+	u64 abort:1;
+	u64 cycles:16;
+	u64 type:4;
+	u64 reserved:40;
 };
 
 struct branch_info {
@@ -45,29 +39,8 @@ struct branch_entry {
 
 struct branch_stack {
 	u64			nr;
-	u64			hw_idx;
-	struct branch_entry	entries[];
+	struct branch_entry	entries[0];
 };
-
-/*
- * The hw_idx is only available when PERF_SAMPLE_BRANCH_HW_INDEX is applied.
- * Otherwise, the output format of a sample with branch stack is
- * struct branch_stack {
- *	u64			nr;
- *	struct branch_entry	entries[0];
- * }
- * Check whether the hw_idx is available,
- * and return the corresponding pointer of entries[0].
- */
-static inline struct branch_entry *perf_sample__branch_entries(struct perf_sample *sample)
-{
-	u64 *entry = (u64 *)sample->branch_stack;
-
-	entry++;
-	if (sample->no_hw_idx)
-		return (struct branch_entry *)entry;
-	return (struct branch_entry *)(++entry);
-}
 
 struct branch_type_stat {
 	bool	branch_to;

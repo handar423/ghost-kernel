@@ -27,8 +27,7 @@ static void __iomem *gic_cpu_ctrl;
 #define GIC_CPU_CTRL			0x00
 #define GIC_CPU_CTRL_ENABLE		1
 
-static int __init ox820_boot_secondary(unsigned int cpu,
-		struct task_struct *idle)
+int __init ox820_boot_secondary(unsigned int cpu, struct task_struct *idle)
 {
 	/*
 	 * Write the address of secondary startup into the

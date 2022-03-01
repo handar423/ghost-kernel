@@ -164,13 +164,15 @@ static int __init coh901331_probe(struct platform_device *pdev)
 {
 	int ret;
 	struct coh901331_port *rtap;
+	struct resource *res;
 
 	rtap = devm_kzalloc(&pdev->dev,
 			    sizeof(struct coh901331_port), GFP_KERNEL);
 	if (!rtap)
 		return -ENOMEM;
 
-	rtap->virtbase  = devm_platform_ioremap_resource(pdev, 0);
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	rtap->virtbase  = devm_ioremap_resource(&pdev->dev, res);
 	if (IS_ERR(rtap->virtbase))
 		return PTR_ERR(rtap->virtbase);
 
@@ -203,7 +205,7 @@ static int __init coh901331_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, rtap);
 
-	ret = devm_rtc_register_device(rtap->rtc);
+	ret = rtc_register_device(rtap->rtc);
 	if (ret)
 		goto out_no_rtc;
 

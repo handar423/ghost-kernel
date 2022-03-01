@@ -91,11 +91,11 @@ int main(int argc, char *argv[])
 
 	cap = kvm_check_cap(KVM_CAP_SYNC_REGS);
 	if ((cap & TEST_SYNC_FIELDS) != TEST_SYNC_FIELDS) {
-		print_skip("KVM_CAP_SYNC_REGS not supported");
+		fprintf(stderr, "KVM_CAP_SYNC_REGS not supported, skipping test\n");
 		exit(KSFT_SKIP);
 	}
 	if ((cap & INVALID_SYNC_FIELD) != 0) {
-		print_skip("The \"invalid\" field is not invalid");
+		fprintf(stderr, "The \"invalid\" field is not invalid, skipping test\n");
 		exit(KSFT_SKIP);
 	}
 

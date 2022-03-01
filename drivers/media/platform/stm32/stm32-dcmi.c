@@ -135,6 +135,7 @@ struct stm32_dcmi {
 	int				sequence;
 	struct list_head		buffers;
 	struct dcmi_buf			*active;
+	int			irq;
 
 	struct v4l2_device		v4l2_dev;
 	struct video_device		*vdev;
@@ -157,7 +158,6 @@ struct stm32_dcmi {
 	struct vb2_queue		queue;
 
 	struct v4l2_fwnode_bus_parallel	bus;
-	enum v4l2_mbus_type		bus_type;
 	struct completion		complete;
 	struct clk			*mclk;
 	enum state			state;
@@ -325,7 +325,7 @@ static int dcmi_start_dma(struct stm32_dcmi *dcmi,
 	}
 
 	/*
-	 * Avoid call of dmaengine_terminate_sync() between
+	 * Avoid call of dmaengine_terminate_all() between
 	 * dmaengine_prep_slave_single() and dmaengine_submit()
 	 * by locking the whole DMA submission sequence
 	 */
@@ -439,7 +439,7 @@ static void dcmi_process_jpeg(struct stm32_dcmi *dcmi)
 	}
 
 	/* Abort DMA operation */
-	dmaengine_terminate_sync(dcmi->dma_chan);
+	dmaengine_terminate_all(dcmi->dma_chan);
 
 	/* Restart capture */
 	if (dcmi_restart_capture(dcmi))
@@ -778,23 +778,6 @@ static int dcmi_start_streaming(struct vb2_queue *vq, unsigned int count)
 	if (dcmi->bus.flags & V4L2_MBUS_PCLK_SAMPLE_RISING)
 		val |= CR_PCKPOL;
 
-	/*
-	 * BT656 embedded synchronisation bus mode.
-	 *
-	 * Default SAV/EAV mode is supported here with default codes
-	 * SAV=0xff000080 & EAV=0xff00009d.
-	 * With DCMI this means LSC=SAV=0x80 & LEC=EAV=0x9d.
-	 */
-	if (dcmi->bus_type == V4L2_MBUS_BT656) {
-		val |= CR_ESS;
-
-		/* Unmask all codes */
-		reg_write(dcmi->regs, DCMI_ESUR, 0xffffffff);/* FEC:LEC:LSC:FSC */
-
-		/* Trig on LSC=0x80 & LEC=0x9d codes, ignore FSC and FEC */
-		reg_write(dcmi->regs, DCMI_ESCR, 0xff9d80ff);/* FEC:LEC:LSC:FSC */
-	}
-
 	reg_write(dcmi->regs, DCMI_CR, val);
 
 	/* Set crop */
@@ -900,7 +883,7 @@ static void dcmi_stop_streaming(struct vb2_queue *vq)
 
 	/* Stop all pending DMA operations */
 	mutex_lock(&dcmi->dma_lock);
-	dmaengine_terminate_sync(dcmi->dma_chan);
+	dmaengine_terminate_all(dcmi->dma_chan);
 	mutex_unlock(&dcmi->dma_lock);
 
 	pm_runtime_put(dcmi->dev);
@@ -1085,9 +1068,8 @@ static int dcmi_set_fmt(struct stm32_dcmi *dcmi, struct v4l2_format *f)
 	if (ret)
 		return ret;
 
-	/* Disable crop if JPEG is requested or BT656 bus is selected */
-	if (pix->pixelformat == V4L2_PIX_FMT_JPEG &&
-	    dcmi->bus_type != V4L2_MBUS_BT656)
+	/* Disable crop if JPEG is requested */
+	if (pix->pixelformat == V4L2_PIX_FMT_JPEG)
 		dcmi->do_crop = false;
 
 	/* pix to mbus format */
@@ -1593,22 +1575,6 @@ static const struct dcmi_format dcmi_formats[] = {
 		.fourcc = V4L2_PIX_FMT_JPEG,
 		.mbus_code = MEDIA_BUS_FMT_JPEG_1X8,
 		.bpp = 1,
-	}, {
-		.fourcc = V4L2_PIX_FMT_SBGGR8,
-		.mbus_code = MEDIA_BUS_FMT_SBGGR8_1X8,
-		.bpp = 1,
-	}, {
-		.fourcc = V4L2_PIX_FMT_SGBRG8,
-		.mbus_code = MEDIA_BUS_FMT_SGBRG8_1X8,
-		.bpp = 1,
-	}, {
-		.fourcc = V4L2_PIX_FMT_SGRBG8,
-		.mbus_code = MEDIA_BUS_FMT_SGRBG8_1X8,
-		.bpp = 1,
-	}, {
-		.fourcc = V4L2_PIX_FMT_SRGGB8,
-		.mbus_code = MEDIA_BUS_FMT_SRGGB8_1X8,
-		.bpp = 1,
 	},
 };
 
@@ -1625,11 +1591,6 @@ static int dcmi_formats_init(struct stm32_dcmi *dcmi)
 				 NULL, &mbus_code)) {
 		for (i = 0; i < ARRAY_SIZE(dcmi_formats); i++) {
 			if (dcmi_formats[i].mbus_code != mbus_code.code)
-				continue;
-
-			/* Exclude JPEG if BT656 bus is selected */
-			if (dcmi_formats[i].fourcc == V4L2_PIX_FMT_JPEG &&
-			    dcmi->bus_type == V4L2_MBUS_BT656)
 				continue;
 
 			/* Code supported, have we got this fourcc yet? */
@@ -1757,6 +1718,14 @@ static int dcmi_graph_notify_complete(struct v4l2_async_notifier *notifier)
 	ret = dcmi_set_default_fmt(dcmi);
 	if (ret) {
 		dev_err(dcmi->dev, "Could not set default format\n");
+		return ret;
+	}
+
+	ret = devm_request_threaded_irq(dcmi->dev, dcmi->irq, dcmi_irq_callback,
+					dcmi_irq_thread, IRQF_ONESHOT,
+					dev_name(dcmi->dev), dcmi);
+	if (ret) {
+		dev_err(dcmi->dev, "Unable to request irq %d\n", dcmi->irq);
 		return ret;
 	}
 
@@ -1891,9 +1860,7 @@ static int dcmi_probe(struct platform_device *pdev)
 
 	dcmi->rstc = devm_reset_control_get_exclusive(&pdev->dev, NULL);
 	if (IS_ERR(dcmi->rstc)) {
-		if (PTR_ERR(dcmi->rstc) != -EPROBE_DEFER)
-			dev_err(&pdev->dev, "Could not get reset control\n");
-
+		dev_err(&pdev->dev, "Could not get reset control\n");
 		return PTR_ERR(dcmi->rstc);
 	}
 
@@ -1915,22 +1882,15 @@ static int dcmi_probe(struct platform_device *pdev)
 		dev_err(&pdev->dev, "CSI bus not supported\n");
 		return -ENODEV;
 	}
-
-	if (ep.bus_type == V4L2_MBUS_BT656 &&
-	    ep.bus.parallel.bus_width != 8) {
-		dev_err(&pdev->dev, "BT656 bus conflicts with %u bits bus width (8 bits required)\n",
-			ep.bus.parallel.bus_width);
-		return -ENODEV;
-	}
-
 	dcmi->bus.flags = ep.bus.parallel.flags;
 	dcmi->bus.bus_width = ep.bus.parallel.bus_width;
 	dcmi->bus.data_shift = ep.bus.parallel.data_shift;
-	dcmi->bus_type = ep.bus_type;
 
 	irq = platform_get_irq(pdev, 0);
 	if (irq <= 0)
 		return irq ? irq : -ENXIO;
+
+	dcmi->irq = irq;
 
 	dcmi->res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!dcmi->res) {
@@ -1944,14 +1904,6 @@ static int dcmi_probe(struct platform_device *pdev)
 		return PTR_ERR(dcmi->regs);
 	}
 
-	ret = devm_request_threaded_irq(&pdev->dev, irq, dcmi_irq_callback,
-					dcmi_irq_thread, IRQF_ONESHOT,
-					dev_name(&pdev->dev), dcmi);
-	if (ret) {
-		dev_err(&pdev->dev, "Unable to request irq %d\n", irq);
-		return ret;
-	}
-
 	mclk = devm_clk_get(&pdev->dev, "mclk");
 	if (IS_ERR(mclk)) {
 		if (PTR_ERR(mclk) != -EPROBE_DEFER)
@@ -1959,13 +1911,10 @@ static int dcmi_probe(struct platform_device *pdev)
 		return PTR_ERR(mclk);
 	}
 
-	chan = dma_request_chan(&pdev->dev, "tx");
-	if (IS_ERR(chan)) {
-		ret = PTR_ERR(chan);
-		if (ret != -EPROBE_DEFER)
-			dev_err(&pdev->dev,
-				"Failed to request DMA channel: %d\n", ret);
-		return ret;
+	chan = dma_request_slave_channel(&pdev->dev, "tx");
+	if (!chan) {
+		dev_info(&pdev->dev, "Unable to request DMA channel, defer probing\n");
+		return -EPROBE_DEFER;
 	}
 
 	spin_lock_init(&dcmi->irqlock);
@@ -2023,7 +1972,7 @@ static int dcmi_probe(struct platform_device *pdev)
 	}
 	dcmi->vdev->entity.flags |= MEDIA_ENT_FL_DEFAULT;
 
-	ret = video_register_device(dcmi->vdev, VFL_TYPE_VIDEO, -1);
+	ret = video_register_device(dcmi->vdev, VFL_TYPE_GRABBER, -1);
 	if (ret) {
 		dev_err(dcmi->dev, "Failed to register video device\n");
 		goto err_media_entity_cleanup;

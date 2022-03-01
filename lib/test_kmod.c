@@ -204,7 +204,7 @@ static void test_kmod_put_module(struct kmod_test_device_info *info)
 	case TEST_KMOD_DRIVER:
 		break;
 	case TEST_KMOD_FS_TYPE:
-		if (info->fs_sync && info->fs_sync->owner)
+		if (info && info->fs_sync && info->fs_sync->owner)
 			module_put(info->fs_sync->owner);
 		break;
 	default:
@@ -877,17 +877,20 @@ static int test_dev_config_update_uint_sync(struct kmod_test_device *test_dev,
 					    int (*test_sync)(struct kmod_test_device *test_dev))
 {
 	int ret;
-	unsigned int val;
+	unsigned long new;
 	unsigned int old_val;
 
-	ret = kstrtouint(buf, 10, &val);
+	ret = kstrtoul(buf, 10, &new);
 	if (ret)
 		return ret;
+
+	if (new > UINT_MAX)
+		return -EINVAL;
 
 	mutex_lock(&test_dev->config_mutex);
 
 	old_val = *config;
-	*(unsigned int *)config = val;
+	*(unsigned int *)config = new;
 
 	ret = test_sync(test_dev);
 	if (ret) {
@@ -911,18 +914,18 @@ static int test_dev_config_update_uint_range(struct kmod_test_device *test_dev,
 					     unsigned int min,
 					     unsigned int max)
 {
-	unsigned int val;
 	int ret;
+	unsigned long new;
 
-	ret = kstrtouint(buf, 10, &val);
+	ret = kstrtoul(buf, 10, &new);
 	if (ret)
 		return ret;
 
-	if (val < min || val > max)
+	if (new < min || new > max)
 		return -EINVAL;
 
 	mutex_lock(&test_dev->config_mutex);
-	*config = val;
+	*config = new;
 	mutex_unlock(&test_dev->config_mutex);
 
 	/* Always return full write size even if we didn't consume all */
@@ -933,15 +936,18 @@ static int test_dev_config_update_int(struct kmod_test_device *test_dev,
 				      const char *buf, size_t size,
 				      int *config)
 {
-	int val;
 	int ret;
+	long new;
 
-	ret = kstrtoint(buf, 10, &val);
+	ret = kstrtol(buf, 10, &new);
 	if (ret)
 		return ret;
 
+	if (new < INT_MIN || new > INT_MAX)
+		return -EINVAL;
+
 	mutex_lock(&test_dev->config_mutex);
-	*config = val;
+	*config = new;
 	mutex_unlock(&test_dev->config_mutex);
 	/* Always return full write size even if we didn't consume all */
 	return size;

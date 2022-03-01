@@ -9,6 +9,7 @@
 #include <linux/slab.h>
 
 #include <asm/pgalloc.h>
+#include <asm/pgtable.h>
 #include <asm/sections.h>
 #include <as-layout.h>
 #include <os.h>
@@ -18,20 +19,14 @@ static int init_stub_pte(struct mm_struct *mm, unsigned long proc,
 			 unsigned long kernel)
 {
 	pgd_t *pgd;
-	p4d_t *p4d;
 	pud_t *pud;
 	pmd_t *pmd;
 	pte_t *pte;
 
 	pgd = pgd_offset(mm, proc);
-
-	p4d = p4d_alloc(mm, pgd, proc);
-	if (!p4d)
-		goto out;
-
-	pud = pud_alloc(mm, p4d, proc);
+	pud = pud_alloc(mm, pgd, proc);
 	if (!pud)
-		goto out_pud;
+		goto out;
 
 	pmd = pmd_alloc(mm, pud, proc);
 	if (!pmd)
@@ -49,8 +44,6 @@ static int init_stub_pte(struct mm_struct *mm, unsigned long proc,
 	pmd_free(mm, pmd);
  out_pmd:
 	pud_free(mm, pud);
- out_pud:
-	p4d_free(mm, p4d);
  out:
 	return -ENOMEM;
 }
@@ -114,7 +107,7 @@ void uml_setup_stubs(struct mm_struct *mm)
 	mm->context.stub_pages[0] = virt_to_page(__syscall_stub_start);
 	mm->context.stub_pages[1] = virt_to_page(mm->context.id.stack);
 
-	/* dup_mmap already holds mmap_lock */
+	/* dup_mmap already holds mmap_sem */
 	err = install_special_mapping(mm, STUB_START, STUB_END - STUB_START,
 				      VM_READ | VM_MAYREAD | VM_EXEC |
 				      VM_MAYEXEC | VM_DONTCOPY | VM_PFNMAP,

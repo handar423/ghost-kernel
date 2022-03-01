@@ -421,8 +421,8 @@ static void mlx4_en_handle_err_cqe(struct mlx4_en_priv *priv, struct mlx4_err_cq
 	queue_work(mdev->workqueue, &priv->restart_task);
 }
 
-int mlx4_en_process_tx_cq(struct net_device *dev,
-			  struct mlx4_en_cq *cq, int napi_budget)
+bool mlx4_en_process_tx_cq(struct net_device *dev,
+			   struct mlx4_en_cq *cq, int napi_budget)
 {
 	struct mlx4_en_priv *priv = netdev_priv(dev);
 	struct mlx4_cq *mcq = &cq->mcq;
@@ -444,7 +444,7 @@ int mlx4_en_process_tx_cq(struct net_device *dev,
 	u32 ring_cons;
 
 	if (unlikely(!priv->port_up))
-		return 0;
+		return true;
 
 	netdev_txq_bql_complete_prefetchw(ring->tx_queue);
 
@@ -518,7 +518,7 @@ int mlx4_en_process_tx_cq(struct net_device *dev,
 	WRITE_ONCE(ring->cons, ring_cons + txbbs_skipped);
 
 	if (cq->type == TX_XDP)
-		return done;
+		return done < budget;
 
 	netdev_tx_completed_queue(ring->tx_queue, packets, bytes);
 
@@ -530,7 +530,7 @@ int mlx4_en_process_tx_cq(struct net_device *dev,
 		ring->wake_queue++;
 	}
 
-	return done;
+	return done < budget;
 }
 
 void mlx4_en_tx_irq(struct mlx4_cq *mcq)
@@ -550,14 +550,14 @@ int mlx4_en_poll_tx_cq(struct napi_struct *napi, int budget)
 	struct mlx4_en_cq *cq = container_of(napi, struct mlx4_en_cq, napi);
 	struct net_device *dev = cq->dev;
 	struct mlx4_en_priv *priv = netdev_priv(dev);
-	int work_done;
+	bool clean_complete;
 
-	work_done = mlx4_en_process_tx_cq(dev, cq, budget);
-	if (work_done >= budget)
+	clean_complete = mlx4_en_process_tx_cq(dev, cq, budget);
+	if (!clean_complete)
 		return budget;
 
-	if (napi_complete_done(napi, work_done))
-		mlx4_en_arm_cq(priv, cq);
+	napi_complete(napi);
+	mlx4_en_arm_cq(priv, cq);
 
 	return 0;
 }
@@ -890,6 +890,9 @@ netdev_tx_t mlx4_en_xmit(struct sk_buff *skb, struct net_device *dev)
 	if (unlikely(!priv->port_up))
 		goto tx_drop;
 
+	/* fetch ring->cons far ahead before needing it to avoid stall */
+	ring_cons = READ_ONCE(ring->cons);
+
 	real_size = get_real_size(skb, shinfo, dev, &lso_header_size,
 				  &inline_ok, &fragptr);
 	if (unlikely(!real_size))
@@ -920,6 +923,10 @@ netdev_tx_t mlx4_en_xmit(struct sk_buff *skb, struct net_device *dev)
 	}
 
 	netdev_txq_bql_enqueue_prefetchw(ring->tx_queue);
+
+	/* Track current inflight packets for performance analysis */
+	AVG_PERF_COUNTER(priv->pstats.inflight_avg,
+			 (u32)(ring->prod - ring_cons - 1));
 
 	/* Packet is good - grab an index and transmit it */
 	index = ring->prod & ring->size_mask;
@@ -1031,6 +1038,7 @@ netdev_tx_t mlx4_en_xmit(struct sk_buff *skb, struct net_device *dev)
 		ring->packets++;
 	}
 	ring->bytes += tx_info->nr_bytes;
+	AVG_PERF_COUNTER(priv->pstats.tx_pktsz_avg, skb->len);
 
 	if (tx_info->inl)
 		build_inline_wqe(tx_desc, skb, shinfo, fragptr);
@@ -1093,6 +1101,7 @@ netdev_tx_t mlx4_en_xmit(struct sk_buff *skb, struct net_device *dev)
 		 */
 		smp_rmb();
 
+		ring_cons = READ_ONCE(ring->cons);
 		if (unlikely(!mlx4_en_is_tx_ring_full(ring))) {
 			netif_tx_wake_queue(ring->tx_queue);
 			ring->wake_queue++;
@@ -1159,6 +1168,10 @@ netdev_tx_t mlx4_en_xmit_frame(struct mlx4_en_rx_ring *rx_ring,
 	index = ring->prod & ring->size_mask;
 	tx_info = &ring->tx_info[index];
 
+	/* Track current inflight packets for performance analysis */
+	AVG_PERF_COUNTER(priv->pstats.inflight_avg,
+			 (u32)(ring->prod - READ_ONCE(ring->cons) - 1));
+
 	tx_desc = ring->buf + (index << LOG_TXBB_SIZE);
 	data = &tx_desc->data;
 
@@ -1183,6 +1196,7 @@ netdev_tx_t mlx4_en_xmit_frame(struct mlx4_en_rx_ring *rx_ring,
 		 cpu_to_be32(MLX4_EN_BIT_DESC_OWN) : 0);
 
 	rx_ring->xdp_tx++;
+	AVG_PERF_COUNTER(priv->pstats.tx_pktsz_avg, length);
 
 	ring->prod += MLX4_EN_XDP_TX_NRTXBB;
 

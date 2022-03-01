@@ -97,7 +97,7 @@ MODULE_DEVICE_TABLE(pci, peak_pci_tbl);
 /* GPIOICR byte access offsets */
 #define PITA_GPOUT		0x18	/* GPx output value */
 #define PITA_GPIN		0x19	/* GPx input value */
-#define PITA_GPOEN		0x1A	/* configure GPx as output pin */
+#define PITA_GPOEN		0x1A	/* configure GPx as ouput pin */
 
 /* I2C GP bits */
 #define PITA_GPIN_SCL		0x01	/* Serial Clock Line */
@@ -731,16 +731,15 @@ static void peak_pci_remove(struct pci_dev *pdev)
 		struct net_device *prev_dev = chan->prev_dev;
 
 		dev_info(&pdev->dev, "removing device %s\n", dev->name);
+		/* do that only for first channel */
+		if (!prev_dev && chan->pciec_card)
+			peak_pciec_remove(chan->pciec_card);
 		unregister_sja1000dev(dev);
 		free_sja1000dev(dev);
 		dev = prev_dev;
 
-		if (!dev) {
-			/* do that only for first channel */
-			if (chan->pciec_card)
-				peak_pciec_remove(chan->pciec_card);
+		if (!dev)
 			break;
-		}
 		priv = netdev_priv(dev);
 		chan = priv->priv;
 	}

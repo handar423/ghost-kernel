@@ -173,7 +173,7 @@ static void __iop_adma_slot_cleanup(struct iop_adma_chan *iop_chan)
 					&iop_chan->chain, chain_node) {
 					zero_sum_result |=
 					    iop_desc_get_zero_result(grp_iter);
-					pr_debug("\titer%d result: %d\n",
+					    pr_debug("\titer%d result: %d\n",
 					    grp_iter->idx, zero_sum_result);
 					slot_cnt -= slots_per_op;
 					if (slot_cnt == 0)
@@ -238,10 +238,9 @@ iop_adma_slot_cleanup(struct iop_adma_chan *iop_chan)
 	spin_unlock_bh(&iop_chan->lock);
 }
 
-static void iop_adma_tasklet(struct tasklet_struct *t)
+static void iop_adma_tasklet(unsigned long data)
 {
-	struct iop_adma_chan *iop_chan = from_tasklet(iop_chan, t,
-						      irq_tasklet);
+	struct iop_adma_chan *iop_chan = (struct iop_adma_chan *) data;
 
 	/* lockdep will flag depedency submissions as potentially
 	 * recursive locking, this is not the case as a dependency
@@ -407,7 +406,8 @@ static void iop_chan_start_null_xor(struct iop_adma_chan *iop_chan);
 
 /**
  * iop_adma_alloc_chan_resources -  returns the number of allocated descriptors
- * @chan: allocate descriptor resources for this channel
+ * @chan - allocate descriptor resources for this channel
+ * @client - current client requesting the channel be ready for requests
  *
  * Note: We keep the slots for 1 operation on iop_chan->chain at all times.  To
  * avoid deadlock, via async_xor, num_descs_in_pool must at a minimum be
@@ -417,7 +417,6 @@ static void iop_chan_start_null_xor(struct iop_adma_chan *iop_chan);
 static int iop_adma_alloc_chan_resources(struct dma_chan *chan)
 {
 	char *hw_desc;
-	dma_addr_t dma_desc;
 	int idx;
 	struct iop_adma_chan *iop_chan = to_iop_adma_chan(chan);
 	struct iop_adma_desc_slot *slot = NULL;
@@ -446,8 +445,9 @@ static int iop_adma_alloc_chan_resources(struct dma_chan *chan)
 		INIT_LIST_HEAD(&slot->tx_list);
 		INIT_LIST_HEAD(&slot->chain_node);
 		INIT_LIST_HEAD(&slot->slot_node);
-		dma_desc = iop_chan->device->dma_desc_pool;
-		slot->async_tx.phys = dma_desc + idx * IOP_ADMA_SLOT_SIZE;
+		hw_desc = (char *) iop_chan->device->dma_desc_pool;
+		slot->async_tx.phys =
+			(dma_addr_t) &hw_desc[idx * IOP_ADMA_SLOT_SIZE];
 		slot->idx = idx;
 
 		spin_lock_bh(&iop_chan->lock);
@@ -1297,8 +1297,9 @@ static int iop_adma_probe(struct platform_device *pdev)
 		goto err_free_adev;
 	}
 
-	dev_dbg(&pdev->dev, "%s: allocated descriptor pool virt %p phys %pad\n",
-		__func__, adev->dma_desc_pool_virt, &adev->dma_desc_pool);
+	dev_dbg(&pdev->dev, "%s: allocated descriptor pool virt %p phys %p\n",
+		__func__, adev->dma_desc_pool_virt,
+		(void *) adev->dma_desc_pool);
 
 	adev->id = plat_data->hw_id;
 
@@ -1351,17 +1352,16 @@ static int iop_adma_probe(struct platform_device *pdev)
 		ret = -ENOMEM;
 		goto err_free_iop_chan;
 	}
-	tasklet_setup(&iop_chan->irq_tasklet, iop_adma_tasklet);
+	tasklet_init(&iop_chan->irq_tasklet, iop_adma_tasklet, (unsigned long)
+		iop_chan);
 
 	/* clear errors before enabling interrupts */
 	iop_adma_device_clear_err_status(iop_chan);
 
 	for (i = 0; i < 3; i++) {
-		static const irq_handler_t handler[] = {
-			iop_adma_eot_handler,
-			iop_adma_eoc_handler,
-			iop_adma_err_handler
-		};
+		irq_handler_t handler[] = { iop_adma_eot_handler,
+					iop_adma_eoc_handler,
+					iop_adma_err_handler };
 		int irq = platform_get_irq(pdev, i);
 		if (irq < 0) {
 			ret = -ENXIO;

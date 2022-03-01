@@ -88,10 +88,9 @@ static void br_arp_send(struct net_bridge *br, struct net_bridge_port *p,
 	}
 }
 
-static int br_chk_addr_ip(struct net_device *dev,
-			  struct netdev_nested_priv *priv)
+static int br_chk_addr_ip(struct net_device *dev, void *data)
 {
-	__be32 ip = *(__be32 *)priv->data;
+	__be32 ip = *(__be32 *)data;
 	struct in_device *in_dev;
 	__be32 addr = 0;
 
@@ -108,15 +107,11 @@ static int br_chk_addr_ip(struct net_device *dev,
 
 static bool br_is_local_ip(struct net_device *dev, __be32 ip)
 {
-	struct netdev_nested_priv priv = {
-		.data = (void *)&ip,
-	};
-
-	if (br_chk_addr_ip(dev, &priv))
+	if (br_chk_addr_ip(dev, &ip))
 		return true;
 
 	/* check if ip is configured on upper dev */
-	if (netdev_walk_all_upper_dev_rcu(dev, br_chk_addr_ip, &priv))
+	if (netdev_walk_all_upper_dev_rcu(dev, br_chk_addr_ip, &ip))
 		return true;
 
 	return false;
@@ -160,7 +155,9 @@ void br_do_proxy_suppress_arp(struct sk_buff *skb, struct net_bridge *br,
 	if (br_opt_get(br, BROPT_NEIGH_SUPPRESS_ENABLED)) {
 		if (p && (p->flags & BR_NEIGH_SUPPRESS))
 			return;
-		if (ipv4_is_zeronet(sip) || sip == tip) {
+		if (parp->ar_op != htons(ARPOP_RREQUEST) &&
+		    parp->ar_op != htons(ARPOP_RREPLY) &&
+		    (ipv4_is_zeronet(sip) || sip == tip)) {
 			/* prevent flooding to neigh suppress ports */
 			BR_INPUT_SKB_CB(skb)->proxyarp_replied = 1;
 			return;
@@ -366,10 +363,9 @@ static void br_nd_send(struct net_bridge *br, struct net_bridge_port *p,
 	}
 }
 
-static int br_chk_addr_ip6(struct net_device *dev,
-			   struct netdev_nested_priv *priv)
+static int br_chk_addr_ip6(struct net_device *dev, void *data)
 {
-	struct in6_addr *addr = (struct in6_addr *)priv->data;
+	struct in6_addr *addr = (struct in6_addr *)data;
 
 	if (ipv6_chk_addr(dev_net(dev), addr, dev, 0))
 		return 1;
@@ -380,15 +376,11 @@ static int br_chk_addr_ip6(struct net_device *dev,
 static bool br_is_local_ip6(struct net_device *dev, struct in6_addr *addr)
 
 {
-	struct netdev_nested_priv priv = {
-		.data = (void *)addr,
-	};
-
-	if (br_chk_addr_ip6(dev, &priv))
+	if (br_chk_addr_ip6(dev, addr))
 		return true;
 
 	/* check if ip is configured on upper dev */
-	if (netdev_walk_all_upper_dev_rcu(dev, br_chk_addr_ip6, &priv))
+	if (netdev_walk_all_upper_dev_rcu(dev, br_chk_addr_ip6, addr))
 		return true;
 
 	return false;

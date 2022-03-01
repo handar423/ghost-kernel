@@ -9,6 +9,7 @@
  * Copyright (C) 2011 Texas Instruments
  */
 
+#include <linux/amba/clcd-regs.h>
 #include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/version.h>
@@ -47,10 +48,10 @@ irqreturn_t pl111_irq(int irq, void *data)
 }
 
 static enum drm_mode_status
-pl111_mode_valid(struct drm_simple_display_pipe *pipe,
+pl111_mode_valid(struct drm_crtc *crtc,
 		 const struct drm_display_mode *mode)
 {
-	struct drm_device *drm = pipe->crtc.dev;
+	struct drm_device *drm = crtc->dev;
 	struct pl111_drm_dev_private *priv = drm->dev_private;
 	u32 cpp = priv->variant->fb_bpp / 8;
 	u64 bw;
@@ -353,7 +354,7 @@ static void pl111_display_enable(struct drm_simple_display_pipe *pipe,
 		drm_crtc_vblank_on(crtc);
 }
 
-static void pl111_display_disable(struct drm_simple_display_pipe *pipe)
+void pl111_display_disable(struct drm_simple_display_pipe *pipe)
 {
 	struct drm_crtc *crtc = &pipe->crtc;
 	struct drm_device *drm = crtc->dev;

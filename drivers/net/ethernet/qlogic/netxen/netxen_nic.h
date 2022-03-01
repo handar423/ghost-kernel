@@ -1189,6 +1189,9 @@ typedef struct {
 #define NX_FORCE_FW_RESET               0xdeaddead
 
 
+/* Fw dump levels */
+static const u32 FW_DUMP_LEVELS[] = { 0x3, 0x7, 0xf, 0x1f, 0x3f, 0x7f, 0xff };
+
 /* Flash read/write address */
 #define NX_FW_DUMP_REG1         0x00130060
 #define NX_FW_DUMP_REG2         0x001e0000
@@ -1313,7 +1316,7 @@ struct netxen_minidump_template_hdr {
 	u32 driver_info_word4;
 	u32 saved_state_array[NX_DUMP_STATE_ARRAY_LEN];
 	u32 capture_size_array[NX_DUMP_CAP_SIZE_ARRAY_LEN];
-	u32 rsvd[];
+	u32 rsvd[0];
 };
 
 /* Common Entry Header:  Common to All Entry Types */

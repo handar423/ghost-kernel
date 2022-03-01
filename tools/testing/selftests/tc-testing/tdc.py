@@ -713,8 +713,9 @@ def set_operation_mode(pm, parser, args, remaining):
         exit(0)
 
     if args.list:
-        list_test_cases(alltests)
-        exit(0)
+        if args.list:
+            list_test_cases(alltests)
+            exit(0)
 
     if len(alltests):
         req_plugins = pm.get_required_plugins(alltests)

@@ -15,7 +15,6 @@
  */
 #include <linux/debugfs.h>
 #include <linux/device.h>
-#include <linux/mfd/intel_pmc_bxt.h>
 #include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/seq_file.h>
@@ -23,6 +22,7 @@
 
 #include <asm/cpu_device_id.h>
 #include <asm/intel-family.h>
+#include <asm/intel_pmc_ipc.h>
 #include <asm/intel_telemetry.h>
 
 #define DRIVER_NAME			"telemetry_soc_debugfs"
@@ -308,10 +308,11 @@ static struct telemetry_debugfs_conf telem_apl_debugfs_conf = {
 };
 
 static const struct x86_cpu_id telemetry_debugfs_cpu_ids[] = {
-	X86_MATCH_INTEL_FAM6_MODEL(ATOM_GOLDMONT,	&telem_apl_debugfs_conf),
-	X86_MATCH_INTEL_FAM6_MODEL(ATOM_GOLDMONT_PLUS,	&telem_apl_debugfs_conf),
+	INTEL_CPU_FAM6(ATOM_GOLDMONT, telem_apl_debugfs_conf),
+	INTEL_CPU_FAM6(ATOM_GOLDMONT_PLUS, telem_apl_debugfs_conf),
 	{}
 };
+
 MODULE_DEVICE_TABLE(x86cpu, telemetry_debugfs_cpu_ids);
 
 static int telemetry_debugfs_check_evts(void)
@@ -647,11 +648,10 @@ DEFINE_SHOW_ATTRIBUTE(telem_soc_states);
 
 static int telem_s0ix_res_get(void *data, u64 *val)
 {
-	struct telemetry_plt_config *plt_config = telemetry_get_pltdata();
 	u64 s0ix_total_res;
 	int ret;
 
-	ret = intel_pmc_s0ix_counter_read(plt_config->pmc, &s0ix_total_res);
+	ret = intel_pmc_s0ix_counter_read(&s0ix_total_res);
 	if (ret) {
 		pr_err("Failed to read S0ix residency");
 		return ret;
@@ -686,14 +686,13 @@ static ssize_t telem_pss_trc_verb_write(struct file *file,
 	u32 verbosity;
 	int err;
 
-	err = kstrtou32_from_user(userbuf, count, 0, &verbosity);
-	if (err)
-		return err;
+	if (kstrtou32_from_user(userbuf, count, 0, &verbosity))
+		return -EFAULT;
 
 	err = telemetry_set_trace_verbosity(TELEM_PSS, verbosity);
 	if (err) {
 		pr_err("Changing PSS Trace Verbosity Failed. Error %d\n", err);
-		return err;
+		count = err;
 	}
 
 	return count;
@@ -734,14 +733,13 @@ static ssize_t telem_ioss_trc_verb_write(struct file *file,
 	u32 verbosity;
 	int err;
 
-	err = kstrtou32_from_user(userbuf, count, 0, &verbosity);
-	if (err)
-		return err;
+	if (kstrtou32_from_user(userbuf, count, 0, &verbosity))
+		return -EFAULT;
 
 	err = telemetry_set_trace_verbosity(TELEM_IOSS, verbosity);
 	if (err) {
 		pr_err("Changing IOSS Trace Verbosity Failed. Error %d\n", err);
-		return err;
+		count = err;
 	}
 
 	return count;
@@ -838,15 +836,12 @@ static int pm_suspend_exit_cb(void)
 	 */
 	if (suspend_shlw_ctr_exit == suspend_shlw_ctr_temp &&
 	    suspend_deep_ctr_exit == suspend_deep_ctr_temp) {
-		struct telemetry_plt_config *plt_config = telemetry_get_pltdata();
-		struct intel_pmc_dev *pmc = plt_config->pmc;
-
-		ret = intel_pmc_gcr_read64(pmc, PMC_GCR_TELEM_SHLW_S0IX_REG,
+		ret = intel_pmc_gcr_read64(PMC_GCR_TELEM_SHLW_S0IX_REG,
 					  &suspend_shlw_res_exit);
 		if (ret < 0)
 			goto out;
 
-		ret = intel_pmc_gcr_read64(pmc, PMC_GCR_TELEM_DEEP_S0IX_REG,
+		ret = intel_pmc_gcr_read64(PMC_GCR_TELEM_DEEP_S0IX_REG,
 					  &suspend_deep_res_exit);
 		if (ret < 0)
 			goto out;
@@ -914,7 +909,8 @@ static int __init telemetry_debugfs_init(void)
 
 	debugfs_conf = (struct telemetry_debugfs_conf *)id->driver_data;
 
-	if (!telemetry_get_pltdata()) {
+	err = telemetry_pltconfig_valid();
+	if (err < 0) {
 		pr_info("Invalid pltconfig, ensure IPC1 device is enabled in BIOS\n");
 		return -ENODEV;
 	}

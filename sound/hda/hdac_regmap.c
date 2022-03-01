@@ -363,7 +363,6 @@ static const struct regmap_config hda_regmap_cfg = {
 	.reg_write = hda_reg_write,
 	.use_single_read = true,
 	.use_single_write = true,
-	.disable_locking = true,
 };
 
 /**
@@ -542,7 +541,7 @@ static int reg_raw_update(struct hdac_device *codec, unsigned int reg,
  * snd_hdac_regmap_update_raw - update a pseudo register with power mgmt
  * @codec: the codec object
  * @reg: pseudo register
- * @mask: bit mask to update
+ * @mask: bit mask to udpate
  * @val: value to update
  *
  * Returns zero if successful or a negative error code.

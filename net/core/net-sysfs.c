@@ -11,7 +11,6 @@
 #include <linux/if_arp.h>
 #include <linux/slab.h>
 #include <linux/sched/signal.h>
-#include <linux/sched/isolation.h>
 #include <linux/nsproxy.h>
 #include <net/sock.h>
 #include <net/net_namespace.h>
@@ -81,7 +80,7 @@ static ssize_t netdev_store(struct device *dev, struct device_attribute *attr,
 	struct net_device *netdev = to_net_dev(dev);
 	struct net *net = dev_net(netdev);
 	unsigned long new;
-	int ret;
+	int ret = -EINVAL;
 
 	if (!ns_capable(net->user_ns, CAP_NET_ADMIN))
 		return -EPERM;
@@ -175,6 +174,14 @@ static int change_carrier(struct net_device *dev, unsigned long new_carrier)
 static ssize_t carrier_store(struct device *dev, struct device_attribute *attr,
 			     const char *buf, size_t len)
 {
+	struct net_device *netdev = to_net_dev(dev);
+
+	/* The check is also done in change_carrier; this helps returning early
+	 * without hitting the trylock/restart in netdev_store.
+	 */
+	if (!netdev->netdev_ops->ndo_change_carrier)
+		return -EOPNOTSUPP;
+
 	return netdev_store(dev, attr, buf, len, change_carrier);
 }
 
@@ -196,6 +203,12 @@ static ssize_t speed_show(struct device *dev,
 	struct net_device *netdev = to_net_dev(dev);
 	int ret = -EINVAL;
 
+	/* The check is also done in __ethtool_get_link_ksettings; this helps
+	 * returning early without hitting the trylock/restart below.
+	 */
+	if (!netdev->ethtool_ops->get_link_ksettings)
+		return ret;
+
 	if (!rtnl_trylock())
 		return restart_syscall();
 
@@ -215,6 +228,12 @@ static ssize_t duplex_show(struct device *dev,
 {
 	struct net_device *netdev = to_net_dev(dev);
 	int ret = -EINVAL;
+
+	/* The check is also done in __ethtool_get_link_ksettings; this helps
+	 * returning early without hitting the trylock/restart below.
+	 */
+	if (!netdev->ethtool_ops->get_link_ksettings)
+		return ret;
 
 	if (!rtnl_trylock())
 		return restart_syscall();
@@ -244,18 +263,6 @@ static ssize_t duplex_show(struct device *dev,
 }
 static DEVICE_ATTR_RO(duplex);
 
-static ssize_t testing_show(struct device *dev,
-			    struct device_attribute *attr, char *buf)
-{
-	struct net_device *netdev = to_net_dev(dev);
-
-	if (netif_running(netdev))
-		return sprintf(buf, fmt_dec, !!netif_testing(netdev));
-
-	return -EINVAL;
-}
-static DEVICE_ATTR_RO(testing);
-
 static ssize_t dormant_show(struct device *dev,
 			    struct device_attribute *attr, char *buf)
 {
@@ -273,7 +280,7 @@ static const char *const operstates[] = {
 	"notpresent", /* currently unused */
 	"down",
 	"lowerlayerdown",
-	"testing",
+	"testing", /* currently unused */
 	"dormant",
 	"up"
 };
@@ -368,7 +375,7 @@ NETDEVICE_SHOW_RW(tx_queue_len, fmt_dec);
 
 static int change_gro_flush_timeout(struct net_device *dev, unsigned long val)
 {
-	WRITE_ONCE(dev->gro_flush_timeout, val);
+	dev->gro_flush_timeout = val;
 	return 0;
 }
 
@@ -382,23 +389,6 @@ static ssize_t gro_flush_timeout_store(struct device *dev,
 	return netdev_store(dev, attr, buf, len, change_gro_flush_timeout);
 }
 NETDEVICE_SHOW_RW(gro_flush_timeout, fmt_ulong);
-
-static int change_napi_defer_hard_irqs(struct net_device *dev, unsigned long val)
-{
-	WRITE_ONCE(dev->napi_defer_hard_irqs, val);
-	return 0;
-}
-
-static ssize_t napi_defer_hard_irqs_store(struct device *dev,
-					  struct device_attribute *attr,
-					  const char *buf, size_t len)
-{
-	if (!capable(CAP_NET_ADMIN))
-		return -EPERM;
-
-	return netdev_store(dev, attr, buf, len, change_napi_defer_hard_irqs);
-}
-NETDEVICE_SHOW_RW(napi_defer_hard_irqs, fmt_dec);
 
 static ssize_t ifalias_store(struct device *dev, struct device_attribute *attr,
 			     const char *buf, size_t len)
@@ -468,6 +458,14 @@ static ssize_t proto_down_store(struct device *dev,
 				struct device_attribute *attr,
 				const char *buf, size_t len)
 {
+	struct net_device *netdev = to_net_dev(dev);
+
+	/* The check is also done in change_proto_down; this helps returning
+	 * early without hitting the trylock/restart in netdev_store.
+	 */
+	if (!netdev->netdev_ops->ndo_change_proto_down)
+		return -EOPNOTSUPP;
+
 	return netdev_store(dev, attr, buf, len, change_proto_down);
 }
 NETDEVICE_SHOW_RW(proto_down, fmt_dec);
@@ -477,6 +475,12 @@ static ssize_t phys_port_id_show(struct device *dev,
 {
 	struct net_device *netdev = to_net_dev(dev);
 	ssize_t ret = -EINVAL;
+
+	/* The check is also done in dev_get_phys_port_id; this helps returning
+	 * early without hitting the trylock/restart below.
+	 */
+	if (!netdev->netdev_ops->ndo_get_phys_port_id)
+		return -EOPNOTSUPP;
 
 	if (!rtnl_trylock())
 		return restart_syscall();
@@ -500,6 +504,13 @@ static ssize_t phys_port_name_show(struct device *dev,
 	struct net_device *netdev = to_net_dev(dev);
 	ssize_t ret = -EINVAL;
 
+	/* The checks are also done in dev_get_phys_port_name; this helps
+	 * returning early without hitting the trylock/restart below.
+	 */
+	if (!netdev->netdev_ops->ndo_get_phys_port_name &&
+	    !netdev->netdev_ops->ndo_get_devlink_port)
+		return -EOPNOTSUPP;
+
 	if (!rtnl_trylock())
 		return restart_syscall();
 
@@ -521,6 +532,14 @@ static ssize_t phys_switch_id_show(struct device *dev,
 {
 	struct net_device *netdev = to_net_dev(dev);
 	ssize_t ret = -EINVAL;
+
+	/* The checks are also done in dev_get_phys_port_name; this helps
+	 * returning early without hitting the trylock/restart below. This works
+	 * because recurse is false when calling dev_get_port_parent_id.
+	 */
+	if (!netdev->netdev_ops->ndo_get_port_parent_id &&
+	    !netdev->netdev_ops->ndo_get_devlink_port)
+		return -EOPNOTSUPP;
 
 	if (!rtnl_trylock())
 		return restart_syscall();
@@ -554,7 +573,6 @@ static struct attribute *net_class_attrs[] __ro_after_init = {
 	&dev_attr_speed.attr,
 	&dev_attr_duplex.attr,
 	&dev_attr_dormant.attr,
-	&dev_attr_testing.attr,
 	&dev_attr_operstate.attr,
 	&dev_attr_carrier_changes.attr,
 	&dev_attr_ifalias.attr,
@@ -563,7 +581,6 @@ static struct attribute *net_class_attrs[] __ro_after_init = {
 	&dev_attr_flags.attr,
 	&dev_attr_tx_queue_len.attr,
 	&dev_attr_gro_flush_timeout.attr,
-	&dev_attr_napi_defer_hard_irqs.attr,
 	&dev_attr_phys_port_id.attr,
 	&dev_attr_phys_port_name.attr,
 	&dev_attr_phys_switch_id.attr,
@@ -742,7 +759,7 @@ static ssize_t store_rps_map(struct netdev_rx_queue *queue,
 {
 	struct rps_map *old_map, *map;
 	cpumask_var_t mask;
-	int err, cpu, i, hk_flags;
+	int err, cpu, i;
 	static DEFINE_MUTEX(rps_map_mutex);
 
 	if (!capable(CAP_NET_ADMIN))
@@ -755,15 +772,6 @@ static ssize_t store_rps_map(struct netdev_rx_queue *queue,
 	if (err) {
 		free_cpumask_var(mask);
 		return err;
-	}
-
-	if (!cpumask_empty(mask)) {
-		hk_flags = HK_FLAG_DOMAIN | HK_FLAG_WQ;
-		cpumask_and(mask, mask, housekeeping_cpumask(hk_flags));
-		if (cpumask_empty(mask)) {
-			free_cpumask_var(mask);
-			return -EINVAL;
-		}
 	}
 
 	map = kzalloc(max_t(unsigned int,
@@ -985,24 +993,6 @@ err:
 	kobject_put(kobj);
 	return error;
 }
-
-static int rx_queue_change_owner(struct net_device *dev, int index, kuid_t kuid,
-				 kgid_t kgid)
-{
-	struct netdev_rx_queue *queue = dev->_rx + index;
-	struct kobject *kobj = &queue->kobj;
-	int error;
-
-	error = sysfs_change_owner(kobj, kuid, kgid);
-	if (error)
-		return error;
-
-	if (dev->sysfs_rx_queue_group)
-		error = sysfs_group_change_owner(
-			kobj, dev->sysfs_rx_queue_group, kuid, kgid);
-
-	return error;
-}
 #endif /* CONFIG_SYSFS */
 
 int
@@ -1027,34 +1017,11 @@ net_rx_queue_update_kobjects(struct net_device *dev, int old_num, int new_num)
 	while (--i >= new_num) {
 		struct kobject *kobj = &dev->_rx[i].kobj;
 
-		if (!refcount_read(&dev_net(dev)->ns.count))
+		if (!refcount_read(&dev_net(dev)->count))
 			kobj->uevent_suppress = 1;
 		if (dev->sysfs_rx_queue_group)
 			sysfs_remove_group(kobj, dev->sysfs_rx_queue_group);
 		kobject_put(kobj);
-	}
-
-	return error;
-#else
-	return 0;
-#endif
-}
-
-static int net_rx_queue_change_owner(struct net_device *dev, int num,
-				     kuid_t kuid, kgid_t kgid)
-{
-#ifdef CONFIG_SYSFS
-	int error = 0;
-	int i;
-
-#ifndef CONFIG_RPS
-	if (!dev->sysfs_rx_queue_group)
-		return 0;
-#endif
-	for (i = 0; i < num; i++) {
-		error = rx_queue_change_owner(dev, i, kuid, kgid);
-		if (error)
-			break;
 	}
 
 	return error;
@@ -1158,8 +1125,8 @@ static ssize_t traffic_class_show(struct netdev_queue *queue,
 	 * belongs to the root device it will be reported with just the
 	 * traffic class, so just "0" for TC 0 for example.
 	 */
-	return dev->num_tc < 0 ? sprintf(buf, "%d%d\n", tc, dev->num_tc) :
-				 sprintf(buf, "%d\n", tc);
+	return dev->num_tc < 0 ? sprintf(buf, "%u%d\n", tc, dev->num_tc) :
+				 sprintf(buf, "%u\n", tc);
 }
 
 #ifdef CONFIG_XPS
@@ -1178,6 +1145,12 @@ static ssize_t tx_maxrate_store(struct netdev_queue *queue,
 
 	if (!capable(CAP_NET_ADMIN))
 		return -EPERM;
+
+	/* The check is also done later; this helps returning early without
+	 * hitting the trylock/restart below.
+	 */
+	if (!dev->netdev_ops->ndo_set_tx_maxrate)
+		return -EOPNOTSUPP;
 
 	err = kstrtou32(buf, 10, &rate);
 	if (err < 0)
@@ -1609,23 +1582,6 @@ err:
 	kobject_put(kobj);
 	return error;
 }
-
-static int tx_queue_change_owner(struct net_device *ndev, int index,
-				 kuid_t kuid, kgid_t kgid)
-{
-	struct netdev_queue *queue = ndev->_tx + index;
-	struct kobject *kobj = &queue->kobj;
-	int error;
-
-	error = sysfs_change_owner(kobj, kuid, kgid);
-	if (error)
-		return error;
-
-#ifdef CONFIG_BQL
-	error = sysfs_group_change_owner(kobj, &dql_group, kuid, kgid);
-#endif
-	return error;
-}
 #endif /* CONFIG_SYSFS */
 
 int
@@ -1646,31 +1602,12 @@ netdev_queue_update_kobjects(struct net_device *dev, int old_num, int new_num)
 	while (--i >= new_num) {
 		struct netdev_queue *queue = dev->_tx + i;
 
-		if (!refcount_read(&dev_net(dev)->ns.count))
+		if (!refcount_read(&dev_net(dev)->count))
 			queue->kobj.uevent_suppress = 1;
 #ifdef CONFIG_BQL
 		sysfs_remove_group(&queue->kobj, &dql_group);
 #endif
 		kobject_put(&queue->kobj);
-	}
-
-	return error;
-#else
-	return 0;
-#endif /* CONFIG_SYSFS */
-}
-
-static int net_tx_queue_change_owner(struct net_device *dev, int num,
-				     kuid_t kuid, kgid_t kgid)
-{
-#ifdef CONFIG_SYSFS
-	int error = 0;
-	int i;
-
-	for (i = 0; i < num; i++) {
-		error = tx_queue_change_owner(dev, i, kuid, kgid);
-		if (error)
-			break;
 	}
 
 	return error;
@@ -1713,31 +1650,6 @@ error:
 	return error;
 }
 
-static int queue_change_owner(struct net_device *ndev, kuid_t kuid, kgid_t kgid)
-{
-	int error = 0, real_rx = 0, real_tx = 0;
-
-#ifdef CONFIG_SYSFS
-	if (ndev->queues_kset) {
-		error = sysfs_change_owner(&ndev->queues_kset->kobj, kuid, kgid);
-		if (error)
-			return error;
-	}
-	real_rx = ndev->real_num_rx_queues;
-#endif
-	real_tx = ndev->real_num_tx_queues;
-
-	error = net_rx_queue_change_owner(ndev, real_rx, kuid, kgid);
-	if (error)
-		return error;
-
-	error = net_tx_queue_change_owner(ndev, real_tx, kuid, kgid);
-	if (error)
-		return error;
-
-	return 0;
-}
-
 static void remove_queue_kobjects(struct net_device *dev)
 {
 	int real_rx = 0, real_tx = 0;
@@ -1749,6 +1661,9 @@ static void remove_queue_kobjects(struct net_device *dev)
 
 	net_rx_queue_update_kobjects(dev, real_rx, 0);
 	netdev_queue_update_kobjects(dev, real_tx, 0);
+
+	dev->real_num_rx_queues = 0;
+	dev->real_num_tx_queues = 0;
 #ifdef CONFIG_SYSFS
 	kset_unregister(dev->queues_kset);
 #endif
@@ -1856,12 +1771,12 @@ static struct class net_class __ro_after_init = {
 #ifdef CONFIG_OF_NET
 static int of_dev_node_match(struct device *dev, const void *data)
 {
-	for (; dev; dev = dev->parent) {
-		if (dev->of_node == data)
-			return 1;
-	}
+	int ret = 0;
 
-	return 0;
+	if (dev->parent)
+		ret = dev->parent->of_node == data;
+
+	return ret == 0 ? dev->of_node == data : ret;
 }
 
 /*
@@ -1893,7 +1808,7 @@ void netdev_unregister_kobject(struct net_device *ndev)
 {
 	struct device *dev = &ndev->dev;
 
-	if (!refcount_read(&dev_net(ndev)->ns.count))
+	if (!refcount_read(&dev_net(ndev)->count))
 		dev_set_uevent_suppress(dev, 1);
 
 	kobject_get(&dev->kobj);
@@ -1949,37 +1864,6 @@ int netdev_register_kobject(struct net_device *ndev)
 	pm_runtime_set_memalloc_noio(dev, true);
 
 	return error;
-}
-
-/* Change owner for sysfs entries when moving network devices across network
- * namespaces owned by different user namespaces.
- */
-int netdev_change_owner(struct net_device *ndev, const struct net *net_old,
-			const struct net *net_new)
-{
-	struct device *dev = &ndev->dev;
-	kuid_t old_uid, new_uid;
-	kgid_t old_gid, new_gid;
-	int error;
-
-	net_ns_get_ownership(net_old, &old_uid, &old_gid);
-	net_ns_get_ownership(net_new, &new_uid, &new_gid);
-
-	/* The network namespace was changed but the owning user namespace is
-	 * identical so there's no need to change the owner of sysfs entries.
-	 */
-	if (uid_eq(old_uid, new_uid) && gid_eq(old_gid, new_gid))
-		return 0;
-
-	error = device_change_owner(dev, new_uid, new_gid);
-	if (error)
-		return error;
-
-	error = queue_change_owner(ndev, new_uid, new_gid);
-	if (error)
-		return error;
-
-	return 0;
 }
 
 int netdev_class_create_file_ns(const struct class_attribute *class_attr,

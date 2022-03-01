@@ -1362,14 +1362,6 @@ static struct meson_axg_pmx_data meson_g12a_aobus_pmx_banks_data = {
 	.num_pmx_banks	= ARRAY_SIZE(meson_g12a_aobus_pmx_banks),
 };
 
-static int meson_g12a_aobus_parse_dt_extra(struct meson_pinctrl *pc)
-{
-	pc->reg_pull = pc->reg_gpio;
-	pc->reg_pullen = pc->reg_gpio;
-
-	return 0;
-}
-
 static struct meson_pinctrl_data meson_g12a_periphs_pinctrl_data = {
 	.name		= "periphs-banks",
 	.pins		= meson_g12a_periphs_pins,
@@ -1396,7 +1388,6 @@ static struct meson_pinctrl_data meson_g12a_aobus_pinctrl_data = {
 	.num_banks	= ARRAY_SIZE(meson_g12a_aobus_banks),
 	.pmx_ops	= &meson_axg_pmx_ops,
 	.pmx_data	= &meson_g12a_aobus_pmx_banks_data,
-	.parse_dt	= meson_g12a_aobus_parse_dt_extra,
 };
 
 static const struct of_device_id meson_g12a_pinctrl_dt_match[] = {
@@ -1410,7 +1401,6 @@ static const struct of_device_id meson_g12a_pinctrl_dt_match[] = {
 	},
 	{ },
 };
-MODULE_DEVICE_TABLE(of, meson_g12a_pinctrl_dt_match);
 
 static struct platform_driver meson_g12a_pinctrl_driver = {
 	.probe  = meson_pinctrl_probe,
@@ -1420,5 +1410,4 @@ static struct platform_driver meson_g12a_pinctrl_driver = {
 	},
 };
 
-module_platform_driver(meson_g12a_pinctrl_driver);
-MODULE_LICENSE("Dual BSD/GPL");
+builtin_platform_driver(meson_g12a_pinctrl_driver);

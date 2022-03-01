@@ -415,8 +415,6 @@ static int hidinput_get_battery_property(struct power_supply *psy,
 
 		if (dev->battery_status == HID_BATTERY_UNKNOWN)
 			val->intval = POWER_SUPPLY_STATUS_UNKNOWN;
-		else if (dev->battery_capacity == 100)
-			val->intval = POWER_SUPPLY_STATUS_FULL;
 		else
 			val->intval = POWER_SUPPLY_STATUS_DISCHARGING;
 		break;
@@ -539,12 +537,9 @@ static void hidinput_update_battery(struct hid_device *dev, int value)
 	capacity = hidinput_scale_battery_capacity(dev, value);
 
 	if (dev->battery_status != HID_BATTERY_REPORTED ||
-	    capacity != dev->battery_capacity ||
-	    ktime_after(ktime_get_coarse(), dev->battery_ratelimit_time)) {
+	    capacity != dev->battery_capacity) {
 		dev->battery_capacity = capacity;
 		dev->battery_status = HID_BATTERY_REPORTED;
-		dev->battery_ratelimit_time =
-			ktime_add_ms(ktime_get_coarse(), 30 * 1000);
 		power_supply_changed(dev->battery);
 	}
 }
@@ -751,7 +746,6 @@ static void hidinput_configure_usage(struct hid_input *hidinput, struct hid_fiel
 				field->flags |= HID_MAIN_ITEM_RELATIVE;
 				break;
 			}
-			goto unknown;
 
 		default: goto unknown;
 		}
@@ -961,6 +955,9 @@ static void hidinput_configure_usage(struct hid_input *hidinput, struct hid_fiel
 
 		case 0x0cd: map_key_clear(KEY_PLAYPAUSE);	break;
 		case 0x0cf: map_key_clear(KEY_VOICECOMMAND);	break;
+
+		case 0x0d9: map_key_clear(KEY_EMOJI_PICKER);	break;
+
 		case 0x0e0: map_abs_clear(ABS_VOLUME);		break;
 		case 0x0e2: map_key_clear(KEY_MUTE);		break;
 		case 0x0e5: map_key_clear(KEY_BASSBOOST);	break;
@@ -1291,6 +1288,12 @@ void hidinput_hid_event(struct hid_device *hid, struct hid_field *field, struct 
 
 	input = field->hidinput->input;
 
+	if (usage->type == EV_ABS &&
+	    (((*quirks & HID_QUIRK_X_INVERT) && usage->code == ABS_X) ||
+	     ((*quirks & HID_QUIRK_Y_INVERT) && usage->code == ABS_Y))) {
+		value = field->logical_maximum - value;
+	}
+
 	if (usage->hat_min < usage->hat_max || usage->hat_dir) {
 		int hat_dir = usage->hat_dir;
 		if (!hat_dir)
@@ -1573,11 +1576,20 @@ static bool __hidinput_change_resolution_multipliers(struct hid_device *hid,
 {
 	struct hid_usage *usage;
 	bool update_needed = false;
-	bool get_report_completed = false;
 	int i, j;
 
 	if (report->maxfield == 0)
 		return false;
+
+	/*
+	 * If we have more than one feature within this report we
+	 * need to fill in the bits from the others before we can
+	 * overwrite the ones for the Resolution Multiplier.
+	 */
+	if (report->maxfield > 1) {
+		hid_hw_request(hid, report, HID_REQ_GET_REPORT);
+		hid_hw_wait(hid);
+	}
 
 	for (i = 0; i < report->maxfield; i++) {
 		__s32 value = use_logical_max ?
@@ -1596,25 +1608,6 @@ static bool __hidinput_change_resolution_multipliers(struct hid_device *hid,
 
 			if (usage->hid != HID_GD_RESOLUTION_MULTIPLIER)
 				continue;
-
-			/*
-			 * If we have more than one feature within this
-			 * report we need to fill in the bits from the
-			 * others before we can overwrite the ones for the
-			 * Resolution Multiplier.
-			 *
-			 * But if we're not allowed to read from the device,
-			 * we just bail. Such a device should not exist
-			 * anyway.
-			 */
-			if (!get_report_completed && report->maxfield > 1) {
-				if (hid->quirks & HID_QUIRK_NO_INIT_REPORTS)
-					return update_needed;
-
-				hid_hw_request(hid, report, HID_REQ_GET_REPORT);
-				hid_hw_wait(hid);
-				get_report_completed = true;
-			}
 
 			report->field[i]->value[j] = value;
 			update_needed = true;

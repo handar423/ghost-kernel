@@ -60,7 +60,7 @@
 		stdout-path = "serial0:115200n8";
 	};
 
-	memory@00000000 {
+	memory {
 		device_type = "memory";
 		reg = <0x00000000 0x1000000>;
 	};
@@ -89,27 +89,25 @@
 
 	leds {
 		compatible = "gpio-leds";
-		led-green {
+		green {
 			gpios = <&gpiog 6 GPIO_ACTIVE_LOW>;
 			linux,default-trigger = "heartbeat";
 		};
-		led-orange {
+		orange {
 			gpios = <&gpiod 4 GPIO_ACTIVE_LOW>;
 		};
-		led-red {
+		red {
 			gpios = <&gpiod 5 GPIO_ACTIVE_LOW>;
 		};
-		led-blue {
+		blue {
 			gpios = <&gpiok 3 GPIO_ACTIVE_LOW>;
 		};
 	};
 
-	gpio_keys {
+	gpio-keys {
 		compatible = "gpio-keys";
-		#address-cells = <1>;
-		#size-cells = <0>;
 		autorepeat;
-		button@0 {
+		button-0 {
 			label = "User";
 			linux,code = <KEY_WAKEUP>;
 			gpios = <&gpioa 0 GPIO_ACTIVE_HIGH>;
@@ -174,6 +172,7 @@
 };
 
 &ltdc {
+	dma-ranges;
 	status = "okay";
 
 	port {

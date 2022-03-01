@@ -22,7 +22,7 @@
 
 #ifdef CONFIG_XEN_PV
 	__INIT
-SYM_CODE_START(startup_xen)
+ENTRY(startup_xen)
 	UNWIND_HINT_EMPTY
 	cld
 
@@ -35,8 +35,9 @@ SYM_CODE_START(startup_xen)
 	rep __ASM_SIZE(stos)
 
 	mov %_ASM_SI, xen_start_info
-	mov initial_stack(%rip), %rsp
+	mov $init_thread_union+THREAD_SIZE, %_ASM_SP
 
+#ifdef CONFIG_X86_64
 	/* Set up %gs.
 	 *
 	 * The base of %gs always points to fixed_percpu_data.  If the
@@ -48,25 +49,16 @@ SYM_CODE_START(startup_xen)
 	movq	$INIT_PER_CPU_VAR(fixed_percpu_data),%rax
 	cdq
 	wrmsr
-
-	call xen_start_kernel
-SYM_CODE_END(startup_xen)
-	__FINIT
-
-#ifdef CONFIG_XEN_PV_SMP
-.pushsection .text
-SYM_CODE_START(asm_cpu_bringup_and_idle)
-	UNWIND_HINT_EMPTY
-
-	call cpu_bringup_and_idle
-SYM_CODE_END(asm_cpu_bringup_and_idle)
-.popsection
 #endif
+
+	jmp xen_start_kernel
+END(startup_xen)
+	__FINIT
 #endif
 
 .pushsection .text
 	.balign PAGE_SIZE
-SYM_CODE_START(hypercall_page)
+ENTRY(hypercall_page)
 	.rept (PAGE_SIZE / 32)
 		UNWIND_HINT_EMPTY
 		.skip 32
@@ -77,7 +69,7 @@ SYM_CODE_START(hypercall_page)
 	.type xen_hypercall_##n, @function; .size xen_hypercall_##n, 32
 #include <asm/xen-hypercalls.h>
 #undef HYPERCALL
-SYM_CODE_END(hypercall_page)
+END(hypercall_page)
 .popsection
 
 	ELFNOTE(Xen, XEN_ELFNOTE_GUEST_OS,       .asciz "linux")

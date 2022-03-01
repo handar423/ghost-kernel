@@ -11,21 +11,16 @@ allOf:
 
 maintainers:
   - Chen-Yu Tsai <wens@csie.org>
-  - Maxime Ripard <mripard@kernel.org>
+  - Maxime Ripard <maxime.ripard@bootlin.com>
 
 properties:
   "#address-cells": true
   "#size-cells": true
 
   compatible:
-    oneOf:
-      - const: allwinner,sun6i-a31-spi
-      - const: allwinner,sun8i-h3-spi
-      - items:
-          - enum:
-              - allwinner,sun8i-r40-spi
-              - allwinner,sun50i-h6-spi
-          - const: allwinner,sun8i-h3-spi
+    enum:
+      - allwinner,sun6i-a31-spi
+      - allwinner,sun8i-h3-spi
 
   reg:
     maxItems: 1

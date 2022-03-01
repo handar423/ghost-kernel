@@ -71,7 +71,6 @@ static LIST_HEAD(opalcore_list);
 static struct opalcore_config *oc_conf;
 static const struct opal_mpipl_fadump *opalc_metadata;
 static const struct opal_mpipl_fadump *opalc_cpu_metadata;
-struct kobject *mpipl_kobj;
 
 /*
  * Set crashing CPU's signal to SIGUSR1. if the kernel is triggered
@@ -429,7 +428,7 @@ static void opalcore_cleanup(void)
 		return;
 
 	/* Remove OPAL core sysfs file */
-	sysfs_remove_bin_file(mpipl_kobj, &opal_core_attr);
+	sysfs_remove_bin_file(opal_kobj, &opal_core_attr);
 	oc_conf->ptload_phdr = NULL;
 	oc_conf->ptload_cnt = 0;
 
@@ -510,7 +509,7 @@ static void __init opalcore_config_init(void)
 	idx = be32_to_cpu(opalc_metadata->region_cnt);
 	if (idx > MAX_PT_LOAD_CNT) {
 		pr_warn("WARNING: OPAL regions count (%d) adjusted to limit (%d)",
-			idx, MAX_PT_LOAD_CNT);
+			MAX_PT_LOAD_CNT, idx);
 		idx = MAX_PT_LOAD_CNT;
 	}
 	for (i = 0; i < idx; i++) {
@@ -564,9 +563,9 @@ error_out:
 	of_node_put(np);
 }
 
-static ssize_t release_core_store(struct kobject *kobj,
-				  struct kobj_attribute *attr,
-				  const char *buf, size_t count)
+static ssize_t fadump_release_opalcore_store(struct kobject *kobj,
+					     struct kobj_attribute *attr,
+					     const char *buf, size_t count)
 {
 	int input = -1;
 
@@ -590,23 +589,9 @@ static ssize_t release_core_store(struct kobject *kobj,
 	return count;
 }
 
-static struct kobj_attribute opalcore_rel_attr = __ATTR_WO(release_core);
-
-static struct attribute *mpipl_attr[] = {
-	&opalcore_rel_attr.attr,
-	NULL,
-};
-
-static struct bin_attribute *mpipl_bin_attr[] = {
-	&opal_core_attr,
-	NULL,
-
-};
-
-static struct attribute_group mpipl_group = {
-	.attrs = mpipl_attr,
-	.bin_attrs =  mpipl_bin_attr,
-};
+static struct kobj_attribute opalcore_rel_attr = __ATTR(fadump_release_opalcore,
+						0200, NULL,
+						fadump_release_opalcore_store);
 
 static int __init opalcore_init(void)
 {
@@ -624,7 +609,7 @@ static int __init opalcore_init(void)
 	 * then capture the dump.
 	 */
 	if (!(is_opalcore_usable())) {
-		pr_err("Failed to export /sys/firmware/opal/mpipl/core\n");
+		pr_err("Failed to export /sys/firmware/opal/core\n");
 		opalcore_cleanup();
 		return rc;
 	}
@@ -632,28 +617,18 @@ static int __init opalcore_init(void)
 	/* Set OPAL core file size */
 	opal_core_attr.size = oc_conf->opalcore_size;
 
-	mpipl_kobj = kobject_create_and_add("mpipl", opal_kobj);
-	if (!mpipl_kobj) {
-		pr_err("unable to create mpipl kobject\n");
-		return -ENOMEM;
-	}
-
 	/* Export OPAL core sysfs file */
-	rc = sysfs_create_group(mpipl_kobj, &mpipl_group);
-	if (rc) {
-		pr_err("mpipl sysfs group creation failed (%d)", rc);
+	rc = sysfs_create_bin_file(opal_kobj, &opal_core_attr);
+	if (rc != 0) {
+		pr_err("Failed to export /sys/firmware/opal/core\n");
 		opalcore_cleanup();
 		return rc;
 	}
-	/* The /sys/firmware/opal/core is moved to /sys/firmware/opal/mpipl/
-	 * directory, need to create symlink at old location to maintain
-	 * backward compatibility.
-	 */
-	rc = compat_only_sysfs_link_entry_to_kobj(opal_kobj, mpipl_kobj,
-						  "core", NULL);
+
+	rc = sysfs_create_file(kernel_kobj, &opalcore_rel_attr.attr);
 	if (rc) {
-		pr_err("unable to create core symlink (%d)\n", rc);
-		return rc;
+		pr_warn("unable to create sysfs file fadump_release_opalcore (%d)\n",
+			rc);
 	}
 
 	return 0;

@@ -60,7 +60,7 @@
 		stdout-path = "serial0:115200n8";
 	};
 
-	memory@00000000 {
+	memory {
 		device_type = "memory";
 		reg = <0x00000000 0x2000000>;
 	};
@@ -95,41 +95,32 @@
 		regulator-max-microvolt = <3300000>;
 	};
 
-	vdd_panel: vdd-panel {
-		compatible = "regulator-fixed";
-		regulator-name = "vdd_panel";
-		regulator-min-microvolt = <3300000>;
-		regulator-max-microvolt = <3300000>;
-	};
-
 	leds {
 		compatible = "gpio-leds";
-		led-green {
+		green {
 			gpios = <&gpiog 6 1>;
 			linux,default-trigger = "heartbeat";
 		};
-		led-orange {
+		orange {
 			gpios = <&gpiog 7 1>;
 		};
-		led-red {
+		red {
 			gpios = <&gpiog 10 1>;
 		};
-		led-blue {
+		blue {
 			gpios = <&gpiog 12 1>;
 		};
 	};
 
-	gpio_keys {
+	gpio-keys {
 		compatible = "gpio-keys";
-		#address-cells = <1>;
-		#size-cells = <0>;
 		autorepeat;
-		button@0 {
+		button-0 {
 			label = "Wake up";
 			linux,code = <KEY_WAKEUP>;
 			gpios = <&gpioa 0 0>;
 		};
-		button@1 {
+		button-1 {
 			label = "Tamper";
 			linux,code = <KEY_RESTART>;
 			gpios = <&gpioc 13 0>;
@@ -145,7 +136,6 @@
 
 	panel_rgb: panel-rgb {
 		compatible = "ampire,am-480272h3tmqw-t01h";
-		power-supply = <&vdd_panel>;
 		status = "okay";
 		port {
 			panel_in_rgb: endpoint {
@@ -188,7 +178,6 @@
 	port {
 		dcmi_0: endpoint {
 			remote-endpoint = <&ov2640_0>;
-			bus-type = <5>;
 			bus-width = <8>;
 			hsync-active = <0>;
 			vsync-active = <0>;
@@ -241,8 +230,9 @@
 
 &ltdc {
 	status = "okay";
-	pinctrl-0 = <&ltdc_pins_a>;
+	pinctrl-0 = <&ltdc_pins>;
 	pinctrl-names = "default";
+	dma-ranges;
 
 	port {
 		ltdc_out_rgb: endpoint {

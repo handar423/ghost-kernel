@@ -144,7 +144,8 @@ static const struct common_glue_ctx camellia_dec_xts = {
 static int camellia_setkey(struct crypto_skcipher *tfm, const u8 *key,
 			   unsigned int keylen)
 {
-	return __camellia_setkey(crypto_skcipher_ctx(tfm), key, keylen);
+	return __camellia_setkey(crypto_skcipher_ctx(tfm), key, keylen,
+				 &tfm->base.crt_flags);
 }
 
 static int ecb_encrypt(struct skcipher_request *req)
@@ -176,6 +177,7 @@ int xts_camellia_setkey(struct crypto_skcipher *tfm, const u8 *key,
 			unsigned int keylen)
 {
 	struct camellia_xts_ctx *ctx = crypto_skcipher_ctx(tfm);
+	u32 *flags = &tfm->base.crt_flags;
 	int err;
 
 	err = xts_verify_key(tfm, key, keylen);
@@ -183,12 +185,13 @@ int xts_camellia_setkey(struct crypto_skcipher *tfm, const u8 *key,
 		return err;
 
 	/* first half of xts-key is for crypt */
-	err = __camellia_setkey(&ctx->crypt_ctx, key, keylen / 2);
+	err = __camellia_setkey(&ctx->crypt_ctx, key, keylen / 2, flags);
 	if (err)
 		return err;
 
 	/* second half of xts-key is for tweak */
-	return __camellia_setkey(&ctx->tweak_ctx, key + keylen / 2, keylen / 2);
+	return __camellia_setkey(&ctx->tweak_ctx, key + keylen / 2, keylen / 2,
+				flags);
 }
 EXPORT_SYMBOL_GPL(xts_camellia_setkey);
 

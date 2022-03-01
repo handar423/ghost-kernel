@@ -186,7 +186,7 @@ void vmw_kms_cursor_snoop(struct vmw_surface *srf,
 		/* TODO handle none page aligned offsets */
 		/* TODO handle more dst & src != 0 */
 		/* TODO handle more then one copy */
-		DRM_ERROR("Can't snoop dma request for cursor!\n");
+		DRM_ERROR("Cant snoop dma request for cursor!\n");
 		DRM_ERROR("(%u, %u, %u) (%u, %u, %u) (%ux%ux%u) %u %u\n",
 			  box->srcx, box->srcy, box->srcz,
 			  box->x, box->y, box->z,
@@ -522,10 +522,8 @@ int vmw_du_cursor_plane_atomic_check(struct drm_plane *plane,
 
 
 int vmw_du_crtc_atomic_check(struct drm_crtc *crtc,
-			     struct drm_atomic_state *state)
+			     struct drm_crtc_state *new_state)
 {
-	struct drm_crtc_state *new_state = drm_atomic_get_new_crtc_state(state,
-									 crtc);
 	struct vmw_display_unit *du = vmw_crtc_to_du(new_state->crtc);
 	int connector_mask = drm_connector_mask(&du->connector);
 	bool has_primary = new_state->plane_mask &
@@ -554,13 +552,13 @@ int vmw_du_crtc_atomic_check(struct drm_crtc *crtc,
 
 
 void vmw_du_crtc_atomic_begin(struct drm_crtc *crtc,
-			      struct drm_atomic_state *state)
+			      struct drm_crtc_state *old_crtc_state)
 {
 }
 
 
 void vmw_du_crtc_atomic_flush(struct drm_crtc *crtc,
-			      struct drm_atomic_state *state)
+			      struct drm_crtc_state *old_crtc_state)
 {
 	struct drm_pending_vblank_event *event = crtc->state->event;
 
@@ -631,7 +629,8 @@ void vmw_du_crtc_reset(struct drm_crtc *crtc)
 		return;
 	}
 
-	__drm_atomic_helper_crtc_reset(crtc, &vcs->base);
+	crtc->state = &vcs->base;
+	crtc->state->crtc = crtc;
 }
 
 
@@ -906,14 +905,14 @@ static int vmw_kms_new_framebuffer_surface(struct vmw_private *dev_priv,
 	 */
 
 	/* Surface must be marked as a scanout. */
-	if (unlikely(!surface->metadata.scanout))
+	if (unlikely(!surface->scanout))
 		return -EINVAL;
 
-	if (unlikely(surface->metadata.mip_levels[0] != 1 ||
-		     surface->metadata.num_sizes != 1 ||
-		     surface->metadata.base_size.width < mode_cmd->width ||
-		     surface->metadata.base_size.height < mode_cmd->height ||
-		     surface->metadata.base_size.depth != 1)) {
+	if (unlikely(surface->mip_levels[0] != 1 ||
+		     surface->num_sizes != 1 ||
+		     surface->base_size.width < mode_cmd->width ||
+		     surface->base_size.height < mode_cmd->height ||
+		     surface->base_size.depth != 1)) {
 		DRM_ERROR("Incompatible surface dimensions "
 			  "for requested mode.\n");
 		return -EINVAL;
@@ -942,7 +941,7 @@ static int vmw_kms_new_framebuffer_surface(struct vmw_private *dev_priv,
 	 * For DX, surface format validation is done when surface->scanout
 	 * is set.
 	 */
-	if (!has_sm4_context(dev_priv) && format != surface->metadata.format) {
+	if (!dev_priv->has_dx && format != surface->format) {
 		DRM_ERROR("Invalid surface format for requested mode.\n");
 		return -EINVAL;
 	}
@@ -1145,8 +1144,8 @@ static int vmw_create_bo_proxy(struct drm_device *dev,
 			       struct vmw_buffer_object *bo_mob,
 			       struct vmw_surface **srf_out)
 {
-	struct vmw_surface_metadata metadata = {0};
 	uint32_t format;
+	struct drm_vmw_size content_base_size = {0};
 	struct vmw_resource *res;
 	unsigned int bytes_pp;
 	struct drm_format_name_buf format_name;
@@ -1176,15 +1175,22 @@ static int vmw_create_bo_proxy(struct drm_device *dev,
 		return -EINVAL;
 	}
 
-	metadata.format = format;
-	metadata.mip_levels[0] = 1;
-	metadata.num_sizes = 1;
-	metadata.base_size.width = mode_cmd->pitches[0] / bytes_pp;
-	metadata.base_size.height =  mode_cmd->height;
-	metadata.base_size.depth = 1;
-	metadata.scanout = true;
+	content_base_size.width  = mode_cmd->pitches[0] / bytes_pp;
+	content_base_size.height = mode_cmd->height;
+	content_base_size.depth  = 1;
 
-	ret = vmw_gb_surface_define(vmw_priv(dev), 0, &metadata, srf_out);
+	ret = vmw_surface_gb_priv_define(dev,
+					 0, /* kernel visible only */
+					 0, /* flags */
+					 format,
+					 true, /* can be a scanout buffer */
+					 1, /* num of mip levels */
+					 0,
+					 0,
+					 content_base_size,
+					 SVGA3D_MS_PATTERN_NONE,
+					 SVGA3D_MS_QUALITY_NONE,
+					 srf_out);
 	if (ret) {
 		DRM_ERROR("Failed to allocate proxy content buffer\n");
 		return ret;
@@ -1891,6 +1897,87 @@ int vmw_kms_write_svga(struct vmw_private *vmw_priv,
 	return 0;
 }
 
+int vmw_kms_save_vga(struct vmw_private *vmw_priv)
+{
+	struct vmw_vga_topology_state *save;
+	uint32_t i;
+
+	vmw_priv->vga_width = vmw_read(vmw_priv, SVGA_REG_WIDTH);
+	vmw_priv->vga_height = vmw_read(vmw_priv, SVGA_REG_HEIGHT);
+	vmw_priv->vga_bpp = vmw_read(vmw_priv, SVGA_REG_BITS_PER_PIXEL);
+	if (vmw_priv->capabilities & SVGA_CAP_PITCHLOCK)
+		vmw_priv->vga_pitchlock =
+		  vmw_read(vmw_priv, SVGA_REG_PITCHLOCK);
+	else if (vmw_fifo_have_pitchlock(vmw_priv))
+		vmw_priv->vga_pitchlock = vmw_mmio_read(vmw_priv->mmio_virt +
+							SVGA_FIFO_PITCHLOCK);
+
+	if (!(vmw_priv->capabilities & SVGA_CAP_DISPLAY_TOPOLOGY))
+		return 0;
+
+	vmw_priv->num_displays = vmw_read(vmw_priv,
+					  SVGA_REG_NUM_GUEST_DISPLAYS);
+
+	if (vmw_priv->num_displays == 0)
+		vmw_priv->num_displays = 1;
+
+	for (i = 0; i < vmw_priv->num_displays; ++i) {
+		save = &vmw_priv->vga_save[i];
+		vmw_write(vmw_priv, SVGA_REG_DISPLAY_ID, i);
+		save->primary = vmw_read(vmw_priv, SVGA_REG_DISPLAY_IS_PRIMARY);
+		save->pos_x = vmw_read(vmw_priv, SVGA_REG_DISPLAY_POSITION_X);
+		save->pos_y = vmw_read(vmw_priv, SVGA_REG_DISPLAY_POSITION_Y);
+		save->width = vmw_read(vmw_priv, SVGA_REG_DISPLAY_WIDTH);
+		save->height = vmw_read(vmw_priv, SVGA_REG_DISPLAY_HEIGHT);
+		vmw_write(vmw_priv, SVGA_REG_DISPLAY_ID, SVGA_ID_INVALID);
+		if (i == 0 && vmw_priv->num_displays == 1 &&
+		    save->width == 0 && save->height == 0) {
+
+			/*
+			 * It should be fairly safe to assume that these
+			 * values are uninitialized.
+			 */
+
+			save->width = vmw_priv->vga_width - save->pos_x;
+			save->height = vmw_priv->vga_height - save->pos_y;
+		}
+	}
+
+	return 0;
+}
+
+int vmw_kms_restore_vga(struct vmw_private *vmw_priv)
+{
+	struct vmw_vga_topology_state *save;
+	uint32_t i;
+
+	vmw_write(vmw_priv, SVGA_REG_WIDTH, vmw_priv->vga_width);
+	vmw_write(vmw_priv, SVGA_REG_HEIGHT, vmw_priv->vga_height);
+	vmw_write(vmw_priv, SVGA_REG_BITS_PER_PIXEL, vmw_priv->vga_bpp);
+	if (vmw_priv->capabilities & SVGA_CAP_PITCHLOCK)
+		vmw_write(vmw_priv, SVGA_REG_PITCHLOCK,
+			  vmw_priv->vga_pitchlock);
+	else if (vmw_fifo_have_pitchlock(vmw_priv))
+		vmw_mmio_write(vmw_priv->vga_pitchlock,
+			       vmw_priv->mmio_virt + SVGA_FIFO_PITCHLOCK);
+
+	if (!(vmw_priv->capabilities & SVGA_CAP_DISPLAY_TOPOLOGY))
+		return 0;
+
+	for (i = 0; i < vmw_priv->num_displays; ++i) {
+		save = &vmw_priv->vga_save[i];
+		vmw_write(vmw_priv, SVGA_REG_DISPLAY_ID, i);
+		vmw_write(vmw_priv, SVGA_REG_DISPLAY_IS_PRIMARY, save->primary);
+		vmw_write(vmw_priv, SVGA_REG_DISPLAY_POSITION_X, save->pos_x);
+		vmw_write(vmw_priv, SVGA_REG_DISPLAY_POSITION_Y, save->pos_y);
+		vmw_write(vmw_priv, SVGA_REG_DISPLAY_WIDTH, save->width);
+		vmw_write(vmw_priv, SVGA_REG_DISPLAY_HEIGHT, save->height);
+		vmw_write(vmw_priv, SVGA_REG_DISPLAY_ID, SVGA_ID_INVALID);
+	}
+
+	return 0;
+}
+
 bool vmw_kms_validate_mode_vram(struct vmw_private *dev_priv,
 				uint32_t pitch,
 				uint32_t height)
@@ -1904,7 +1991,7 @@ bool vmw_kms_validate_mode_vram(struct vmw_private *dev_priv,
 /**
  * Function called by DRM code called with vbl_lock held.
  */
-u32 vmw_get_vblank_counter(struct drm_crtc *crtc)
+u32 vmw_get_vblank_counter(struct drm_device *dev, unsigned int pipe)
 {
 	return 0;
 }
@@ -1912,7 +1999,7 @@ u32 vmw_get_vblank_counter(struct drm_crtc *crtc)
 /**
  * Function called by DRM code called with vbl_lock held.
  */
-int vmw_enable_vblank(struct drm_crtc *crtc)
+int vmw_enable_vblank(struct drm_device *dev, unsigned int pipe)
 {
 	return -EINVAL;
 }
@@ -1920,7 +2007,7 @@ int vmw_enable_vblank(struct drm_crtc *crtc)
 /**
  * Function called by DRM code called with vbl_lock held.
  */
-void vmw_disable_vblank(struct drm_crtc *crtc)
+void vmw_disable_vblank(struct drm_device *dev, unsigned int pipe)
 {
 }
 
@@ -2139,6 +2226,7 @@ void vmw_guess_mode_timing(struct drm_display_mode *mode)
 	mode->vtotal = mode->vsync_end + 50;
 
 	mode->clock = (u32)mode->htotal * (u32)mode->vtotal / 100 * 6;
+	mode->vrefresh = drm_mode_vrefresh(mode);
 }
 
 
@@ -2212,6 +2300,7 @@ int vmw_du_connector_fill_modes(struct drm_connector *connector,
 		mode = drm_mode_duplicate(dev, bmode);
 		if (!mode)
 			return 0;
+		mode->vrefresh = drm_mode_vrefresh(mode);
 
 		drm_mode_probed_add(connector, mode);
 	}
@@ -2481,7 +2570,7 @@ void vmw_kms_helper_validation_finish(struct vmw_private *dev_priv,
 	if (file_priv)
 		vmw_execbuf_copy_fence_user(dev_priv, vmw_fpriv(file_priv),
 					    ret, user_fence_rep, fence,
-					    handle, -1, NULL);
+					    handle, -1);
 	if (out_fence)
 		*out_fence = fence;
 	else
@@ -2508,7 +2597,7 @@ int vmw_kms_update_proxy(struct vmw_resource *res,
 			 int increment)
 {
 	struct vmw_private *dev_priv = res->dev_priv;
-	struct drm_vmw_size *size = &vmw_res_to_srf(res)->metadata.base_size;
+	struct drm_vmw_size *size = &vmw_res_to_srf(res)->base_size;
 	struct {
 		SVGA3dCmdHeader header;
 		SVGA3dCmdUpdateGBImage body;

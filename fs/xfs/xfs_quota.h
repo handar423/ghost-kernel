@@ -13,7 +13,6 @@
  */
 
 struct xfs_trans;
-struct xfs_buf;
 
 /*
  * This check is done typically without holding the inode lock;
@@ -39,14 +38,14 @@ struct xfs_buf;
 
 static inline uint
 xfs_quota_chkd_flag(
-	xfs_dqtype_t		type)
+	uint		dqtype)
 {
-	switch (type) {
-	case XFS_DQTYPE_USER:
+	switch (dqtype) {
+	case XFS_DQ_USER:
 		return XFS_UQUOTA_CHKD;
-	case XFS_DQTYPE_GROUP:
+	case XFS_DQ_GROUP:
 		return XFS_GQUOTA_CHKD;
-	case XFS_DQTYPE_PROJ:
+	case XFS_DQ_PROJ:
 		return XFS_PQUOTA_CHKD;
 	default:
 		return 0;
@@ -87,7 +86,7 @@ extern int xfs_trans_reserve_quota_bydquots(struct xfs_trans *,
 		struct xfs_mount *, struct xfs_dquot *,
 		struct xfs_dquot *, struct xfs_dquot *, int64_t, long, uint);
 
-extern int xfs_qm_vop_dqalloc(struct xfs_inode *, kuid_t, kgid_t,
+extern int xfs_qm_vop_dqalloc(struct xfs_inode *, xfs_dqid_t, xfs_dqid_t,
 		prid_t, uint, struct xfs_dquot **, struct xfs_dquot **,
 		struct xfs_dquot **);
 extern void xfs_qm_vop_create_dqattach(struct xfs_trans *, struct xfs_inode *,
@@ -110,7 +109,7 @@ extern void xfs_qm_unmount_quotas(struct xfs_mount *);
 
 #else
 static inline int
-xfs_qm_vop_dqalloc(struct xfs_inode *ip, kuid_t kuid, kgid_t kgid,
+xfs_qm_vop_dqalloc(struct xfs_inode *ip, xfs_dqid_t uid, xfs_dqid_t gid,
 		prid_t prid, uint flags, struct xfs_dquot **udqp,
 		struct xfs_dquot **gdqp, struct xfs_dquot **pdqp)
 {

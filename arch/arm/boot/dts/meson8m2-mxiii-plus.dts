@@ -69,7 +69,9 @@
 	pinctrl-names = "default";
 
 	phy-handle = <&eth_phy0>;
-	phy-mode = "rgmii-id";
+	phy-mode = "rgmii";
+
+	amlogic,tx-delay-ns = <4>;
 
 	mdio {
 		compatible = "snps,dwmac-mdio";

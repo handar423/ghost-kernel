@@ -11,7 +11,6 @@
 #include <linux/workqueue.h>
 #include <linux/of_device.h>
 #include <linux/soc/qcom/apr.h>
-#include <linux/soc/qcom/pdr.h>
 #include <linux/rpmsg.h>
 #include <linux/of.h>
 
@@ -22,7 +21,6 @@ struct apr {
 	spinlock_t rx_lock;
 	struct idr svcs_idr;
 	int dest_domain_id;
-	struct pdr_handle *pdr;
 	struct workqueue_struct *rxwq;
 	struct work_struct rx_work;
 	struct list_head rx_list;
@@ -291,9 +289,6 @@ static int apr_add_device(struct device *dev, struct device_node *np,
 		  id->svc_id + 1, GFP_ATOMIC);
 	spin_unlock(&apr->svcs_lock);
 
-	of_property_read_string_index(np, "qcom,protection-domain",
-				      1, &adev->service_path);
-
 	dev_info(dev, "Adding APR dev: %s\n", dev_name(&adev->dev));
 
 	ret = device_register(&adev->dev);
@@ -305,74 +300,13 @@ static int apr_add_device(struct device *dev, struct device_node *np,
 	return ret;
 }
 
-static int of_apr_add_pd_lookups(struct device *dev)
-{
-	const char *service_name, *service_path;
-	struct apr *apr = dev_get_drvdata(dev);
-	struct device_node *node;
-	struct pdr_service *pds;
-	int ret;
-
-	for_each_child_of_node(dev->of_node, node) {
-		ret = of_property_read_string_index(node, "qcom,protection-domain",
-						    0, &service_name);
-		if (ret < 0)
-			continue;
-
-		ret = of_property_read_string_index(node, "qcom,protection-domain",
-						    1, &service_path);
-		if (ret < 0) {
-			dev_err(dev, "pdr service path missing: %d\n", ret);
-			return ret;
-		}
-
-		pds = pdr_add_lookup(apr->pdr, service_name, service_path);
-		if (IS_ERR(pds) && PTR_ERR(pds) != -EALREADY) {
-			dev_err(dev, "pdr add lookup failed: %ld\n", PTR_ERR(pds));
-			return PTR_ERR(pds);
-		}
-	}
-
-	return 0;
-}
-
-static void of_register_apr_devices(struct device *dev, const char *svc_path)
+static void of_register_apr_devices(struct device *dev)
 {
 	struct apr *apr = dev_get_drvdata(dev);
 	struct device_node *node;
-	const char *service_path;
-	int ret;
 
 	for_each_child_of_node(dev->of_node, node) {
 		struct apr_device_id id = { {0} };
-
-		/*
-		 * This function is called with svc_path NULL during
-		 * apr_probe(), in which case we register any apr devices
-		 * without a qcom,protection-domain specified.
-		 *
-		 * Then as the protection domains becomes available
-		 * (if applicable) this function is again called, but with
-		 * svc_path representing the service becoming available. In
-		 * this case we register any apr devices with a matching
-		 * qcom,protection-domain.
-		 */
-
-		ret = of_property_read_string_index(node, "qcom,protection-domain",
-						    1, &service_path);
-		if (svc_path) {
-			/* skip APR services that are PD independent */
-			if (ret)
-				continue;
-
-			/* skip APR services whose PD paths don't match */
-			if (strcmp(service_path, svc_path))
-				continue;
-		} else {
-			/* skip APR services whose PD lookups are registered */
-			if (ret == 0)
-				continue;
-		}
 
 		if (of_property_read_u32(node, "reg", &id.svc_id))
 			continue;
@@ -381,34 +315,6 @@ static void of_register_apr_devices(struct device *dev, const char *svc_path)
 
 		if (apr_add_device(dev, node, &id))
 			dev_err(dev, "Failed to add apr %d svc\n", id.svc_id);
-	}
-}
-
-static int apr_remove_device(struct device *dev, void *svc_path)
-{
-	struct apr_device *adev = to_apr_device(dev);
-
-	if (svc_path && adev->service_path) {
-		if (!strcmp(adev->service_path, (char *)svc_path))
-			device_unregister(&adev->dev);
-	} else {
-		device_unregister(&adev->dev);
-	}
-
-	return 0;
-}
-
-static void apr_pd_status(int state, char *svc_path, void *priv)
-{
-	struct apr *apr = (struct apr *)priv;
-
-	switch (state) {
-	case SERVREG_SERVICE_STATE_UP:
-		of_register_apr_devices(apr->dev, svc_path);
-		break;
-	case SERVREG_SERVICE_STATE_DOWN:
-		device_for_each_child(apr->dev, svc_path, apr_remove_device);
-		break;
 	}
 }
 
@@ -437,39 +343,28 @@ static int apr_probe(struct rpmsg_device *rpdev)
 		return -ENOMEM;
 	}
 	INIT_WORK(&apr->rx_work, apr_rxwq);
-
-	apr->pdr = pdr_handle_alloc(apr_pd_status, apr);
-	if (IS_ERR(apr->pdr)) {
-		dev_err(dev, "Failed to init PDR handle\n");
-		ret = PTR_ERR(apr->pdr);
-		goto destroy_wq;
-	}
-
 	INIT_LIST_HEAD(&apr->rx_list);
 	spin_lock_init(&apr->rx_lock);
 	spin_lock_init(&apr->svcs_lock);
 	idr_init(&apr->svcs_idr);
-
-	ret = of_apr_add_pd_lookups(dev);
-	if (ret)
-		goto handle_release;
-
-	of_register_apr_devices(dev, NULL);
+	of_register_apr_devices(dev);
 
 	return 0;
+}
 
-handle_release:
-	pdr_handle_release(apr->pdr);
-destroy_wq:
-	destroy_workqueue(apr->rxwq);
-	return ret;
+static int apr_remove_device(struct device *dev, void *null)
+{
+	struct apr_device *adev = to_apr_device(dev);
+
+	device_unregister(&adev->dev);
+
+	return 0;
 }
 
 static void apr_remove(struct rpmsg_device *rpdev)
 {
 	struct apr *apr = dev_get_drvdata(&rpdev->dev);
 
-	pdr_handle_release(apr->pdr);
 	device_for_each_child(&rpdev->dev, NULL, apr_remove_device);
 	flush_workqueue(apr->rxwq);
 	destroy_workqueue(apr->rxwq);

@@ -187,9 +187,9 @@ static void aa_free_data(void *ptr, void *arg)
 {
 	struct aa_data *data = ptr;
 
-	kfree_sensitive(data->data);
-	kfree_sensitive(data->key);
-	kfree_sensitive(data);
+	kzfree(data->data);
+	kzfree(data->key);
+	kzfree(data);
 }
 
 /**
@@ -217,19 +217,19 @@ void aa_free_profile(struct aa_profile *profile)
 	aa_put_profile(rcu_access_pointer(profile->parent));
 
 	aa_put_ns(profile->ns);
-	kfree_sensitive(profile->rename);
+	kzfree(profile->rename);
 
 	aa_free_file_rules(&profile->file);
 	aa_free_cap_rules(&profile->caps);
 	aa_free_rlimit_rules(&profile->rlimits);
 
 	for (i = 0; i < profile->xattr_count; i++)
-		kfree_sensitive(profile->xattrs[i]);
-	kfree_sensitive(profile->xattrs);
+		kzfree(profile->xattrs[i]);
+	kzfree(profile->xattrs);
 	for (i = 0; i < profile->secmark_count; i++)
-		kfree_sensitive(profile->secmark[i].label);
-	kfree_sensitive(profile->secmark);
-	kfree_sensitive(profile->dirname);
+		kzfree(profile->secmark[i].label);
+	kzfree(profile->secmark);
+	kzfree(profile->dirname);
 	aa_put_dfa(profile->xmatch);
 	aa_put_dfa(profile->policy.dfa);
 
@@ -237,14 +237,13 @@ void aa_free_profile(struct aa_profile *profile)
 		rht = profile->data;
 		profile->data = NULL;
 		rhashtable_free_and_destroy(rht, aa_free_data, NULL);
-		kfree_sensitive(rht);
+		kzfree(rht);
 	}
 
-	kfree_sensitive(profile->hash);
+	kzfree(profile->hash);
 	aa_put_loaddata(profile->rawdata);
-	aa_label_destroy(&profile->label);
 
-	kfree_sensitive(profile);
+	kzfree(profile);
 }
 
 /**
@@ -583,7 +582,7 @@ static int replacement_allowed(struct aa_profile *profile, int noreplace,
 {
 	if (profile) {
 		if (profile->label.flags & FLAG_IMMUTIBLE) {
-			*info = "cannot replace immutable profile";
+			*info = "cannot replace immutible profile";
 			return -EPERM;
 		} else if (noreplace) {
 			*info = "profile already exists";
@@ -857,7 +856,7 @@ static struct aa_profile *update_to_newest_parent(struct aa_profile *new)
 ssize_t aa_replace_profiles(struct aa_ns *policy_ns, struct aa_label *label,
 			    u32 mask, struct aa_loaddata *udata)
 {
-	const char *ns_name = NULL, *info = NULL;
+	const char *ns_name, *info = NULL;
 	struct aa_ns *ns = NULL;
 	struct aa_load_ent *ent, *tmp;
 	struct aa_loaddata *rawdata_ent;
@@ -1044,7 +1043,6 @@ ssize_t aa_replace_profiles(struct aa_ns *policy_ns, struct aa_label *label,
 out:
 	aa_put_ns(ns);
 	aa_put_loaddata(udata);
-	kfree(ns_name);
 
 	if (error)
 		return error;

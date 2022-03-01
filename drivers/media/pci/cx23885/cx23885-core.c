@@ -1322,6 +1322,7 @@ void cx23885_free_buffer(struct cx23885_dev *dev, struct cx23885_buffer *buf)
 {
 	struct cx23885_riscmem *risc = &buf->risc;
 
+	BUG_ON(in_interrupt());
 	pci_free_consistent(dev->pci, risc->size, risc->cpu, risc->dma);
 }
 
@@ -2238,6 +2239,9 @@ static struct pci_driver cx23885_pci_driver = {
 	.id_table = cx23885_pci_tbl,
 	.probe    = cx23885_initdev,
 	.remove   = cx23885_finidev,
+	/* TODO */
+	.suspend  = NULL,
+	.resume   = NULL,
 };
 
 static int __init cx23885_init(void)

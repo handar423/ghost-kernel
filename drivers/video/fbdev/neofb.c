@@ -70,6 +70,7 @@
 
 #include <asm/io.h>
 #include <asm/irq.h>
+#include <asm/pgtable.h>
 #include <video/vga.h>
 #include <video/neomagic.h>
 
@@ -1609,7 +1610,7 @@ neofb_cursor(struct fb_info *info, struct fb_cursor *cursor)
 }
 */
 
-static const struct fb_ops neofb_ops = {
+static struct fb_ops neofb_ops = {
 	.owner		= THIS_MODULE,
 	.fb_open	= neofb_open,
 	.fb_release	= neofb_release,

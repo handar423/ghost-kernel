@@ -1610,6 +1610,8 @@ static void halbtc8723b2ant_TdmaDurationAdjust(
 						HAL_BTC8723B2ANT_DMA_DURATION_ADJUST(13);
 					else if (maxInterval == 2)
 						HAL_BTC8723B2ANT_DMA_DURATION_ADJUST(14);
+					else if (maxInterval == 3)
+						HAL_BTC8723B2ANT_DMA_DURATION_ADJUST(15);
 					else
 						HAL_BTC8723B2ANT_DMA_DURATION_ADJUST(15);
 				} else {
@@ -1617,6 +1619,8 @@ static void halbtc8723b2ant_TdmaDurationAdjust(
 						HAL_BTC8723B2ANT_DMA_DURATION_ADJUST(9);
 					else if (maxInterval == 2)
 						HAL_BTC8723B2ANT_DMA_DURATION_ADJUST(10);
+					else if (maxInterval == 3)
+						HAL_BTC8723B2ANT_DMA_DURATION_ADJUST(11);
 					else
 						HAL_BTC8723B2ANT_DMA_DURATION_ADJUST(11);
 				}
@@ -1626,6 +1630,8 @@ static void halbtc8723b2ant_TdmaDurationAdjust(
 						HAL_BTC8723B2ANT_DMA_DURATION_ADJUST(5);
 					else if (maxInterval == 2)
 						HAL_BTC8723B2ANT_DMA_DURATION_ADJUST(6);
+					else if (maxInterval == 3)
+						HAL_BTC8723B2ANT_DMA_DURATION_ADJUST(7);
 					else
 						HAL_BTC8723B2ANT_DMA_DURATION_ADJUST(7);
 				} else {
@@ -1633,6 +1639,8 @@ static void halbtc8723b2ant_TdmaDurationAdjust(
 						HAL_BTC8723B2ANT_DMA_DURATION_ADJUST(1);
 					else if (maxInterval == 2)
 						HAL_BTC8723B2ANT_DMA_DURATION_ADJUST(2);
+					else if (maxInterval == 3)
+						HAL_BTC8723B2ANT_DMA_DURATION_ADJUST(3);
 					else
 						HAL_BTC8723B2ANT_DMA_DURATION_ADJUST(3);
 				}
@@ -1646,7 +1654,7 @@ static void halbtc8723b2ant_TdmaDurationAdjust(
 		result = 0;
 		WaitCount = 0;
 	} else {
-		/* acquire the BT TRx retry count from BT_Info byte2 */
+		/* accquire the BT TRx retry count from BT_Info byte2 */
 		retryCount = pCoexSta->btRetryCnt;
 		BTC_PRINT(BTC_MSG_ALGORITHM, ALGO_TRACE_FW_DETAIL, ("[BTCoex], retryCount = %d\n", retryCount));
 		BTC_PRINT(

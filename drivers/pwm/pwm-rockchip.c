@@ -83,7 +83,12 @@ static void rockchip_pwm_get_state(struct pwm_chip *chip,
 	state->duty_cycle =  DIV_ROUND_CLOSEST_ULL(tmp, clk_rate);
 
 	val = readl_relaxed(pc->base + pc->data->regs.ctrl);
-	state->enabled = (val & enable_conf) == enable_conf;
+	if (pc->data->supports_polarity)
+		state->enabled = ((val & enable_conf) != enable_conf) ?
+				 false : true;
+	else
+		state->enabled = ((val & enable_conf) == enable_conf) ?
+				 true : false;
 
 	if (pc->data->supports_polarity && !(val & PWM_DUTY_POSITIVE))
 		state->polarity = PWM_POLARITY_INVERSED;
@@ -287,7 +292,7 @@ static int rockchip_pwm_probe(struct platform_device *pdev)
 {
 	const struct of_device_id *id;
 	struct rockchip_pwm_chip *pc;
-	u32 enable_conf, ctrl;
+	struct resource *r;
 	int ret, count;
 
 	id = of_match_device(rockchip_pwm_dt_ids, &pdev->dev);
@@ -298,16 +303,21 @@ static int rockchip_pwm_probe(struct platform_device *pdev)
 	if (!pc)
 		return -ENOMEM;
 
-	pc->base = devm_platform_ioremap_resource(pdev, 0);
+	r = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	pc->base = devm_ioremap_resource(&pdev->dev, r);
 	if (IS_ERR(pc->base))
 		return PTR_ERR(pc->base);
 
 	pc->clk = devm_clk_get(&pdev->dev, "pwm");
 	if (IS_ERR(pc->clk)) {
 		pc->clk = devm_clk_get(&pdev->dev, NULL);
-		if (IS_ERR(pc->clk))
-			return dev_err_probe(&pdev->dev, PTR_ERR(pc->clk),
-					     "Can't get bus clk\n");
+		if (IS_ERR(pc->clk)) {
+			ret = PTR_ERR(pc->clk);
+			if (ret != -EPROBE_DEFER)
+				dev_err(&pdev->dev, "Can't get bus clk: %d\n",
+					ret);
+			return ret;
+		}
 	}
 
 	count = of_count_phandle_with_args(pdev->dev.of_node,
@@ -351,15 +361,12 @@ static int rockchip_pwm_probe(struct platform_device *pdev)
 
 	ret = pwmchip_add(&pc->chip);
 	if (ret < 0) {
-		clk_unprepare(pc->clk);
 		dev_err(&pdev->dev, "pwmchip_add() failed: %d\n", ret);
 		goto err_pclk;
 	}
 
 	/* Keep the PWM clk enabled if the PWM appears to be up and running. */
-	enable_conf = pc->data->enable_conf;
-	ctrl = readl_relaxed(pc->base + pc->data->regs.ctrl);
-	if ((ctrl & enable_conf) != enable_conf)
+	if (!pwm_is_enabled(pc->chip.pwms))
 		clk_disable(pc->clk);
 
 	return 0;
@@ -375,20 +382,6 @@ err_clk:
 static int rockchip_pwm_remove(struct platform_device *pdev)
 {
 	struct rockchip_pwm_chip *pc = platform_get_drvdata(pdev);
-
-	/*
-	 * Disable the PWM clk before unpreparing it if the PWM device is still
-	 * running. This should only happen when the last PWM user left it
-	 * enabled, or when nobody requested a PWM that was previously enabled
-	 * by the bootloader.
-	 *
-	 * FIXME: Maybe the core should disable all PWM devices in
-	 * pwmchip_remove(). In this case we'd only have to call
-	 * clk_unprepare() after pwmchip_remove().
-	 *
-	 */
-	if (pwm_is_enabled(pc->chip.pwms))
-		clk_disable(pc->clk);
 
 	clk_unprepare(pc->pclk);
 	clk_unprepare(pc->clk);

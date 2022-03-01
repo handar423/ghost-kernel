@@ -354,7 +354,7 @@ static int mxc_rtc_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	ret = devm_rtc_register_device(pdata->rtc);
+	ret = rtc_register_device(pdata->rtc);
 	if (ret < 0)
 		clk_unprepare(pdata->clk);
 
@@ -373,6 +373,7 @@ static const struct of_device_id mxc_ids[] = {
 	{ .compatible = "fsl,imx53-rtc", },
 	{}
 };
+MODULE_DEVICE_TABLE(of, mxc_ids);
 
 static struct platform_driver mxc_rtc_driver = {
 	.driver = {

@@ -10,7 +10,6 @@
 #include <linux/debugfs.h>
 #include <linux/dma-buf.h>
 #include <linux/of_irq.h>
-#include <linux/pm_opp.h>
 
 #include <drm/drm_crtc.h>
 #include <drm/drm_file.h>
@@ -31,6 +30,10 @@
 #define CREATE_TRACE_POINTS
 #include "dpu_trace.h"
 
+static const char * const iommu_ports[] = {
+		"mdp_0",
+};
+
 /*
  * To enable overall DRM driver logging
  * # echo 0x2 > /sys/module/drm/parameters/debug
@@ -46,19 +49,35 @@
 static int dpu_kms_hw_init(struct msm_kms *kms);
 static void _dpu_kms_mmu_destroy(struct dpu_kms *dpu_kms);
 
+static unsigned long dpu_iomap_size(struct platform_device *pdev,
+				    const char *name)
+{
+	struct resource *res;
+
+	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, name);
+	if (!res) {
+		DRM_ERROR("failed to get memory resource: %s\n", name);
+		return 0;
+	}
+
+	return resource_size(res);
+}
+
 #ifdef CONFIG_DEBUG_FS
 static int _dpu_danger_signal_status(struct seq_file *s,
 		bool danger_status)
 {
 	struct dpu_kms *kms = (struct dpu_kms *)s->private;
+	struct msm_drm_private *priv;
 	struct dpu_danger_safe_status status;
 	int i;
 
-	if (!kms->hw_mdp) {
+	if (!kms->dev || !kms->dev->dev_private || !kms->hw_mdp) {
 		DPU_ERROR("invalid arg(s)\n");
 		return 0;
 	}
 
+	priv = kms->dev->dev_private;
 	memset(&status, 0, sizeof(struct dpu_danger_safe_status));
 
 	pm_runtime_get_sync(&kms->pdev->dev);
@@ -69,8 +88,8 @@ static int _dpu_danger_signal_status(struct seq_file *s,
 					&status);
 	} else {
 		seq_puts(s, "\nSafe signal status:\n");
-		if (kms->hw_mdp->ops.get_danger_status)
-			kms->hw_mdp->ops.get_danger_status(kms->hw_mdp,
+		if (kms->hw_mdp->ops.get_safe_status)
+			kms->hw_mdp->ops.get_safe_status(kms->hw_mdp,
 					&status);
 	}
 	pm_runtime_put_sync(&kms->pdev->dev);
@@ -85,17 +104,30 @@ static int _dpu_danger_signal_status(struct seq_file *s,
 	return 0;
 }
 
+#define DEFINE_DPU_DEBUGFS_SEQ_FOPS(__prefix)				\
+static int __prefix ## _open(struct inode *inode, struct file *file)	\
+{									\
+	return single_open(file, __prefix ## _show, inode->i_private);	\
+}									\
+static const struct file_operations __prefix ## _fops = {		\
+	.owner = THIS_MODULE,						\
+	.open = __prefix ## _open,					\
+	.release = single_release,					\
+	.read = seq_read,						\
+	.llseek = seq_lseek,						\
+}
+
 static int dpu_debugfs_danger_stats_show(struct seq_file *s, void *v)
 {
 	return _dpu_danger_signal_status(s, true);
 }
-DEFINE_SHOW_ATTRIBUTE(dpu_debugfs_danger_stats);
+DEFINE_DPU_DEBUGFS_SEQ_FOPS(dpu_debugfs_danger_stats);
 
 static int dpu_debugfs_safe_stats_show(struct seq_file *s, void *v)
 {
 	return _dpu_danger_signal_status(s, false);
 }
-DEFINE_SHOW_ATTRIBUTE(dpu_debugfs_safe_stats);
+DEFINE_DPU_DEBUGFS_SEQ_FOPS(dpu_debugfs_safe_stats);
 
 static void dpu_debugfs_danger_init(struct dpu_kms *dpu_kms,
 		struct dentry *parent)
@@ -112,10 +144,20 @@ static int _dpu_debugfs_show_regset32(struct seq_file *s, void *data)
 {
 	struct dpu_debugfs_regset32 *regset = s->private;
 	struct dpu_kms *dpu_kms = regset->dpu_kms;
+	struct drm_device *dev;
+	struct msm_drm_private *priv;
 	void __iomem *base;
 	uint32_t i, addr;
 
 	if (!dpu_kms->mmio)
+		return 0;
+
+	dev = dpu_kms->dev;
+	if (!dev)
+		return 0;
+
+	priv = dev->dev_private;
+	if (!priv)
 		return 0;
 
 	base = dpu_kms->mmio + regset->offset;
@@ -182,14 +224,9 @@ static int dpu_kms_debugfs_init(struct msm_kms *kms, struct drm_minor *minor)
 	struct dpu_kms *dpu_kms = to_dpu_kms(kms);
 	void *p = dpu_hw_util_get_log_mask_ptr();
 	struct dentry *entry;
-	struct drm_device *dev;
-	struct msm_drm_private *priv;
 
 	if (!p)
 		return -EINVAL;
-
-	dev = dpu_kms->dev;
-	priv = dev->dev_private;
 
 	entry = debugfs_create_dir("debug", minor->debugfs_root);
 
@@ -199,113 +236,9 @@ static int dpu_kms_debugfs_init(struct msm_kms *kms, struct drm_minor *minor)
 	dpu_debugfs_vbif_init(dpu_kms, entry);
 	dpu_debugfs_core_irq_init(dpu_kms, entry);
 
-	if (priv->dp)
-		msm_dp_debugfs_init(priv->dp, minor);
-
 	return dpu_core_perf_debugfs_init(dpu_kms, entry);
 }
 #endif
-
-/* Global/shared object state funcs */
-
-/*
- * This is a helper that returns the private state currently in operation.
- * Note that this would return the "old_state" if called in the atomic check
- * path, and the "new_state" after the atomic swap has been done.
- */
-struct dpu_global_state *
-dpu_kms_get_existing_global_state(struct dpu_kms *dpu_kms)
-{
-	return to_dpu_global_state(dpu_kms->global_state.state);
-}
-
-/*
- * This acquires the modeset lock set aside for global state, creates
- * a new duplicated private object state.
- */
-struct dpu_global_state *dpu_kms_get_global_state(struct drm_atomic_state *s)
-{
-	struct msm_drm_private *priv = s->dev->dev_private;
-	struct dpu_kms *dpu_kms = to_dpu_kms(priv->kms);
-	struct drm_private_state *priv_state;
-	int ret;
-
-	ret = drm_modeset_lock(&dpu_kms->global_state_lock, s->acquire_ctx);
-	if (ret)
-		return ERR_PTR(ret);
-
-	priv_state = drm_atomic_get_private_obj_state(s,
-						&dpu_kms->global_state);
-	if (IS_ERR(priv_state))
-		return ERR_CAST(priv_state);
-
-	return to_dpu_global_state(priv_state);
-}
-
-static struct drm_private_state *
-dpu_kms_global_duplicate_state(struct drm_private_obj *obj)
-{
-	struct dpu_global_state *state;
-
-	state = kmemdup(obj->state, sizeof(*state), GFP_KERNEL);
-	if (!state)
-		return NULL;
-
-	__drm_atomic_helper_private_obj_duplicate_state(obj, &state->base);
-
-	return &state->base;
-}
-
-static void dpu_kms_global_destroy_state(struct drm_private_obj *obj,
-				      struct drm_private_state *state)
-{
-	struct dpu_global_state *dpu_state = to_dpu_global_state(state);
-
-	kfree(dpu_state);
-}
-
-static const struct drm_private_state_funcs dpu_kms_global_state_funcs = {
-	.atomic_duplicate_state = dpu_kms_global_duplicate_state,
-	.atomic_destroy_state = dpu_kms_global_destroy_state,
-};
-
-static int dpu_kms_global_obj_init(struct dpu_kms *dpu_kms)
-{
-	struct dpu_global_state *state;
-
-	drm_modeset_lock_init(&dpu_kms->global_state_lock);
-
-	state = kzalloc(sizeof(*state), GFP_KERNEL);
-	if (!state)
-		return -ENOMEM;
-
-	drm_atomic_private_obj_init(dpu_kms->dev, &dpu_kms->global_state,
-				    &state->base,
-				    &dpu_kms_global_state_funcs);
-	return 0;
-}
-
-static int dpu_kms_parse_data_bus_icc_path(struct dpu_kms *dpu_kms)
-{
-	struct icc_path *path0;
-	struct icc_path *path1;
-	struct drm_device *dev = dpu_kms->dev;
-
-	path0 = of_icc_get(dev->dev, "mdp0-mem");
-	path1 = of_icc_get(dev->dev, "mdp1-mem");
-
-	if (IS_ERR_OR_NULL(path0))
-		return PTR_ERR_OR_ZERO(path0);
-
-	dpu_kms->path[0] = path0;
-	dpu_kms->num_paths = 1;
-
-	if (!IS_ERR_OR_NULL(path1)) {
-		dpu_kms->path[1] = path1;
-		dpu_kms->num_paths++;
-	}
-	return 0;
-}
 
 static int dpu_kms_enable_vblank(struct msm_kms *kms, struct drm_crtc *crtc)
 {
@@ -346,6 +279,9 @@ static ktime_t dpu_kms_vsync_time(struct msm_kms *kms, struct drm_crtc *crtc)
 static void dpu_kms_prepare_commit(struct msm_kms *kms,
 		struct drm_atomic_state *state)
 {
+	struct dpu_kms *dpu_kms;
+	struct msm_drm_private *priv;
+	struct drm_device *dev;
 	struct drm_crtc *crtc;
 	struct drm_crtc_state *crtc_state;
 	struct drm_encoder *encoder;
@@ -353,6 +289,12 @@ static void dpu_kms_prepare_commit(struct msm_kms *kms,
 
 	if (!kms)
 		return;
+	dpu_kms = to_dpu_kms(kms);
+	dev = dpu_kms->dev;
+
+	if (!dev || !dev->dev_private)
+		return;
+	priv = dev->dev_private;
 
 	/* Call prepare_commit for all affected encoders */
 	for_each_new_crtc_in_state(state, crtc, crtc_state, i) {
@@ -391,6 +333,7 @@ void dpu_kms_encoder_enable(struct drm_encoder *encoder)
 	if (funcs && funcs->commit)
 		funcs->commit(encoder);
 
+	WARN_ON(!drm_modeset_is_locked(&dev->mode_config.connection_mutex));
 	drm_for_each_crtc(crtc, dev) {
 		if (!(crtc->state->encoder_mask & drm_encoder_mask(encoder)))
 			continue;
@@ -496,33 +439,6 @@ static int _dpu_kms_initialize_dsi(struct drm_device *dev,
 	return rc;
 }
 
-static int _dpu_kms_initialize_displayport(struct drm_device *dev,
-					    struct msm_drm_private *priv,
-					    struct dpu_kms *dpu_kms)
-{
-	struct drm_encoder *encoder = NULL;
-	int rc = 0;
-
-	if (!priv->dp)
-		return rc;
-
-	encoder = dpu_encoder_init(dev, DRM_MODE_ENCODER_TMDS);
-	if (IS_ERR(encoder)) {
-		DPU_ERROR("encoder init failed for dsi display\n");
-		return PTR_ERR(encoder);
-	}
-
-	rc = msm_dp_modeset_init(priv->dp, dev, encoder);
-	if (rc) {
-		DPU_ERROR("modeset_init failed for DP, rc = %d\n", rc);
-		drm_encoder_cleanup(encoder);
-		return rc;
-	}
-
-	priv->encoders[priv->num_encoders++] = encoder;
-	return rc;
-}
-
 /**
  * _dpu_kms_setup_displays - create encoders, bridges and connectors
  *                           for underlying displays
@@ -535,21 +451,12 @@ static int _dpu_kms_setup_displays(struct drm_device *dev,
 				    struct msm_drm_private *priv,
 				    struct dpu_kms *dpu_kms)
 {
-	int rc = 0;
+	/**
+	 * Extend this function to initialize other
+	 * types of displays
+	 */
 
-	rc = _dpu_kms_initialize_dsi(dev, priv, dpu_kms);
-	if (rc) {
-		DPU_ERROR("initialize_dsi failed, rc = %d\n", rc);
-		return rc;
-	}
-
-	rc = _dpu_kms_initialize_displayport(dev, priv, dpu_kms);
-	if (rc) {
-		DPU_ERROR("initialize_DP failed, rc = %d\n", rc);
-		return rc;
-	}
-
-	return rc;
+	return _dpu_kms_initialize_dsi(dev, priv, dpu_kms);
 }
 
 static void _dpu_kms_drm_obj_destroy(struct dpu_kms *dpu_kms)
@@ -557,6 +464,16 @@ static void _dpu_kms_drm_obj_destroy(struct dpu_kms *dpu_kms)
 	struct msm_drm_private *priv;
 	int i;
 
+	if (!dpu_kms) {
+		DPU_ERROR("invalid dpu_kms\n");
+		return;
+	} else if (!dpu_kms->dev) {
+		DPU_ERROR("invalid dev\n");
+		return;
+	} else if (!dpu_kms->dev->dev_private) {
+		DPU_ERROR("invalid dev_private\n");
+		return;
+	}
 	priv = dpu_kms->dev->dev_private;
 
 	for (i = 0; i < priv->num_crtcs; i++)
@@ -588,6 +505,7 @@ static int _dpu_kms_drm_obj_init(struct dpu_kms *dpu_kms)
 
 	int primary_planes_idx = 0, cursor_planes_idx = 0, i, ret;
 	int max_crtc_count;
+
 	dev = dpu_kms->dev;
 	priv = dev->dev_private;
 	catalog = dpu_kms->catalog;
@@ -663,7 +581,12 @@ static long dpu_kms_round_pixclk(struct msm_kms *kms, unsigned long rate,
 
 static void _dpu_kms_hw_destroy(struct dpu_kms *dpu_kms)
 {
+	struct drm_device *dev;
 	int i;
+
+	dev = dpu_kms->dev;
+	if (!dev)
+		return;
 
 	if (dpu_kms->hw_intr)
 		dpu_hw_intr_destroy(dpu_kms->hw_intr);
@@ -718,8 +641,6 @@ static void dpu_kms_destroy(struct msm_kms *kms)
 	dpu_kms = to_dpu_kms(kms);
 
 	_dpu_kms_hw_destroy(dpu_kms);
-
-	msm_kms_destroy(&dpu_kms->base);
 }
 
 static void _dpu_kms_set_encoder_mode(struct msm_kms *kms,
@@ -736,20 +657,13 @@ static void _dpu_kms_set_encoder_mode(struct msm_kms *kms,
 	info.capabilities = cmd_mode ? MSM_DISPLAY_CAP_CMD_MODE :
 			MSM_DISPLAY_CAP_VID_MODE;
 
-	switch (info.intf_type) {
-	case DRM_MODE_ENCODER_DSI:
-		/* TODO: No support for DSI swap */
-		for (i = 0; i < ARRAY_SIZE(priv->dsi); i++) {
-			if (priv->dsi[i]) {
-				info.h_tile_instance[info.num_of_h_tiles] = i;
-				info.num_of_h_tiles++;
-			}
+	/* TODO: No support for DSI swap */
+	for (i = 0; i < ARRAY_SIZE(priv->dsi); i++) {
+		if (priv->dsi[i]) {
+			info.h_tile_instance[info.num_of_h_tiles] = i;
+			info.num_of_h_tiles++;
 		}
-		break;
-	case DRM_MODE_ENCODER_TMDS:
-		info.num_of_h_tiles = 1;
-		break;
-	};
+	}
 
 	rc = dpu_encoder_setup(encoder->dev, encoder, &info);
 	if (rc)
@@ -771,23 +685,6 @@ static void dpu_irq_preinstall(struct msm_kms *kms)
 	dpu_core_irq_preinstall(dpu_kms);
 }
 
-static int dpu_irq_postinstall(struct msm_kms *kms)
-{
-	struct msm_drm_private *priv;
-	struct dpu_kms *dpu_kms = to_dpu_kms(kms);
-
-	if (!dpu_kms || !dpu_kms->dev)
-		return -EINVAL;
-
-	priv = dpu_kms->dev->dev_private;
-	if (!priv)
-		return -EINVAL;
-
-	msm_dp_irq_postinstall(priv->dp);
-
-	return 0;
-}
-
 static void dpu_irq_uninstall(struct msm_kms *kms)
 {
 	struct dpu_kms *dpu_kms = to_dpu_kms(kms);
@@ -798,7 +695,6 @@ static void dpu_irq_uninstall(struct msm_kms *kms)
 static const struct msm_kms_funcs kms_funcs = {
 	.hw_init         = dpu_kms_hw_init,
 	.irq_preinstall  = dpu_irq_preinstall,
-	.irq_postinstall = dpu_irq_postinstall,
 	.irq_uninstall   = dpu_irq_uninstall,
 	.irq             = dpu_irq,
 	.enable_commit   = dpu_kms_enable_commit,
@@ -829,7 +725,8 @@ static void _dpu_kms_mmu_destroy(struct dpu_kms *dpu_kms)
 
 	mmu = dpu_kms->base.aspace->mmu;
 
-	mmu->funcs->detach(mmu);
+	mmu->funcs->detach(mmu, (const char **)iommu_ports,
+			ARRAY_SIZE(iommu_ports));
 	msm_gem_address_space_put(dpu_kms->base.aspace);
 
 	dpu_kms->base.aspace = NULL;
@@ -839,19 +736,28 @@ static int _dpu_kms_mmu_init(struct dpu_kms *dpu_kms)
 {
 	struct iommu_domain *domain;
 	struct msm_gem_address_space *aspace;
-	struct msm_mmu *mmu;
+	int ret;
 
 	domain = iommu_domain_alloc(&platform_bus_type);
 	if (!domain)
 		return 0;
 
-	mmu = msm_iommu_new(dpu_kms->dev->dev, domain);
-	aspace = msm_gem_address_space_create(mmu, "dpu1",
-		0x1000, 0x100000000 - 0x1000);
+	domain->geometry.aperture_start = 0x1000;
+	domain->geometry.aperture_end = 0xffffffff;
 
+	aspace = msm_gem_address_space_create(dpu_kms->dev->dev,
+			domain, "dpu1");
 	if (IS_ERR(aspace)) {
-		mmu->funcs->destroy(mmu);
+		iommu_domain_free(domain);
 		return PTR_ERR(aspace);
+	}
+
+	ret = aspace->mmu->funcs->attach(aspace->mmu, iommu_ports,
+			ARRAY_SIZE(iommu_ports));
+	if (ret) {
+		DPU_ERROR("failed to attach iommu %d\n", ret);
+		msm_gem_address_space_put(aspace);
+		return ret;
 	}
 
 	dpu_kms->base.aspace = aspace;
@@ -887,6 +793,7 @@ static int dpu_kms_hw_init(struct msm_kms *kms)
 {
 	struct dpu_kms *dpu_kms;
 	struct drm_device *dev;
+	struct msm_drm_private *priv;
 	int i, rc = -EINVAL;
 
 	if (!kms) {
@@ -896,10 +803,16 @@ static int dpu_kms_hw_init(struct msm_kms *kms)
 
 	dpu_kms = to_dpu_kms(kms);
 	dev = dpu_kms->dev;
-
-	rc = dpu_kms_global_obj_init(dpu_kms);
-	if (rc)
+	if (!dev) {
+		DPU_ERROR("invalid device\n");
 		return rc;
+	}
+
+	priv = dev->dev_private;
+	if (!priv) {
+		DPU_ERROR("invalid private data\n");
+		return rc;
+	}
 
 	atomic_set(&dpu_kms->bandwidth_ref, 0);
 
@@ -911,6 +824,7 @@ static int dpu_kms_hw_init(struct msm_kms *kms)
 		goto error;
 	}
 	DRM_DEBUG("mapped dpu address space @%pK\n", dpu_kms->mmio);
+	dpu_kms->mmio_len = dpu_iomap_size(dpu_kms->pdev, "mdp");
 
 	dpu_kms->vbif[VBIF_RT] = msm_ioremap(dpu_kms->pdev, "vbif", "vbif");
 	if (IS_ERR(dpu_kms->vbif[VBIF_RT])) {
@@ -919,16 +833,22 @@ static int dpu_kms_hw_init(struct msm_kms *kms)
 		dpu_kms->vbif[VBIF_RT] = NULL;
 		goto error;
 	}
-	dpu_kms->vbif[VBIF_NRT] = msm_ioremap_quiet(dpu_kms->pdev, "vbif_nrt", "vbif_nrt");
+	dpu_kms->vbif_len[VBIF_RT] = dpu_iomap_size(dpu_kms->pdev, "vbif");
+	dpu_kms->vbif[VBIF_NRT] = msm_ioremap(dpu_kms->pdev, "vbif_nrt", "vbif_nrt");
 	if (IS_ERR(dpu_kms->vbif[VBIF_NRT])) {
 		dpu_kms->vbif[VBIF_NRT] = NULL;
 		DPU_DEBUG("VBIF NRT is not defined");
+	} else {
+		dpu_kms->vbif_len[VBIF_NRT] = dpu_iomap_size(dpu_kms->pdev,
+							     "vbif_nrt");
 	}
 
-	dpu_kms->reg_dma = msm_ioremap_quiet(dpu_kms->pdev, "regdma", "regdma");
+	dpu_kms->reg_dma = msm_ioremap(dpu_kms->pdev, "regdma", "regdma");
 	if (IS_ERR(dpu_kms->reg_dma)) {
 		dpu_kms->reg_dma = NULL;
 		DPU_DEBUG("REG_DMA is not defined");
+	} else {
+		dpu_kms->reg_dma_len = dpu_iomap_size(dpu_kms->pdev, "regdma");
 	}
 
 	pm_runtime_get_sync(&dpu_kms->pdev->dev);
@@ -1032,9 +952,6 @@ static int dpu_kms_hw_init(struct msm_kms *kms)
 
 	dpu_vbif_init_memtypes(dpu_kms);
 
-	if (of_device_is_compatible(dev->dev->of_node, "qcom,sc7180-mdss"))
-		dpu_kms_parse_data_bus_icc_path(dpu_kms);
-
 	pm_runtime_put_sync(&dpu_kms->pdev->dev);
 
 	return 0;
@@ -1057,7 +974,7 @@ struct msm_kms *dpu_kms_init(struct drm_device *dev)
 	struct dpu_kms *dpu_kms;
 	int irq;
 
-	if (!dev) {
+	if (!dev || !dev->dev_private) {
 		DPU_ERROR("drm device node invalid\n");
 		return ERR_PTR(-EINVAL);
 	}
@@ -1088,30 +1005,16 @@ static int dpu_bind(struct device *dev, struct device *master, void *data)
 	if (!dpu_kms)
 		return -ENOMEM;
 
-	dpu_kms->opp_table = dev_pm_opp_set_clkname(dev, "core");
-	if (IS_ERR(dpu_kms->opp_table))
-		return PTR_ERR(dpu_kms->opp_table);
-	/* OPP table is optional */
-	ret = dev_pm_opp_of_add_table(dev);
-	if (ret && ret != -ENODEV) {
-		dev_err(dev, "invalid OPP table in device tree\n");
-		goto put_clkname;
-	}
-
 	mp = &dpu_kms->mp;
 	ret = msm_dss_parse_clock(pdev, mp);
 	if (ret) {
 		DPU_ERROR("failed to parse clocks, ret=%d\n", ret);
-		goto err;
+		return ret;
 	}
 
 	platform_set_drvdata(pdev, dpu_kms);
 
-	ret = msm_kms_init(&dpu_kms->base, &kms_funcs);
-	if (ret) {
-		DPU_ERROR("failed to init kms, ret=%d\n", ret);
-		goto err;
-	}
+	msm_kms_init(&dpu_kms->base, &kms_funcs);
 	dpu_kms->dev = ddev;
 	dpu_kms->pdev = pdev;
 
@@ -1119,11 +1022,6 @@ static int dpu_bind(struct device *dev, struct device *master, void *data)
 	dpu_kms->rpm_enabled = true;
 
 	priv->kms = &dpu_kms->base;
-	return ret;
-err:
-	dev_pm_opp_of_remove_table(dev);
-put_clkname:
-	dev_pm_opp_put_clkname(dpu_kms->opp_table);
 	return ret;
 }
 
@@ -1139,9 +1037,6 @@ static void dpu_unbind(struct device *dev, struct device *master, void *data)
 
 	if (dpu_kms->rpm_enabled)
 		pm_runtime_disable(&pdev->dev);
-
-	dev_pm_opp_of_remove_table(dev);
-	dev_pm_opp_put_clkname(dpu_kms->opp_table);
 }
 
 static const struct component_ops dpu_ops = {
@@ -1162,19 +1057,21 @@ static int dpu_dev_remove(struct platform_device *pdev)
 
 static int __maybe_unused dpu_runtime_suspend(struct device *dev)
 {
-	int i, rc = -1;
+	int rc = -1;
 	struct platform_device *pdev = to_platform_device(dev);
 	struct dpu_kms *dpu_kms = platform_get_drvdata(pdev);
+	struct drm_device *ddev;
 	struct dss_module_power *mp = &dpu_kms->mp;
 
-	/* Drop the performance state vote */
-	dev_pm_opp_set_rate(dev, 0);
+	ddev = dpu_kms->dev;
+	if (!ddev) {
+		DPU_ERROR("invalid drm_device\n");
+		return rc;
+	}
+
 	rc = msm_dss_enable_clk(mp->clk_config, mp->num_clk, false);
 	if (rc)
 		DPU_ERROR("clock disable failed rc:%d\n", rc);
-
-	for (i = 0; i < dpu_kms->num_paths; i++)
-		icc_set_bw(dpu_kms->path[i], 0, 0);
 
 	return rc;
 }
@@ -1187,14 +1084,12 @@ static int __maybe_unused dpu_runtime_resume(struct device *dev)
 	struct drm_encoder *encoder;
 	struct drm_device *ddev;
 	struct dss_module_power *mp = &dpu_kms->mp;
-	int i;
 
 	ddev = dpu_kms->dev;
-
-	/* Min vote of BW is required before turning on AXI clk */
-	for (i = 0; i < dpu_kms->num_paths; i++)
-		icc_set_bw(dpu_kms->path[i], 0,
-			dpu_kms->catalog->perf.min_dram_ib);
+	if (!ddev) {
+		DPU_ERROR("invalid drm_device\n");
+		return rc;
+	}
 
 	rc = msm_dss_enable_clk(mp->clk_config, mp->num_clk, true);
 	if (rc) {
@@ -1212,13 +1107,10 @@ static int __maybe_unused dpu_runtime_resume(struct device *dev)
 
 static const struct dev_pm_ops dpu_pm_ops = {
 	SET_RUNTIME_PM_OPS(dpu_runtime_suspend, dpu_runtime_resume, NULL)
-	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend,
-				pm_runtime_force_resume)
 };
 
 static const struct of_device_id dpu_dt_match[] = {
 	{ .compatible = "qcom,sdm845-dpu", },
-	{ .compatible = "qcom,sc7180-dpu", },
 	{}
 };
 MODULE_DEVICE_TABLE(of, dpu_dt_match);

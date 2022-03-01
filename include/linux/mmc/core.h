@@ -107,6 +107,9 @@ struct mmc_command {
  */
 
 	unsigned int		busy_timeout;	/* busy detect timeout in ms */
+	/* Set this flag only for blocking sanitize request */
+	bool			sanitize_busy;
+
 	struct mmc_data		*data;		/* data segment associated with cmd */
 	struct mmc_request	*mrq;		/* associated request */
 };

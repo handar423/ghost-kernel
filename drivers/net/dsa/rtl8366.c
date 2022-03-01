@@ -311,7 +311,7 @@ int rtl8366_init_vlan(struct realtek_smi *smi)
 			/* For the CPU port, make all ports members of this
 			 * VLAN.
 			 */
-			mask = GENMASK((int)smi->num_ports - 1, 0);
+			mask = GENMASK(smi->num_ports - 1, 0);
 		else
 			/* For all other ports, enable itself plus the
 			 * CPU port.
@@ -340,20 +340,15 @@ int rtl8366_init_vlan(struct realtek_smi *smi)
 }
 EXPORT_SYMBOL_GPL(rtl8366_init_vlan);
 
-int rtl8366_vlan_filtering(struct dsa_switch *ds, int port, bool vlan_filtering,
-			   struct switchdev_trans *trans)
+int rtl8366_vlan_filtering(struct dsa_switch *ds, int port, bool vlan_filtering)
 {
 	struct realtek_smi *smi = ds->priv;
 	struct rtl8366_vlan_4k vlan4k;
 	int ret;
 
 	/* Use VLAN nr port + 1 since VLAN0 is not valid */
-	if (switchdev_trans_ph_prepare(trans)) {
-		if (!smi->ops->is_vlan_valid(smi, port + 1))
-			return -EINVAL;
-
-		return 0;
-	}
+	if (!smi->ops->is_vlan_valid(smi, port + 1))
+		return -EINVAL;
 
 	dev_info(smi->dev, "%s filtering on port %d\n",
 		 vlan_filtering ? "enable" : "disable",
@@ -384,6 +379,7 @@ int rtl8366_vlan_prepare(struct dsa_switch *ds, int port,
 {
 	struct realtek_smi *smi = ds->priv;
 	u16 vid;
+	int ret;
 
 	for (vid = vlan->vid_begin; vid < vlan->vid_end; vid++)
 		if (!smi->ops->is_vlan_valid(smi, vid))
@@ -396,7 +392,11 @@ int rtl8366_vlan_prepare(struct dsa_switch *ds, int port,
 	 * FIXME: what's with this 4k business?
 	 * Just rtl8366_enable_vlan() seems inconclusive.
 	 */
-	return rtl8366_enable_vlan4k(smi, true);
+	ret = rtl8366_enable_vlan4k(smi, true);
+	if (ret)
+		return ret;
+
+	return 0;
 }
 EXPORT_SYMBOL_GPL(rtl8366_vlan_prepare);
 

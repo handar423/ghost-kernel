@@ -122,7 +122,7 @@ static void *ti_am335x_xbar_route_allocate(struct of_phandle_args *dma_spec,
 	return map;
 }
 
-static const struct of_device_id ti_am335x_master_match[] __maybe_unused = {
+static const struct of_device_id ti_am335x_master_match[] = {
 	{ .compatible = "ti,edma3-tpcc", },
 	{},
 };
@@ -133,6 +133,7 @@ static int ti_am335x_xbar_probe(struct platform_device *pdev)
 	const struct of_device_id *match;
 	struct device_node *dma_node;
 	struct ti_am335x_xbar_data *xbar;
+	struct resource *res;
 	void __iomem *iomem;
 	int i, ret;
 
@@ -172,7 +173,8 @@ static int ti_am335x_xbar_probe(struct platform_device *pdev)
 		xbar->xbar_events = TI_AM335X_XBAR_LINES;
 	}
 
-	iomem = devm_platform_ioremap_resource(pdev, 0);
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	iomem = devm_ioremap_resource(&pdev->dev, res);
 	if (IS_ERR(iomem))
 		return PTR_ERR(iomem);
 
@@ -292,7 +294,7 @@ static const u32 ti_dma_offset[] = {
 	[TI_XBAR_SDMA_OFFSET] = 1,
 };
 
-static const struct of_device_id ti_dra7_master_match[] __maybe_unused = {
+static const struct of_device_id ti_dra7_master_match[] = {
 	{
 		.compatible = "ti,omap4430-sdma",
 		.data = &ti_dma_offset[TI_XBAR_SDMA_OFFSET],
@@ -321,6 +323,7 @@ static int ti_dra7_xbar_probe(struct platform_device *pdev)
 	struct device_node *dma_node;
 	struct ti_dra7_xbar_data *xbar;
 	struct property *prop;
+	struct resource *res;
 	u32 safe_val;
 	int sz;
 	void __iomem *iomem;
@@ -400,7 +403,8 @@ static int ti_dra7_xbar_probe(struct platform_device *pdev)
 		kfree(rsv_events);
 	}
 
-	iomem = devm_platform_ioremap_resource(pdev, 0);
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	iomem = devm_ioremap_resource(&pdev->dev, res);
 	if (IS_ERR(iomem))
 		return PTR_ERR(iomem);
 
@@ -460,7 +464,7 @@ static int ti_dma_xbar_probe(struct platform_device *pdev)
 static struct platform_driver ti_dma_xbar_driver = {
 	.driver = {
 		.name = "ti-dma-crossbar",
-		.of_match_table = ti_dma_xbar_match,
+		.of_match_table = of_match_ptr(ti_dma_xbar_match),
 	},
 	.probe	= ti_dma_xbar_probe,
 };

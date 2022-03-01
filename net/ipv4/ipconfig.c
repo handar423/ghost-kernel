@@ -870,7 +870,7 @@ static void __init ic_bootp_send_if(struct ic_device *d, unsigned long jiffies_d
 
 
 /*
- *  Copy BOOTP-supplied string if not already set.
+ *  Copy BOOTP-supplied string
  */
 static int __init ic_bootp_string(char *dest, char *src, int len, int max)
 {
@@ -919,12 +919,15 @@ static void __init ic_do_bootp_ext(u8 *ext)
 		}
 		break;
 	case 12:	/* Host name */
-		ic_bootp_string(utsname()->nodename, ext+1, *ext,
-				__NEW_UTS_LEN);
-		ic_host_name_set = 1;
+		if (!ic_host_name_set) {
+			ic_bootp_string(utsname()->nodename, ext+1, *ext,
+					__NEW_UTS_LEN);
+			ic_host_name_set = 1;
+		}
 		break;
 	case 15:	/* Domain name (DNS) */
-		ic_bootp_string(ic_domain, ext+1, *ext, sizeof(ic_domain));
+		if (!ic_domain[0])
+			ic_bootp_string(ic_domain, ext+1, *ext, sizeof(ic_domain));
 		break;
 	case 17:	/* Root path */
 		if (!root_server_path[0])
@@ -1334,7 +1337,7 @@ static int __init ipconfig_proc_net_init(void)
 
 /* Create a new file under /proc/net/ipconfig */
 static int ipconfig_proc_net_create(const char *name,
-				    const struct proc_ops *proc_ops)
+				    const struct file_operations *fops)
 {
 	char *pname;
 	struct proc_dir_entry *p;
@@ -1346,7 +1349,7 @@ static int ipconfig_proc_net_create(const char *name,
 	if (!pname)
 		return -ENOMEM;
 
-	p = proc_create(pname, 0444, init_net.proc_net, proc_ops);
+	p = proc_create(pname, 0444, init_net.proc_net, fops);
 	kfree(pname);
 	if (!p)
 		return -ENOMEM;
@@ -1355,7 +1358,7 @@ static int ipconfig_proc_net_create(const char *name,
 }
 
 /* Write NTP server IP addresses to /proc/net/ipconfig/ntp_servers */
-static int ntp_servers_show(struct seq_file *seq, void *v)
+static int ntp_servers_seq_show(struct seq_file *seq, void *v)
 {
 	int i;
 
@@ -1365,7 +1368,7 @@ static int ntp_servers_show(struct seq_file *seq, void *v)
 	}
 	return 0;
 }
-DEFINE_PROC_SHOW_ATTRIBUTE(ntp_servers);
+DEFINE_SHOW_ATTRIBUTE(ntp_servers_seq);
 #endif /* CONFIG_PROC_FS */
 
 /*
@@ -1412,9 +1415,6 @@ static int __init wait_for_devices(void)
 		struct net_device *dev;
 		int found = 0;
 
-		/* make sure deferred device probes are finished */
-		wait_for_device_probe();
-
 		rtnl_lock();
 		for_each_netdev(&init_net, dev) {
 			if (ic_is_init_dev(dev)) {
@@ -1441,7 +1441,7 @@ static int __init ip_auto_config(void)
 	int retries = CONF_OPEN_RETRIES;
 #endif
 	int err;
-	unsigned int i, count;
+	unsigned int i;
 
 	/* Initialise all name servers and NTP servers to NONE (but only if the
 	 * "ip=" or "nfsaddrs=" kernel command line parameters weren't decoded,
@@ -1456,7 +1456,7 @@ static int __init ip_auto_config(void)
 	proc_create_single("pnp", 0444, init_net.proc_net, pnp_seq_show);
 
 	if (ipconfig_proc_net_init() == 0)
-		ipconfig_proc_net_create("ntp_servers", &ntp_servers_proc_ops);
+		ipconfig_proc_net_create("ntp_servers", &ntp_servers_seq_fops);
 #endif /* CONFIG_PROC_FS */
 
 	if (!ic_enable)
@@ -1486,10 +1486,10 @@ static int __init ip_auto_config(void)
 	 * missing values.
 	 */
 	if (ic_myaddr == NONE ||
-#if defined(CONFIG_ROOT_NFS) || defined(CONFIG_CIFS_ROOT)
+#ifdef CONFIG_ROOT_NFS
 	    (root_server_addr == NONE &&
 	     ic_servaddr == NONE &&
-	     (ROOT_DEV == Root_NFS || ROOT_DEV == Root_CIFS)) ||
+	     ROOT_DEV == Root_NFS) ||
 #endif
 	    ic_first_dev->next) {
 #ifdef IPCONFIG_DYNAMIC
@@ -1513,12 +1513,6 @@ static int __init ip_auto_config(void)
 #ifdef CONFIG_ROOT_NFS
 			if (ROOT_DEV ==  Root_NFS) {
 				pr_err("IP-Config: Retrying forever (NFS root)...\n");
-				goto try_try_again;
-			}
-#endif
-#ifdef CONFIG_CIFS_ROOT
-			if (ROOT_DEV == Root_CIFS) {
-				pr_err("IP-Config: Retrying forever (CIFS root)...\n");
 				goto try_try_again;
 			}
 #endif
@@ -1575,7 +1569,7 @@ static int __init ip_auto_config(void)
 	if (ic_dev_mtu)
 		pr_cont(", mtu=%d", ic_dev_mtu);
 	/* Name servers (if any): */
-	for (i = 0, count = 0; i < CONF_NAMESERVERS_MAX; i++) {
+	for (i = 0; i < CONF_NAMESERVERS_MAX; i++) {
 		if (ic_nameservers[i] != NONE) {
 			if (i == 0)
 				pr_info("     nameserver%u=%pI4",
@@ -1583,14 +1577,12 @@ static int __init ip_auto_config(void)
 			else
 				pr_cont(", nameserver%u=%pI4",
 					i, &ic_nameservers[i]);
-
-			count++;
 		}
-		if ((i + 1 == CONF_NAMESERVERS_MAX) && count > 0)
+		if (i + 1 == CONF_NAMESERVERS_MAX)
 			pr_cont("\n");
 	}
 	/* NTP servers (if any): */
-	for (i = 0, count = 0; i < CONF_NTP_SERVERS_MAX; i++) {
+	for (i = 0; i < CONF_NTP_SERVERS_MAX; i++) {
 		if (ic_ntp_servers[i] != NONE) {
 			if (i == 0)
 				pr_info("     ntpserver%u=%pI4",
@@ -1598,10 +1590,8 @@ static int __init ip_auto_config(void)
 			else
 				pr_cont(", ntpserver%u=%pI4",
 					i, &ic_ntp_servers[i]);
-
-			count++;
 		}
-		if ((i + 1 == CONF_NTP_SERVERS_MAX) && count > 0)
+		if (i + 1 == CONF_NTP_SERVERS_MAX)
 			pr_cont("\n");
 	}
 #endif /* !SILENT */
@@ -1625,7 +1615,7 @@ late_initcall(ip_auto_config);
 
 /*
  *  Decode any IP configuration options in the "ip=" or "nfsaddrs=" kernel
- *  command line parameter.  See Documentation/admin-guide/nfs/nfsroot.rst.
+ *  command line parameter.  See Documentation/filesystems/nfs/nfsroot.txt.
  */
 static int __init ic_proto_name(char *name)
 {

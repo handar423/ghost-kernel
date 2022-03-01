@@ -39,7 +39,7 @@ static void hcall_event_get_key(struct evsel *evsel,
 				struct event_key *key)
 {
 	key->info = 0;
-	key->key = evsel__intval(evsel, sample, "req");
+	key->key = perf_evsel__intval(evsel, sample, "req");
 }
 
 static const char *get_hcall_exit_reason(u64 exit_code)
@@ -113,10 +113,10 @@ static int is_tracepoint_available(const char *str, struct evlist *evlist)
 	struct parse_events_error err;
 	int ret;
 
-	bzero(&err, sizeof(err));
+	err.str = NULL;
 	ret = parse_events(evlist, str, &err);
 	if (err.str)
-		parse_events_print_error(&err, "tracepoint");
+		pr_err("%s : %s\n", str, err.str);
 	return ret;
 }
 

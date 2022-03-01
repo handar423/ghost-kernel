@@ -26,7 +26,7 @@
 #ifndef __DML21_DISPLAY_RQ_DLG_CALC_H__
 #define __DML21_DISPLAY_RQ_DLG_CALC_H__
 
-#include "dm_services.h"
+#include "../dml_common_defs.h"
 #include "../display_rq_dlg_helpers.h"
 
 struct display_mode_lib;

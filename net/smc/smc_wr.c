@@ -44,32 +44,11 @@ struct smc_wr_tx_pend {	/* control data for a pending send request */
 	struct smc_link		*link;
 	u32			idx;
 	struct smc_wr_tx_pend_priv priv;
-	u8			compl_requested;
 };
 
 /******************************** send queue *********************************/
 
 /*------------------------------- completion --------------------------------*/
-
-/* returns true if at least one tx work request is pending on the given link */
-static inline bool smc_wr_is_tx_pend(struct smc_link *link)
-{
-	if (find_first_bit(link->wr_tx_mask, link->wr_tx_cnt) !=
-							link->wr_tx_cnt) {
-		return true;
-	}
-	return false;
-}
-
-/* wait till all pending tx work requests on the given link are completed */
-int smc_wr_tx_wait_no_pending_sends(struct smc_link *link)
-{
-	if (wait_event_timeout(link->wr_tx_wait, !smc_wr_is_tx_pend(link),
-			       SMC_WR_TX_WAIT_PENDING_TIME))
-		return 0;
-	else /* timeout */
-		return -EPIPE;
-}
 
 static inline int smc_wr_tx_find_pending_index(struct smc_link *link, u64 wr_id)
 {
@@ -96,7 +75,7 @@ static inline void smc_wr_tx_process_cqe(struct ib_wc *wc)
 			link->wr_reg_state = FAILED;
 		else
 			link->wr_reg_state = CONFIRMED;
-		smc_wr_wakeup_reg_wait(link);
+		wake_up(&link->wr_reg_wait);
 		return;
 	}
 
@@ -104,8 +83,6 @@ static inline void smc_wr_tx_process_cqe(struct ib_wc *wc)
 	if (pnd_snd_idx == link->wr_tx_cnt)
 		return;
 	link->wr_tx_pends[pnd_snd_idx].wc_status = wc->status;
-	if (link->wr_tx_pends[pnd_snd_idx].compl_requested)
-		complete(&link->wr_tx_compl[pnd_snd_idx]);
 	memcpy(&pnd_snd, &link->wr_tx_pends[pnd_snd_idx], sizeof(pnd_snd));
 	/* clear the full struct smc_wr_tx_pend including .priv */
 	memset(&link->wr_tx_pends[pnd_snd_idx], 0,
@@ -123,17 +100,17 @@ static inline void smc_wr_tx_process_cqe(struct ib_wc *wc)
 			       sizeof(link->wr_tx_bufs[i]));
 			clear_bit(i, link->wr_tx_mask);
 		}
-		/* terminate link */
-		smcr_link_down_cond_sched(link);
+		/* terminate connections of this link group abnormally */
+		smc_lgr_terminate(smc_get_lgr(link));
 	}
 	if (pnd_snd.handler)
 		pnd_snd.handler(&pnd_snd.priv, link, wc->status);
 	wake_up(&link->wr_tx_wait);
 }
 
-static void smc_wr_tx_tasklet_fn(struct tasklet_struct *t)
+static void smc_wr_tx_tasklet_fn(unsigned long data)
 {
-	struct smc_ib_device *dev = from_tasklet(dev, t, send_tasklet);
+	struct smc_ib_device *dev = (struct smc_ib_device *)data;
 	struct ib_wc wc[SMC_WR_MAX_POLL_CQE];
 	int i = 0, rc;
 	int polled = 0;
@@ -169,8 +146,6 @@ void smc_wr_tx_cq_handler(struct ib_cq *ib_cq, void *cq_context)
 static inline int smc_wr_tx_get_free_slot_index(struct smc_link *link, u32 *idx)
 {
 	*idx = link->wr_tx_cnt;
-	if (!smc_link_usable(link))
-		return -ENOLINK;
 	for_each_clear_bit(*idx, link->wr_tx_mask, link->wr_tx_cnt) {
 		if (!test_and_set_bit(*idx, link->wr_tx_mask))
 			return 0;
@@ -196,7 +171,6 @@ int smc_wr_tx_get_free_slot(struct smc_link *link,
 			    struct smc_rdma_wr **wr_rdma_buf,
 			    struct smc_wr_tx_pend_priv **wr_pend_priv)
 {
-	struct smc_link_group *lgr = smc_get_lgr(link);
 	struct smc_wr_tx_pend *wr_pend;
 	u32 idx = link->wr_tx_cnt;
 	struct ib_send_wr *wr_ib;
@@ -205,20 +179,19 @@ int smc_wr_tx_get_free_slot(struct smc_link *link,
 
 	*wr_buf = NULL;
 	*wr_pend_priv = NULL;
-	if (in_softirq() || lgr->terminating) {
+	if (in_softirq()) {
 		rc = smc_wr_tx_get_free_slot_index(link, &idx);
 		if (rc)
 			return rc;
 	} else {
-		rc = wait_event_interruptible_timeout(
+		rc = wait_event_timeout(
 			link->wr_tx_wait,
-			!smc_link_usable(link) ||
-			lgr->terminating ||
+			link->state == SMC_LNK_INACTIVE ||
 			(smc_wr_tx_get_free_slot_index(link, &idx) != -EBUSY),
 			SMC_WR_TX_WAIT_FREE_SLOT_TIME);
 		if (!rc) {
-			/* timeout - terminate link */
-			smcr_link_down_cond_sched(link);
+			/* timeout - terminate connections */
+			smc_lgr_terminate(smc_get_lgr(link));
 			return -EPIPE;
 		}
 		if (idx == link->wr_tx_cnt)
@@ -254,7 +227,6 @@ int smc_wr_tx_put_slot(struct smc_link *link,
 		memset(&link->wr_tx_bufs[idx], 0,
 		       sizeof(link->wr_tx_bufs[idx]));
 		test_and_clear_bit(idx, link->wr_tx_mask);
-		wake_up(&link->wr_tx_wait);
 		return 1;
 	}
 
@@ -275,35 +247,8 @@ int smc_wr_tx_send(struct smc_link *link, struct smc_wr_tx_pend_priv *priv)
 	rc = ib_post_send(link->roce_qp, &link->wr_tx_ibs[pend->idx], NULL);
 	if (rc) {
 		smc_wr_tx_put_slot(link, priv);
-		smcr_link_down_cond_sched(link);
+		smc_lgr_terminate(smc_get_lgr(link));
 	}
-	return rc;
-}
-
-/* Send prepared WR slot via ib_post_send and wait for send completion
- * notification.
- * @priv: pointer to smc_wr_tx_pend_priv identifying prepared message buffer
- */
-int smc_wr_tx_send_wait(struct smc_link *link, struct smc_wr_tx_pend_priv *priv,
-			unsigned long timeout)
-{
-	struct smc_wr_tx_pend *pend;
-	int rc;
-
-	pend = container_of(priv, struct smc_wr_tx_pend, priv);
-	pend->compl_requested = 1;
-	init_completion(&link->wr_tx_compl[pend->idx]);
-
-	rc = smc_wr_tx_send(link, priv);
-	if (rc)
-		return rc;
-	/* wait for completion by smc_wr_tx_process_cqe() */
-	rc = wait_for_completion_interruptible_timeout(
-					&link->wr_tx_compl[pend->idx], timeout);
-	if (rc <= 0)
-		rc = -ENODATA;
-	if (rc > 0)
-		rc = 0;
 	return rc;
 }
 
@@ -326,8 +271,8 @@ int smc_wr_reg_send(struct smc_link *link, struct ib_mr *mr)
 					      (link->wr_reg_state != POSTED),
 					      SMC_WR_REG_MR_WAIT_TIME);
 	if (!rc) {
-		/* timeout - terminate link */
-		smcr_link_down_cond_sched(link);
+		/* timeout - terminate connections */
+		smc_lgr_terminate(smc_get_lgr(link));
 		return -EPIPE;
 	}
 	if (rc == -ERESTARTSYS)
@@ -425,7 +370,10 @@ static inline void smc_wr_rx_process_cqes(struct ib_wc wc[], int num)
 			case IB_WC_RETRY_EXC_ERR:
 			case IB_WC_RNR_RETRY_EXC_ERR:
 			case IB_WC_WR_FLUSH_ERR:
-				smcr_link_down_cond_sched(link);
+				/* terminate connections of this link group
+				 * abnormally
+				 */
+				smc_lgr_terminate(smc_get_lgr(link));
 				break;
 			default:
 				smc_wr_rx_post(link); /* refill WR RX */
@@ -435,9 +383,9 @@ static inline void smc_wr_rx_process_cqes(struct ib_wc wc[], int num)
 	}
 }
 
-static void smc_wr_rx_tasklet_fn(struct tasklet_struct *t)
+static void smc_wr_rx_tasklet_fn(unsigned long data)
 {
-	struct smc_ib_device *dev = from_tasklet(dev, t, recv_tasklet);
+	struct smc_ib_device *dev = (struct smc_ib_device *)data;
 	struct ib_wc wc[SMC_WR_MAX_POLL_CQE];
 	int polled = 0;
 	int rc;
@@ -562,14 +510,12 @@ void smc_wr_free_link(struct smc_link *lnk)
 {
 	struct ib_device *ibdev;
 
+	memset(lnk->wr_tx_mask, 0,
+	       BITS_TO_LONGS(SMC_WR_BUF_CNT) * sizeof(*lnk->wr_tx_mask));
+
 	if (!lnk->smcibdev)
 		return;
 	ibdev = lnk->smcibdev->ibdev;
-
-	if (smc_wr_tx_wait_no_pending_sends(lnk))
-		memset(lnk->wr_tx_mask, 0,
-		       BITS_TO_LONGS(SMC_WR_BUF_CNT) *
-						sizeof(*lnk->wr_tx_mask));
 
 	if (lnk->wr_rx_dma_addr) {
 		ib_dma_unmap_single(ibdev, lnk->wr_rx_dma_addr,
@@ -587,8 +533,6 @@ void smc_wr_free_link(struct smc_link *lnk)
 
 void smc_wr_free_link_mem(struct smc_link *lnk)
 {
-	kfree(lnk->wr_tx_compl);
-	lnk->wr_tx_compl = NULL;
 	kfree(lnk->wr_tx_pends);
 	lnk->wr_tx_pends = NULL;
 	kfree(lnk->wr_tx_mask);
@@ -659,15 +603,8 @@ int smc_wr_alloc_link_mem(struct smc_link *link)
 				    GFP_KERNEL);
 	if (!link->wr_tx_pends)
 		goto no_mem_wr_tx_mask;
-	link->wr_tx_compl = kcalloc(SMC_WR_BUF_CNT,
-				    sizeof(link->wr_tx_compl[0]),
-				    GFP_KERNEL);
-	if (!link->wr_tx_compl)
-		goto no_mem_wr_tx_pends;
 	return 0;
 
-no_mem_wr_tx_pends:
-	kfree(link->wr_tx_pends);
 no_mem_wr_tx_mask:
 	kfree(link->wr_tx_mask);
 no_mem_wr_rx_sges:
@@ -698,8 +635,10 @@ void smc_wr_remove_dev(struct smc_ib_device *smcibdev)
 
 void smc_wr_add_dev(struct smc_ib_device *smcibdev)
 {
-	tasklet_setup(&smcibdev->recv_tasklet, smc_wr_rx_tasklet_fn);
-	tasklet_setup(&smcibdev->send_tasklet, smc_wr_tx_tasklet_fn);
+	tasklet_init(&smcibdev->recv_tasklet, smc_wr_rx_tasklet_fn,
+		     (unsigned long)smcibdev);
+	tasklet_init(&smcibdev->send_tasklet, smc_wr_tx_tasklet_fn,
+		     (unsigned long)smcibdev);
 }
 
 int smc_wr_create_link(struct smc_link *lnk)

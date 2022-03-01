@@ -742,6 +742,7 @@ struct bcm_sysport_priv {
 	int			wol_irq;
 
 	/* Transmit rings */
+	spinlock_t		desc_lock;
 	struct bcm_sysport_tx_ring *tx_rings;
 
 	/* Receive queue */
@@ -770,8 +771,6 @@ struct bcm_sysport_priv {
 	u32			wolopts;
 	u8			sopass[SOPASS_MAX];
 	unsigned int		wol_irq_disabled:1;
-	struct clk		*clk;
-	struct clk		*wol_clk;
 
 	/* MIB related fields */
 	struct bcm_sysport_mib	mib;

@@ -28,7 +28,7 @@
  *
  * - A hierarchical btree, with 2 levels which effectively maps (thin
  *   dev id, virtual block) -> block_time.  Block time is a 64-bit
- *   field holding the time in the low 24 bits, and block in the top 40
+ *   field holding the time in the low 24 bits, and block in the top 48
  *   bits.
  *
  * BTrees consist solely of btree_nodes, that fill a block.  Some are
@@ -814,7 +814,7 @@ static int __write_changed_details(struct dm_pool_metadata *pmd)
 			return r;
 
 		if (td->open_count)
-			td->changed = false;
+			td->changed = 0;
 		else {
 			list_del(&td->list);
 			kfree(td);
@@ -1051,11 +1051,12 @@ static int __create_thin(struct dm_pool_metadata *pmd,
 	int r;
 	dm_block_t dev_root;
 	uint64_t key = dev;
+	struct disk_device_details details_le;
 	struct dm_thin_device *td;
 	__le64 value;
 
 	r = dm_btree_lookup(&pmd->details_info, pmd->details_root,
-			    &key, NULL);
+			    &key, &details_le);
 	if (!r)
 		return -EEXIST;
 
@@ -1111,7 +1112,7 @@ static int __set_snapshot_details(struct dm_pool_metadata *pmd,
 	if (r)
 		return r;
 
-	td->changed = true;
+	td->changed = 1;
 	td->snapshotted_time = time;
 
 	snap->mapped_blocks = td->mapped_blocks;
@@ -1128,11 +1129,12 @@ static int __create_snap(struct dm_pool_metadata *pmd,
 	dm_block_t origin_root;
 	uint64_t key = origin, dev_key = dev;
 	struct dm_thin_device *td;
+	struct disk_device_details details_le;
 	__le64 value;
 
 	/* check this device is unused */
 	r = dm_btree_lookup(&pmd->details_info, pmd->details_root,
-			    &dev_key, NULL);
+			    &dev_key, &details_le);
 	if (!r)
 		return -EEXIST;
 
@@ -1622,7 +1624,7 @@ static int __insert(struct dm_thin_device *td, dm_block_t block,
 	if (r)
 		return r;
 
-	td->changed = true;
+	td->changed = 1;
 	if (inserted)
 		td->mapped_blocks++;
 
@@ -1653,7 +1655,7 @@ static int __remove(struct dm_thin_device *td, dm_block_t block)
 		return r;
 
 	td->mapped_blocks--;
-	td->changed = true;
+	td->changed = 1;
 
 	return 0;
 }
@@ -1707,7 +1709,7 @@ static int __remove_range(struct dm_thin_device *td, dm_block_t begin, dm_block_
 	}
 
 	td->mapped_blocks -= total_count;
-	td->changed = true;
+	td->changed = 1;
 
 	/*
 	 * Reinsert the mapping tree.

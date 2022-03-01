@@ -60,7 +60,10 @@ static struct mesh_table *mesh_table_alloc(void)
 	atomic_set(&newtbl->entries,  0);
 	spin_lock_init(&newtbl->gates_lock);
 	spin_lock_init(&newtbl->walk_lock);
-	rhashtable_init(&newtbl->rhead, &mesh_rht_params);
+	if (rhashtable_init(&newtbl->rhead, &mesh_rht_params)) {
+		kfree(newtbl);
+		return NULL;
+	}
 
 	return newtbl;
 }
@@ -73,6 +76,7 @@ static void mesh_table_free(struct mesh_table *tbl)
 }
 
 /**
+ *
  * mesh_path_assign_nexthop - update mesh path next hop
  *
  * @mpath: mesh path to update
@@ -140,6 +144,7 @@ static void prepare_for_gate(struct sk_buff *skb, char *dst_addr,
 }
 
 /**
+ *
  * mesh_path_move_to_queue - Move or copy frames from one mpath queue to another
  *
  * This function is used to transfer or copy frames from an unresolved mpath to
@@ -151,7 +156,7 @@ static void prepare_for_gate(struct sk_buff *skb, char *dst_addr,
  *
  * The gate mpath must be an active mpath with a valid mpath->next_hop.
  *
- * @gate_mpath: An active mpath the frames will be sent to (i.e. the gate)
+ * @mpath: An active mpath the frames will be sent to (i.e. the gate)
  * @from_mpath: The failed mpath
  * @copy: When true, copy all the frames to the new mpath queue.  When false,
  * move them.

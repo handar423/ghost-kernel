@@ -316,7 +316,7 @@ static int lnc_add(struct ubifs_info *c, struct ubifs_zbranch *zbr,
 	err = ubifs_validate_entry(c, dent);
 	if (err) {
 		dump_stack();
-		ubifs_dump_node(c, dent, zbr->len);
+		ubifs_dump_node(c, dent);
 		return err;
 	}
 
@@ -349,7 +349,7 @@ static int lnc_add_directly(struct ubifs_info *c, struct ubifs_zbranch *zbr,
 	err = ubifs_validate_entry(c, node);
 	if (err) {
 		dump_stack();
-		ubifs_dump_node(c, node, zbr->len);
+		ubifs_dump_node(c, node);
 		return err;
 	}
 
@@ -360,6 +360,7 @@ static int lnc_add_directly(struct ubifs_info *c, struct ubifs_zbranch *zbr,
 /**
  * lnc_free - remove a leaf node from the leaf node cache.
  * @zbr: zbranch of leaf node
+ * @node: leaf node
  */
 static void lnc_free(struct ubifs_zbranch *zbr)
 {
@@ -377,7 +378,7 @@ static void lnc_free(struct ubifs_zbranch *zbr)
  *
  * This function reads a "hashed" node defined by @zbr from the leaf node cache
  * (in it is there) or from the hash media, in which case the node is also
- * added to LNC. Returns zero in case of success or a negative error
+ * added to LNC. Returns zero in case of success or a negative negative error
  * code in case of failure.
  */
 static int tnc_read_hashed_node(struct ubifs_info *c, struct ubifs_zbranch *zbr,
@@ -891,7 +892,7 @@ static int fallible_resolve_collision(struct ubifs_info *c,
 				      int adding)
 {
 	struct ubifs_znode *o_znode = NULL, *znode = *zn;
-	int o_n, err, cmp, unsure = 0, nn = *n;
+	int uninitialized_var(o_n), err, cmp, unsure = 0, nn = *n;
 
 	cmp = fallible_matches_name(c, &znode->zbranch[nn], nm);
 	if (unlikely(cmp < 0))
@@ -1513,8 +1514,8 @@ out:
  */
 int ubifs_tnc_get_bu_keys(struct ubifs_info *c, struct bu_info *bu)
 {
-	int n, err = 0, lnum = -1, offs;
-	int len;
+	int n, err = 0, lnum = -1, uninitialized_var(offs);
+	int uninitialized_var(len);
 	unsigned int block = key_block(c, &bu->key);
 	struct ubifs_znode *znode;
 
@@ -1699,7 +1700,7 @@ static int validate_data_node(struct ubifs_info *c, void *buf,
 		goto out_err;
 	}
 
-	err = ubifs_check_node(c, buf, zbr->len, zbr->lnum, zbr->offs, 0, 0);
+	err = ubifs_check_node(c, buf, zbr->lnum, zbr->offs, 0, 0);
 	if (err) {
 		ubifs_err(c, "expected node type %d", UBIFS_DATA_NODE);
 		goto out;
@@ -1733,7 +1734,7 @@ out_err:
 	err = -EINVAL;
 out:
 	ubifs_err(c, "bad node at LEB %d:%d", zbr->lnum, zbr->offs);
-	ubifs_dump_node(c, buf, zbr->len);
+	ubifs_dump_node(c, buf);
 	dump_stack();
 	return err;
 }
@@ -3468,7 +3469,7 @@ out_unlock:
 /**
  * dbg_check_inode_size - check if inode size is correct.
  * @c: UBIFS file-system description object
- * @inode: inode to check
+ * @inum: inode number
  * @size: inode size
  *
  * This function makes sure that the inode size (@size) is correct and it does

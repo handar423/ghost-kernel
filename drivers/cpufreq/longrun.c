@@ -281,7 +281,8 @@ static struct cpufreq_driver longrun_driver = {
 };
 
 static const struct x86_cpu_id longrun_ids[] = {
-	X86_MATCH_VENDOR_FEATURE(TRANSMETA, X86_FEATURE_LONGRUN, NULL),
+	{ X86_VENDOR_TRANSMETA, X86_FAMILY_ANY, X86_MODEL_ANY,
+	  X86_FEATURE_LONGRUN },
 	{}
 };
 MODULE_DEVICE_TABLE(x86cpu, longrun_ids);

@@ -1044,7 +1044,7 @@ static int gbefb_mmap(struct fb_info *info,
 	return 0;
 }
 
-static const struct fb_ops gbefb_ops = {
+static struct fb_ops gbefb_ops = {
 	.owner		= THIS_MODULE,
 	.fb_check_var	= gbefb_check_var,
 	.fb_set_par	= gbefb_set_par,
@@ -1269,7 +1269,7 @@ static struct platform_device *gbefb_device;
 static int __init gbefb_init(void)
 {
 	int ret = platform_driver_register(&gbefb_driver);
-	if (!ret) {
+	if (IS_ENABLED(CONFIG_SGI_IP32) && !ret) {
 		gbefb_device = platform_device_alloc("gbefb", 0);
 		if (gbefb_device) {
 			ret = platform_device_add(gbefb_device);

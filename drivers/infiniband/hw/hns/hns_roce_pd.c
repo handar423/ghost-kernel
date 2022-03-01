@@ -32,6 +32,7 @@
 
 #include <linux/platform_device.h>
 #include <linux/pci.h>
+#include <uapi/rdma/hns-abi.h>
 #include "hns_roce_device.h"
 
 static int hns_roce_pd_alloc(struct hns_roce_dev *hr_dev, unsigned long *pdn)
@@ -59,33 +60,33 @@ void hns_roce_cleanup_pd_table(struct hns_roce_dev *hr_dev)
 int hns_roce_alloc_pd(struct ib_pd *ibpd, struct ib_udata *udata)
 {
 	struct ib_device *ib_dev = ibpd->device;
+	struct hns_roce_dev *hr_dev = to_hr_dev(ib_dev);
+	struct device *dev = hr_dev->dev;
 	struct hns_roce_pd *pd = to_hr_pd(ibpd);
 	int ret;
 
 	ret = hns_roce_pd_alloc(to_hr_dev(ib_dev), &pd->pdn);
 	if (ret) {
-		ibdev_err(ib_dev, "failed to alloc pd, ret = %d.\n", ret);
+		dev_err(dev, "[alloc_pd]hns_roce_pd_alloc failed!\n");
 		return ret;
 	}
 
 	if (udata) {
-		struct hns_roce_ib_alloc_pd_resp resp = {.pdn = pd->pdn};
+		struct hns_roce_ib_alloc_pd_resp uresp = {.pdn = pd->pdn};
 
-		ret = ib_copy_to_udata(udata, &resp,
-				       min(udata->outlen, sizeof(resp)));
-		if (ret) {
+		if (ib_copy_to_udata(udata, &uresp, sizeof(uresp))) {
 			hns_roce_pd_free(to_hr_dev(ib_dev), pd->pdn);
-			ibdev_err(ib_dev, "failed to copy to udata, ret = %d\n", ret);
+			dev_err(dev, "[alloc_pd]ib_copy_to_udata failed!\n");
+			return -EFAULT;
 		}
 	}
 
-	return ret;
+	return 0;
 }
 
-int hns_roce_dealloc_pd(struct ib_pd *pd, struct ib_udata *udata)
+void hns_roce_dealloc_pd(struct ib_pd *pd, struct ib_udata *udata)
 {
 	hns_roce_pd_free(to_hr_dev(pd->device), to_hr_pd(pd)->pdn);
-	return 0;
 }
 
 int hns_roce_uar_alloc(struct hns_roce_dev *hr_dev, struct hns_roce_uar *uar)
@@ -95,7 +96,7 @@ int hns_roce_uar_alloc(struct hns_roce_dev *hr_dev, struct hns_roce_uar *uar)
 
 	/* Using bitmap to manager UAR index */
 	ret = hns_roce_bitmap_alloc(&hr_dev->uar_table.bitmap, &uar->logic_idx);
-	if (ret)
+	if (ret == -1)
 		return -ENOMEM;
 
 	if (uar->logic_idx > 0 && hr_dev->caps.phy_num_uars > 1)

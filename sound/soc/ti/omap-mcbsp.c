@@ -77,15 +77,18 @@ static int omap2_mcbsp_set_clks_src(struct omap_mcbsp *mcbsp, u8 fck_src_id)
 	pm_runtime_put_sync(mcbsp->dev);
 
 	r = clk_set_parent(mcbsp->fclk, fck_src);
-	if (r)
+	if (r) {
 		dev_err(mcbsp->dev, "CLKS: could not clk_set_parent() to %s\n",
 			src);
+		clk_put(fck_src);
+		return r;
+	}
 
 	pm_runtime_get_sync(mcbsp->dev);
 
 	clk_put(fck_src);
 
-	return r;
+	return 0;
 }
 
 static irqreturn_t omap_mcbsp_irq_handler(int irq, void *data)
@@ -731,8 +734,8 @@ err_st:
 static void omap_mcbsp_set_threshold(struct snd_pcm_substream *substream,
 		unsigned int packet_size)
 {
-	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
-	struct snd_soc_dai *cpu_dai = asoc_rtd_to_cpu(rtd, 0);
+	struct snd_soc_pcm_runtime *rtd = substream->private_data;
+	struct snd_soc_dai *cpu_dai = rtd->cpu_dai;
 	struct omap_mcbsp *mcbsp = snd_soc_dai_get_drvdata(cpu_dai);
 	int words;
 
@@ -783,7 +786,7 @@ static int omap_mcbsp_dai_startup(struct snd_pcm_substream *substream,
 	struct omap_mcbsp *mcbsp = snd_soc_dai_get_drvdata(cpu_dai);
 	int err = 0;
 
-	if (!snd_soc_dai_active(cpu_dai))
+	if (!cpu_dai->active)
 		err = omap_mcbsp_request(mcbsp);
 
 	/*
@@ -831,14 +834,14 @@ static void omap_mcbsp_dai_shutdown(struct snd_pcm_substream *substream,
 	int stream2 = tx ? SNDRV_PCM_STREAM_CAPTURE : SNDRV_PCM_STREAM_PLAYBACK;
 
 	if (mcbsp->latency[stream2])
-		cpu_latency_qos_update_request(&mcbsp->pm_qos_req,
-					       mcbsp->latency[stream2]);
+		pm_qos_update_request(&mcbsp->pm_qos_req,
+				      mcbsp->latency[stream2]);
 	else if (mcbsp->latency[stream1])
-		cpu_latency_qos_remove_request(&mcbsp->pm_qos_req);
+		pm_qos_remove_request(&mcbsp->pm_qos_req);
 
 	mcbsp->latency[stream1] = 0;
 
-	if (!snd_soc_dai_active(cpu_dai)) {
+	if (!cpu_dai->active) {
 		omap_mcbsp_free(mcbsp);
 		mcbsp->configured = 0;
 	}
@@ -858,10 +861,10 @@ static int omap_mcbsp_dai_prepare(struct snd_pcm_substream *substream,
 	if (!latency || mcbsp->latency[stream1] < latency)
 		latency = mcbsp->latency[stream1];
 
-	if (cpu_latency_qos_request_active(pm_qos_req))
-		cpu_latency_qos_update_request(pm_qos_req, latency);
+	if (pm_qos_request_active(pm_qos_req))
+		pm_qos_update_request(pm_qos_req, latency);
 	else if (latency)
-		cpu_latency_qos_add_request(pm_qos_req, latency);
+		pm_qos_add_request(pm_qos_req, PM_QOS_CPU_DMA_LATENCY, latency);
 
 	return 0;
 }
@@ -896,8 +899,8 @@ static snd_pcm_sframes_t omap_mcbsp_dai_delay(
 			struct snd_pcm_substream *substream,
 			struct snd_soc_dai *dai)
 {
-	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
-	struct snd_soc_dai *cpu_dai = asoc_rtd_to_cpu(rtd, 0);
+	struct snd_soc_pcm_runtime *rtd = substream->private_data;
+	struct snd_soc_dai *cpu_dai = rtd->cpu_dai;
 	struct omap_mcbsp *mcbsp = snd_soc_dai_get_drvdata(cpu_dai);
 	u16 fifo_use;
 	snd_pcm_sframes_t delay;
@@ -1180,7 +1183,7 @@ static int omap_mcbsp_dai_set_dai_fmt(struct snd_soc_dai *cpu_dai,
 	default:
 		return -EINVAL;
 	}
-	if (inv_fs)
+	if (inv_fs == true)
 		regs->pcr0 ^= FSXP | FSRP;
 
 	return 0;
@@ -1429,8 +1432,8 @@ static int asoc_mcbsp_remove(struct platform_device *pdev)
 	if (mcbsp->pdata->ops && mcbsp->pdata->ops->free)
 		mcbsp->pdata->ops->free(mcbsp->id);
 
-	if (cpu_latency_qos_request_active(&mcbsp->pm_qos_req))
-		cpu_latency_qos_remove_request(&mcbsp->pm_qos_req);
+	if (pm_qos_request_active(&mcbsp->pm_qos_req))
+		pm_qos_remove_request(&mcbsp->pm_qos_req);
 
 	if (mcbsp->pdata->buffer_size)
 		sysfs_remove_group(&mcbsp->dev->kobj, &additional_attr_group);

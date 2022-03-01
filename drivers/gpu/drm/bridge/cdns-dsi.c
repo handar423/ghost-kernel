@@ -512,7 +512,7 @@ static int cdns_dsi_mode2cfg(struct cdns_dsi *dsi,
 	struct cdns_dsi_output *output = &dsi->output;
 	unsigned int tmp;
 	bool sync_pulse = false;
-	int bpp;
+	int bpp, nlanes;
 
 	memset(dsi_cfg, 0, sizeof(*dsi_cfg));
 
@@ -520,6 +520,7 @@ static int cdns_dsi_mode2cfg(struct cdns_dsi *dsi,
 		sync_pulse = true;
 
 	bpp = mipi_dsi_pixel_format_to_bpp(output->dev->format);
+	nlanes = output->dev->lanes;
 
 	if (mode_valid_check)
 		tmp = mode->htotal -
@@ -644,8 +645,7 @@ static int cdns_dsi_check_conf(struct cdns_dsi *dsi,
 	return 0;
 }
 
-static int cdns_dsi_bridge_attach(struct drm_bridge *bridge,
-				  enum drm_bridge_attach_flags flags)
+static int cdns_dsi_bridge_attach(struct drm_bridge *bridge)
 {
 	struct cdns_dsi_input *input = bridge_to_cdns_dsi_input(bridge);
 	struct cdns_dsi *dsi = input_to_dsi(input);
@@ -657,13 +657,11 @@ static int cdns_dsi_bridge_attach(struct drm_bridge *bridge,
 		return -ENOTSUPP;
 	}
 
-	return drm_bridge_attach(bridge->encoder, output->bridge, bridge,
-				 flags);
+	return drm_bridge_attach(bridge->encoder, output->bridge, bridge);
 }
 
 static enum drm_mode_status
 cdns_dsi_bridge_mode_valid(struct drm_bridge *bridge,
-			   const struct drm_display_info *info,
 			   const struct drm_display_mode *mode)
 {
 	struct cdns_dsi_input *input = bridge_to_cdns_dsi_input(bridge);
@@ -787,12 +785,13 @@ static void cdns_dsi_bridge_enable(struct drm_bridge *bridge)
 	unsigned long tx_byte_period;
 	struct cdns_dsi_cfg dsi_cfg;
 	u32 tmp, reg_wakeup, div;
-	int nlanes;
+	int bpp, nlanes;
 
 	if (WARN_ON(pm_runtime_get_sync(dsi->base.dev) < 0))
 		return;
 
 	mode = &bridge->encoder->crtc->state->adjusted_mode;
+	bpp = mipi_dsi_pixel_format_to_bpp(output->dev->format);
 	nlanes = output->dev->lanes;
 
 	WARN_ON_ONCE(cdns_dsi_check_conf(dsi, mode, &dsi_cfg, false));
@@ -957,8 +956,7 @@ static int cdns_dsi_attach(struct mipi_dsi_host *host,
 
 	panel = of_drm_find_panel(np);
 	if (!IS_ERR(panel)) {
-		bridge = drm_panel_bridge_add_typed(panel,
-						    DRM_MODE_CONNECTOR_DSI);
+		bridge = drm_panel_bridge_add(panel, DRM_MODE_CONNECTOR_DSI);
 	} else {
 		bridge = of_drm_find_bridge(dev->dev.of_node);
 		if (!bridge)
@@ -1028,7 +1026,7 @@ static ssize_t cdns_dsi_transfer(struct mipi_dsi_host *host,
 	struct mipi_dsi_packet packet;
 	int ret, i, tx_len, rx_len;
 
-	ret = pm_runtime_get_sync(host->dev);
+	ret = pm_runtime_resume_and_get(host->dev);
 	if (ret < 0)
 		return ret;
 

@@ -18,6 +18,7 @@
 #include <linux/iio/common/st_sensors_i2c.h>
 #include "st_accel.h"
 
+#ifdef CONFIG_OF
 static const struct of_device_id st_accel_of_match[] = {
 	{
 		/* An older compatible */
@@ -104,13 +105,12 @@ static const struct of_device_id st_accel_of_match[] = {
 		.compatible = "st,lis2de12",
 		.data = LIS2DE12_ACCEL_DEV_NAME,
 	},
-	{
-		.compatible = "st,lis2hh12",
-		.data = LIS2HH12_ACCEL_DEV_NAME,
-	},
 	{},
 };
 MODULE_DEVICE_TABLE(of, st_accel_of_match);
+#else
+#define st_accel_of_match NULL
+#endif
 
 #ifdef CONFIG_ACPI
 static const struct acpi_device_id st_accel_acpi_match[] = {
@@ -119,6 +119,8 @@ static const struct acpi_device_id st_accel_acpi_match[] = {
 	{ },
 };
 MODULE_DEVICE_TABLE(acpi, st_accel_acpi_match);
+#else
+#define st_accel_acpi_match NULL
 #endif
 
 static const struct i2c_device_id st_accel_id_table[] = {
@@ -142,7 +144,6 @@ static const struct i2c_device_id st_accel_id_table[] = {
 	{ LIS2DW12_ACCEL_DEV_NAME },
 	{ LIS3DE_ACCEL_DEV_NAME },
 	{ LIS2DE12_ACCEL_DEV_NAME },
-	{ LIS2HH12_ACCEL_DEV_NAME },
 	{},
 };
 MODULE_DEVICE_TABLE(i2c, st_accel_id_table);
@@ -152,9 +153,12 @@ static int st_accel_i2c_probe(struct i2c_client *client)
 	const struct st_sensor_settings *settings;
 	struct st_sensor_data *adata;
 	struct iio_dev *indio_dev;
+	const char *match;
 	int ret;
 
-	st_sensors_dev_name_probe(&client->dev, client->name, sizeof(client->name));
+	match = device_get_match_data(&client->dev);
+	if (match)
+		strlcpy(client->name, match, sizeof(client->name));
 
 	settings = st_accel_get_settings(client->name);
 	if (!settings) {
@@ -191,7 +195,7 @@ static int st_accel_i2c_remove(struct i2c_client *client)
 static struct i2c_driver st_accel_driver = {
 	.driver = {
 		.name = "st-accel-i2c",
-		.of_match_table = st_accel_of_match,
+		.of_match_table = of_match_ptr(st_accel_of_match),
 		.acpi_match_table = ACPI_PTR(st_accel_acpi_match),
 	},
 	.probe_new = st_accel_i2c_probe,

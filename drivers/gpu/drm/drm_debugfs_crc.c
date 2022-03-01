@@ -260,11 +260,6 @@ static int crtc_crc_release(struct inode *inode, struct file *filep)
 	struct drm_crtc *crtc = filep->f_inode->i_private;
 	struct drm_crtc_crc *crc = &crtc->crc;
 
-	/* terminate the infinite while loop if 'drm_dp_aux_crc_work' running */
-	spin_lock_irq(&crc->lock);
-	crc->opened = false;
-	spin_unlock_irq(&crc->lock);
-
 	crtc->funcs->set_crc_source(crtc, NULL);
 
 	spin_lock_irq(&crc->lock);
@@ -341,17 +336,19 @@ static ssize_t crtc_crc_read(struct file *filep, char __user *user_buf,
 	return LINE_LEN(crc->values_cnt);
 }
 
-static __poll_t crtc_crc_poll(struct file *file, poll_table *wait)
+static unsigned int crtc_crc_poll(struct file *file, poll_table *wait)
 {
 	struct drm_crtc *crtc = file->f_inode->i_private;
 	struct drm_crtc_crc *crc = &crtc->crc;
-	__poll_t ret = 0;
+	unsigned ret;
 
 	poll_wait(file, &crc->wq, wait);
 
 	spin_lock_irq(&crc->lock);
 	if (crc->source && crtc_crc_data_count(crc))
-		ret |= EPOLLIN | EPOLLRDNORM;
+		ret = POLLIN | POLLRDNORM;
+	else
+		ret = 0;
 	spin_unlock_irq(&crc->lock);
 
 	return ret;
@@ -374,7 +371,7 @@ void drm_debugfs_crtc_crc_add(struct drm_crtc *crtc)
 
 	crc_ent = debugfs_create_dir("crc", crtc->debugfs_entry);
 
-	debugfs_create_file("control", S_IRUGO | S_IWUSR, crc_ent, crtc,
+	debugfs_create_file("control", S_IRUGO, crc_ent, crtc,
 			    &drm_crtc_crc_control_fops);
 	debugfs_create_file("data", S_IRUGO, crc_ent, crtc,
 			    &drm_crtc_crc_data_fops);

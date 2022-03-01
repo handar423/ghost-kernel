@@ -34,6 +34,7 @@ arch_futex_atomic_op_inuser(int op, u32 oparg, int *oval, u32 __user *uaddr)
 	u32 tmp;
 
 	preempt_disable();
+	pagefault_disable();
 
 	ret = -EFAULT;
 	if (unlikely(get_user(oldval, uaddr) != 0))
@@ -66,6 +67,7 @@ arch_futex_atomic_op_inuser(int op, u32 oparg, int *oval, u32 __user *uaddr)
 		ret = -EFAULT;
 
 out_pagefault_enable:
+	pagefault_enable();
 	preempt_enable();
 
 	if (ret == 0)

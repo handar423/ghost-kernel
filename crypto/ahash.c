@@ -10,6 +10,7 @@
 
 #include <crypto/internal/hash.h>
 #include <crypto/scatterwalk.h>
+#include <linux/bug.h>
 #include <linux/err.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -21,8 +22,6 @@
 #include <net/netlink.h>
 
 #include "internal.h"
-
-static const struct crypto_type crypto_ahash_type;
 
 struct ahash_request_priv {
 	crypto_completion_t complete;
@@ -45,7 +44,10 @@ static int hash_walk_next(struct crypto_hash_walk *walk)
 	unsigned int nbytes = min(walk->entrylen,
 				  ((unsigned int)(PAGE_SIZE)) - offset);
 
-	walk->data = kmap_atomic(walk->pg);
+	if (walk->flags & CRYPTO_ALG_ASYNC)
+		walk->data = kmap(walk->pg);
+	else
+		walk->data = kmap_atomic(walk->pg);
 	walk->data += offset;
 
 	if (offset & alignmask) {
@@ -95,8 +97,16 @@ int crypto_hash_walk_done(struct crypto_hash_walk *walk, int err)
 		}
 	}
 
-	kunmap_atomic(walk->data);
-	crypto_yield(walk->flags);
+	if (walk->flags & CRYPTO_ALG_ASYNC)
+		kunmap(walk->pg);
+	else {
+		kunmap_atomic(walk->data);
+		/*
+		 * The may sleep test only makes sense for sync users.
+		 * Async users don't need to sleep here anyway.
+		 */
+		crypto_yield(walk->flags);
+	}
 
 	if (err)
 		return err;
@@ -128,11 +138,32 @@ int crypto_hash_walk_first(struct ahash_request *req,
 
 	walk->alignmask = crypto_ahash_alignmask(crypto_ahash_reqtfm(req));
 	walk->sg = req->src;
-	walk->flags = req->base.flags;
+	walk->flags = req->base.flags & CRYPTO_TFM_REQ_MASK;
 
 	return hash_walk_new_entry(walk);
 }
 EXPORT_SYMBOL_GPL(crypto_hash_walk_first);
+
+int crypto_ahash_walk_first(struct ahash_request *req,
+			    struct crypto_hash_walk *walk)
+{
+	walk->total = req->nbytes;
+
+	if (!walk->total) {
+		walk->entrylen = 0;
+		return 0;
+	}
+
+	walk->alignmask = crypto_ahash_alignmask(crypto_ahash_reqtfm(req));
+	walk->sg = req->src;
+	walk->flags = req->base.flags & CRYPTO_TFM_REQ_MASK;
+	walk->flags |= CRYPTO_ALG_ASYNC;
+
+	BUILD_BUG_ON(CRYPTO_TFM_REQ_MASK & CRYPTO_ALG_ASYNC);
+
+	return hash_walk_new_entry(walk);
+}
+EXPORT_SYMBOL_GPL(crypto_ahash_walk_first);
 
 static int ahash_setkey_unaligned(struct crypto_ahash *tfm, const u8 *key,
 				unsigned int keylen)
@@ -150,7 +181,7 @@ static int ahash_setkey_unaligned(struct crypto_ahash *tfm, const u8 *key,
 	alignbuffer = (u8 *)ALIGN((unsigned long)buffer, alignmask + 1);
 	memcpy(alignbuffer, key, keylen);
 	ret = tfm->setkey(tfm, alignbuffer, keylen);
-	kfree_sensitive(buffer);
+	kzfree(buffer);
 	return ret;
 }
 
@@ -269,7 +300,7 @@ static void ahash_restore_req(struct ahash_request *req, int err)
 	req->priv = NULL;
 
 	/* Free the req->priv.priv from the ADJUSTED request. */
-	kfree_sensitive(priv);
+	kzfree(priv);
 }
 
 static void ahash_notify_einprogress(struct ahash_request *req)
@@ -444,14 +475,6 @@ static int ahash_def_finup(struct ahash_request *req)
 	return ahash_def_finup_finish1(req, err);
 }
 
-static void crypto_ahash_exit_tfm(struct crypto_tfm *tfm)
-{
-	struct crypto_ahash *hash = __crypto_ahash_cast(tfm);
-	struct ahash_alg *alg = crypto_ahash_alg(hash);
-
-	alg->exit_tfm(hash);
-}
-
 static int crypto_ahash_init_tfm(struct crypto_tfm *tfm)
 {
 	struct crypto_ahash *hash = __crypto_ahash_cast(tfm);
@@ -475,10 +498,7 @@ static int crypto_ahash_init_tfm(struct crypto_tfm *tfm)
 		ahash_set_needkey(hash);
 	}
 
-	if (alg->exit_tfm)
-		tfm->exit = crypto_ahash_exit_tfm;
-
-	return alg->init_tfm ? alg->init_tfm(hash) : 0;
+	return 0;
 }
 
 static unsigned int crypto_ahash_extsize(struct crypto_alg *alg)
@@ -487,13 +507,6 @@ static unsigned int crypto_ahash_extsize(struct crypto_alg *alg)
 		return sizeof(struct crypto_shash *);
 
 	return crypto_alg_extsize(alg);
-}
-
-static void crypto_ahash_free_instance(struct crypto_instance *inst)
-{
-	struct ahash_instance *ahash = ahash_instance(inst);
-
-	ahash->free(ahash);
 }
 
 #ifdef CONFIG_NET
@@ -529,10 +542,9 @@ static void crypto_ahash_show(struct seq_file *m, struct crypto_alg *alg)
 		   __crypto_hash_alg_common(alg)->digestsize);
 }
 
-static const struct crypto_type crypto_ahash_type = {
+const struct crypto_type crypto_ahash_type = {
 	.extsize = crypto_ahash_extsize,
 	.init_tfm = crypto_ahash_init_tfm,
-	.free = crypto_ahash_free_instance,
 #ifdef CONFIG_PROC_FS
 	.show = crypto_ahash_show,
 #endif
@@ -542,15 +554,7 @@ static const struct crypto_type crypto_ahash_type = {
 	.type = CRYPTO_ALG_TYPE_AHASH,
 	.tfmsize = offsetof(struct crypto_ahash, base),
 };
-
-int crypto_grab_ahash(struct crypto_ahash_spawn *spawn,
-		      struct crypto_instance *inst,
-		      const char *name, u32 type, u32 mask)
-{
-	spawn->base.frontend = &crypto_ahash_type;
-	return crypto_grab_spawn(&spawn->base, inst, name, type, mask);
-}
-EXPORT_SYMBOL_GPL(crypto_grab_ahash);
+EXPORT_SYMBOL_GPL(crypto_ahash_type);
 
 struct crypto_ahash *crypto_alloc_ahash(const char *alg_name, u32 type,
 					u32 mask)
@@ -594,9 +598,9 @@ int crypto_register_ahash(struct ahash_alg *alg)
 }
 EXPORT_SYMBOL_GPL(crypto_register_ahash);
 
-void crypto_unregister_ahash(struct ahash_alg *alg)
+int crypto_unregister_ahash(struct ahash_alg *alg)
 {
-	crypto_unregister_alg(&alg->halg.base);
+	return crypto_unregister_alg(&alg->halg.base);
 }
 EXPORT_SYMBOL_GPL(crypto_unregister_ahash);
 
@@ -634,9 +638,6 @@ int ahash_register_instance(struct crypto_template *tmpl,
 {
 	int err;
 
-	if (WARN_ON(!inst->free))
-		return -EINVAL;
-
 	err = ahash_prepare_alg(&inst->alg);
 	if (err)
 		return err;
@@ -644,6 +645,31 @@ int ahash_register_instance(struct crypto_template *tmpl,
 	return crypto_register_instance(tmpl, ahash_crypto_instance(inst));
 }
 EXPORT_SYMBOL_GPL(ahash_register_instance);
+
+void ahash_free_instance(struct crypto_instance *inst)
+{
+	crypto_drop_spawn(crypto_instance_ctx(inst));
+	kfree(ahash_instance(inst));
+}
+EXPORT_SYMBOL_GPL(ahash_free_instance);
+
+int crypto_init_ahash_spawn(struct crypto_ahash_spawn *spawn,
+			    struct hash_alg_common *alg,
+			    struct crypto_instance *inst)
+{
+	return crypto_init_spawn2(&spawn->base, &alg->base, inst,
+				  &crypto_ahash_type);
+}
+EXPORT_SYMBOL_GPL(crypto_init_ahash_spawn);
+
+struct hash_alg_common *ahash_attr_alg(struct rtattr *rta, u32 type, u32 mask)
+{
+	struct crypto_alg *alg;
+
+	alg = crypto_attr_alg2(rta, &crypto_ahash_type, type, mask);
+	return IS_ERR(alg) ? ERR_CAST(alg) : __crypto_hash_alg_common(alg);
+}
+EXPORT_SYMBOL_GPL(ahash_attr_alg);
 
 bool crypto_hash_alg_has_setkey(struct hash_alg_common *halg)
 {

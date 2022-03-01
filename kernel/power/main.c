@@ -80,18 +80,18 @@ int unregister_pm_notifier(struct notifier_block *nb)
 }
 EXPORT_SYMBOL_GPL(unregister_pm_notifier);
 
-int pm_notifier_call_chain_robust(unsigned long val_up, unsigned long val_down)
+int __pm_notifier_call_chain(unsigned long val, int nr_to_call, int *nr_calls)
 {
 	int ret;
 
-	ret = blocking_notifier_call_chain_robust(&pm_chain_head, val_up, val_down, NULL);
+	ret = __blocking_notifier_call_chain(&pm_chain_head, val, NULL,
+						nr_to_call, nr_calls);
 
 	return notifier_to_errno(ret);
 }
-
 int pm_notifier_call_chain(unsigned long val)
 {
-	return blocking_notifier_call_chain(&pm_chain_head, val, NULL);
+	return __pm_notifier_call_chain(val, -1, NULL);
 }
 
 /* If set, devices may be suspended and resumed asynchronously. */
@@ -190,38 +190,6 @@ static ssize_t mem_sleep_store(struct kobject *kobj, struct kobj_attribute *attr
 }
 
 power_attr(mem_sleep);
-
-/*
- * sync_on_suspend: invoke ksys_sync_helper() before suspend.
- *
- * show() returns whether ksys_sync_helper() is invoked before suspend.
- * store() accepts 0 or 1.  0 disables ksys_sync_helper() and 1 enables it.
- */
-bool sync_on_suspend_enabled = !IS_ENABLED(CONFIG_SUSPEND_SKIP_SYNC);
-
-static ssize_t sync_on_suspend_show(struct kobject *kobj,
-				   struct kobj_attribute *attr, char *buf)
-{
-	return sprintf(buf, "%d\n", sync_on_suspend_enabled);
-}
-
-static ssize_t sync_on_suspend_store(struct kobject *kobj,
-				    struct kobj_attribute *attr,
-				    const char *buf, size_t n)
-{
-	unsigned long val;
-
-	if (kstrtoul(buf, 10, &val))
-		return -EINVAL;
-
-	if (val > 1)
-		return -EINVAL;
-
-	sync_on_suspend_enabled = !!val;
-	return n;
-}
-
-power_attr(sync_on_suspend);
 #endif /* CONFIG_SUSPEND */
 
 #ifdef CONFIG_PM_SLEEP_DEBUG
@@ -504,7 +472,10 @@ static ssize_t pm_wakeup_irq_show(struct kobject *kobj,
 					struct kobj_attribute *attr,
 					char *buf)
 {
-	return pm_wakeup_irq ? sprintf(buf, "%u\n", pm_wakeup_irq) : -ENODATA;
+	if (!pm_wakeup_irq())
+		return -ENODATA;
+
+	return sprintf(buf, "%u\n", pm_wakeup_irq());
 }
 
 power_attr_ro(pm_wakeup_irq);
@@ -534,13 +505,6 @@ static ssize_t pm_debug_messages_store(struct kobject *kobj,
 }
 
 power_attr(pm_debug_messages);
-
-static int __init pm_debug_messages_setup(char *str)
-{
-	pm_debug_messages_on = true;
-	return 1;
-}
-__setup("pm_debug_messages", pm_debug_messages_setup);
 
 /**
  * __pm_pr_dbg - Print a suspend debug message to the kernel log.
@@ -894,7 +858,6 @@ static struct attribute * g[] = {
 	&wakeup_count_attr.attr,
 #ifdef CONFIG_SUSPEND
 	&mem_sleep_attr.attr,
-	&sync_on_suspend_attr.attr,
 #endif
 #ifdef CONFIG_PM_AUTOSLEEP
 	&autosleep_attr.attr,

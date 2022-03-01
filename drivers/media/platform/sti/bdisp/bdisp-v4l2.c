@@ -499,7 +499,7 @@ static int bdisp_start_streaming(struct vb2_queue *q, unsigned int count)
 {
 	struct bdisp_ctx *ctx = q->drv_priv;
 	struct vb2_v4l2_buffer *buf;
-	int ret = pm_runtime_get_sync(ctx->bdisp_dev->dev);
+	int ret = pm_runtime_resume_and_get(ctx->bdisp_dev->dev);
 
 	if (ret < 0) {
 		dev_err(ctx->bdisp_dev->dev, "failed to set runtime PM\n");
@@ -1066,7 +1066,7 @@ static int bdisp_register_device(struct bdisp_dev *bdisp)
 		return PTR_ERR(bdisp->m2m.m2m_dev);
 	}
 
-	ret = video_register_device(&bdisp->vdev, VFL_TYPE_VIDEO, -1);
+	ret = video_register_device(&bdisp->vdev, VFL_TYPE_GRABBER, -1);
 	if (ret) {
 		dev_err(bdisp->dev,
 			"%s(): failed to register video device\n", __func__);
@@ -1274,8 +1274,6 @@ static int bdisp_remove(struct platform_device *pdev)
 	if (!IS_ERR(bdisp->clock))
 		clk_unprepare(bdisp->clock);
 
-	destroy_workqueue(bdisp->work_queue);
-
 	dev_dbg(&pdev->dev, "%s driver unloaded\n", pdev->name);
 
 	return 0;
@@ -1319,22 +1317,20 @@ static int bdisp_probe(struct platform_device *pdev)
 	bdisp->regs = devm_ioremap_resource(dev, res);
 	if (IS_ERR(bdisp->regs)) {
 		dev_err(dev, "failed to get regs\n");
-		ret = PTR_ERR(bdisp->regs);
-		goto err_wq;
+		return PTR_ERR(bdisp->regs);
 	}
 
 	bdisp->clock = devm_clk_get(dev, BDISP_NAME);
 	if (IS_ERR(bdisp->clock)) {
 		dev_err(dev, "failed to get clock\n");
-		ret = PTR_ERR(bdisp->clock);
-		goto err_wq;
+		return PTR_ERR(bdisp->clock);
 	}
 
 	ret = clk_prepare(bdisp->clock);
 	if (ret < 0) {
 		dev_err(dev, "clock prepare failed\n");
 		bdisp->clock = ERR_PTR(-EINVAL);
-		goto err_wq;
+		return ret;
 	}
 
 	res = platform_get_resource(pdev, IORESOURCE_IRQ, 0);
@@ -1360,14 +1356,18 @@ static int bdisp_probe(struct platform_device *pdev)
 	}
 
 	/* Debug */
-	bdisp_debugfs_create(bdisp);
+	ret = bdisp_debugfs_create(bdisp);
+	if (ret) {
+		dev_err(dev, "failed to create debugfs\n");
+		goto err_v4l2;
+	}
 
 	/* Power management */
 	pm_runtime_enable(dev);
-	ret = pm_runtime_get_sync(dev);
+	ret = pm_runtime_resume_and_get(dev);
 	if (ret < 0) {
 		dev_err(dev, "failed to set PM\n");
-		goto err_pm;
+		goto err_remove;
 	}
 
 	/* Filters */
@@ -1395,13 +1395,14 @@ err_filter:
 	bdisp_hw_free_filters(bdisp->dev);
 err_pm:
 	pm_runtime_put(dev);
+err_remove:
 	bdisp_debugfs_remove(bdisp);
+err_v4l2:
 	v4l2_device_unregister(&bdisp->v4l2_dev);
 err_clk:
 	if (!IS_ERR(bdisp->clock))
 		clk_unprepare(bdisp->clock);
-err_wq:
-	destroy_workqueue(bdisp->work_queue);
+
 	return ret;
 }
 

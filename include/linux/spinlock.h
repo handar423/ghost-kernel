@@ -56,7 +56,6 @@
 #include <linux/kernel.h>
 #include <linux/stringify.h>
 #include <linux/bottom_half.h>
-#include <linux/lockdep.h>
 #include <asm/barrier.h>
 #include <asm/mmiowb.h>
 
@@ -76,7 +75,7 @@
 #define LOCK_SECTION_END                        \
         ".previous\n\t"
 
-#define __lockfunc __section(".spinlock.text")
+#define __lockfunc __attribute__((section(".spinlock.text")))
 
 /*
  * Pull the arch_spinlock_t and arch_rwlock_t definitions:
@@ -94,13 +93,12 @@
 
 #ifdef CONFIG_DEBUG_SPINLOCK
   extern void __raw_spin_lock_init(raw_spinlock_t *lock, const char *name,
-				   struct lock_class_key *key, short inner);
-
-# define raw_spin_lock_init(lock)					\
-do {									\
-	static struct lock_class_key __key;				\
-									\
-	__raw_spin_lock_init((lock), #lock, &__key, LD_WAIT_SPIN);	\
+				   struct lock_class_key *key);
+# define raw_spin_lock_init(lock)				\
+do {								\
+	static struct lock_class_key __key;			\
+								\
+	__raw_spin_lock_init((lock), #lock, &__key);		\
 } while (0)
 
 #else
@@ -329,25 +327,11 @@ static __always_inline raw_spinlock_t *spinlock_check(spinlock_t *lock)
 	return &lock->rlock;
 }
 
-#ifdef CONFIG_DEBUG_SPINLOCK
-
-# define spin_lock_init(lock)					\
-do {								\
-	static struct lock_class_key __key;			\
-								\
-	__raw_spin_lock_init(spinlock_check(lock),		\
-			     #lock, &__key, LD_WAIT_CONFIG);	\
+#define spin_lock_init(_lock)				\
+do {							\
+	spinlock_check(_lock);				\
+	raw_spin_lock_init(&(_lock)->rlock);		\
 } while (0)
-
-#else
-
-# define spin_lock_init(_lock)			\
-do {						\
-	spinlock_check(_lock);			\
-	*(_lock) = __SPIN_LOCK_UNLOCKED(_lock);	\
-} while (0)
-
-#endif
 
 static __always_inline void spin_lock(spinlock_t *lock)
 {

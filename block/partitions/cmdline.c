@@ -18,6 +18,7 @@
 #include <linux/cmdline-parser.h>
 
 #include "check.h"
+#include "cmdline.h"
 
 static char *cmdline;
 static struct cmdline_parts *bdev_parts;

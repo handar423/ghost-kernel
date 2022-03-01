@@ -106,13 +106,11 @@ static int scmi_pm_domain_probe(struct scmi_device *sdev)
 	scmi_pd_data->domains = domains;
 	scmi_pd_data->num_domains = num_domains;
 
-	of_genpd_add_provider_onecell(np, scmi_pd_data);
-
-	return 0;
+	return of_genpd_add_provider_onecell(np, scmi_pd_data);
 }
 
 static const struct scmi_device_id scmi_id_table[] = {
-	{ SCMI_PROTOCOL_POWER, "genpd" },
+	{ SCMI_PROTOCOL_POWER },
 	{ },
 };
 MODULE_DEVICE_TABLE(scmi, scmi_id_table);

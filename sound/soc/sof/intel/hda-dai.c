@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: (GPL-2.0-only OR BSD-3-Clause)
+// SPDX-License-Identifier: (GPL-2.0 OR BSD-3-Clause)
 //
 // This file is provided under a dual BSD/GPLv2 license.  When using or
 // redistributing this file, you may do so under either license.
@@ -11,7 +11,6 @@
 #include <sound/pcm_params.h>
 #include <sound/hdaudio_ext.h>
 #include "../sof-priv.h"
-#include "../sof-audio.h"
 #include "hda.h"
 
 #if IS_ENABLED(CONFIG_SND_SOC_SOF_HDA)
@@ -56,7 +55,7 @@ static struct hdac_ext_stream *
 	hda_link_stream_assign(struct hdac_bus *bus,
 			       struct snd_pcm_substream *substream)
 {
-	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
+	struct snd_soc_pcm_runtime *rtd = substream->private_data;
 	struct sof_intel_hda_stream *hda_stream;
 	struct hdac_ext_stream *res = NULL;
 	struct hdac_stream *stream = NULL;
@@ -68,6 +67,7 @@ static struct hdac_ext_stream *
 		return NULL;
 	}
 
+	spin_lock_irq(&bus->reg_lock);
 	list_for_each_entry(stream, &bus->stream_list, list) {
 		struct hdac_ext_stream *hstream =
 			stream_to_hdac_ext_stream(stream);
@@ -107,12 +107,12 @@ static struct hdac_ext_stream *
 		 * is updated in snd_hdac_ext_stream_decouple().
 		 */
 		if (!res->decoupled)
-			snd_hdac_ext_stream_decouple(bus, res, true);
-		spin_lock_irq(&bus->reg_lock);
+			snd_hdac_ext_stream_decouple_locked(bus, res, true);
+
 		res->link_locked = 1;
 		res->link_substream = substream;
-		spin_unlock_irq(&bus->reg_lock);
 	}
+	spin_unlock_irq(&bus->reg_lock);
 
 	return res;
 }
@@ -203,8 +203,8 @@ static int hda_link_hw_params(struct snd_pcm_substream *substream,
 	struct hdac_stream *hstream = substream->runtime->private_data;
 	struct hdac_bus *bus = hstream->bus;
 	struct hdac_ext_stream *link_dev;
-	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
-	struct snd_soc_dai *codec_dai = asoc_rtd_to_codec(rtd, 0);
+	struct snd_soc_pcm_runtime *rtd = snd_pcm_substream_chip(substream);
+	struct snd_soc_dai *codec_dai = rtd->codec_dai;
 	struct sof_intel_hda_stream *hda_stream;
 	struct hda_pipe_params p_params = {0};
 	struct hdac_ext_link *link;
@@ -264,7 +264,7 @@ static int hda_link_pcm_prepare(struct snd_pcm_substream *substream,
 				snd_soc_dai_get_dma_data(dai, substream);
 	struct snd_sof_dev *sdev =
 				snd_soc_component_get_drvdata(dai->component);
-	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
+	struct snd_soc_pcm_runtime *rtd = snd_pcm_substream_chip(substream);
 	int stream = substream->stream;
 
 	if (link_dev->link_prepared)
@@ -291,9 +291,9 @@ static int hda_link_pcm_trigger(struct snd_pcm_substream *substream,
 
 	hstream = substream->runtime->private_data;
 	bus = hstream->bus;
-	rtd = asoc_substream_to_rtd(substream);
+	rtd = snd_pcm_substream_chip(substream);
 
-	link = snd_hdac_ext_bus_get_link(bus, asoc_rtd_to_codec(rtd, 0)->component->name);
+	link = snd_hdac_ext_bus_get_link(bus, rtd->codec_dai->component->name);
 	if (!link)
 		return -EINVAL;
 
@@ -310,7 +310,7 @@ static int hda_link_pcm_trigger(struct snd_pcm_substream *substream,
 			return ret;
 		}
 
-		fallthrough;
+		/* fallthrough */
 	case SNDRV_PCM_TRIGGER_START:
 	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
 		snd_hdac_ext_link_stream_start(link_dev);
@@ -333,7 +333,7 @@ static int hda_link_pcm_trigger(struct snd_pcm_substream *substream,
 
 		link_dev->link_prepared = 0;
 
-		fallthrough;
+		/* fallthrough */
 	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
 		snd_hdac_ext_link_stream_clear(link_dev);
 		break;
@@ -357,7 +357,7 @@ static int hda_link_hw_free(struct snd_pcm_substream *substream,
 
 	hstream = substream->runtime->private_data;
 	bus = hstream->bus;
-	rtd = asoc_substream_to_rtd(substream);
+	rtd = snd_pcm_substream_chip(substream);
 	link_dev = snd_soc_dai_get_dma_data(dai, substream);
 
 	if (!link_dev) {
@@ -374,7 +374,7 @@ static int hda_link_hw_free(struct snd_pcm_substream *substream,
 	if (ret < 0)
 		return ret;
 
-	link = snd_hdac_ext_bus_get_link(bus, asoc_rtd_to_codec(rtd, 0)->component->name);
+	link = snd_hdac_ext_bus_get_link(bus, rtd->codec_dai->component->name);
 	if (!link)
 		return -EINVAL;
 
@@ -399,19 +399,6 @@ static const struct snd_soc_dai_ops hda_link_dai_ops = {
 	.trigger = hda_link_pcm_trigger,
 	.prepare = hda_link_pcm_prepare,
 };
-
-#if IS_ENABLED(CONFIG_SND_SOC_SOF_HDA_PROBES)
-#include "../compress.h"
-
-static struct snd_soc_cdai_ops sof_probe_compr_ops = {
-	.startup	= sof_probe_compr_open,
-	.shutdown	= sof_probe_compr_free,
-	.set_params	= sof_probe_compr_set_params,
-	.trigger	= sof_probe_compr_trigger,
-	.pointer	= sof_probe_compr_pointer,
-};
-
-#endif
 #endif
 
 /*
@@ -422,167 +409,56 @@ static struct snd_soc_cdai_ops sof_probe_compr_ops = {
 struct snd_soc_dai_driver skl_dai[] = {
 {
 	.name = "SSP0 Pin",
-	.playback = {
-		.channels_min = 1,
-		.channels_max = 8,
-	},
-	.capture = {
-		.channels_min = 1,
-		.channels_max = 8,
-	},
 },
 {
 	.name = "SSP1 Pin",
-	.playback = {
-		.channels_min = 1,
-		.channels_max = 8,
-	},
-	.capture = {
-		.channels_min = 1,
-		.channels_max = 8,
-	},
 },
 {
 	.name = "SSP2 Pin",
-	.playback = {
-		.channels_min = 1,
-		.channels_max = 8,
-	},
-	.capture = {
-		.channels_min = 1,
-		.channels_max = 8,
-	},
 },
 {
 	.name = "SSP3 Pin",
-	.playback = {
-		.channels_min = 1,
-		.channels_max = 8,
-	},
-	.capture = {
-		.channels_min = 1,
-		.channels_max = 8,
-	},
 },
 {
 	.name = "SSP4 Pin",
-	.playback = {
-		.channels_min = 1,
-		.channels_max = 8,
-	},
-	.capture = {
-		.channels_min = 1,
-		.channels_max = 8,
-	},
 },
 {
 	.name = "SSP5 Pin",
-	.playback = {
-		.channels_min = 1,
-		.channels_max = 8,
-	},
-	.capture = {
-		.channels_min = 1,
-		.channels_max = 8,
-	},
 },
 {
 	.name = "DMIC01 Pin",
-	.capture = {
-		.channels_min = 1,
-		.channels_max = 4,
-	},
 },
 {
 	.name = "DMIC16k Pin",
-	.capture = {
-		.channels_min = 1,
-		.channels_max = 4,
-	},
 },
 #if IS_ENABLED(CONFIG_SND_SOC_SOF_HDA)
 {
 	.name = "iDisp1 Pin",
 	.ops = &hda_link_dai_ops,
-	.playback = {
-		.channels_min = 1,
-		.channels_max = 8,
-	},
 },
 {
 	.name = "iDisp2 Pin",
 	.ops = &hda_link_dai_ops,
-	.playback = {
-		.channels_min = 1,
-		.channels_max = 8,
-	},
 },
 {
 	.name = "iDisp3 Pin",
 	.ops = &hda_link_dai_ops,
-	.playback = {
-		.channels_min = 1,
-		.channels_max = 8,
-	},
 },
 {
 	.name = "iDisp4 Pin",
 	.ops = &hda_link_dai_ops,
-	.playback = {
-		.channels_min = 1,
-		.channels_max = 8,
-	},
 },
 {
 	.name = "Analog CPU DAI",
 	.ops = &hda_link_dai_ops,
-	.playback = {
-		.channels_min = 1,
-		.channels_max = 16,
-	},
-	.capture = {
-		.channels_min = 1,
-		.channels_max = 16,
-	},
 },
 {
 	.name = "Digital CPU DAI",
 	.ops = &hda_link_dai_ops,
-	.playback = {
-		.channels_min = 1,
-		.channels_max = 16,
-	},
-	.capture = {
-		.channels_min = 1,
-		.channels_max = 16,
-	},
 },
 {
 	.name = "Alt Analog CPU DAI",
 	.ops = &hda_link_dai_ops,
-	.playback = {
-		.channels_min = 1,
-		.channels_max = 16,
-	},
-	.capture = {
-		.channels_min = 1,
-		.channels_max = 16,
-	},
 },
-#if IS_ENABLED(CONFIG_SND_SOC_SOF_HDA_PROBES)
-{
-	.name = "Probe Extraction CPU DAI",
-	.compress_new = snd_soc_new_compress,
-	.cops = &sof_probe_compr_ops,
-	.capture = {
-		.stream_name = "Probe Extraction",
-		.channels_min = 1,
-		.channels_max = 8,
-		.rates = SNDRV_PCM_RATE_48000,
-		.rate_min = 48000,
-		.rate_max = 48000,
-	},
-},
-#endif
 #endif
 };

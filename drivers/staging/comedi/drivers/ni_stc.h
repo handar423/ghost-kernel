@@ -941,7 +941,6 @@ enum ni_reg_type {
 
 struct ni_board_struct {
 	const char *name;
-	const char *alt_route_name;
 	int device_id;
 	int isapnp_id;
 

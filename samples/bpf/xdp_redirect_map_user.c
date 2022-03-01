@@ -17,7 +17,7 @@
 
 #include "bpf_util.h"
 #include <bpf/bpf.h>
-#include <bpf/libbpf.h>
+#include "libbpf.h"
 
 static int ifindex_in;
 static int ifindex_out;
@@ -96,6 +96,7 @@ static void usage(const char *prog)
 
 int main(int argc, char **argv)
 {
+	struct rlimit r = {RLIM_INFINITY, RLIM_INFINITY};
 	struct bpf_prog_load_attr prog_load_attr = {
 		.prog_type	= BPF_PROG_TYPE_XDP,
 	};
@@ -115,7 +116,7 @@ int main(int argc, char **argv)
 			xdp_flags |= XDP_FLAGS_SKB_MODE;
 			break;
 		case 'N':
-			/* default, set below */
+			xdp_flags |= XDP_FLAGS_DRV_MODE;
 			break;
 		case 'F':
 			xdp_flags &= ~XDP_FLAGS_UPDATE_IF_NOEXIST;
@@ -126,11 +127,13 @@ int main(int argc, char **argv)
 		}
 	}
 
-	if (!(xdp_flags & XDP_FLAGS_SKB_MODE))
-		xdp_flags |= XDP_FLAGS_DRV_MODE;
-
 	if (optind == argc) {
 		printf("usage: %s <IFNAME|IFINDEX>_IN <IFNAME|IFINDEX>_OUT\n", argv[0]);
+		return 1;
+	}
+
+	if (setrlimit(RLIMIT_MEMLOCK, &r)) {
+		perror("setrlimit(RLIMIT_MEMLOCK)");
 		return 1;
 	}
 

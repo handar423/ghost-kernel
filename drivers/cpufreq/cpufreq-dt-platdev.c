@@ -53,7 +53,6 @@ static const struct of_device_id whitelist[] __initconst = {
 	{ .compatible = "renesas,r7s72100", },
 	{ .compatible = "renesas,r8a73a4", },
 	{ .compatible = "renesas,r8a7740", },
-	{ .compatible = "renesas,r8a7742", },
 	{ .compatible = "renesas,r8a7743", },
 	{ .compatible = "renesas,r8a7744", },
 	{ .compatible = "renesas,r8a7745", },
@@ -87,6 +86,7 @@ static const struct of_device_id whitelist[] __initconst = {
 	{ .compatible = "st-ericsson,u9540", },
 
 	{ .compatible = "ti,omap2", },
+	{ .compatible = "ti,omap3", },
 	{ .compatible = "ti,omap4", },
 	{ .compatible = "ti,omap5", },
 
@@ -103,15 +103,15 @@ static const struct of_device_id whitelist[] __initconst = {
 static const struct of_device_id blacklist[] __initconst = {
 	{ .compatible = "allwinner,sun50i-h6", },
 
+	{ .compatible = "arm,vexpress", },
+
 	{ .compatible = "calxeda,highbank", },
 	{ .compatible = "calxeda,ecx-2000", },
 
-	{ .compatible = "fsl,imx7ulp", },
 	{ .compatible = "fsl,imx7d", },
 	{ .compatible = "fsl,imx8mq", },
 	{ .compatible = "fsl,imx8mm", },
 	{ .compatible = "fsl,imx8mn", },
-	{ .compatible = "fsl,imx8mp", },
 
 	{ .compatible = "marvell,armadaxp", },
 
@@ -119,39 +119,26 @@ static const struct of_device_id blacklist[] __initconst = {
 	{ .compatible = "mediatek,mt2712", },
 	{ .compatible = "mediatek,mt7622", },
 	{ .compatible = "mediatek,mt7623", },
-	{ .compatible = "mediatek,mt8167", },
 	{ .compatible = "mediatek,mt817x", },
 	{ .compatible = "mediatek,mt8173", },
 	{ .compatible = "mediatek,mt8176", },
 	{ .compatible = "mediatek,mt8183", },
-	{ .compatible = "mediatek,mt8516", },
 
-	{ .compatible = "nvidia,tegra20", },
-	{ .compatible = "nvidia,tegra30", },
 	{ .compatible = "nvidia,tegra124", },
 	{ .compatible = "nvidia,tegra210", },
 
 	{ .compatible = "qcom,apq8096", },
 	{ .compatible = "qcom,msm8996", },
 	{ .compatible = "qcom,qcs404", },
-	{ .compatible = "qcom,sc7180", },
-	{ .compatible = "qcom,sdm845", },
 
 	{ .compatible = "st,stih407", },
 	{ .compatible = "st,stih410", },
-	{ .compatible = "st,stih418", },
 
 	{ .compatible = "sigma,tango4", },
 
 	{ .compatible = "ti,am33xx", },
 	{ .compatible = "ti,am43", },
 	{ .compatible = "ti,dra7", },
-	{ .compatible = "ti,omap3", },
-
-	{ .compatible = "qcom,ipq8064", },
-	{ .compatible = "qcom,apq8064", },
-	{ .compatible = "qcom,msm8974", },
-	{ .compatible = "qcom,msm8960", },
 
 	{ }
 };
@@ -195,4 +182,4 @@ create_pdev:
 			       -1, data,
 			       sizeof(struct cpufreq_dt_platform_data)));
 }
-core_initcall(cpufreq_dt_platdev_init);
+device_initcall(cpufreq_dt_platdev_init);

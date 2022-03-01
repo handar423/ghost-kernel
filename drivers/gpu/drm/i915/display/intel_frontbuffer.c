@@ -206,7 +206,6 @@ static int frontbuffer_active(struct i915_active *ref)
 	return 0;
 }
 
-__i915_active_call
 static void frontbuffer_retire(struct i915_active *ref)
 {
 	struct intel_frontbuffer *front =
@@ -221,21 +220,12 @@ static void frontbuffer_release(struct kref *ref)
 {
 	struct intel_frontbuffer *front =
 		container_of(ref, typeof(*front), ref);
-	struct drm_i915_gem_object *obj = front->obj;
-	struct i915_vma *vma;
 
-	spin_lock(&obj->vma.lock);
-	for_each_ggtt_vma(vma, obj)
-		vma->display_alignment = I915_GTT_MIN_ALIGNMENT;
-	spin_unlock(&obj->vma.lock);
+	front->obj->frontbuffer = NULL;
+	spin_unlock(&to_i915(front->obj->base.dev)->fb_tracking.lock);
 
-	RCU_INIT_POINTER(obj->frontbuffer, NULL);
-	spin_unlock(&to_i915(obj->base.dev)->fb_tracking.lock);
-
-	i915_active_fini(&front->write);
-
-	i915_gem_object_put(obj);
-	kfree_rcu(front, rcu);
+	i915_gem_object_put(front->obj);
+	kfree(front);
 }
 
 struct intel_frontbuffer *
@@ -244,7 +234,11 @@ intel_frontbuffer_get(struct drm_i915_gem_object *obj)
 	struct drm_i915_private *i915 = to_i915(obj->base.dev);
 	struct intel_frontbuffer *front;
 
-	front = __intel_frontbuffer_get(obj);
+	spin_lock(&i915->fb_tracking.lock);
+	front = obj->frontbuffer;
+	if (front)
+		kref_get(&front->ref);
+	spin_unlock(&i915->fb_tracking.lock);
 	if (front)
 		return front;
 
@@ -255,18 +249,17 @@ intel_frontbuffer_get(struct drm_i915_gem_object *obj)
 	front->obj = obj;
 	kref_init(&front->ref);
 	atomic_set(&front->bits, 0);
-	i915_active_init(&front->write,
-			 frontbuffer_active,
-			 i915_active_may_sleep(frontbuffer_retire));
+	i915_active_init(i915, &front->write,
+			 frontbuffer_active, frontbuffer_retire);
 
 	spin_lock(&i915->fb_tracking.lock);
-	if (rcu_access_pointer(obj->frontbuffer)) {
+	if (obj->frontbuffer) {
 		kfree(front);
-		front = rcu_dereference_protected(obj->frontbuffer, true);
+		front = obj->frontbuffer;
 		kref_get(&front->ref);
 	} else {
 		i915_gem_object_get(obj);
-		rcu_assign_pointer(obj->frontbuffer, front);
+		obj->frontbuffer = front;
 	}
 	spin_unlock(&i915->fb_tracking.lock);
 
@@ -304,14 +297,12 @@ void intel_frontbuffer_track(struct intel_frontbuffer *old,
 		     BITS_PER_TYPE(atomic_t));
 
 	if (old) {
-		drm_WARN_ON(old->obj->base.dev,
-			    !(atomic_read(&old->bits) & frontbuffer_bits));
+		WARN_ON(!(atomic_read(&old->bits) & frontbuffer_bits));
 		atomic_andnot(frontbuffer_bits, &old->bits);
 	}
 
 	if (new) {
-		drm_WARN_ON(new->obj->base.dev,
-			    atomic_read(&new->bits) & frontbuffer_bits);
+		WARN_ON(atomic_read(&new->bits) & frontbuffer_bits);
 		atomic_or(frontbuffer_bits, &new->bits);
 	}
 }

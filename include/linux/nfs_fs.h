@@ -46,11 +46,6 @@
 #define NFS_RPC_SWAPFLAGS		(RPC_TASK_SWAPPER|RPC_TASK_ROOTCREDS)
 
 /*
- * Size of the NFS directory verifier
- */
-#define NFS_DIR_VERIFIER_SIZE		2
-
-/*
  * NFSv3/v4 Access mode cache entry
  */
 struct nfs_access_entry {
@@ -84,6 +79,7 @@ struct nfs_open_context {
 #define NFS_CONTEXT_RESEND_WRITES	(1)
 #define NFS_CONTEXT_BAD			(2)
 #define NFS_CONTEXT_UNLOCK	(3)
+#define NFS_CONTEXT_FILE_OPEN		(4)
 	int error;
 
 	struct list_head list;
@@ -93,8 +89,8 @@ struct nfs_open_context {
 
 struct nfs_open_dir_context {
 	struct list_head list;
+	const struct cred *cred;
 	unsigned long attr_gencount;
-	__be32	verf[NFS_DIR_VERIFIER_SIZE];
 	__u64 dir_cookie;
 	__u64 dup_cookie;
 	signed char duped;
@@ -106,8 +102,6 @@ struct nfs_open_dir_context {
 struct nfs_delegation;
 
 struct posix_acl;
-
-struct nfs4_xattr_cache;
 
 /*
  * nfs fs inode data in memory
@@ -162,7 +156,7 @@ struct nfs_inode {
 	 * This is the cookie verifier used for NFSv3 readdir
 	 * operations
 	 */
-	__be32			cookieverf[NFS_DIR_VERIFIER_SIZE];
+	__be32			cookieverf[2];
 
 	atomic_long_t		nrequests;
 	struct nfs_mds_commit_info commit_info;
@@ -174,9 +168,6 @@ struct nfs_inode {
 	/* Writers: rmdir */
 	struct rw_semaphore	rmdir_sem;
 	struct mutex		commit_mutex;
-
-	/* track last access to cached pages */
-	unsigned long		page_index;
 
 #if IS_ENABLED(CONFIG_NFS_V4)
 	struct nfs4_cached_acl	*nfs4_acl;
@@ -195,23 +186,17 @@ struct nfs_inode {
 	struct fscache_cookie	*fscache;
 #endif
 	struct inode		vfs_inode;
-
-#ifdef CONFIG_NFS_V4_2
-	struct nfs4_xattr_cache *xattr_cache;
-#endif
 };
 
 struct nfs4_copy_state {
 	struct list_head	copies;
-	struct list_head	src_copies;
 	nfs4_stateid		stateid;
 	struct completion	completion;
 	uint64_t		count;
 	struct nfs_writeverf	verf;
 	int			error;
 	int			flags;
-	struct nfs4_state	*parent_src_state;
-	struct nfs4_state	*parent_dst_state;
+	struct nfs4_state	*parent_state;
 };
 
 /*
@@ -223,9 +208,6 @@ struct nfs4_copy_state {
 #define NFS_ACCESS_EXTEND      0x0008
 #define NFS_ACCESS_DELETE      0x0010
 #define NFS_ACCESS_EXECUTE     0x0020
-#define NFS_ACCESS_XAREAD      0x0040
-#define NFS_ACCESS_XAWRITE     0x0080
-#define NFS_ACCESS_XALIST      0x0100
 
 /*
  * Cache validity bit flags
@@ -245,7 +227,6 @@ struct nfs4_copy_state {
 #define NFS_INO_DATA_INVAL_DEFER	\
 				BIT(13)		/* Deferred cache invalidation */
 #define NFS_INO_INVALID_BLOCKS	BIT(14)         /* cached blocks are invalid */
-#define NFS_INO_INVALID_XATTR	BIT(15)		/* xattrs are invalid */
 
 #define NFS_INO_INVALID_ATTR	(NFS_INO_INVALID_CHANGE \
 		| NFS_INO_INVALID_CTIME \
@@ -353,15 +334,33 @@ static inline int nfs_server_capable(struct inode *inode, int cap)
 	return NFS_SERVER(inode)->caps & cap;
 }
 
+static inline void nfs_set_verifier(struct dentry * dentry, unsigned long verf)
+{
+	dentry->d_time = verf;
+}
+
 /**
  * nfs_save_change_attribute - Returns the inode attribute change cookie
  * @dir - pointer to parent directory inode
- * The "cache change attribute" is updated when we need to revalidate
- * our dentry cache after a directory was seen to change on the server.
+ * The "change attribute" is updated every time we finish an operation
+ * that will result in a metadata change on the server.
  */
 static inline unsigned long nfs_save_change_attribute(struct inode *dir)
 {
 	return NFS_I(dir)->cache_change_attribute;
+}
+
+/**
+ * nfs_verify_change_attribute - Detects NFS remote directory changes
+ * @dir - pointer to parent directory inode
+ * @chattr - previously saved change attribute
+ * Return "false" if the verifiers doesn't match the change attribute.
+ * This would usually indicate that the directory contents have changed on
+ * the server, and that any dentries need revalidating.
+ */
+static inline int nfs_verify_change_attribute(struct inode *dir, unsigned long chattr)
+{
+	return chattr == NFS_I(dir)->cache_change_attribute;
 }
 
 /*
@@ -370,7 +369,6 @@ static inline unsigned long nfs_save_change_attribute(struct inode *dir)
 extern int nfs_sync_mapping(struct address_space *mapping);
 extern void nfs_zap_mapping(struct inode *inode, struct address_space *mapping);
 extern void nfs_zap_caches(struct inode *);
-extern void nfs_set_inode_stale(struct inode *inode);
 extern void nfs_invalidate_atime(struct inode *);
 extern struct inode *nfs_fhget(struct super_block *, struct nfs_fh *,
 				struct nfs_fattr *, struct nfs4_label *);
@@ -494,10 +492,6 @@ extern const struct file_operations nfs_dir_operations;
 extern const struct dentry_operations nfs_dentry_operations;
 
 extern void nfs_force_lookup_revalidate(struct inode *dir);
-extern void nfs_set_verifier(struct dentry * dentry, unsigned long verf);
-#if IS_ENABLED(CONFIG_NFS_V4)
-extern void nfs_clear_verifier_delegated(struct inode *inode);
-#endif /* IS_ENABLED(CONFIG_NFS_V4) */
 extern struct dentry *nfs_add_or_obtain(struct dentry *dentry,
 			struct nfs_fh *fh, struct nfs_fattr *fattr,
 			struct nfs4_label *label);
@@ -505,8 +499,6 @@ extern int nfs_instantiate(struct dentry *dentry, struct nfs_fh *fh,
 			struct nfs_fattr *fattr, struct nfs4_label *label);
 extern int nfs_may_open(struct inode *inode, const struct cred *cred, int openflags);
 extern void nfs_access_zap_cache(struct inode *inode);
-extern int nfs_access_get_cached(struct inode *inode, const struct cred *cred, struct nfs_access_entry *res,
-				 bool may_block);
 
 /*
  * linux/fs/nfs/symlink.c

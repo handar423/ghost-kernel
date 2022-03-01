@@ -94,30 +94,23 @@ static __always_inline bool __preempt_count_dec_and_test(void)
 	return GEN_UNARY_RMWcc("decl", __preempt_count, e, __percpu_arg([var]));
 }
 
-#ifdef CONFIG_SCHED_CLASS_GHOST
-extern void ghost_commit_greedy_txn(void);
-#endif
-
 /*
  * Returns true when we need to resched and can (barring IRQ state).
  */
 static __always_inline bool should_resched(int preempt_offset)
 {
-#ifdef CONFIG_SCHED_CLASS_GHOST
-	ghost_commit_greedy_txn();
-#endif
 	return unlikely(raw_cpu_read_4(__preempt_count) == preempt_offset);
 }
 
 #ifdef CONFIG_PREEMPTION
-  extern asmlinkage void preempt_schedule_thunk(void);
+  extern asmlinkage void ___preempt_schedule(void);
 # define __preempt_schedule() \
-	asm volatile ("call preempt_schedule_thunk" : ASM_CALL_CONSTRAINT)
+	asm volatile ("call ___preempt_schedule" : ASM_CALL_CONSTRAINT)
 
   extern asmlinkage void preempt_schedule(void);
-  extern asmlinkage void preempt_schedule_notrace_thunk(void);
+  extern asmlinkage void ___preempt_schedule_notrace(void);
 # define __preempt_schedule_notrace() \
-	asm volatile ("call preempt_schedule_notrace_thunk" : ASM_CALL_CONSTRAINT)
+	asm volatile ("call ___preempt_schedule_notrace" : ASM_CALL_CONSTRAINT)
 
   extern asmlinkage void preempt_schedule_notrace(void);
 #endif

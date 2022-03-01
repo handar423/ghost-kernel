@@ -119,7 +119,7 @@ static int cfi_use_status_reg(struct cfi_private *cfi)
 	struct cfi_pri_amdstd *extp = cfi->cmdset_priv;
 	u8 poll_mask = CFI_POLL_STATUS_REG | CFI_POLL_DQ;
 
-	return extp->MinorVersion >= '5' &&
+	return extp && extp->MinorVersion >= '5' &&
 		(extp->SoftwareFeatures & poll_mask) == CFI_POLL_STATUS_REG;
 }
 
@@ -966,7 +966,8 @@ static int get_chip(struct map_info *map, struct flchip *chip, unsigned long adr
 		/* Only if there's no operation suspended... */
 		if (mode == FL_READY && chip->oldstate == FL_READY)
 			return 0;
-		fallthrough;
+		/* fall through */
+
 	default:
 	sleep:
 		set_current_state(TASK_UNINTERRUPTIBLE);
@@ -1719,7 +1720,7 @@ static int __xipram do_write_oneword_start(struct map_info *map,
 					   struct flchip *chip,
 					   unsigned long adr, int mode)
 {
-	int ret;
+	int ret = 0;
 
 	mutex_lock(&chip->mutex);
 
@@ -1796,7 +1797,7 @@ static int __xipram do_write_oneword(struct map_info *map, struct flchip *chip,
 				     unsigned long adr, map_word datum,
 				     int mode)
 {
-	int ret;
+	int ret = 0;
 
 	adr += chip->start;
 
@@ -1820,7 +1821,7 @@ static int cfi_amdstd_write_words(struct mtd_info *mtd, loff_t to, size_t len,
 {
 	struct map_info *map = mtd->priv;
 	struct cfi_private *cfi = map->fldrv_priv;
-	int ret;
+	int ret = 0;
 	int chipnum;
 	unsigned long ofs, chipstart;
 	DECLARE_WAITQUEUE(wait, current);
@@ -2024,7 +2025,7 @@ static int __xipram do_write_buffer(struct map_info *map, struct flchip *chip,
 				    int len)
 {
 	struct cfi_private *cfi = map->fldrv_priv;
-	int ret;
+	int ret = -EIO;
 	unsigned long cmd_adr;
 	int z, words;
 	map_word datum;
@@ -2101,7 +2102,7 @@ static int cfi_amdstd_write_buffers(struct mtd_info *mtd, loff_t to, size_t len,
 	struct map_info *map = mtd->priv;
 	struct cfi_private *cfi = map->fldrv_priv;
 	int wbufsize = cfi_interleave(cfi) << cfi->cfiq->MaxBufWriteSize;
-	int ret;
+	int ret = 0;
 	int chipnum;
 	unsigned long ofs;
 
@@ -2238,7 +2239,7 @@ static int do_panic_write_oneword(struct map_info *map, struct flchip *chip,
 	struct cfi_private *cfi = map->fldrv_priv;
 	int retry_cnt = 0;
 	map_word oldd;
-	int ret;
+	int ret = 0;
 	int i;
 
 	adr += chip->start;
@@ -2313,7 +2314,7 @@ static int cfi_amdstd_panic_write(struct mtd_info *mtd, loff_t to, size_t len,
 	struct map_info *map = mtd->priv;
 	struct cfi_private *cfi = map->fldrv_priv;
 	unsigned long ofs, chipstart;
-	int ret;
+	int ret = 0;
 	int chipnum;
 
 	chipnum = to >> cfi->chipshift;
@@ -2417,7 +2418,7 @@ static int __xipram do_erase_chip(struct map_info *map, struct flchip *chip)
 	unsigned long timeo = jiffies + HZ;
 	unsigned long int adr;
 	DECLARE_WAITQUEUE(wait, current);
-	int ret;
+	int ret = 0;
 	int retry_cnt = 0;
 
 	adr = cfi->addr_unlock1;
@@ -2516,7 +2517,7 @@ static int __xipram do_erase_oneblock(struct map_info *map, struct flchip *chip,
 	struct cfi_private *cfi = map->fldrv_priv;
 	unsigned long timeo = jiffies + HZ;
 	DECLARE_WAITQUEUE(wait, current);
-	int ret;
+	int ret = 0;
 	int retry_cnt = 0;
 
 	adr += chip->start;
@@ -2934,7 +2935,7 @@ static void cfi_amdstd_sync (struct mtd_info *mtd)
 			 * as the whole point is that nobody can do anything
 			 * with the chip now anyway.
 			 */
-			fallthrough;
+			/* fall through */
 		case FL_SYNCING:
 			mutex_unlock(&chip->mutex);
 			break;

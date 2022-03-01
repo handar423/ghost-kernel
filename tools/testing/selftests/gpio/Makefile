@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: GPL-2.0
 
-VAR_CFLAGS := $(shell pkg-config --cflags mount 2>/dev/null)
-VAR_LDLIBS := $(shell pkg-config --libs mount 2>/dev/null)
-ifeq ($(VAR_LDLIBS),)
-VAR_LDLIBS := -lmount -I/usr/include/libmount
+MOUNT_CFLAGS := $(shell pkg-config --cflags mount 2>/dev/null)
+MOUNT_LDLIBS := $(shell pkg-config --libs mount 2>/dev/null)
+ifeq ($(MOUNT_LDLIBS),)
+MOUNT_LDLIBS := -lmount -I/usr/include/libmount
 endif
 
-CFLAGS += -O2 -g -std=gnu99 -Wall -I../../../../usr/include/ $(VAR_CFLAGS)
-LDLIBS += $(VAR_LDLIBS)
+CFLAGS += -O2 -g -std=gnu99 -Wall -I../../../../usr/include/ $(MOUNT_CFLAGS)
+LDLIBS += $(MOUNT_LDLIBS)
 
 TEST_PROGS := gpio-mockup.sh
 TEST_FILES := gpio-mockup-sysfs.sh
@@ -20,7 +20,10 @@ GPIODIR := $(realpath ../../../gpio)
 GPIOOUT := $(OUTPUT)/tools-gpio/
 GPIOOBJ := $(GPIOOUT)/gpio-utils.o
 
-CLEAN += ; $(RM) -rf $(GPIOOUT)
+override define CLEAN
+	$(RM) $(TEST_GEN_PROGS_EXTENDED)
+	$(RM) -rf $(GPIOOUT)
+endef
 
 $(TEST_GEN_PROGS_EXTENDED): $(GPIOOBJ)
 

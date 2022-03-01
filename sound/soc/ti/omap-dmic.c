@@ -95,7 +95,7 @@ static int omap_dmic_dai_startup(struct snd_pcm_substream *substream,
 
 	mutex_lock(&dmic->mutex);
 
-	if (!snd_soc_dai_active(dai))
+	if (!dai->active)
 		dmic->active = 1;
 	else
 		ret = -EBUSY;
@@ -112,9 +112,9 @@ static void omap_dmic_dai_shutdown(struct snd_pcm_substream *substream,
 
 	mutex_lock(&dmic->mutex);
 
-	cpu_latency_qos_remove_request(&dmic->pm_qos_req);
+	pm_qos_remove_request(&dmic->pm_qos_req);
 
-	if (!snd_soc_dai_active(dai))
+	if (!dai->active)
 		dmic->active = 0;
 
 	mutex_unlock(&dmic->mutex);
@@ -203,10 +203,10 @@ static int omap_dmic_dai_hw_params(struct snd_pcm_substream *substream,
 	switch (channels) {
 	case 6:
 		dmic->ch_enabled |= OMAP_DMIC_UP3_ENABLE;
-		fallthrough;
+		/* fall through */
 	case 4:
 		dmic->ch_enabled |= OMAP_DMIC_UP2_ENABLE;
-		fallthrough;
+		/* fall through */
 	case 2:
 		dmic->ch_enabled |= OMAP_DMIC_UP1_ENABLE;
 		break;
@@ -230,9 +230,8 @@ static int omap_dmic_dai_prepare(struct snd_pcm_substream *substream,
 	struct omap_dmic *dmic = snd_soc_dai_get_drvdata(dai);
 	u32 ctrl;
 
-	if (cpu_latency_qos_request_active(&dmic->pm_qos_req))
-		cpu_latency_qos_update_request(&dmic->pm_qos_req,
-					       dmic->latency);
+	if (pm_qos_request_active(&dmic->pm_qos_req))
+		pm_qos_update_request(&dmic->pm_qos_req, dmic->latency);
 
 	/* Configure uplink threshold */
 	omap_dmic_write(dmic, OMAP_DMIC_FIFO_CTRL_REG, dmic->threshold);

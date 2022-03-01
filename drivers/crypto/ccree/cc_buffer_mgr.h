@@ -24,7 +24,7 @@ enum cc_sg_cpy_direct {
 };
 
 struct cc_mlli {
-	u32 sram_addr;
+	cc_sram_addr_t sram_addr;
 	unsigned int mapped_nents;
 	unsigned int nents; //sg nents
 	unsigned int mlli_nents; //mlli nents might be different than the above
@@ -32,7 +32,7 @@ struct cc_mlli {
 
 struct mlli_params {
 	struct dma_pool *curr_pool;
-	void *mlli_virt_addr;
+	u8 *mlli_virt_addr;
 	dma_addr_t mlli_dma_addr;
 	u32 mlli_len;
 };

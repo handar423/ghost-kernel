@@ -7,6 +7,8 @@
 
 #include <asm-generic/module.h>
 
+#define MODULE_ARCH_VERMAGIC	"aarch64"
+
 #ifdef CONFIG_ARM64_MODULE_PLTS
 struct mod_plt_sec {
 	int			plt_shndx;
@@ -19,7 +21,7 @@ struct mod_arch_specific {
 	struct mod_plt_sec	init;
 
 	/* for CONFIG_DYNAMIC_FTRACE */
-	struct plt_entry	*ftrace_trampolines;
+	struct plt_entry 	*ftrace_trampoline;
 };
 #endif
 

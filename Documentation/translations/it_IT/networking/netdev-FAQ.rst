@@ -1,6 +1,6 @@
 .. include:: ../disclaimer-ita.rst
 
-:Original: :ref:`Documentation/networking/netdev-FAQ.rst <netdev-FAQ>`
+:Original: :ref:`Documentation/process/stable-kernel-rules.rst <stable_kernel_rules>`
 
 .. _it_netdev-FAQ:
 

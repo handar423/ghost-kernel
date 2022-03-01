@@ -77,10 +77,6 @@ struct fsverity_operations {
 	 *
 	 * @inode: the inode
 	 * @index: 0-based index of the page within the Merkle tree
-	 * @num_ra_pages: The number of Merkle tree pages that should be
-	 *		  prefetched starting at @index if the page at @index
-	 *		  isn't already cached.  Implementations may ignore this
-	 *		  argument; it's only a performance optimization.
 	 *
 	 * This can be called at any time on an open verity file, as well as
 	 * between ->begin_enable_verity() and ->end_enable_verity().  It may be
@@ -91,8 +87,7 @@ struct fsverity_operations {
 	 * Return: the page on success, ERR_PTR() on failure
 	 */
 	struct page *(*read_merkle_tree_page)(struct inode *inode,
-					      pgoff_t index,
-					      unsigned long num_ra_pages);
+					      pgoff_t index);
 
 	/**
 	 * Write a Merkle tree block to the given inode.
@@ -115,34 +110,29 @@ struct fsverity_operations {
 
 static inline struct fsverity_info *fsverity_get_info(const struct inode *inode)
 {
-	/*
-	 * Pairs with the cmpxchg_release() in fsverity_set_info().
-	 * I.e., another task may publish ->i_verity_info concurrently,
-	 * executing a RELEASE barrier.  We need to use smp_load_acquire() here
-	 * to safely ACQUIRE the memory the other task published.
-	 */
-	return smp_load_acquire(&inode->i_verity_info);
+	/* pairs with the cmpxchg() in fsverity_set_info() */
+	return READ_ONCE(inode->i_verity_info);
 }
 
 /* enable.c */
 
-int fsverity_ioctl_enable(struct file *filp, const void __user *arg);
+extern int fsverity_ioctl_enable(struct file *filp, const void __user *arg);
 
 /* measure.c */
 
-int fsverity_ioctl_measure(struct file *filp, void __user *arg);
+extern int fsverity_ioctl_measure(struct file *filp, void __user *arg);
 
 /* open.c */
 
-int fsverity_file_open(struct inode *inode, struct file *filp);
-int fsverity_prepare_setattr(struct dentry *dentry, struct iattr *attr);
-void fsverity_cleanup_inode(struct inode *inode);
+extern int fsverity_file_open(struct inode *inode, struct file *filp);
+extern int fsverity_prepare_setattr(struct dentry *dentry, struct iattr *attr);
+extern void fsverity_cleanup_inode(struct inode *inode);
 
 /* verify.c */
 
-bool fsverity_verify_page(struct page *page);
-void fsverity_verify_bio(struct bio *bio);
-void fsverity_enqueue_verify_work(struct work_struct *work);
+extern bool fsverity_verify_page(struct page *page);
+extern void fsverity_verify_bio(struct bio *bio);
+extern void fsverity_enqueue_verify_work(struct work_struct *work);
 
 #else /* !CONFIG_FS_VERITY */
 
@@ -205,7 +195,6 @@ static inline void fsverity_enqueue_verify_work(struct work_struct *work)
 
 /**
  * fsverity_active() - do reads from the inode need to go through fs-verity?
- * @inode: inode to check
  *
  * This checks whether ->i_verity_info has been set.
  *
@@ -213,8 +202,6 @@ static inline void fsverity_enqueue_verify_work(struct work_struct *work)
  * be verified or not.  Don't use IS_VERITY() for this purpose; it's subject to
  * a race condition where the file is being read concurrently with
  * FS_IOC_ENABLE_VERITY completing.  (S_VERITY is set before ->i_verity_info.)
- *
- * Return: true if reads need to go through fs-verity, otherwise false
  */
 static inline bool fsverity_active(const struct inode *inode)
 {

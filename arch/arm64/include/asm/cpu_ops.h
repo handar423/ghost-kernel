@@ -21,7 +21,7 @@
  *		mechanism for doing so, tests whether it is possible to boot
  *		the given CPU.
  * @cpu_boot:	Boots a cpu into the kernel.
- * @cpu_postboot: Optionally, perform any post-boot cleanup or necessary
+ * @cpu_postboot: Optionally, perform any post-boot cleanup or necesary
  *		synchronisation. Called from the cpu being booted.
  * @cpu_can_disable: Determines whether a CPU can be disabled based on
  *		mechanism-specific information.
@@ -55,12 +55,12 @@ struct cpu_operations {
 #endif
 };
 
-int __init init_cpu_ops(int cpu);
-extern const struct cpu_operations *get_cpu_ops(int cpu);
+extern const struct cpu_operations *cpu_ops[NR_CPUS];
+int __init cpu_read_ops(int cpu);
 
-static inline void __init init_bootcpu_ops(void)
+static inline void __init cpu_read_bootcpu_ops(void)
 {
-	init_cpu_ops(0);
+	cpu_read_ops(0);
 }
 
 #endif /* ifndef __ASM_CPU_OPS_H */

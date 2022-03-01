@@ -20,7 +20,7 @@ DECLARE_RWSEM(trace_event_sem);
 
 static struct hlist_head event_hash[EVENT_HASHSIZE] __read_mostly;
 
-static int next_event_type = __TRACE_LAST_TYPE;
+static int next_event_type = __TRACE_LAST_TYPE + 1;
 
 enum print_line_t trace_print_bputs_msg_only(struct trace_iterator *iter)
 {
@@ -274,21 +274,6 @@ trace_print_array_seq(struct trace_seq *p, const void *buf, int count,
 }
 EXPORT_SYMBOL(trace_print_array_seq);
 
-const char *
-trace_print_hex_dump_seq(struct trace_seq *p, const char *prefix_str,
-			 int prefix_type, int rowsize, int groupsize,
-			 const void *buf, size_t len, bool ascii)
-{
-	const char *ret = trace_seq_buffer_ptr(p);
-
-	trace_seq_putc(p, '\n');
-	trace_seq_hex_dump(p, prefix_str, prefix_type,
-			   rowsize, groupsize, buf, len, ascii);
-	trace_seq_putc(p, 0);
-	return ret;
-}
-EXPORT_SYMBOL(trace_print_hex_dump_seq);
-
 int trace_raw_output_prep(struct trace_iterator *iter,
 			  struct trace_event *trace_event)
 {
@@ -353,8 +338,8 @@ static inline const char *kretprobed(const char *name)
 }
 #endif /* CONFIG_KRETPROBES */
 
-void
-trace_seq_print_sym(struct trace_seq *s, unsigned long address, bool offset)
+static void
+seq_print_sym(struct trace_seq *s, unsigned long address, bool offset)
 {
 #ifdef CONFIG_KALLSYMS
 	char str[KSYM_SYMBOL_LEN];
@@ -393,7 +378,7 @@ static int seq_print_user_ip(struct trace_seq *s, struct mm_struct *mm,
 	if (mm) {
 		const struct vm_area_struct *vma;
 
-		mmap_read_lock(mm);
+		down_read(&mm->mmap_sem);
 		vma = find_vma(mm, ip);
 		if (vma) {
 			file = vma->vm_file;
@@ -405,7 +390,7 @@ static int seq_print_user_ip(struct trace_seq *s, struct mm_struct *mm,
 				trace_seq_printf(s, "[+0x%lx]",
 						 ip - vmstart);
 		}
-		mmap_read_unlock(mm);
+		up_read(&mm->mmap_sem);
 	}
 	if (ret && ((sym_flags & TRACE_ITER_SYM_ADDR) || !file))
 		trace_seq_printf(s, " <" IP_FMT ">", ip);
@@ -420,7 +405,7 @@ seq_print_ip_sym(struct trace_seq *s, unsigned long ip, unsigned long sym_flags)
 		goto out;
 	}
 
-	trace_seq_print_sym(s, ip, sym_flags & TRACE_ITER_SYM_OFFSET);
+	seq_print_sym(s, ip, sym_flags & TRACE_ITER_SYM_OFFSET);
 
 	if (sym_flags & TRACE_ITER_SYM_ADDR)
 		trace_seq_printf(s, " <" IP_FMT ">", ip);
@@ -538,7 +523,7 @@ lat_print_timestamp(struct trace_iterator *iter, u64 next_ts)
 	struct trace_array *tr = iter->tr;
 	unsigned long verbose = tr->trace_flags & TRACE_ITER_VERBOSE;
 	unsigned long in_ns = iter->iter_flags & TRACE_FILE_TIME_IN_NS;
-	unsigned long long abs_ts = iter->ts - iter->array_buffer->time_start;
+	unsigned long long abs_ts = iter->ts - iter->trace_buffer->time_start;
 	unsigned long long rel_ts = next_ts - iter->ts;
 	struct trace_seq *s = &iter->seq;
 
@@ -617,18 +602,21 @@ int trace_print_context(struct trace_iterator *iter)
 
 int trace_print_lat_context(struct trace_iterator *iter)
 {
-	struct trace_entry *entry, *next_entry;
 	struct trace_array *tr = iter->tr;
+	/* trace_find_next_entry will reset ent_size */
+	int ent_size = iter->ent_size;
 	struct trace_seq *s = &iter->seq;
-	unsigned long verbose = (tr->trace_flags & TRACE_ITER_VERBOSE);
 	u64 next_ts;
+	struct trace_entry *entry = iter->ent,
+			   *next_entry = trace_find_next_entry(iter, NULL,
+							       &next_ts);
+	unsigned long verbose = (tr->trace_flags & TRACE_ITER_VERBOSE);
 
-	next_entry = trace_find_next_entry(iter, NULL, &next_ts);
+	/* Restore the original ent_size */
+	iter->ent_size = ent_size;
+
 	if (!next_entry)
 		next_ts = iter->ts;
-
-	/* trace_find_next_entry() may change iter->ent */
-	entry = iter->ent;
 
 	if (verbose) {
 		char comm[TASK_COMM_LEN];
@@ -675,11 +663,11 @@ static LIST_HEAD(ftrace_event_list);
 static int trace_search_list(struct list_head **list)
 {
 	struct trace_event *e;
-	int next = __TRACE_LAST_TYPE;
+	int last = __TRACE_LAST_TYPE;
 
 	if (list_empty(&ftrace_event_list)) {
 		*list = &ftrace_event_list;
-		return next;
+		return last + 1;
 	}
 
 	/*
@@ -687,17 +675,17 @@ static int trace_search_list(struct list_head **list)
 	 * lets see if somebody freed one.
 	 */
 	list_for_each_entry(e, &ftrace_event_list, list) {
-		if (e->type != next)
+		if (e->type != last + 1)
 			break;
-		next++;
+		last++;
 	}
 
 	/* Did we used up all 65 thousand events??? */
-	if (next > TRACE_EVENT_TYPE_MAX)
+	if ((last + 1) > TRACE_EVENT_TYPE_MAX)
 		return 0;
 
 	*list = &e->list;
-	return next;
+	return last + 1;
 }
 
 void trace_event_read_lock(void)
@@ -1155,12 +1143,12 @@ trace_hwlat_print(struct trace_iterator *iter, int flags,
 
 	trace_assign_type(field, entry);
 
-	trace_seq_printf(s, "#%-5u inner/outer(us): %4llu/%-5llu ts:%lld.%09ld count:%d",
+	trace_seq_printf(s, "#%-5u inner/outer(us): %4llu/%-5llu ts:%lld.%09ld",
 			 field->seqnum,
 			 field->duration,
 			 field->outer_duration,
 			 (long long)field->timestamp.tv_sec,
-			 field->timestamp.tv_nsec, field->count);
+			 field->timestamp.tv_nsec);
 
 	if (field->nmi_count) {
 		/*

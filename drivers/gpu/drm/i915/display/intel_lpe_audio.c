@@ -71,7 +71,6 @@
 #include <drm/intel_lpe_audio.h>
 
 #include "i915_drv.h"
-#include "intel_de.h"
 #include "intel_lpe_audio.h"
 
 #define HAS_LPE_AUDIO(dev_priv) ((dev_priv)->lpe_audio.platdev != NULL)
@@ -115,7 +114,7 @@ lpe_audio_platdev_create(struct drm_i915_private *dev_priv)
 	pinfo.size_data = sizeof(*pdata);
 	pinfo.dma_mask = DMA_BIT_MASK(32);
 
-	pdata->num_pipes = INTEL_NUM_PIPES(dev_priv);
+	pdata->num_pipes = INTEL_INFO(dev_priv)->num_pipes;
 	pdata->num_ports = IS_CHERRYVIEW(dev_priv) ? 3 : 2; /* B,C,D or B,C */
 	pdata->port[0].pipe = -1;
 	pdata->port[1].pipe = -1;
@@ -127,8 +126,7 @@ lpe_audio_platdev_create(struct drm_i915_private *dev_priv)
 	kfree(pdata);
 
 	if (IS_ERR(platdev)) {
-		drm_err(&dev_priv->drm,
-			"Failed to allocate LPE audio platform device\n");
+		DRM_ERROR("Failed to allocate LPE audio platform device\n");
 		return platdev;
 	}
 
@@ -168,7 +166,7 @@ static int lpe_audio_irq_init(struct drm_i915_private *dev_priv)
 {
 	int irq = dev_priv->lpe_audio.irq;
 
-	drm_WARN_ON(&dev_priv->drm, !intel_irqs_enabled(dev_priv));
+	WARN_ON(!intel_irqs_enabled(dev_priv));
 	irq_set_chip_and_handler_name(irq,
 				&lpe_audio_irqchip,
 				handle_simple_irq,
@@ -191,8 +189,7 @@ static bool lpe_audio_detect(struct drm_i915_private *dev_priv)
 		};
 
 		if (!pci_dev_present(atom_hdaudio_ids)) {
-			drm_info(&dev_priv->drm,
-				 "HDaudio controller not detected, using LPE audio instead\n");
+			DRM_INFO("HDaudio controller not detected, using LPE audio instead\n");
 			lpe_present = true;
 		}
 	}
@@ -205,19 +202,18 @@ static int lpe_audio_setup(struct drm_i915_private *dev_priv)
 
 	dev_priv->lpe_audio.irq = irq_alloc_desc(0);
 	if (dev_priv->lpe_audio.irq < 0) {
-		drm_err(&dev_priv->drm, "Failed to allocate IRQ desc: %d\n",
+		DRM_ERROR("Failed to allocate IRQ desc: %d\n",
 			dev_priv->lpe_audio.irq);
 		ret = dev_priv->lpe_audio.irq;
 		goto err;
 	}
 
-	drm_dbg(&dev_priv->drm, "irq = %d\n", dev_priv->lpe_audio.irq);
+	DRM_DEBUG("irq = %d\n", dev_priv->lpe_audio.irq);
 
 	ret = lpe_audio_irq_init(dev_priv);
 
 	if (ret) {
-		drm_err(&dev_priv->drm,
-			"Failed to initialize irqchip for lpe audio: %d\n",
+		DRM_ERROR("Failed to initialize irqchip for lpe audio: %d\n",
 			ret);
 		goto err_free_irq;
 	}
@@ -226,8 +222,7 @@ static int lpe_audio_setup(struct drm_i915_private *dev_priv)
 
 	if (IS_ERR(dev_priv->lpe_audio.platdev)) {
 		ret = PTR_ERR(dev_priv->lpe_audio.platdev);
-		drm_err(&dev_priv->drm,
-			"Failed to create lpe audio platform device: %d\n",
+		DRM_ERROR("Failed to create lpe audio platform device: %d\n",
 			ret);
 		goto err_free_irq;
 	}
@@ -235,8 +230,7 @@ static int lpe_audio_setup(struct drm_i915_private *dev_priv)
 	/* enable chicken bit; at least this is required for Dell Wyse 3040
 	 * with DP outputs (but only sometimes by some reason!)
 	 */
-	intel_de_write(dev_priv, VLV_AUD_CHICKEN_BIT_REG,
-		       VLV_CHICKEN_BIT_DBG_ENABLE);
+	I915_WRITE(VLV_AUD_CHICKEN_BIT_REG, VLV_CHICKEN_BIT_DBG_ENABLE);
 
 	return 0;
 err_free_irq:
@@ -263,8 +257,8 @@ void intel_lpe_audio_irq_handler(struct drm_i915_private *dev_priv)
 
 	ret = generic_handle_irq(dev_priv->lpe_audio.irq);
 	if (ret)
-		drm_err_ratelimited(&dev_priv->drm,
-				    "error handling LPE audio irq: %d\n", ret);
+		DRM_ERROR_RATELIMITED("error handling LPE audio irq: %d\n",
+				ret);
 }
 
 /**
@@ -282,8 +276,7 @@ int intel_lpe_audio_init(struct drm_i915_private *dev_priv)
 	if (lpe_audio_detect(dev_priv)) {
 		ret = lpe_audio_setup(dev_priv);
 		if (ret < 0)
-			drm_err(&dev_priv->drm,
-				"failed to setup LPE Audio bridge\n");
+			DRM_ERROR("failed to setup LPE Audio bridge\n");
 	}
 	return ret;
 }
@@ -297,8 +290,12 @@ int intel_lpe_audio_init(struct drm_i915_private *dev_priv)
  */
 void intel_lpe_audio_teardown(struct drm_i915_private *dev_priv)
 {
+	struct irq_desc *desc;
+
 	if (!HAS_LPE_AUDIO(dev_priv))
 		return;
+
+	desc = irq_to_desc(dev_priv->lpe_audio.irq);
 
 	lpe_audio_platdev_destroy(dev_priv);
 
@@ -337,7 +334,7 @@ void intel_lpe_audio_notify(struct drm_i915_private *dev_priv,
 
 	spin_lock_irqsave(&pdata->lpe_audio_slock, irqflags);
 
-	audio_enable = intel_de_read(dev_priv, VLV_AUD_PORT_EN_DBG(port));
+	audio_enable = I915_READ(VLV_AUD_PORT_EN_DBG(port));
 
 	if (eld != NULL) {
 		memcpy(ppdata->eld, eld, HDMI_MAX_ELD_BYTES);
@@ -346,8 +343,8 @@ void intel_lpe_audio_notify(struct drm_i915_private *dev_priv,
 		ppdata->dp_output = dp_output;
 
 		/* Unmute the amp for both DP and HDMI */
-		intel_de_write(dev_priv, VLV_AUD_PORT_EN_DBG(port),
-			       audio_enable & ~VLV_AMP_MUTE);
+		I915_WRITE(VLV_AUD_PORT_EN_DBG(port),
+			   audio_enable & ~VLV_AMP_MUTE);
 	} else {
 		memset(ppdata->eld, 0, HDMI_MAX_ELD_BYTES);
 		ppdata->pipe = -1;
@@ -355,8 +352,8 @@ void intel_lpe_audio_notify(struct drm_i915_private *dev_priv,
 		ppdata->dp_output = false;
 
 		/* Mute the amp for both DP and HDMI */
-		intel_de_write(dev_priv, VLV_AUD_PORT_EN_DBG(port),
-			       audio_enable | VLV_AMP_MUTE);
+		I915_WRITE(VLV_AUD_PORT_EN_DBG(port),
+			   audio_enable | VLV_AMP_MUTE);
 	}
 
 	if (pdata->notify_audio_lpe)

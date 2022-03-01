@@ -11,7 +11,7 @@ User Space Memory Access
 .. kernel-doc:: arch/x86/lib/usercopy_32.c
    :export:
 
-.. kernel-doc:: mm/gup.c
+.. kernel-doc:: mm/util.c
    :functions: get_user_pages_fast
 
 .. _mm-api-gfp-flags:
@@ -72,9 +72,6 @@ File Mapping and Page Cache
 
 .. kernel-doc:: mm/truncate.c
    :export:
-
-.. kernel-doc:: include/linux/pagemap.h
-   :internal:
 
 Memory pools
 ============

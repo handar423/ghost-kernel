@@ -13,7 +13,6 @@
  */
 
 #include <linux/linkage.h>
-#include <linux/pgtable.h>
 #include <asm/asm-offsets.h>
 #include <asm/asmmacro.h>
 #include <asm/processor.h>
@@ -23,6 +22,7 @@
 #include <asm/unistd.h>
 #include <asm/ptrace.h>
 #include <asm/current.h>
+#include <asm/pgtable.h>
 #include <asm/page.h>
 #include <asm/signal.h>
 #include <asm/tlbflush.h>
@@ -500,8 +500,8 @@ common_exception_return:
 	 */
 
 	_bbsi.l	a4, TIF_NEED_RESCHED, 3f
-	movi	a2, _TIF_SIGPENDING | _TIF_NOTIFY_RESUME | _TIF_NOTIFY_SIGNAL
-	bnone	a4, a2, 5f
+	_bbsi.l	a4, TIF_NOTIFY_RESUME, 2f
+	_bbci.l	a4, TIF_SIGPENDING, 5f
 
 2:	l32i	a4, a1, PT_DEPC
 	bgeui	a4, VALID_DOUBLE_EXCEPTION_ADDRESS, 4f
@@ -525,7 +525,7 @@ common_exception_return:
 	call4	schedule	# void schedule (void)
 	j	1b
 
-#ifdef CONFIG_PREEMPTION
+#ifdef CONFIG_PREEMPT
 6:
 	_bbci.l	a4, TIF_NEED_RESCHED, 4f
 
@@ -534,7 +534,7 @@ common_exception_return:
 	l32i	a4, a2, TI_PRE_COUNT
 	bnez	a4, 4f
 	call4	preempt_schedule_irq
-	j	4f
+	j	1b
 #endif
 
 #if XTENSA_FAKE_NMI
@@ -944,9 +944,6 @@ ENDPROC(unrecoverable_exception)
 
 /* -------------------------- FAST EXCEPTION HANDLERS ----------------------- */
 
-	__XTENSA_HANDLER
-	.literal_position
-
 /*
  * Fast-handler for alloca exceptions
  *
@@ -964,14 +961,14 @@ ENDPROC(unrecoverable_exception)
  * of the proper size instead.
  *
  * This algorithm simply backs out the register changes started by the user
- * exception handler, makes it appear that we have started a window underflow
+ * excpetion handler, makes it appear that we have started a window underflow
  * by rotating the window back and then setting the old window base (OWB) in
  * the 'ps' register with the rolled back window base. The 'movsp' instruction
  * will be re-executed and this time since the next window frames is in the
  * active AR registers it won't cause an exception.
  *
  * If the WindowUnderflow code gets a TLB miss the page will get mapped
- * the partial WindowUnderflow will be handled in the double exception
+ * the the partial windeowUnderflow will be handeled in the double exception
  * handler.
  *
  * Entry condition:
@@ -1032,7 +1029,7 @@ ENDPROC(fast_alloca)
 ENTRY(fast_illegal_instruction_user)
 
 	rsr	a0, ps
-	bbsi.l	a0, PS_WOE_BIT, 1f
+	bbsi.l	a0, PS_WOE_BIT, user_exception
 	s32i	a3, a2, PT_AREG3
 	movi	a3, PS_WOE_MASK
 	or	a0, a0, a3
@@ -1041,8 +1038,6 @@ ENTRY(fast_illegal_instruction_user)
 	l32i	a0, a2, PT_AREG0
 	rsr	a2, depc
 	rfe
-1:
-	call0	user_exception
 
 ENDPROC(fast_illegal_instruction_user)
 #endif
@@ -1081,7 +1076,7 @@ ENTRY(fast_syscall_user)
 	_beqz	a0, fast_syscall_spill_registers
 	_beqi	a0, __NR_xtensa, fast_syscall_xtensa
 
-	call0	user_exception
+	j	user_exception
 
 ENDPROC(fast_syscall_user)
 
@@ -1772,8 +1767,8 @@ ENTRY(fast_second_level_miss)
 
 	rsr	a2, ps
 	bbsi.l	a2, PS_UM_BIT, 1f
-	call0	_kernel_exception
-1:	call0	_user_exception
+	j	_kernel_exception
+1:	j	_user_exception
 
 ENDPROC(fast_second_level_miss)
 
@@ -1869,14 +1864,13 @@ ENTRY(fast_store_prohibited)
 
 	rsr	a2, ps
 	bbsi.l	a2, PS_UM_BIT, 1f
-	call0	_kernel_exception
-1:	call0	_user_exception
+	j	_kernel_exception
+1:	j	_user_exception
 
 ENDPROC(fast_store_prohibited)
 
 #endif /* CONFIG_MMU */
 
-	.text
 /*
  * System Calls.
  *
@@ -1887,7 +1881,8 @@ ENDPROC(fast_store_prohibited)
 
 ENTRY(system_call)
 
-	abi_entry_default
+	/* reserve 4 bytes on stack for function parameter */
+	abi_entry(4)
 
 	/* regs->syscall = regs->areg[2] */
 
@@ -1906,6 +1901,8 @@ ENTRY(system_call)
 	l32i	a7, a2, PT_SYSCALL
 
 1:
+	s32i	a7, a1, 4
+
 	/* syscall = sys_call_table[syscall_nr] */
 
 	movi	a4, sys_call_table
@@ -1925,6 +1922,9 @@ ENTRY(system_call)
 	l32i	a10, a2, PT_AREG8
 	l32i	a11, a2, PT_AREG9
 
+	/* Pass one additional argument to the syscall: pt_regs (on stack) */
+	s32i	a2, a1, 0
+
 	callx4	a4
 
 1:	/* regs->areg[2] = return_value */
@@ -1932,12 +1932,16 @@ ENTRY(system_call)
 	s32i	a6, a2, PT_AREG2
 	bnez	a3, 1f
 .Lsyscall_exit:
-	abi_ret_default
+	abi_ret(4)
 
 1:
+	l32i	a4, a1, 4
+	l32i	a3, a2, PT_SYSCALL
+	s32i	a4, a2, PT_SYSCALL
 	mov	a6, a2
 	call4	do_syscall_trace_leave
-	abi_ret_default
+	s32i	a3, a2, PT_SYSCALL
+	abi_ret(4)
 
 ENDPROC(system_call)
 

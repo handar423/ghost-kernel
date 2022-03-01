@@ -11,7 +11,6 @@
 #include "btree.h"
 #include "request.h"
 #include "writeback.h"
-#include "features.h"
 
 #include <linux/blkdev.h>
 #include <linux/sort.h>
@@ -89,9 +88,6 @@ read_attribute(btree_used_percent);
 read_attribute(average_key_size);
 read_attribute(dirty_data);
 read_attribute(bset_tree_stats);
-read_attribute(feature_compat);
-read_attribute(feature_ro_compat);
-read_attribute(feature_incompat);
 
 read_attribute(state);
 read_attribute(cache_read_races);
@@ -145,7 +141,6 @@ rw_attribute(expensive_debug_checks);
 rw_attribute(cache_replacement_policy);
 rw_attribute(btree_shrinker_disabled);
 rw_attribute(copy_gc_enabled);
-rw_attribute(idle_max_writeback_rate);
 rw_attribute(gc_after_writeback);
 rw_attribute(size);
 
@@ -158,7 +153,7 @@ static ssize_t bch_snprint_string_list(char *buf,
 	size_t i;
 
 	for (i = 0; list[i]; i++)
-		out += scnprintf(out, buf + size - out,
+		out += snprintf(out, buf + size - out,
 				i == selected ? "[%s] " : "%s ", list[i]);
 
 	out[-1] = '\n';
@@ -404,7 +399,7 @@ STORE(__cached_dev)
 		if (!env)
 			return -ENOMEM;
 		add_uevent_var(env, "DRIVER=bcache");
-		add_uevent_var(env, "CACHED_UUID=%pU", dc->sb.uuid);
+		add_uevent_var(env, "CACHED_UUID=%pU", dc->sb.uuid),
 		add_uevent_var(env, "CACHED_LABEL=%s", buf);
 		kobject_uevent_env(&disk_to_dev(dc->disk.disk)->kobj,
 				   KOBJ_CHANGE,
@@ -425,7 +420,7 @@ STORE(__cached_dev)
 				return size;
 		}
 		if (v == -ENOENT)
-			pr_err("Can't attach %s: cache set not found\n", buf);
+			pr_err("Can't attach %s: cache set not found", buf);
 		return v;
 	}
 
@@ -459,7 +454,7 @@ STORE(bch_cached_dev)
 			 */
 			if (dc->writeback_running) {
 				dc->writeback_running = false;
-				pr_err("%s: failed to run non-existent writeback thread\n",
+				pr_err("%s: failed to run non-existent writeback thread",
 						dc->disk.disk->disk_name);
 			}
 		} else
@@ -711,10 +706,10 @@ SHOW(__bch_cache_set)
 {
 	struct cache_set *c = container_of(kobj, struct cache_set, kobj);
 
-	sysfs_print(synchronous,		CACHE_SYNC(&c->cache->sb));
+	sysfs_print(synchronous,		CACHE_SYNC(&c->sb));
 	sysfs_print(journal_delay_ms,		c->journal_delay_ms);
-	sysfs_hprint(bucket_size,		bucket_bytes(c->cache));
-	sysfs_hprint(block_size,		block_bytes(c->cache));
+	sysfs_hprint(bucket_size,		bucket_bytes(c));
+	sysfs_hprint(block_size,		block_bytes(c));
 	sysfs_print(tree_depth,			c->root->level);
 	sysfs_print(root_usage_percent,		bch_root_usage(c));
 
@@ -774,21 +769,12 @@ SHOW(__bch_cache_set)
 	sysfs_printf(gc_always_rewrite,		"%i", c->gc_always_rewrite);
 	sysfs_printf(btree_shrinker_disabled,	"%i", c->shrinker_disabled);
 	sysfs_printf(copy_gc_enabled,		"%i", c->copy_gc_enabled);
-	sysfs_printf(idle_max_writeback_rate,	"%i",
-		     c->idle_max_writeback_rate_enabled);
 	sysfs_printf(gc_after_writeback,	"%i", c->gc_after_writeback);
 	sysfs_printf(io_disable,		"%i",
 		     test_bit(CACHE_SET_IO_DISABLE, &c->flags));
 
 	if (attr == &sysfs_bset_tree_stats)
 		return bch_bset_print_stats(c, buf);
-
-	if (attr == &sysfs_feature_compat)
-		return bch_print_cache_set_feature_compat(c, buf, PAGE_SIZE);
-	if (attr == &sysfs_feature_ro_compat)
-		return bch_print_cache_set_feature_ro_compat(c, buf, PAGE_SIZE);
-	if (attr == &sysfs_feature_incompat)
-		return bch_print_cache_set_feature_incompat(c, buf, PAGE_SIZE);
 
 	return 0;
 }
@@ -812,8 +798,8 @@ STORE(__bch_cache_set)
 	if (attr == &sysfs_synchronous) {
 		bool sync = strtoul_or_return(buf);
 
-		if (sync != CACHE_SYNC(&c->cache->sb)) {
-			SET_CACHE_SYNC(&c->cache->sb, sync);
+		if (sync != CACHE_SYNC(&c->sb)) {
+			SET_CACHE_SYNC(&c->sb, sync);
 			bcache_write_super(c);
 		}
 	}
@@ -883,11 +869,11 @@ STORE(__bch_cache_set)
 		if (v) {
 			if (test_and_set_bit(CACHE_SET_IO_DISABLE,
 					     &c->flags))
-				pr_warn("CACHE_SET_IO_DISABLE already set\n");
+				pr_warn("CACHE_SET_IO_DISABLE already set");
 		} else {
 			if (!test_and_clear_bit(CACHE_SET_IO_DISABLE,
 						&c->flags))
-				pr_warn("CACHE_SET_IO_DISABLE already cleared\n");
+				pr_warn("CACHE_SET_IO_DISABLE already cleared");
 		}
 	}
 
@@ -900,9 +886,6 @@ STORE(__bch_cache_set)
 	sysfs_strtoul_bool(gc_always_rewrite,	c->gc_always_rewrite);
 	sysfs_strtoul_bool(btree_shrinker_disabled, c->shrinker_disabled);
 	sysfs_strtoul_bool(copy_gc_enabled,	c->copy_gc_enabled);
-	sysfs_strtoul_bool(idle_max_writeback_rate,
-			   c->idle_max_writeback_rate_enabled);
-
 	/*
 	 * write gc_after_writeback here may overwrite an already set
 	 * BCH_DO_AUTO_GC, it doesn't matter because this flag will be
@@ -993,14 +976,10 @@ static struct attribute *bch_cache_set_internal_files[] = {
 	&sysfs_gc_always_rewrite,
 	&sysfs_btree_shrinker_disabled,
 	&sysfs_copy_gc_enabled,
-	&sysfs_idle_max_writeback_rate,
 	&sysfs_gc_after_writeback,
 	&sysfs_io_disable,
 	&sysfs_cutoff_writeback,
 	&sysfs_cutoff_writeback_sync,
-	&sysfs_feature_compat,
-	&sysfs_feature_ro_compat,
-	&sysfs_feature_incompat,
 	NULL
 };
 KTYPE(bch_cache_set_internal);

@@ -32,7 +32,7 @@ struct o2net_msg
 	__be32 status;
 	__be32 key;
 	__be32 msg_num;
-	__u8  buf[];
+	__u8  buf[0];
 };
 
 typedef int (o2net_msg_handler_func)(struct o2net_msg *msg, u32 len, void *data,

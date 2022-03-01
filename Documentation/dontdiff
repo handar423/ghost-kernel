@@ -55,7 +55,6 @@
 *.ver
 *.xml
 *.xz
-*.zst
 *_MODULES
 *_vga16.c
 *~
@@ -180,7 +179,6 @@ mkutf8data
 modpost
 modules.builtin
 modules.builtin.modinfo
-modules.nsdeps
 modules.order
 modversions.h*
 nconf
@@ -252,7 +250,6 @@ vmlinux-*
 vmlinux.aout
 vmlinux.bin.all
 vmlinux.lds
-vmlinux.symvers
 vmlinuz
 voffset.h
 vsyscall.lds

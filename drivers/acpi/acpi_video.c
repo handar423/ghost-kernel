@@ -543,6 +543,15 @@ static const struct dmi_system_id video_dmi_table[] = {
 		DMI_MATCH(DMI_PRODUCT_NAME, "Vostro V131"),
 		},
 	},
+	{
+	 .callback = video_set_report_key_events,
+	 .driver_data = (void *)((uintptr_t)REPORT_BRIGHTNESS_KEY_EVENTS),
+	 .ident = "Dell Vostro 3350",
+	 .matches = {
+		DMI_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
+		DMI_MATCH(DMI_PRODUCT_NAME, "Vostro 3350"),
+		},
+	},
 	/*
 	 * Some machines change the brightness themselves when a brightness
 	 * hotkey gets pressed, despite us telling them not to. In this case
@@ -578,7 +587,7 @@ acpi_video_bqc_value_to_level(struct acpi_video_device *device,
 				ACPI_VIDEO_FIRST_LEVEL - 1 - bqc_value;
 
 		level = device->brightness->levels[bqc_value +
-						   ACPI_VIDEO_FIRST_LEVEL];
+		                                   ACPI_VIDEO_FIRST_LEVEL];
 	} else {
 		level = bqc_value;
 	}
@@ -699,13 +708,9 @@ acpi_video_device_EDID(struct acpi_video_device *device,
  *			event notify code.
  *	lcd_flag	:
  *		0.	The system BIOS should automatically control the brightness level
- *			of the LCD when:
- *			- the power changes from AC to DC (ACPI appendix B)
- *			- a brightness hotkey gets pressed (implied by Win7/8 backlight docs)
+ *			of the LCD when the power changes from AC to DC
  *		1.	The system BIOS should NOT automatically control the brightness
- *			level of the LCD when:
- *			- the power changes from AC to DC (ACPI appendix B)
- *			- a brightness hotkey gets pressed (implied by Win7/8 backlight docs)
+ *			level of the LCD when the power changes from AC to DC.
  *  Return Value:
  *		-EINVAL	wrong arg.
  */
@@ -943,7 +948,7 @@ acpi_video_init_brightness(struct acpi_video_device *device)
 	int i, max_level = 0;
 	unsigned long long level, level_old;
 	struct acpi_video_device_brightness *br = NULL;
-	int result;
+	int result = -EINVAL;
 
 	result = acpi_video_get_levels(device->dev, &br, &max_level);
 	if (result)
@@ -990,8 +995,8 @@ set_level:
 		goto out_free_levels;
 
 	ACPI_DEBUG_PRINT((ACPI_DB_INFO,
-			  "found %d brightness levels\n",
-			  br->count - ACPI_VIDEO_FIRST_LEVEL));
+	                  "found %d brightness levels\n",
+	                  br->count - ACPI_VIDEO_FIRST_LEVEL));
 	return 0;
 
 out_free_levels:
@@ -2187,7 +2192,7 @@ int acpi_video_register(void)
 	if (register_count) {
 		/*
 		 * if the function of acpi_video_register is already called,
-		 * don't register the acpi_video_bus again and return no error.
+		 * don't register the acpi_vide_bus again and return no error.
 		 */
 		goto leave;
 	}

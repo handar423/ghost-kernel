@@ -40,7 +40,7 @@ struct sender_context {
 	unsigned int num_fds;
 	int ready_out;
 	int wakefd;
-	int out_fds[];
+	int out_fds[0];
 };
 
 struct receiver_context {

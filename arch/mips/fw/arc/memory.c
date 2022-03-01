@@ -22,6 +22,7 @@
 
 #include <asm/sgialib.h>
 #include <asm/page.h>
+#include <asm/pgtable.h>
 #include <asm/bootinfo.h>
 
 #undef DEBUG
@@ -68,24 +69,20 @@ static char *arc_mtypes[8] = {
 						: arc_mtypes[a.arc]
 #endif
 
-enum {
-	mem_free, mem_prom_used, mem_reserved
-};
-
 static inline int memtype_classify_arcs(union linux_memtypes type)
 {
 	switch (type.arcs) {
 	case arcs_fcontig:
 	case arcs_free:
-		return mem_free;
+		return BOOT_MEM_RAM;
 	case arcs_atmp:
-		return mem_prom_used;
+		return BOOT_MEM_ROM_DATA;
 	case arcs_eblock:
 	case arcs_rvpage:
 	case arcs_bmem:
 	case arcs_prog:
 	case arcs_aperm:
-		return mem_reserved;
+		return BOOT_MEM_RESERVED;
 	default:
 		BUG();
 	}
@@ -97,15 +94,15 @@ static inline int memtype_classify_arc(union linux_memtypes type)
 	switch (type.arc) {
 	case arc_free:
 	case arc_fcontig:
-		return mem_free;
+		return BOOT_MEM_RAM;
 	case arc_atmp:
-		return mem_prom_used;
+		return BOOT_MEM_ROM_DATA;
 	case arc_eblock:
 	case arc_rvpage:
 	case arc_bmem:
 	case arc_prog:
 	case arc_aperm:
-		return mem_reserved;
+		return BOOT_MEM_RESERVED;
 	default:
 		BUG();
 	}
@@ -120,7 +117,7 @@ static int __init prom_memtype_classify(union linux_memtypes type)
 	return memtype_classify_arc(type);
 }
 
-void __weak __init prom_meminit(void)
+void __init prom_meminit(void)
 {
 	struct linux_mdesc *p;
 
@@ -147,17 +144,9 @@ void __weak __init prom_meminit(void)
 		size = p->pages << ARC_PAGE_SHIFT;
 		type = prom_memtype_classify(p->type);
 
-		/* ignore mirrored RAM on IP28/IP30 */
-		if (base < PHYS_OFFSET)
-			continue;
+		add_memory_region(base, size, type);
 
-		memblock_add(base, size);
-
-		if (type == mem_reserved)
-			memblock_reserve(base, size);
-
-		if (type == mem_prom_used) {
-			memblock_reserve(base, size);
+		if (type == BOOT_MEM_ROM_DATA) {
 			if (nr_prom_mem >= 5) {
 				pr_err("Too many ROM DATA regions");
 				continue;
@@ -169,11 +158,7 @@ void __weak __init prom_meminit(void)
 	}
 }
 
-void __weak __init prom_cleanup(void)
-{
-}
-
-void __weak __init prom_free_prom_memory(void)
+void __init prom_free_prom_memory(void)
 {
 	int i;
 
@@ -184,9 +169,4 @@ void __weak __init prom_free_prom_memory(void)
 		free_init_pages("prom memory",
 			prom_mem_base[i], prom_mem_base[i] + prom_mem_size[i]);
 	}
-	/*
-	 * at this point it isn't safe to call PROM functions
-	 * give platforms a way to do PROM cleanups
-	 */
-	prom_cleanup();
 }

@@ -125,8 +125,7 @@ static inline void zl6100_wait(const struct zl6100_data *data)
 	}
 }
 
-static int zl6100_read_word_data(struct i2c_client *client, int page,
-				 int phase, int reg)
+static int zl6100_read_word_data(struct i2c_client *client, int page, int reg)
 {
 	const struct pmbus_driver_info *info = pmbus_get_driver_info(client);
 	struct zl6100_data *data = to_zl6100_data(info);
@@ -168,7 +167,7 @@ static int zl6100_read_word_data(struct i2c_client *client, int page,
 	}
 
 	zl6100_wait(data);
-	ret = pmbus_read_word_data(client, page, phase, vreg);
+	ret = pmbus_read_word_data(client, page, vreg);
 	data->access = ktime_get();
 	if (ret < 0)
 		return ret;
@@ -301,7 +300,8 @@ static const struct i2c_device_id zl6100_id[] = {
 };
 MODULE_DEVICE_TABLE(i2c, zl6100_id);
 
-static int zl6100_probe(struct i2c_client *client)
+static int zl6100_probe(struct i2c_client *client,
+			const struct i2c_device_id *id)
 {
 	int ret;
 	struct zl6100_data *data;
@@ -332,10 +332,10 @@ static int zl6100_probe(struct i2c_client *client)
 		dev_err(&client->dev, "Unsupported device\n");
 		return -ENODEV;
 	}
-	if (strcmp(client->name, mid->name) != 0)
+	if (id->driver_data != mid->driver_data)
 		dev_notice(&client->dev,
 			   "Device mismatch: Configured %s, detected %s\n",
-			   client->name, mid->name);
+			   id->name, mid->name);
 
 	data = devm_kzalloc(&client->dev, sizeof(struct zl6100_data),
 			    GFP_KERNEL);
@@ -388,14 +388,15 @@ static int zl6100_probe(struct i2c_client *client)
 	info->write_word_data = zl6100_write_word_data;
 	info->write_byte = zl6100_write_byte;
 
-	return pmbus_do_probe(client, info);
+	return pmbus_do_probe(client, mid, info);
 }
 
 static struct i2c_driver zl6100_driver = {
 	.driver = {
 		   .name = "zl6100",
 		   },
-	.probe_new = zl6100_probe,
+	.probe = zl6100_probe,
+	.remove = pmbus_do_remove,
 	.id_table = zl6100_id,
 };
 

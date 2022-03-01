@@ -73,8 +73,7 @@ void mt76_set_irq_mask(struct mt76_dev *dev, u32 addr,
 	spin_lock_irqsave(&dev->mmio.irq_lock, flags);
 	dev->mmio.irqmask &= ~clear;
 	dev->mmio.irqmask |= set;
-	if (addr)
-		mt76_mmio_wr(dev, addr, dev->mmio.irqmask);
+	mt76_mmio_wr(dev, addr, dev->mmio.irqmask);
 	spin_unlock_irqrestore(&dev->mmio.irq_lock, flags);
 }
 EXPORT_SYMBOL_GPL(mt76_set_irq_mask);
@@ -95,6 +94,9 @@ void mt76_mmio_init(struct mt76_dev *dev, void __iomem *regs)
 	dev->bus = &mt76_mmio_ops;
 	dev->mmio.regs = regs;
 
+	skb_queue_head_init(&dev->mmio.mcu.res_q);
+	init_waitqueue_head(&dev->mmio.mcu.wait);
 	spin_lock_init(&dev->mmio.irq_lock);
+	mutex_init(&dev->mmio.mcu.mutex);
 }
 EXPORT_SYMBOL_GPL(mt76_mmio_init);

@@ -15,7 +15,6 @@
 
 #include <linux/clk.h>
 #include <linux/device.h>
-#include <linux/dma-mapping.h>
 #include <linux/err.h>
 #include <linux/init.h>
 #include <linux/io.h>
@@ -31,8 +30,7 @@
 #include <linux/bitops.h>
 
 #include <crypto/internal/hash.h>
-#include <crypto/sha1.h>
-#include <crypto/sha2.h>
+#include <crypto/sha.h>
 #include <crypto/scatterwalk.h>
 #include <crypto/algapi.h>
 
@@ -142,6 +140,7 @@ static int hash_set_dma_transfer(struct hash_ctx *ctx, struct scatterlist *sg,
 {
 	struct dma_async_tx_descriptor *desc = NULL;
 	struct dma_chan *channel = NULL;
+	dma_cookie_t cookie;
 
 	if (direction != DMA_TO_DEVICE) {
 		dev_err(ctx->device->dev, "%s: Invalid DMA direction\n",
@@ -177,7 +176,7 @@ static int hash_set_dma_transfer(struct hash_ctx *ctx, struct scatterlist *sg,
 	desc->callback = hash_dma_callback;
 	desc->callback_param = ctx;
 
-	dmaengine_submit(desc);
+	cookie = dmaengine_submit(desc);
 	dma_async_issue_pending(channel);
 
 	return 0;
@@ -547,7 +546,7 @@ static bool hash_dma_valid_data(struct scatterlist *sg, int datasize)
  *
  * Initialize structures.
  */
-static int ux500_hash_init(struct ahash_request *req)
+static int hash_init(struct ahash_request *req)
 {
 	struct crypto_ahash *tfm = crypto_ahash_reqtfm(req);
 	struct hash_ctx *ctx = crypto_ahash_ctx(tfm);
@@ -1010,6 +1009,7 @@ static int hash_hw_final(struct ahash_request *req)
 			goto out;
 		}
 	} else if (req->nbytes == 0 && ctx->keylen > 0) {
+		ret = -EPERM;
 		dev_err(device_data->dev, "%s: Empty message with keylength > 0, NOT supported\n",
 			__func__);
 		goto out;
@@ -1073,31 +1073,26 @@ int hash_hw_update(struct ahash_request *req)
 	struct hash_ctx *ctx = crypto_ahash_ctx(tfm);
 	struct hash_req_ctx *req_ctx = ahash_request_ctx(req);
 	struct crypto_hash_walk walk;
-	int msg_length;
+	int msg_length = crypto_hash_walk_first(req, &walk);
+
+	/* Empty message ("") is correct indata */
+	if (msg_length == 0)
+		return ret;
 
 	index = req_ctx->state.index;
 	buffer = (u8 *)req_ctx->state.buffer;
-
-	ret = hash_get_device_data(ctx, &device_data);
-	if (ret)
-		return ret;
-
-	msg_length = crypto_hash_walk_first(req, &walk);
-
-	/* Empty message ("") is correct indata */
-	if (msg_length == 0) {
-		ret = 0;
-		goto release_dev;
-	}
 
 	/* Check if ctx->state.length + msg_length
 	   overflows */
 	if (msg_length > (req_ctx->state.length.low_word + msg_length) &&
 	    HASH_HIGH_WORD_MAX_VAL == req_ctx->state.length.high_word) {
 		pr_err("%s: HASH_MSG_LENGTH_OVERFLOW!\n", __func__);
-		ret = crypto_hash_walk_done(&walk, -EPERM);
-		goto release_dev;
+		return -EPERM;
 	}
+
+	ret = hash_get_device_data(ctx, &device_data);
+	if (ret)
+		return ret;
 
 	/* Main loop */
 	while (0 != msg_length) {
@@ -1108,8 +1103,7 @@ int hash_hw_update(struct ahash_request *req)
 		if (ret) {
 			dev_err(device_data->dev, "%s: hash_internal_hw_update() failed!\n",
 				__func__);
-			crypto_hash_walk_done(&walk, ret);
-			goto release_dev;
+			goto out;
 		}
 
 		msg_length = crypto_hash_walk_done(&walk, 0);
@@ -1119,7 +1113,7 @@ int hash_hw_update(struct ahash_request *req)
 	dev_dbg(device_data->dev, "%s: indata length=%d, bin=%d\n",
 		__func__, req_ctx->state.index, req_ctx->state.bit_index);
 
-release_dev:
+out:
 	release_hash_device(device_data);
 
 	return ret;
@@ -1367,7 +1361,7 @@ static int ahash_sha1_init(struct ahash_request *req)
 	ctx->config.oper_mode = HASH_OPER_MODE_HASH;
 	ctx->digestsize = SHA1_DIGEST_SIZE;
 
-	return ux500_hash_init(req);
+	return hash_init(req);
 }
 
 static int ahash_sha256_init(struct ahash_request *req)
@@ -1380,7 +1374,7 @@ static int ahash_sha256_init(struct ahash_request *req)
 	ctx->config.oper_mode = HASH_OPER_MODE_HASH;
 	ctx->digestsize = SHA256_DIGEST_SIZE;
 
-	return ux500_hash_init(req);
+	return hash_init(req);
 }
 
 static int ahash_sha1_digest(struct ahash_request *req)
@@ -1433,7 +1427,7 @@ static int hmac_sha1_init(struct ahash_request *req)
 	ctx->config.oper_mode	= HASH_OPER_MODE_HMAC;
 	ctx->digestsize		= SHA1_DIGEST_SIZE;
 
-	return ux500_hash_init(req);
+	return hash_init(req);
 }
 
 static int hmac_sha256_init(struct ahash_request *req)
@@ -1446,7 +1440,7 @@ static int hmac_sha256_init(struct ahash_request *req)
 	ctx->config.oper_mode	= HASH_OPER_MODE_HMAC;
 	ctx->digestsize		= SHA256_DIGEST_SIZE;
 
-	return ux500_hash_init(req);
+	return hash_init(req);
 }
 
 static int hmac_sha1_digest(struct ahash_request *req)
@@ -1523,7 +1517,7 @@ static struct hash_algo_template hash_algs[] = {
 		.conf.algorithm = HASH_ALGO_SHA1,
 		.conf.oper_mode = HASH_OPER_MODE_HASH,
 		.hash = {
-			.init = ux500_hash_init,
+			.init = hash_init,
 			.update = ahash_update,
 			.final = ahash_final,
 			.digest = ahash_sha1_digest,
@@ -1546,7 +1540,7 @@ static struct hash_algo_template hash_algs[] = {
 		.conf.algorithm	= HASH_ALGO_SHA256,
 		.conf.oper_mode	= HASH_OPER_MODE_HASH,
 		.hash = {
-			.init = ux500_hash_init,
+			.init = hash_init,
 			.update	= ahash_update,
 			.final = ahash_final,
 			.digest = ahash_sha256_digest,
@@ -1569,7 +1563,7 @@ static struct hash_algo_template hash_algs[] = {
 		.conf.algorithm = HASH_ALGO_SHA1,
 		.conf.oper_mode = HASH_OPER_MODE_HMAC,
 			.hash = {
-			.init = ux500_hash_init,
+			.init = hash_init,
 			.update = ahash_update,
 			.final = ahash_final,
 			.digest = hmac_sha1_digest,
@@ -1593,7 +1587,7 @@ static struct hash_algo_template hash_algs[] = {
 		.conf.algorithm = HASH_ALGO_SHA256,
 		.conf.oper_mode = HASH_OPER_MODE_HMAC,
 		.hash = {
-			.init = ux500_hash_init,
+			.init = hash_init,
 			.update = ahash_update,
 			.final = ahash_final,
 			.digest = hmac_sha256_digest,

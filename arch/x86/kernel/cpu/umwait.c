@@ -4,7 +4,6 @@
 #include <linux/cpu.h>
 
 #include <asm/msr.h>
-#include <asm/mwait.h>
 
 #define UMWAIT_C02_ENABLE	0
 

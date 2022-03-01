@@ -90,6 +90,8 @@ struct tegra_dc {
 	struct drm_info_list *debugfs_files;
 
 	const struct tegra_dc_soc_info *soc;
+
+	struct iommu_group *group;
 };
 
 static inline struct tegra_dc *
@@ -136,8 +138,7 @@ struct tegra_dc_window {
 	unsigned int stride[2];
 	unsigned long base[3];
 	unsigned int zpos;
-	bool reflect_x;
-	bool reflect_y;
+	bool bottom_up;
 
 	struct tegra_bo_tiling tiling;
 	u32 format;

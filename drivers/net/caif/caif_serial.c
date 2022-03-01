@@ -102,8 +102,8 @@ static inline void debugfs_init(struct ser_device *ser, struct tty_struct *tty)
 	debugfs_create_blob("last_rx_msg", 0400, ser->debugfs_tty_dir,
 			    &ser->rx_blob);
 
-	debugfs_create_xul("ser_state", 0400, ser->debugfs_tty_dir,
-			   &ser->state);
+	debugfs_create_x32("ser_state", 0400, ser->debugfs_tty_dir,
+			   (u32 *)&ser->state);
 
 	debugfs_create_x8("tty_status", 0400, ser->debugfs_tty_dir,
 			  &ser->tty_status);
@@ -266,12 +266,9 @@ error:
 	return tty_wr;
 }
 
-static netdev_tx_t caif_xmit(struct sk_buff *skb, struct net_device *dev)
+static int caif_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct ser_device *ser;
-
-	if (WARN_ON(!dev))
-		return -EINVAL;
 
 	ser = netdev_priv(dev);
 
@@ -354,6 +351,7 @@ static int ldisc_open(struct tty_struct *tty)
 	rtnl_lock();
 	result = register_netdevice(dev);
 	if (result) {
+		tty_kref_put(tty);
 		rtnl_unlock();
 		free_netdev(dev);
 		return -ENODEV;

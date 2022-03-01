@@ -19,7 +19,7 @@
 #include <linux/spinlock.h>
 #include <linux/wait.h>
 
-#define MAX_MSG_LEN		240
+#define MAX_MSG_LEN		128
 #define IPMB_REQUEST_LEN_MIN	7
 #define NETFN_RSP_BIT_MASK	0x4
 #define REQUEST_QUEUE_MAX_LEN	256
@@ -63,7 +63,6 @@ struct ipmb_dev {
 	spinlock_t lock;
 	wait_queue_head_t wait_queue;
 	struct mutex file_mutex;
-	bool is_i2c_protocol;
 };
 
 static inline struct ipmb_dev *to_ipmb_dev(struct file *file)
@@ -113,25 +112,6 @@ static ssize_t ipmb_read(struct file *file, char __user *buf, size_t count,
 	return ret < 0 ? ret : count;
 }
 
-static int ipmb_i2c_write(struct i2c_client *client, u8 *msg, u8 addr)
-{
-	struct i2c_msg i2c_msg;
-
-	/*
-	 * subtract 1 byte (rq_sa) from the length of the msg passed to
-	 * raw i2c_transfer
-	 */
-	i2c_msg.len = msg[IPMB_MSG_LEN_IDX] - 1;
-
-	/* Assign message to buffer except first 2 bytes (length and address) */
-	i2c_msg.buf = msg + 2;
-
-	i2c_msg.addr = addr;
-	i2c_msg.flags = client->flags & I2C_CLIENT_PEC;
-
-	return i2c_transfer(client->adapter, &i2c_msg, 1);
-}
-
 static ssize_t ipmb_write(struct file *file, const char __user *buf,
 			size_t count, loff_t *ppos)
 {
@@ -153,11 +133,8 @@ static ssize_t ipmb_write(struct file *file, const char __user *buf,
 	rq_sa = GET_7BIT_ADDR(msg[RQ_SA_8BIT_IDX]);
 	netf_rq_lun = msg[NETFN_LUN_IDX];
 
-	/* Check i2c block transfer vs smbus */
-	if (ipmb_dev->is_i2c_protocol) {
-		ret = ipmb_i2c_write(ipmb_dev->client, msg, rq_sa);
-		return (ret == 1) ? count : ret;
-	}
+	if (!(netf_rq_lun & NETFN_RSP_BIT_MASK))
+		return -EINVAL;
 
 	/*
 	 * subtract rq_sa and netf_rq_lun from the length of the msg passed to
@@ -177,16 +154,16 @@ static ssize_t ipmb_write(struct file *file, const char __user *buf,
 	return ret ? : count;
 }
 
-static __poll_t ipmb_poll(struct file *file, poll_table *wait)
+static unsigned int ipmb_poll(struct file *file, poll_table *wait)
 {
 	struct ipmb_dev *ipmb_dev = to_ipmb_dev(file);
-	__poll_t mask = EPOLLOUT;
+	unsigned int mask = POLLOUT;
 
 	mutex_lock(&ipmb_dev->file_mutex);
 	poll_wait(file, &ipmb_dev->wait_queue, wait);
 
 	if (atomic_read(&ipmb_dev->request_queue_len))
-		mask |= EPOLLIN;
+		mask |= POLLIN;
 	mutex_unlock(&ipmb_dev->file_mutex);
 
 	return mask;
@@ -226,16 +203,25 @@ static u8 ipmb_verify_checksum1(struct ipmb_dev *ipmb_dev, u8 rs_sa)
 		ipmb_dev->request.checksum1);
 }
 
-/*
- * Verify if message has proper ipmb header with minimum length
- * and correct checksum byte.
- */
-static bool is_ipmb_msg(struct ipmb_dev *ipmb_dev, u8 rs_sa)
+static bool is_ipmb_request(struct ipmb_dev *ipmb_dev, u8 rs_sa)
 {
-	if ((ipmb_dev->msg_idx >= IPMB_REQUEST_LEN_MIN) &&
-	   (!ipmb_verify_checksum1(ipmb_dev, rs_sa)))
-		return true;
+	if (ipmb_dev->msg_idx >= IPMB_REQUEST_LEN_MIN) {
+		if (ipmb_verify_checksum1(ipmb_dev, rs_sa))
+			return false;
 
+		/*
+		 * Check whether this is an IPMB request or
+		 * response.
+		 * The 6 MSB of netfn_rs_lun are dedicated to the netfn
+		 * while the remaining bits are dedicated to the lun.
+		 * If the LSB of the netfn is cleared, it is associated
+		 * with an IPMB request.
+		 * If the LSB of the netfn is set, it is associated with
+		 * an IPMB response.
+		 */
+		if (!(ipmb_dev->request.netfn_rs_lun & NETFN_RSP_BIT_MASK))
+			return true;
+	}
 	return false;
 }
 
@@ -287,7 +273,8 @@ static int ipmb_slave_cb(struct i2c_client *client,
 
 	case I2C_SLAVE_STOP:
 		ipmb_dev->request.len = ipmb_dev->msg_idx;
-		if (is_ipmb_msg(ipmb_dev, GET_8BIT_ADDR(client->addr)))
+
+		if (is_ipmb_request(ipmb_dev, GET_8BIT_ADDR(client->addr)))
 			ipmb_handle_request(ipmb_dev);
 		break;
 
@@ -327,9 +314,6 @@ static int ipmb_probe(struct i2c_client *client,
 	ret = misc_register(&ipmb_dev->miscdev);
 	if (ret)
 		return ret;
-
-	ipmb_dev->is_i2c_protocol
-		= device_property_read_bool(&client->dev, "i2c-protocol");
 
 	ipmb_dev->client = client;
 	i2c_set_clientdata(client, ipmb_dev);

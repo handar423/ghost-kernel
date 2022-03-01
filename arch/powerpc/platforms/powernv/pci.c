@@ -38,7 +38,7 @@ static DEFINE_MUTEX(tunnel_mutex);
 
 int pnv_pci_get_slot_id(struct device_node *np, uint64_t *id)
 {
-	struct device_node *node = np;
+	struct device_node *parent = np;
 	u32 bdfn;
 	u64 phbid;
 	int ret;
@@ -48,29 +48,25 @@ int pnv_pci_get_slot_id(struct device_node *np, uint64_t *id)
 		return -ENXIO;
 
 	bdfn = ((bdfn & 0x00ffff00) >> 8);
-	for (node = np; node; node = of_get_parent(node)) {
-		if (!PCI_DN(node)) {
-			of_node_put(node);
+	while ((parent = of_get_parent(parent))) {
+		if (!PCI_DN(parent)) {
+			of_node_put(parent);
 			break;
 		}
 
-		if (!of_device_is_compatible(node, "ibm,ioda2-phb") &&
-		    !of_device_is_compatible(node, "ibm,ioda3-phb") &&
-		    !of_device_is_compatible(node, "ibm,ioda2-npu2-opencapi-phb")) {
-			of_node_put(node);
+		if (!of_device_is_compatible(parent, "ibm,ioda2-phb") &&
+		    !of_device_is_compatible(parent, "ibm,ioda3-phb")) {
+			of_node_put(parent);
 			continue;
 		}
 
-		ret = of_property_read_u64(node, "ibm,opal-phbid", &phbid);
+		ret = of_property_read_u64(parent, "ibm,opal-phbid", &phbid);
 		if (ret) {
-			of_node_put(node);
+			of_node_put(parent);
 			return -ENXIO;
 		}
 
-		if (of_device_is_compatible(node, "ibm,ioda2-npu2-opencapi-phb"))
-			*id = PCI_PHB_SLOT_ID(phbid);
-		else
-			*id = PCI_SLOT_ID(phbid, bdfn);
+		*id = PCI_SLOT_ID(phbid, bdfn);
 		return 0;
 	}
 
@@ -162,7 +158,8 @@ EXPORT_SYMBOL_GPL(pnv_pci_set_power_state);
 
 int pnv_setup_msi_irqs(struct pci_dev *pdev, int nvec, int type)
 {
-	struct pnv_phb *phb = pci_bus_to_pnvhb(pdev->bus);
+	struct pci_controller *hose = pci_bus_to_host(pdev->bus);
+	struct pnv_phb *phb = hose->private_data;
 	struct msi_desc *entry;
 	struct msi_msg msg;
 	int hwirq;
@@ -210,7 +207,8 @@ int pnv_setup_msi_irqs(struct pci_dev *pdev, int nvec, int type)
 
 void pnv_teardown_msi_irqs(struct pci_dev *pdev)
 {
-	struct pnv_phb *phb = pci_bus_to_pnvhb(pdev->bus);
+	struct pci_controller *hose = pci_bus_to_host(pdev->bus);
+	struct pnv_phb *phb = hose->private_data;
 	struct msi_desc *entry;
 	irq_hw_number_t hwirq;
 
@@ -812,6 +810,35 @@ struct iommu_table *pnv_pci_table_alloc(int nid)
 	return tbl;
 }
 
+void pnv_pci_dma_dev_setup(struct pci_dev *pdev)
+{
+	struct pci_controller *hose = pci_bus_to_host(pdev->bus);
+	struct pnv_phb *phb = hose->private_data;
+
+	if (phb && phb->dma_dev_setup)
+		phb->dma_dev_setup(phb, pdev);
+}
+
+void pnv_pci_dma_bus_setup(struct pci_bus *bus)
+{
+	struct pci_controller *hose = bus->sysdata;
+	struct pnv_phb *phb = hose->private_data;
+	struct pnv_ioda_pe *pe;
+
+	list_for_each_entry(pe, &phb->ioda.pe_list, list) {
+		if (!(pe->flags & (PNV_IODA_PE_BUS | PNV_IODA_PE_BUS_ALL)))
+			continue;
+
+		if (!pe->pbus)
+			continue;
+
+		if (bus->number == ((pe->rid >> 8) & 0xFF)) {
+			pe->pbus = bus;
+			break;
+		}
+	}
+}
+
 struct device_node *pnv_pci_get_phb_node(struct pci_dev *dev)
 {
 	struct pci_controller *hose = pci_bus_to_host(dev->bus);
@@ -822,15 +849,19 @@ EXPORT_SYMBOL(pnv_pci_get_phb_node);
 
 int pnv_pci_set_tunnel_bar(struct pci_dev *dev, u64 addr, int enable)
 {
-	struct pnv_phb *phb = pci_bus_to_pnvhb(dev->bus);
-	u64 tunnel_bar;
 	__be64 val;
+	struct pci_controller *hose;
+	struct pnv_phb *phb;
+	u64 tunnel_bar;
 	int rc;
 
 	if (!opal_check_token(OPAL_PCI_GET_PBCQ_TUNNEL_BAR))
 		return -ENXIO;
 	if (!opal_check_token(OPAL_PCI_SET_PBCQ_TUNNEL_BAR))
 		return -ENXIO;
+
+	hose = pci_bus_to_host(dev->bus);
+	phb = hose->private_data;
 
 	mutex_lock(&tunnel_mutex);
 	rc = opal_pci_get_pbcq_tunnel_bar(phb->opal_id, &val);
@@ -949,8 +980,28 @@ static int pnv_tce_iommu_bus_notifier(struct notifier_block *nb,
 		unsigned long action, void *data)
 {
 	struct device *dev = data;
+	struct pci_dev *pdev;
+	struct pci_dn *pdn;
+	struct pnv_ioda_pe *pe;
+	struct pci_controller *hose;
+	struct pnv_phb *phb;
 
 	switch (action) {
+	case BUS_NOTIFY_ADD_DEVICE:
+		pdev = to_pci_dev(dev);
+		pdn = pci_get_pdn(pdev);
+		hose = pci_bus_to_host(pdev->bus);
+		phb = hose->private_data;
+
+		WARN_ON_ONCE(!phb);
+		if (!pdn || pdn->pe_number == IODA_INVALID_PE || !phb)
+			return 0;
+
+		pe = &phb->ioda.pe_array[pdn->pe_number];
+		if (!pe->table_group.group)
+			return 0;
+		iommu_add_device(&pe->table_group, dev);
+		return 0;
 	case BUS_NOTIFY_DEL_DEVICE:
 		iommu_del_device(dev);
 		return 0;

@@ -8,8 +8,6 @@
 #ifndef __DPU_KMS_H__
 #define __DPU_KMS_H__
 
-#include <linux/interconnect.h>
-
 #include <drm/drm_drv.h>
 
 #include "msm_drv.h"
@@ -33,7 +31,7 @@
  */
 #define DPU_DEBUG(fmt, ...)                                                \
 	do {                                                               \
-		if (drm_debug_enabled(DRM_UT_KMS))                         \
+		if (unlikely(drm_debug & DRM_UT_KMS))                      \
 			DRM_DEBUG(fmt, ##__VA_ARGS__); \
 		else                                                       \
 			pr_debug(fmt, ##__VA_ARGS__);                      \
@@ -45,7 +43,7 @@
  */
 #define DPU_DEBUG_DRIVER(fmt, ...)                                         \
 	do {                                                               \
-		if (drm_debug_enabled(DRM_UT_DRIVER))                      \
+		if (unlikely(drm_debug & DRM_UT_DRIVER))                   \
 			DRM_ERROR(fmt, ##__VA_ARGS__); \
 		else                                                       \
 			pr_debug(fmt, ##__VA_ARGS__);                      \
@@ -102,6 +100,7 @@ struct dpu_kms {
 
 	/* io/register spaces: */
 	void __iomem *mmio, *vbif[VBIF_MAX], *reg_dma;
+	unsigned long mmio_len, vbif_len[VBIF_MAX], reg_dma_len;
 
 	struct regulator *vdd;
 	struct regulator *mmagic;
@@ -111,13 +110,6 @@ struct dpu_kms {
 	struct dpu_irq irq_obj;
 
 	struct dpu_core_perf perf;
-
-	/*
-	 * Global private object state, Do not access directly, use
-	 * dpu_kms_global_get_state()
-	 */
-	struct drm_modeset_lock global_state_lock;
-	struct drm_private_obj global_state;
 
 	struct dpu_rm rm;
 	bool rm_init;
@@ -129,9 +121,6 @@ struct dpu_kms {
 
 	struct platform_device *pdev;
 	bool rpm_enabled;
-
-	struct opp_table *opp_table;
-
 	struct dss_module_power mp;
 
 	/* reference count bandwidth requests, so we know when we can
@@ -141,8 +130,6 @@ struct dpu_kms {
 	 * when disabled.
 	 */
 	atomic_t bandwidth_ref;
-	struct icc_path *path[2];
-	u32 num_paths;
 };
 
 struct vsync_info {
@@ -152,32 +139,16 @@ struct vsync_info {
 
 #define to_dpu_kms(x) container_of(x, struct dpu_kms, base)
 
-#define to_dpu_global_state(x) container_of(x, struct dpu_global_state, base)
-
-/* Global private object state for tracking resources that are shared across
- * multiple kms objects (planes/crtcs/etc).
- */
-struct dpu_global_state {
-	struct drm_private_state base;
-
-	uint32_t pingpong_to_enc_id[PINGPONG_MAX - PINGPONG_0];
-	uint32_t mixer_to_enc_id[LM_MAX - LM_0];
-	uint32_t ctl_to_enc_id[CTL_MAX - CTL_0];
-	uint32_t intf_to_enc_id[INTF_MAX - INTF_0];
-	uint32_t dspp_to_enc_id[DSPP_MAX - DSPP_0];
-};
-
-struct dpu_global_state
-	*dpu_kms_get_existing_global_state(struct dpu_kms *dpu_kms);
-struct dpu_global_state
-	*__must_check dpu_kms_get_global_state(struct drm_atomic_state *s);
+/* get struct msm_kms * from drm_device * */
+#define ddev_to_msm_kms(D) ((D) && (D)->dev_private ? \
+		((struct msm_drm_private *)((D)->dev_private))->kms : NULL)
 
 /**
  * Debugfs functions - extra helper functions for debugfs support
  *
  * Main debugfs documentation is located at,
  *
- * Documentation/filesystems/debugfs.rst
+ * Documentation/filesystems/debugfs.txt
  *
  * @dpu_debugfs_setup_regset32: Initialize data for dpu_debugfs_create_regset32
  * @dpu_debugfs_create_regset32: Create 32-bit register dump file

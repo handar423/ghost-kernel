@@ -10,7 +10,6 @@
 #include <linux/backing-dev.h>
 #include <linux/uio.h>
 #include <linux/task_io_accounting_ops.h>
-#include "trace.h"
 
 #include "../internal.h"
 
@@ -60,7 +59,7 @@ int iomap_dio_iopoll(struct kiocb *kiocb, bool spin)
 EXPORT_SYMBOL_GPL(iomap_dio_iopoll);
 
 static void iomap_dio_submit_bio(struct iomap_dio *dio, struct iomap *iomap,
-		struct bio *bio, loff_t pos)
+		struct bio *bio)
 {
 	atomic_inc(&dio->ref);
 
@@ -68,15 +67,10 @@ static void iomap_dio_submit_bio(struct iomap_dio *dio, struct iomap *iomap,
 		bio_set_polled(bio, dio->iocb);
 
 	dio->submit.last_queue = bdev_get_queue(iomap->bdev);
-	if (dio->dops && dio->dops->submit_io)
-		dio->submit.cookie = dio->dops->submit_io(
-				file_inode(dio->iocb->ki_filp),
-				iomap, bio, pos);
-	else
-		dio->submit.cookie = submit_bio(bio);
+	dio->submit.cookie = submit_bio(bio);
 }
 
-ssize_t iomap_dio_complete(struct iomap_dio *dio)
+static ssize_t iomap_dio_complete(struct iomap_dio *dio)
 {
 	const struct iomap_dio_ops *dops = dio->dops;
 	struct kiocb *iocb = dio->iocb;
@@ -108,7 +102,7 @@ ssize_t iomap_dio_complete(struct iomap_dio *dio)
 	 * ->end_io() when necessary, otherwise a racing buffer read would cache
 	 * zeros from unwritten extents.
 	 */
-	if (!dio->error && dio->size &&
+	if (!dio->error &&
 	    (dio->flags & IOMAP_DIO_WRITE) && inode->i_mapping->nrpages) {
 		int err;
 		err = invalidate_inode_pages2_range(inode->i_mapping,
@@ -118,7 +112,6 @@ ssize_t iomap_dio_complete(struct iomap_dio *dio)
 			dio_warn_stale_pagecache(iocb->ki_filp);
 	}
 
-	inode_dio_end(file_inode(iocb->ki_filp));
 	/*
 	 * If this is a DSYNC write, make sure we push it to stable storage now
 	 * that we've written data.
@@ -126,11 +119,11 @@ ssize_t iomap_dio_complete(struct iomap_dio *dio)
 	if (ret > 0 && (dio->flags & IOMAP_DIO_NEED_SYNC))
 		ret = generic_write_sync(iocb, ret);
 
+	inode_dio_end(file_inode(iocb->ki_filp));
 	kfree(dio);
 
 	return ret;
 }
-EXPORT_SYMBOL_GPL(iomap_dio_complete);
 
 static void iomap_dio_complete_work(struct work_struct *work)
 {
@@ -198,7 +191,7 @@ iomap_dio_zero(struct iomap_dio *dio, struct iomap *iomap, loff_t pos,
 	get_page(page);
 	__bio_add_page(bio, page, len, 0);
 	bio_set_op_attrs(bio, REQ_OP_WRITE, flags);
-	iomap_dio_submit_bio(dio, iomap, bio, pos);
+	iomap_dio_submit_bio(dio, iomap, bio);
 }
 
 static loff_t
@@ -208,12 +201,12 @@ iomap_dio_bio_actor(struct inode *inode, loff_t pos, loff_t length,
 	unsigned int blkbits = blksize_bits(bdev_logical_block_size(iomap->bdev));
 	unsigned int fs_block_size = i_blocksize(inode), pad;
 	unsigned int align = iov_iter_alignment(dio->submit.iter);
+	struct iov_iter iter;
 	struct bio *bio;
 	bool need_zeroout = false;
 	bool use_fua = false;
 	int nr_pages, ret = 0;
 	size_t copied = 0;
-	size_t orig_count;
 
 	if ((pos | length | align) & ((1 << blkbits) - 1))
 		return -EINVAL;
@@ -243,18 +236,15 @@ iomap_dio_bio_actor(struct inode *inode, loff_t pos, loff_t length,
 	}
 
 	/*
-	 * Save the original count and trim the iter to just the extent we
-	 * are operating on right now.  The iter will be re-expanded once
-	 * we are done.
+	 * Operate on a partial iter trimmed to the extent we were called for.
+	 * We'll update the iter in the dio once we're done with this extent.
 	 */
-	orig_count = iov_iter_count(dio->submit.iter);
-	iov_iter_truncate(dio->submit.iter, length);
+	iter = *dio->submit.iter;
+	iov_iter_truncate(&iter, length);
 
-	nr_pages = iov_iter_npages(dio->submit.iter, BIO_MAX_PAGES);
-	if (nr_pages <= 0) {
-		ret = nr_pages;
-		goto out;
-	}
+	nr_pages = iov_iter_npages(&iter, BIO_MAX_PAGES);
+	if (nr_pages <= 0)
+		return nr_pages;
 
 	if (need_zeroout) {
 		/* zero out from the start of the block to the write offset */
@@ -267,8 +257,7 @@ iomap_dio_bio_actor(struct inode *inode, loff_t pos, loff_t length,
 		size_t n;
 		if (dio->error) {
 			iov_iter_revert(dio->submit.iter, copied);
-			copied = ret = 0;
-			goto out;
+			return 0;
 		}
 
 		bio = bio_alloc(GFP_KERNEL, nr_pages);
@@ -279,7 +268,7 @@ iomap_dio_bio_actor(struct inode *inode, loff_t pos, loff_t length,
 		bio->bi_private = dio;
 		bio->bi_end_io = iomap_dio_bio_end_io;
 
-		ret = bio_iov_iter_get_pages(bio, dio->submit.iter);
+		ret = bio_iov_iter_get_pages(bio, &iter);
 		if (unlikely(ret)) {
 			/*
 			 * We have to stop part way through an IO. We must fall
@@ -305,12 +294,14 @@ iomap_dio_bio_actor(struct inode *inode, loff_t pos, loff_t length,
 				bio_set_pages_dirty(bio);
 		}
 
+		iov_iter_advance(dio->submit.iter, n);
+
 		dio->size += n;
+		pos += n;
 		copied += n;
 
-		nr_pages = iov_iter_npages(dio->submit.iter, BIO_MAX_PAGES);
-		iomap_dio_submit_bio(dio, iomap, bio, pos);
-		pos += n;
+		nr_pages = iov_iter_npages(&iter, BIO_MAX_PAGES);
+		iomap_dio_submit_bio(dio, iomap, bio);
 	} while (nr_pages);
 
 	/*
@@ -327,9 +318,6 @@ zero_tail:
 		if (pad)
 			iomap_dio_zero(dio, iomap, pos, fs_block_size - pad);
 	}
-out:
-	/* Undo iter limitation to current extent */
-	iov_iter_reexpand(dio->submit.iter, orig_count - copied);
 	if (copied)
 		return copied;
 	return ret;
@@ -372,7 +360,7 @@ iomap_dio_inline_actor(struct inode *inode, loff_t pos, loff_t length,
 
 static loff_t
 iomap_dio_actor(struct inode *inode, loff_t pos, loff_t length,
-		void *data, struct iomap *iomap, struct iomap *srcmap)
+		void *data, struct iomap *iomap)
 {
 	struct iomap_dio *dio = data;
 
@@ -413,33 +401,29 @@ iomap_dio_actor(struct inode *inode, loff_t pos, loff_t length,
  * can be mapped into multiple disjoint IOs and only a subset of the IOs issued
  * may be pure data writes. In that case, we still need to do a full data sync
  * completion.
- *
- * Returns -ENOTBLK In case of a page invalidation invalidation failure for
- * writes.  The callers needs to fall back to buffered I/O in this case.
  */
-struct iomap_dio *
-__iomap_dio_rw(struct kiocb *iocb, struct iov_iter *iter,
-		const struct iomap_ops *ops, const struct iomap_dio_ops *dops,
-		bool wait_for_completion)
+ssize_t
+iomap_dio_rw(struct kiocb *iocb, struct iov_iter *iter,
+		const struct iomap_ops *ops, const struct iomap_dio_ops *dops)
 {
 	struct address_space *mapping = iocb->ki_filp->f_mapping;
 	struct inode *inode = file_inode(iocb->ki_filp);
 	size_t count = iov_iter_count(iter);
-	loff_t pos = iocb->ki_pos;
+	loff_t pos = iocb->ki_pos, start = pos;
 	loff_t end = iocb->ki_pos + count - 1, ret = 0;
 	unsigned int flags = IOMAP_DIRECT;
+	bool wait_for_completion = is_sync_kiocb(iocb);
 	struct blk_plug plug;
 	struct iomap_dio *dio;
 
-	if (!count)
-		return NULL;
+	lockdep_assert_held(&inode->i_rwsem);
 
-	if (WARN_ON(is_sync_kiocb(iocb) && !wait_for_completion))
-		return ERR_PTR(-EIO);
+	if (!count)
+		return 0;
 
 	dio = kmalloc(sizeof(*dio), GFP_KERNEL);
 	if (!dio)
-		return ERR_PTR(-ENOMEM);
+		return -ENOMEM;
 
 	dio->iocb = iocb;
 	atomic_set(&dio->ref, 1);
@@ -458,7 +442,7 @@ __iomap_dio_rw(struct kiocb *iocb, struct iov_iter *iter,
 		if (pos >= dio->i_size)
 			goto out_free_dio;
 
-		if (iter_is_iovec(iter))
+		if (iter_is_iovec(iter) && iov_iter_rw(iter) == READ)
 			dio->flags |= IOMAP_DIO_DIRTY;
 	} else {
 		flags |= IOMAP_WRITE;
@@ -479,35 +463,34 @@ __iomap_dio_rw(struct kiocb *iocb, struct iov_iter *iter,
 	}
 
 	if (iocb->ki_flags & IOCB_NOWAIT) {
-		if (filemap_range_has_page(mapping, pos, end)) {
+		if (filemap_range_has_page(mapping, start, end)) {
 			ret = -EAGAIN;
 			goto out_free_dio;
 		}
 		flags |= IOMAP_NOWAIT;
 	}
 
-	ret = filemap_write_and_wait_range(mapping, pos, end);
+	ret = filemap_write_and_wait_range(mapping, start, end);
 	if (ret)
 		goto out_free_dio;
 
-	if (iov_iter_rw(iter) == WRITE) {
-		/*
-		 * Try to invalidate cache pages for the range we are writing.
-		 * If this invalidation fails, let the caller fall back to
-		 * buffered I/O.
-		 */
-		if (invalidate_inode_pages2_range(mapping, pos >> PAGE_SHIFT,
-				end >> PAGE_SHIFT)) {
-			trace_iomap_dio_invalidate_fail(inode, pos, count);
-			ret = -ENOTBLK;
-			goto out_free_dio;
-		}
+	/*
+	 * Try to invalidate cache pages for the range we're direct
+	 * writing.  If this invalidation fails, tough, the write will
+	 * still work, but racing two incompatible write paths is a
+	 * pretty crazy thing to do, so we don't support it 100%.
+	 */
+	ret = invalidate_inode_pages2_range(mapping,
+			start >> PAGE_SHIFT, end >> PAGE_SHIFT);
+	if (ret)
+		dio_warn_stale_pagecache(iocb->ki_filp);
+	ret = 0;
 
-		if (!wait_for_completion && !inode->i_sb->s_dio_done_wq) {
-			ret = sb_init_dio_done_wq(inode->i_sb);
-			if (ret < 0)
-				goto out_free_dio;
-		}
+	if (iov_iter_rw(iter) == WRITE && !wait_for_completion &&
+	    !inode->i_sb->s_dio_done_wq) {
+		ret = sb_init_dio_done_wq(inode->i_sb);
+		if (ret < 0)
+			goto out_free_dio;
 	}
 
 	inode_dio_begin(inode);
@@ -553,8 +536,8 @@ __iomap_dio_rw(struct kiocb *iocb, struct iov_iter *iter,
 
 	/*
 	 * We are about to drop our additional submission reference, which
-	 * might be the last reference to the dio.  There are three different
-	 * ways we can progress here:
+	 * might be the last reference to the dio.  There are three three
+	 * different ways we can progress here:
 	 *
 	 *  (a) If this is the last reference we will always complete and free
 	 *	the dio ourselves.
@@ -569,7 +552,7 @@ __iomap_dio_rw(struct kiocb *iocb, struct iov_iter *iter,
 	dio->wait_for_completion = wait_for_completion;
 	if (!atomic_dec_and_test(&dio->ref)) {
 		if (!wait_for_completion)
-			return ERR_PTR(-EIOCBQUEUED);
+			return -EIOCBQUEUED;
 
 		for (;;) {
 			set_current_state(TASK_UNINTERRUPTIBLE);
@@ -580,31 +563,15 @@ __iomap_dio_rw(struct kiocb *iocb, struct iov_iter *iter,
 			    !dio->submit.last_queue ||
 			    !blk_poll(dio->submit.last_queue,
 					 dio->submit.cookie, true))
-				blk_io_schedule();
+				io_schedule();
 		}
 		__set_current_state(TASK_RUNNING);
 	}
 
-	return dio;
+	return iomap_dio_complete(dio);
 
 out_free_dio:
 	kfree(dio);
-	if (ret)
-		return ERR_PTR(ret);
-	return NULL;
-}
-EXPORT_SYMBOL_GPL(__iomap_dio_rw);
-
-ssize_t
-iomap_dio_rw(struct kiocb *iocb, struct iov_iter *iter,
-		const struct iomap_ops *ops, const struct iomap_dio_ops *dops,
-		bool wait_for_completion)
-{
-	struct iomap_dio *dio;
-
-	dio = __iomap_dio_rw(iocb, iter, ops, dops, wait_for_completion);
-	if (IS_ERR_OR_NULL(dio))
-		return PTR_ERR_OR_ZERO(dio);
-	return iomap_dio_complete(dio);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(iomap_dio_rw);

@@ -1,10 +1,10 @@
 /*
- * NXP Wireless LAN device driver: AP TX and RX data handling
+ * Marvell Wireless LAN device driver: AP TX and RX data handling
  *
- * Copyright 2011-2020 NXP
+ * Copyright (C) 2012-2014, Marvell International Ltd.
  *
- * This software file (the "File") is distributed by NXP
- * under the terms of the GNU General Public License Version 2, June 1991
+ * This software file (the "File") is distributed by Marvell International
+ * Ltd. under the terms of the GNU General Public License Version 2, June 1991
  * (the "License").  You may use, redistribute and/or modify this File in
  * accordance with the terms and conditions of the License, a copy of which
  * is available by writing to the Free Software Foundation, Inc.,
@@ -350,7 +350,11 @@ int mwifiex_uap_recv_packet(struct mwifiex_private *priv,
 		skb->truesize += (skb->len - MWIFIEX_RX_DATA_BUF_SIZE);
 
 	/* Forward multicast/broadcast packet to upper layer*/
-	netif_rx_any_context(skb);
+	if (in_interrupt())
+		netif_rx(skb);
+	else
+		netif_rx_ni(skb);
+
 	return 0;
 }
 

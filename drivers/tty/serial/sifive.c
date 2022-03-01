@@ -144,13 +144,12 @@
  */
 
 /**
- * struct sifive_serial_port - driver-specific data extension to struct uart_port
+ * sifive_serial_port - driver-specific data extension to struct uart_port
  * @port: struct uart_port embedded in this struct
  * @dev: struct device *
  * @ier: shadowed copy of the interrupt enable register
  * @clkin_rate: input clock to the UART IP block.
  * @baud_rate: UART serial line rate (e.g., 115200 baud)
- * @clk: reference to this device's clock
  * @clk_notifier: clock rate change notifier for upstream clock changes
  *
  * Configuration data specific to this SiFive UART.
@@ -730,29 +729,6 @@ static const char *sifive_serial_type(struct uart_port *port)
 	return port->type == PORT_SIFIVE_V0 ? "SiFive UART v0" : NULL;
 }
 
-#ifdef CONFIG_CONSOLE_POLL
-static int sifive_serial_poll_get_char(struct uart_port *port)
-{
-	struct sifive_serial_port *ssp = port_to_sifive_serial_port(port);
-	char is_empty, ch;
-
-	ch = __ssp_receive_char(ssp, &is_empty);
-	if (is_empty)
-		return NO_POLL_CHAR;
-
-	return ch;
-}
-
-static void sifive_serial_poll_put_char(struct uart_port *port,
-					unsigned char c)
-{
-	struct sifive_serial_port *ssp = port_to_sifive_serial_port(port);
-
-	__ssp_wait_for_xmitr(ssp);
-	__ssp_transmit_char(ssp, c);
-}
-#endif /* CONFIG_CONSOLE_POLL */
-
 /*
  * Early console support
  */
@@ -884,6 +860,7 @@ console_initcall(sifive_console_init);
 
 static void __ssp_add_console_port(struct sifive_serial_port *ssp)
 {
+	spin_lock_init(&ssp->port.lock);
 	sifive_serial_console_ports[ssp->port.line] = ssp;
 }
 
@@ -921,10 +898,6 @@ static const struct uart_ops sifive_serial_uops = {
 	.request_port	= sifive_serial_request_port,
 	.config_port	= sifive_serial_config_port,
 	.verify_port	= sifive_serial_verify_port,
-#ifdef CONFIG_CONSOLE_POLL
-	.poll_get_char	= sifive_serial_poll_get_char,
-	.poll_put_char	= sifive_serial_poll_put_char,
-#endif
 };
 
 static struct uart_driver sifive_serial_uart_driver = {

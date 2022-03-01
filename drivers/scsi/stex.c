@@ -236,7 +236,7 @@ struct req_msg {
 	u8 data_dir;
 	u8 payload_sz;		/* payload size in 4-byte, not used */
 	u8 cdb[STEX_CDB_LENGTH];
-	u32 variable[];
+	u32 variable[0];
 };
 
 struct status_msg {
@@ -685,7 +685,6 @@ stex_queuecommand_lck(struct scsi_cmnd *cmd, void (*done)(struct scsi_cmnd *))
 			done(cmd);
 			return 0;
 		}
-		break;
 	default:
 		break;
 	}

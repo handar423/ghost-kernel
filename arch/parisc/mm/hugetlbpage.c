@@ -15,6 +15,7 @@
 #include <linux/sysctl.h>
 
 #include <asm/mman.h>
+#include <asm/pgalloc.h>
 #include <asm/tlb.h>
 #include <asm/tlbflush.h>
 #include <asm/cacheflush.h>
@@ -48,7 +49,6 @@ pte_t *huge_pte_alloc(struct mm_struct *mm,
 			unsigned long addr, unsigned long sz)
 {
 	pgd_t *pgd;
-	p4d_t *p4d;
 	pud_t *pud;
 	pmd_t *pmd;
 	pte_t *pte = NULL;
@@ -61,8 +61,7 @@ pte_t *huge_pte_alloc(struct mm_struct *mm,
 	addr &= HPAGE_MASK;
 
 	pgd = pgd_offset(mm, addr);
-	p4d = p4d_offset(pgd, addr);
-	pud = pud_alloc(mm, p4d, addr);
+	pud = pud_alloc(mm, pgd, addr);
 	if (pud) {
 		pmd = pmd_alloc(mm, pud, addr);
 		if (pmd)
@@ -75,7 +74,6 @@ pte_t *huge_pte_offset(struct mm_struct *mm,
 		       unsigned long addr, unsigned long sz)
 {
 	pgd_t *pgd;
-	p4d_t *p4d;
 	pud_t *pud;
 	pmd_t *pmd;
 	pte_t *pte = NULL;
@@ -84,14 +82,11 @@ pte_t *huge_pte_offset(struct mm_struct *mm,
 
 	pgd = pgd_offset(mm, addr);
 	if (!pgd_none(*pgd)) {
-		p4d = p4d_offset(pgd, addr);
-		if (!p4d_none(*p4d)) {
-			pud = pud_offset(p4d, addr);
-			if (!pud_none(*pud)) {
-				pmd = pmd_offset(pud, addr);
-				if (!pmd_none(*pmd))
-					pte = pte_offset_map(pmd, addr);
-			}
+		pud = pud_offset(pgd, addr);
+		if (!pud_none(*pud)) {
+			pmd = pmd_offset(pud, addr);
+			if (!pmd_none(*pmd))
+				pte = pte_offset_map(pmd, addr);
 		}
 	}
 	return pte;

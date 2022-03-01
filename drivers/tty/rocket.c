@@ -1225,28 +1225,22 @@ static int set_config(struct tty_struct *tty, struct r_port *info,
  */
 static int get_ports(struct r_port *info, struct rocket_ports __user *retports)
 {
-	struct rocket_ports *tmp;
-	int board, ret = 0;
+	struct rocket_ports tmp;
+	int board;
 
-	tmp = kzalloc(sizeof(*tmp), GFP_KERNEL);
-	if (!tmp)
-		return -ENOMEM;
-
-	tmp->tty_major = rocket_driver->major;
+	memset(&tmp, 0, sizeof (tmp));
+	tmp.tty_major = rocket_driver->major;
 
 	for (board = 0; board < 4; board++) {
-		tmp->rocketModel[board].model = rocketModel[board].model;
-		strcpy(tmp->rocketModel[board].modelString,
-		       rocketModel[board].modelString);
-		tmp->rocketModel[board].numPorts = rocketModel[board].numPorts;
-		tmp->rocketModel[board].loadrm2 = rocketModel[board].loadrm2;
-		tmp->rocketModel[board].startingPortNumber =
-			rocketModel[board].startingPortNumber;
+		tmp.rocketModel[board].model = rocketModel[board].model;
+		strcpy(tmp.rocketModel[board].modelString, rocketModel[board].modelString);
+		tmp.rocketModel[board].numPorts = rocketModel[board].numPorts;
+		tmp.rocketModel[board].loadrm2 = rocketModel[board].loadrm2;
+		tmp.rocketModel[board].startingPortNumber = rocketModel[board].startingPortNumber;
 	}
-	if (copy_to_user(retports, tmp, sizeof(*retports)))
-		ret = -EFAULT;
-	kfree(tmp);
-	return ret;
+	if (copy_to_user(retports, &tmp, sizeof (*retports)))
+		return -EFAULT;
+	return 0;
 }
 
 static int reset_rm2(struct r_port *info, void __user *arg)
@@ -1885,7 +1879,7 @@ static int sPCIInitController(CONTROLLER_T * CtlP, int CtlNum,
  */
 static __init int register_PCI(int i, struct pci_dev *dev)
 {
-	int num_aiops, aiop, max_num_aiops, chan;
+	int num_aiops, aiop, max_num_aiops, num_chan, chan;
 	unsigned int aiopio[MAX_AIOPS_PER_BOARD];
 	CONTROLLER_t *ctlp;
 
@@ -2157,7 +2151,8 @@ static __init int register_PCI(int i, struct pci_dev *dev)
 	/*  Reset the AIOPIC, init the serial ports */
 	for (aiop = 0; aiop < num_aiops; aiop++) {
 		sResetAiopByNum(ctlp, aiop);
-		for (chan = 0; chan < ports_per_aiop; chan++)
+		num_chan = ports_per_aiop;
+		for (chan = 0; chan < num_chan; chan++)
 			init_r_port(i, aiop, chan, dev);
 	}
 
@@ -2165,10 +2160,11 @@ static __init int register_PCI(int i, struct pci_dev *dev)
 	if ((rcktpt_type[i] == ROCKET_TYPE_MODEM) ||
 	    (rcktpt_type[i] == ROCKET_TYPE_MODEMII) ||
 	    (rcktpt_type[i] == ROCKET_TYPE_MODEMIII)) {
-		for (chan = 0; chan < ports_per_aiop; chan++)
+		num_chan = ports_per_aiop;
+		for (chan = 0; chan < num_chan; chan++)
 			sPCIModemReset(ctlp, chan, 1);
 		msleep(500);
-		for (chan = 0; chan < ports_per_aiop; chan++)
+		for (chan = 0; chan < num_chan; chan++)
 			sPCIModemReset(ctlp, chan, 0);
 		msleep(500);
 		rmSpeakerReset(ctlp, rocketModel[i].model);

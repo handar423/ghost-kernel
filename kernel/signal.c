@@ -720,7 +720,7 @@ static int dequeue_synchronous_signal(kernel_siginfo_t *info)
 	 * Return the first synchronous signal in the queue.
 	 */
 	list_for_each_entry(q, &pending->list, list) {
-		/* Synchronous signals have a positive si_code */
+		/* Synchronous signals have a postive si_code */
 		if ((q->info.si_code > SI_USER) &&
 		    (sigmask(q->info.si_signo) & SYNCHRONOUS_MASK)) {
 			sync = q;
@@ -852,7 +852,7 @@ static int check_kill_permission(int sig, struct kernel_siginfo *info,
 			 */
 			if (!sid || sid == task_session(current))
 				break;
-			fallthrough;
+			/* fall through */
 		default:
 			return -EPERM;
 		}
@@ -984,7 +984,7 @@ static inline bool wants_signal(int sig, struct task_struct *p)
 	if (task_is_stopped_or_traced(p))
 		return false;
 
-	return task_curr(p) || !task_sigpending(p);
+	return task_curr(p) || !signal_pending(p);
 }
 
 static void complete_signal(int sig, struct task_struct *p, enum pid_type type)
@@ -1389,7 +1389,7 @@ struct sighand_struct *__lock_task_sighand(struct task_struct *tsk,
 		 * must see ->sighand == NULL.
 		 */
 		spin_lock_irqsave(&sighand->siglock, *flags);
-		if (likely(sighand == rcu_access_pointer(tsk->sighand)))
+		if (likely(sighand == tsk->sighand))
 			break;
 		spin_unlock_irqrestore(&sighand->siglock, *flags);
 	}
@@ -1558,8 +1558,12 @@ static int kill_something_info(int sig, struct kernel_siginfo *info, pid_t pid)
 {
 	int ret;
 
-	if (pid > 0)
-		return kill_proc_info(sig, info, pid);
+	if (pid > 0) {
+		rcu_read_lock();
+		ret = kill_pid_info(sig, info, find_vpid(pid));
+		rcu_read_unlock();
+		return ret;
+	}
 
 	/* -INT_MIN is undefined.  Exclude this case to avoid a UBSAN warning */
 	if (pid == INT_MIN)
@@ -2097,15 +2101,6 @@ static inline bool may_ptrace_stop(void)
 	return true;
 }
 
-/*
- * Return non-zero if there is a SIGKILL that should be waking us up.
- * Called with the siglock held.
- */
-static bool sigkill_pending(struct task_struct *tsk)
-{
-	return sigismember(&tsk->pending.signal, SIGKILL) ||
-	       sigismember(&tsk->signal->shared_pending.signal, SIGKILL);
-}
 
 /*
  * This must be called with current->sighand->siglock held.
@@ -2132,17 +2127,16 @@ static void ptrace_stop(int exit_code, int why, int clear_code, kernel_siginfo_t
 		 * calling arch_ptrace_stop, so we must release it now.
 		 * To preserve proper semantics, we must do this before
 		 * any signal bookkeeping like checking group_stop_count.
-		 * Meanwhile, a SIGKILL could come in before we retake the
-		 * siglock.  That must prevent us from sleeping in TASK_TRACED.
-		 * So after regaining the lock, we must check for SIGKILL.
 		 */
 		spin_unlock_irq(&current->sighand->siglock);
 		arch_ptrace_stop(exit_code, info);
 		spin_lock_irq(&current->sighand->siglock);
-		if (sigkill_pending(current))
-			return;
 	}
 
+	/*
+	 * schedule() will not sleep if there is a pending signal that
+	 * can awaken the task.
+	 */
 	set_special_state(TASK_TRACED);
 
 	/*
@@ -2524,26 +2518,6 @@ static int ptrace_signal(int signr, kernel_siginfo_t *info)
 	return signr;
 }
 
-static void hide_si_addr_tag_bits(struct ksignal *ksig)
-{
-	switch (siginfo_layout(ksig->sig, ksig->info.si_code)) {
-	case SIL_FAULT:
-	case SIL_FAULT_MCEERR:
-	case SIL_FAULT_BNDERR:
-	case SIL_FAULT_PKUERR:
-		ksig->info.si_addr = arch_untagged_si_addr(
-			ksig->info.si_addr, ksig->sig, ksig->info.si_code);
-		break;
-	case SIL_KILL:
-	case SIL_TIMER:
-	case SIL_POLL:
-	case SIL_CHLD:
-	case SIL_RT:
-	case SIL_SYS:
-		break;
-	}
-}
-
 bool get_signal(struct ksignal *ksig)
 {
 	struct sighand_struct *sighand = current->sighand;
@@ -2552,18 +2526,6 @@ bool get_signal(struct ksignal *ksig)
 
 	if (unlikely(current->task_works))
 		task_work_run();
-
-	/*
-	 * For non-generic architectures, check for TIF_NOTIFY_SIGNAL so
-	 * that the arch handlers don't all have to do it. If we get here
-	 * without TIF_SIGPENDING, just exit after running signal work.
-	 */
-	if (!IS_ENABLED(CONFIG_GENERIC_ENTRY)) {
-		if (test_thread_flag(TIF_NOTIFY_SIGNAL))
-			tracehook_notify_signal();
-		if (!task_sigpending(current))
-			return false;
-	}
 
 	if (unlikely(uprobe_deny_signal()))
 		return false;
@@ -2577,7 +2539,6 @@ bool get_signal(struct ksignal *ksig)
 
 relock:
 	spin_lock_irq(&sighand->siglock);
-
 	/*
 	 * Every stopped thread goes here after wakeup. Check to see if
 	 * we should notify the parent, prepare_signal(SIGCONT) encodes
@@ -2776,10 +2737,6 @@ relock:
 	spin_unlock_irq(&sighand->siglock);
 
 	ksig->sig = signr;
-
-	if (!(ksig->ka.sa.sa_flags & SA_EXPOSE_TAGBITS))
-		hide_si_addr_tag_bits(ksig);
-
 	return ksig->sig > 0;
 }
 
@@ -2842,7 +2799,7 @@ static void retarget_shared_pending(struct task_struct *tsk, sigset_t *which)
 		/* Remove the signals this thread can handle. */
 		sigandsets(&retarget, &retarget, &t->blocked);
 
-		if (!task_sigpending(t))
+		if (!signal_pending(t))
 			signal_wake_up(t, 0);
 
 		if (sigisemptyset(&retarget))
@@ -2876,7 +2833,7 @@ void exit_signals(struct task_struct *tsk)
 
 	cgroup_threadgroup_change_end(tsk);
 
-	if (!task_sigpending(tsk))
+	if (!signal_pending(tsk))
 		goto out;
 
 	unblocked = tsk->blocked;
@@ -2920,7 +2877,7 @@ long do_no_restart_syscall(struct restart_block *param)
 
 static void __set_task_blocked(struct task_struct *tsk, const sigset_t *newset)
 {
-	if (task_sigpending(tsk) && !thread_group_empty(tsk)) {
+	if (signal_pending(tsk) && !thread_group_empty(tsk)) {
 		sigset_t newblocked;
 		/* A set of now blocked but previously unblocked signals. */
 		sigandnsets(&newblocked, newset, &current->blocked);
@@ -3273,94 +3230,94 @@ int copy_siginfo_from_user(kernel_siginfo_t *to, const siginfo_t __user *from)
 }
 
 #ifdef CONFIG_COMPAT
-/**
- * copy_siginfo_to_external32 - copy a kernel siginfo into a compat user siginfo
- * @to: compat siginfo destination
- * @from: kernel siginfo source
- *
- * Note: This function does not work properly for the SIGCHLD on x32, but
- * fortunately it doesn't have to.  The only valid callers for this function are
- * copy_siginfo_to_user32, which is overriden for x32 and the coredump code.
- * The latter does not care because SIGCHLD will never cause a coredump.
- */
-void copy_siginfo_to_external32(struct compat_siginfo *to,
-		const struct kernel_siginfo *from)
+int copy_siginfo_to_user32(struct compat_siginfo __user *to,
+			   const struct kernel_siginfo *from)
+#if defined(CONFIG_X86_X32_ABI) || defined(CONFIG_IA32_EMULATION)
 {
-	memset(to, 0, sizeof(*to));
+	return __copy_siginfo_to_user32(to, from, in_x32_syscall());
+}
+int __copy_siginfo_to_user32(struct compat_siginfo __user *to,
+			     const struct kernel_siginfo *from, bool x32_ABI)
+#endif
+{
+	struct compat_siginfo new;
+	memset(&new, 0, sizeof(new));
 
-	to->si_signo = from->si_signo;
-	to->si_errno = from->si_errno;
-	to->si_code  = from->si_code;
+	new.si_signo = from->si_signo;
+	new.si_errno = from->si_errno;
+	new.si_code  = from->si_code;
 	switch(siginfo_layout(from->si_signo, from->si_code)) {
 	case SIL_KILL:
-		to->si_pid = from->si_pid;
-		to->si_uid = from->si_uid;
+		new.si_pid = from->si_pid;
+		new.si_uid = from->si_uid;
 		break;
 	case SIL_TIMER:
-		to->si_tid     = from->si_tid;
-		to->si_overrun = from->si_overrun;
-		to->si_int     = from->si_int;
+		new.si_tid     = from->si_tid;
+		new.si_overrun = from->si_overrun;
+		new.si_int     = from->si_int;
 		break;
 	case SIL_POLL:
-		to->si_band = from->si_band;
-		to->si_fd   = from->si_fd;
+		new.si_band = from->si_band;
+		new.si_fd   = from->si_fd;
 		break;
 	case SIL_FAULT:
-		to->si_addr = ptr_to_compat(from->si_addr);
+		new.si_addr = ptr_to_compat(from->si_addr);
 #ifdef __ARCH_SI_TRAPNO
-		to->si_trapno = from->si_trapno;
+		new.si_trapno = from->si_trapno;
 #endif
 		break;
 	case SIL_FAULT_MCEERR:
-		to->si_addr = ptr_to_compat(from->si_addr);
+		new.si_addr = ptr_to_compat(from->si_addr);
 #ifdef __ARCH_SI_TRAPNO
-		to->si_trapno = from->si_trapno;
+		new.si_trapno = from->si_trapno;
 #endif
-		to->si_addr_lsb = from->si_addr_lsb;
+		new.si_addr_lsb = from->si_addr_lsb;
 		break;
 	case SIL_FAULT_BNDERR:
-		to->si_addr = ptr_to_compat(from->si_addr);
+		new.si_addr = ptr_to_compat(from->si_addr);
 #ifdef __ARCH_SI_TRAPNO
-		to->si_trapno = from->si_trapno;
+		new.si_trapno = from->si_trapno;
 #endif
-		to->si_lower = ptr_to_compat(from->si_lower);
-		to->si_upper = ptr_to_compat(from->si_upper);
+		new.si_lower = ptr_to_compat(from->si_lower);
+		new.si_upper = ptr_to_compat(from->si_upper);
 		break;
 	case SIL_FAULT_PKUERR:
-		to->si_addr = ptr_to_compat(from->si_addr);
+		new.si_addr = ptr_to_compat(from->si_addr);
 #ifdef __ARCH_SI_TRAPNO
-		to->si_trapno = from->si_trapno;
+		new.si_trapno = from->si_trapno;
 #endif
-		to->si_pkey = from->si_pkey;
+		new.si_pkey = from->si_pkey;
 		break;
 	case SIL_CHLD:
-		to->si_pid = from->si_pid;
-		to->si_uid = from->si_uid;
-		to->si_status = from->si_status;
-		to->si_utime = from->si_utime;
-		to->si_stime = from->si_stime;
+		new.si_pid    = from->si_pid;
+		new.si_uid    = from->si_uid;
+		new.si_status = from->si_status;
+#ifdef CONFIG_X86_X32_ABI
+		if (x32_ABI) {
+			new._sifields._sigchld_x32._utime = from->si_utime;
+			new._sifields._sigchld_x32._stime = from->si_stime;
+		} else
+#endif
+		{
+			new.si_utime = from->si_utime;
+			new.si_stime = from->si_stime;
+		}
 		break;
 	case SIL_RT:
-		to->si_pid = from->si_pid;
-		to->si_uid = from->si_uid;
-		to->si_int = from->si_int;
+		new.si_pid = from->si_pid;
+		new.si_uid = from->si_uid;
+		new.si_int = from->si_int;
 		break;
 	case SIL_SYS:
-		to->si_call_addr = ptr_to_compat(from->si_call_addr);
-		to->si_syscall   = from->si_syscall;
-		to->si_arch      = from->si_arch;
+		new.si_call_addr = ptr_to_compat(from->si_call_addr);
+		new.si_syscall   = from->si_syscall;
+		new.si_arch      = from->si_arch;
 		break;
 	}
-}
 
-int __copy_siginfo_to_user32(struct compat_siginfo __user *to,
-			   const struct kernel_siginfo *from)
-{
-	struct compat_siginfo new;
-
-	copy_siginfo_to_external32(&new, from);
 	if (copy_to_user(to, &new, sizeof(struct compat_siginfo)))
 		return -EFAULT;
+
 	return 0;
 }
 
@@ -3704,8 +3661,7 @@ static bool access_pidfd_pidns(struct pid *pid)
 	return true;
 }
 
-static int copy_siginfo_from_user_any(kernel_siginfo_t *kinfo,
-		siginfo_t __user *info)
+static int copy_siginfo_from_user_any(kernel_siginfo_t *kinfo, siginfo_t *info)
 {
 #ifdef CONFIG_COMPAT
 	/*
@@ -4004,22 +3960,6 @@ int do_sigaction(int sig, struct k_sigaction *act, struct k_sigaction *oact)
 	spin_lock_irq(&p->sighand->siglock);
 	if (oact)
 		*oact = *k;
-
-	/*
-	 * Make sure that we never accidentally claim to support SA_UNSUPPORTED,
-	 * e.g. by having an architecture use the bit in their uapi.
-	 */
-	BUILD_BUG_ON(UAPI_SA_FLAGS & SA_UNSUPPORTED);
-
-	/*
-	 * Clear unknown flag bits in order to allow userspace to detect missing
-	 * support for flag bits and to allow the kernel to use non-uapi bits
-	 * internally.
-	 */
-	if (act)
-		act->sa.sa_flags &= UAPI_SA_FLAGS;
-	if (oact)
-		oact->sa.sa_flags &= UAPI_SA_FLAGS;
 
 	sigaction_compat_abi(act, oact);
 

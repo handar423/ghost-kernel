@@ -362,7 +362,7 @@ MODULE_DEVICE_TABLE(ieee1394, efw_id_table);
 static struct fw_driver efw_driver = {
 	.driver = {
 		.owner = THIS_MODULE,
-		.name = KBUILD_MODNAME,
+		.name = "snd-fireworks",
 		.bus = &fw_bus_type,
 	},
 	.probe    = efw_probe,

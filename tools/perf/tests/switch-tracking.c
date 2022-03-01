@@ -8,7 +8,6 @@
 #include <linux/zalloc.h>
 #include <perf/cpumap.h>
 #include <perf/evlist.h>
-#include <perf/mmap.h>
 
 #include "debug.h"
 #include "parse-events.h"
@@ -128,15 +127,15 @@ static int process_sample_event(struct evlist *evlist,
 	pid_t next_tid, prev_tid;
 	int cpu, err;
 
-	if (evlist__parse_sample(evlist, event, &sample)) {
-		pr_debug("evlist__parse_sample failed\n");
+	if (perf_evlist__parse_sample(evlist, event, &sample)) {
+		pr_debug("perf_evlist__parse_sample failed\n");
 		return -1;
 	}
 
-	evsel = evlist__id2evsel(evlist, sample.id);
+	evsel = perf_evlist__id2evsel(evlist, sample.id);
 	if (evsel == switch_tracking->switch_evsel) {
-		next_tid = evsel__intval(evsel, &sample, "next_pid");
-		prev_tid = evsel__intval(evsel, &sample, "prev_pid");
+		next_tid = perf_evsel__intval(evsel, &sample, "next_pid");
+		prev_tid = perf_evsel__intval(evsel, &sample, "prev_pid");
 		cpu = sample.cpu;
 		pr_debug3("sched_switch: cpu: %d prev_tid %d next_tid %d\n",
 			  cpu, prev_tid, next_tid);
@@ -223,8 +222,8 @@ static int add_event(struct evlist *evlist, struct list_head *events,
 	node->event = event;
 	list_add(&node->list, events);
 
-	if (evlist__parse_sample(evlist, event, &sample)) {
-		pr_debug("evlist__parse_sample failed\n");
+	if (perf_evlist__parse_sample(evlist, event, &sample)) {
+		pr_debug("perf_evlist__parse_sample failed\n");
 		return -1;
 	}
 
@@ -270,17 +269,17 @@ static int process_events(struct evlist *evlist,
 
 	for (i = 0; i < evlist->core.nr_mmaps; i++) {
 		md = &evlist->mmap[i];
-		if (perf_mmap__read_init(&md->core) < 0)
+		if (perf_mmap__read_init(md) < 0)
 			continue;
 
-		while ((event = perf_mmap__read_event(&md->core)) != NULL) {
+		while ((event = perf_mmap__read_event(md)) != NULL) {
 			cnt += 1;
 			ret = add_event(evlist, &events, event);
-			 perf_mmap__consume(&md->core);
+			 perf_mmap__consume(md);
 			if (ret < 0)
 				goto out_free_nodes;
 		}
-		perf_mmap__read_done(&md->core);
+		perf_mmap__read_done(md);
 	}
 
 	events_array = calloc(cnt, sizeof(struct event_node));
@@ -380,7 +379,7 @@ int test__switch_tracking(struct test *test __maybe_unused, int subtest __maybe_
 	cycles_evsel = evlist__last(evlist);
 
 	/* Third event */
-	if (!evlist__can_select_event(evlist, sched_switch)) {
+	if (!perf_evlist__can_select_event(evlist, sched_switch)) {
 		pr_debug("No sched_switch\n");
 		err = 0;
 		goto out;
@@ -394,8 +393,8 @@ int test__switch_tracking(struct test *test __maybe_unused, int subtest __maybe_
 
 	switch_evsel = evlist__last(evlist);
 
-	evsel__set_sample_bit(switch_evsel, CPU);
-	evsel__set_sample_bit(switch_evsel, TIME);
+	perf_evsel__set_sample_bit(switch_evsel, CPU);
+	perf_evsel__set_sample_bit(switch_evsel, TIME);
 
 	switch_evsel->core.system_wide = true;
 	switch_evsel->no_aux_samples = true;
@@ -406,14 +405,14 @@ int test__switch_tracking(struct test *test __maybe_unused, int subtest __maybe_
 		pr_debug("cycles event already at front");
 		goto out_err;
 	}
-	evlist__to_front(evlist, cycles_evsel);
+	perf_evlist__to_front(evlist, cycles_evsel);
 	if (cycles_evsel != evlist__first(evlist)) {
 		pr_debug("Failed to move cycles event to front");
 		goto out_err;
 	}
 
-	evsel__set_sample_bit(cycles_evsel, CPU);
-	evsel__set_sample_bit(cycles_evsel, TIME);
+	perf_evsel__set_sample_bit(cycles_evsel, CPU);
+	perf_evsel__set_sample_bit(cycles_evsel, TIME);
 
 	/* Fourth event */
 	err = parse_events(evlist, "dummy:u", NULL);
@@ -424,15 +423,15 @@ int test__switch_tracking(struct test *test __maybe_unused, int subtest __maybe_
 
 	tracking_evsel = evlist__last(evlist);
 
-	evlist__set_tracking_event(evlist, tracking_evsel);
+	perf_evlist__set_tracking_event(evlist, tracking_evsel);
 
 	tracking_evsel->core.attr.freq = 0;
 	tracking_evsel->core.attr.sample_period = 1;
 
-	evsel__set_sample_bit(tracking_evsel, TIME);
+	perf_evsel__set_sample_bit(tracking_evsel, TIME);
 
 	/* Config events */
-	evlist__config(evlist, &opts, NULL);
+	perf_evlist__config(evlist, &opts, NULL);
 
 	/* Check moved event is still at the front */
 	if (cycles_evsel != evlist__first(evlist)) {

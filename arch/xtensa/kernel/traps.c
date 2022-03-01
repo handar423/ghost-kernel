@@ -34,12 +34,12 @@
 #include <linux/delay.h>
 #include <linux/hardirq.h>
 #include <linux/ratelimit.h>
-#include <linux/pgtable.h>
 
 #include <asm/stacktrace.h>
 #include <asm/ptrace.h>
 #include <asm/timex.h>
 #include <linux/uaccess.h>
+#include <asm/pgtable.h>
 #include <asm/processor.h>
 #include <asm/traps.h>
 #include <asm/hw_breakpoint.h>
@@ -479,43 +479,44 @@ void show_regs(struct pt_regs * regs)
 
 static int show_trace_cb(struct stackframe *frame, void *data)
 {
-	const char *loglvl = data;
-
 	if (kernel_text_address(frame->pc))
-		printk("%s [<%08lx>] %pB\n",
-			loglvl, frame->pc, (void *)frame->pc);
+		pr_cont(" [<%08lx>] %pB\n", frame->pc, (void *)frame->pc);
 	return 0;
 }
 
-static void show_trace(struct task_struct *task, unsigned long *sp,
-		       const char *loglvl)
+void show_trace(struct task_struct *task, unsigned long *sp)
 {
 	if (!sp)
 		sp = stack_pointer(task);
 
-	printk("%sCall Trace:\n", loglvl);
-	walk_stackframe(sp, show_trace_cb, (void *)loglvl);
+	pr_info("Call Trace:\n");
+	walk_stackframe(sp, show_trace_cb, NULL);
+#ifndef CONFIG_KALLSYMS
+	pr_cont("\n");
+#endif
 }
 
-#define STACK_DUMP_ENTRY_SIZE 4
-#define STACK_DUMP_LINE_SIZE 32
-static size_t kstack_depth_to_print = CONFIG_PRINT_STACK_DEPTH;
+static int kstack_depth_to_print = 24;
 
-void show_stack(struct task_struct *task, unsigned long *sp, const char *loglvl)
+void show_stack(struct task_struct *task, unsigned long *sp)
 {
-	size_t len;
+	int i = 0;
+	unsigned long *stack;
 
 	if (!sp)
 		sp = stack_pointer(task);
+	stack = sp;
 
-	len = min((-(size_t)sp) & (THREAD_SIZE - STACK_DUMP_ENTRY_SIZE),
-		  kstack_depth_to_print * STACK_DUMP_ENTRY_SIZE);
+	pr_info("Stack:\n");
 
-	printk("%sStack:\n", loglvl);
-	print_hex_dump(loglvl, " ", DUMP_PREFIX_NONE,
-		       STACK_DUMP_LINE_SIZE, STACK_DUMP_ENTRY_SIZE,
-		       sp, len, false);
-	show_trace(task, sp, loglvl);
+	for (i = 0; i < kstack_depth_to_print; i++) {
+		if (kstack_end(sp))
+			break;
+		pr_cont(" %08lx", *sp++);
+		if (i % 8 == 7)
+			pr_cont("\n");
+	}
+	show_trace(task, stack);
 }
 
 DEFINE_SPINLOCK(die_lock);
@@ -523,18 +524,15 @@ DEFINE_SPINLOCK(die_lock);
 void die(const char * str, struct pt_regs * regs, long err)
 {
 	static int die_counter;
-	const char *pr = "";
-
-	if (IS_ENABLED(CONFIG_PREEMPTION))
-		pr = IS_ENABLED(CONFIG_PREEMPT_RT) ? " PREEMPT_RT" : " PREEMPT";
 
 	console_verbose();
 	spin_lock_irq(&die_lock);
 
-	pr_info("%s: sig: %ld [#%d]%s\n", str, err, ++die_counter, pr);
+	pr_info("%s: sig: %ld [#%d]%s\n", str, err, ++die_counter,
+		IS_ENABLED(CONFIG_PREEMPT) ? " PREEMPT" : "");
 	show_regs(regs);
 	if (!user_mode(regs))
-		show_stack(NULL, (unsigned long *)regs->areg[1], KERN_INFO);
+		show_stack(NULL, (unsigned long*)regs->areg[1]);
 
 	add_taint(TAINT_DIE, LOCKDEP_NOW_UNRELIABLE);
 	spin_unlock_irq(&die_lock);

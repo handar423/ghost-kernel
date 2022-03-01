@@ -21,6 +21,7 @@
 #include <asm/bootinfo.h>
 #include <asm/hazards.h>
 #include <asm/mmu_context.h>
+#include <asm/pgtable.h>
 #include <asm/tlb.h>
 #include <asm/tlbmisc.h>
 
@@ -34,10 +35,10 @@ extern void build_tlb_refill_handler(void);
 static inline void flush_micro_tlb(void)
 {
 	switch (current_cpu_type()) {
-	case CPU_LOONGSON2EF:
+	case CPU_LOONGSON2:
 		write_c0_diag(LOONGSON_DIAG_ITLB);
 		break;
-	case CPU_LOONGSON64:
+	case CPU_LOONGSON3:
 		write_c0_diag(LOONGSON_DIAG_ITLB | LOONGSON_DIAG_DTLB);
 		break;
 	default:
@@ -119,7 +120,7 @@ void local_flush_tlb_range(struct vm_area_struct *vma, unsigned long start,
 		if (size <= (current_cpu_data.tlbsizeftlbsets ?
 			     current_cpu_data.tlbsize / 8 :
 			     current_cpu_data.tlbsize / 2)) {
-			unsigned long old_entryhi, old_mmid;
+			unsigned long old_entryhi, uninitialized_var(old_mmid);
 			int newpid = cpu_asid(cpu, mm);
 
 			old_entryhi = read_c0_entryhi();
@@ -213,7 +214,7 @@ void local_flush_tlb_page(struct vm_area_struct *vma, unsigned long page)
 	int cpu = smp_processor_id();
 
 	if (cpu_context(cpu, vma->vm_mm) != 0) {
-		unsigned long old_mmid;
+		unsigned long uninitialized_var(old_mmid);
 		unsigned long flags, old_entryhi;
 		int idx;
 
@@ -294,7 +295,6 @@ void __update_tlb(struct vm_area_struct * vma, unsigned long address, pte_t pte)
 {
 	unsigned long flags;
 	pgd_t *pgdp;
-	p4d_t *p4dp;
 	pud_t *pudp;
 	pmd_t *pmdp;
 	pte_t *ptep;
@@ -320,8 +320,7 @@ void __update_tlb(struct vm_area_struct * vma, unsigned long address, pte_t pte)
 	mtc0_tlbw_hazard();
 	tlb_probe();
 	tlb_probe_hazard();
-	p4dp = p4d_offset(pgdp, address);
-	pudp = pud_offset(p4dp, address);
+	pudp = pud_offset(pgdp, address);
 	pmdp = pmd_offset(pudp, address);
 	idx = read_c0_index();
 #ifdef CONFIG_MIPS_HUGE_TLB_SUPPORT
@@ -382,7 +381,7 @@ void add_wired_entry(unsigned long entrylo0, unsigned long entrylo1,
 #ifdef CONFIG_XPA
 	panic("Broken for XPA kernels");
 #else
-	unsigned int old_mmid;
+	unsigned int uninitialized_var(old_mmid);
 	unsigned long flags;
 	unsigned long wired;
 	unsigned long old_pagemask;

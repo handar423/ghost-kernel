@@ -12,8 +12,11 @@
 #include <linux/interrupt.h>
 #include <linux/usb/ch9.h>
 #include <linux/usb/gadget.h>
-#include <linux/gpio/consumer.h>
+#include <linux/gpio.h>
 #include <linux/irq.h>
+
+/* GPIO port for VBUS detecting */
+static int vbus_gpio_port = -1;		/* GPIO port number (-1:Not used) */
 
 #define PCH_VBUS_PERIOD		3000	/* VBUS polling period (msec) */
 #define PCH_VBUS_INTERVAL	10	/* VBUS polling interval (msec) */
@@ -226,7 +229,8 @@ struct pch_udc_data_dma_desc {
  *				 for control data
  * @status:	Status
  * @reserved:	Reserved
- * @request:	Control Request
+ * @data12:	First setup word
+ * @data34:	Second setup word
  */
 struct pch_udc_stp_dma_desc {
 	u32 status;
@@ -298,13 +302,13 @@ struct pch_udc_ep {
 /**
  * struct pch_vbus_gpio_data - Structure holding GPIO informaton
  *					for detecting VBUS
- * @port:		gpio descriptor for the VBUS GPIO
+ * @port:		gpio port number
  * @intr:		gpio interrupt number
- * @irq_work_fall:	Structure for WorkQueue
- * @irq_work_rise:	Structure for WorkQueue
+ * @irq_work_fall	Structure for WorkQueue
+ * @irq_work_rise	Structure for WorkQueue
  */
 struct pch_vbus_gpio_data {
-	struct gpio_desc	*port;
+	int			port;
 	int			intr;
 	struct work_struct	irq_work_fall;
 	struct work_struct	irq_work_rise;
@@ -471,7 +475,7 @@ static void pch_udc_csr_busy(struct pch_udc_dev *dev)
  * pch_udc_write_csr() - Write the command and status registers.
  * @dev:	Reference to pch_udc_dev structure
  * @val:	value to be written to CSR register
- * @ep:		end-point number
+ * @addr:	address of CSR register
  */
 static void pch_udc_write_csr(struct pch_udc_dev *dev, unsigned long val,
 			       unsigned int ep)
@@ -486,7 +490,7 @@ static void pch_udc_write_csr(struct pch_udc_dev *dev, unsigned long val,
 /**
  * pch_udc_read_csr() - Read the command and status registers.
  * @dev:	Reference to pch_udc_dev structure
- * @ep:		end-point number
+ * @addr:	address of CSR register
  *
  * Return codes:	content of CSR register
  */
@@ -596,18 +600,22 @@ static void pch_udc_reconnect(struct pch_udc_dev *dev)
 static inline void pch_udc_vbus_session(struct pch_udc_dev *dev,
 					  int is_active)
 {
+	unsigned long		iflags;
+
+	spin_lock_irqsave(&dev->lock, iflags);
 	if (is_active) {
 		pch_udc_reconnect(dev);
 		dev->vbus_session = 1;
 	} else {
 		if (dev->driver && dev->driver->disconnect) {
-			spin_lock(&dev->lock);
+			spin_unlock_irqrestore(&dev->lock, iflags);
 			dev->driver->disconnect(&dev->gadget);
-			spin_unlock(&dev->lock);
+			spin_lock_irqsave(&dev->lock, iflags);
 		}
 		pch_udc_set_disconnect(dev);
 		dev->vbus_session = 0;
 	}
+	spin_unlock_irqrestore(&dev->lock, iflags);
 }
 
 /**
@@ -652,7 +660,6 @@ static inline void pch_udc_ep_set_trfr_type(struct pch_udc_ep *ep,
  * pch_udc_ep_set_bufsz() - Set the maximum packet size for the endpoint
  * @ep:		Reference to structure of type pch_udc_ep_regs
  * @buf_size:	The buffer word size
- * @ep_in:	EP is IN
  */
 static void pch_udc_ep_set_bufsz(struct pch_udc_ep *ep,
 						 u32 buf_size, u32 ep_in)
@@ -965,8 +972,7 @@ static void pch_udc_ep_fifo_flush(struct pch_udc_ep *ep, int dir)
 
 /**
  * pch_udc_ep_enable() - This api enables endpoint
- * @ep:		reference to structure of type pch_udc_ep_regs
- * @cfg:	current configuration information
+ * @regs:	Reference to structure pch_udc_ep_regs
  * @desc:	endpoint descriptor
  */
 static void pch_udc_ep_enable(struct pch_udc_ep *ep,
@@ -1002,7 +1008,7 @@ static void pch_udc_ep_enable(struct pch_udc_ep *ep,
 
 /**
  * pch_udc_ep_disable() - This api disables endpoint
- * @ep:		reference to structure of type pch_udc_ep_regs
+ * @regs:	Reference to structure pch_udc_ep_regs
  */
 static void pch_udc_ep_disable(struct pch_udc_ep *ep)
 {
@@ -1022,7 +1028,7 @@ static void pch_udc_ep_disable(struct pch_udc_ep *ep)
 
 /**
  * pch_udc_wait_ep_stall() - Wait EP stall.
- * @ep:		reference to structure of type pch_udc_ep_regs
+ * @dev:	Reference to pch_udc_dev structure
  */
 static void pch_udc_wait_ep_stall(struct pch_udc_ep *ep)
 {
@@ -1166,20 +1172,25 @@ static int pch_udc_pcd_selfpowered(struct usb_gadget *gadget, int value)
 static int pch_udc_pcd_pullup(struct usb_gadget *gadget, int is_on)
 {
 	struct pch_udc_dev	*dev;
+	unsigned long		iflags;
 
 	if (!gadget)
 		return -EINVAL;
+
 	dev = container_of(gadget, struct pch_udc_dev, gadget);
+
+	spin_lock_irqsave(&dev->lock, iflags);
 	if (is_on) {
 		pch_udc_reconnect(dev);
 	} else {
 		if (dev->driver && dev->driver->disconnect) {
-			spin_lock(&dev->lock);
+			spin_unlock_irqrestore(&dev->lock, iflags);
 			dev->driver->disconnect(&dev->gadget);
-			spin_unlock(&dev->lock);
+			spin_lock_irqsave(&dev->lock, iflags);
 		}
 		pch_udc_set_disconnect(dev);
 	}
+	spin_unlock_irqrestore(&dev->lock, iflags);
 
 	return 0;
 }
@@ -1251,7 +1262,7 @@ static int pch_vbus_gpio_get_value(struct pch_udc_dev *dev)
 	int vbus = 0;
 
 	if (dev->vbus_gpio.port)
-		vbus = gpiod_get_value(dev->vbus_gpio.port) ? 1 : 0;
+		vbus = gpio_get_value(dev->vbus_gpio.port) ? 1 : 0;
 	else
 		vbus = -1;
 
@@ -1329,7 +1340,7 @@ static void pch_vbus_gpio_work_rise(struct work_struct *irq_work)
 /**
  * pch_vbus_gpio_irq() - IRQ handler for GPIO interrupt for changing VBUS
  * @irq:	Interrupt request number
- * @data:	Reference to the device structure
+ * @dev:	Reference to the device structure
  *
  * Return codes:
  *	0: Success
@@ -1352,31 +1363,43 @@ static irqreturn_t pch_vbus_gpio_irq(int irq, void *data)
 
 /**
  * pch_vbus_gpio_init() - This API initializes GPIO port detecting VBUS.
- * @dev:		Reference to the driver structure
+ * @dev:	Reference to the driver structure
+ * @vbus_gpio	Number of GPIO port to detect gpio
  *
  * Return codes:
  *	0: Success
  *	-EINVAL: GPIO port is invalid or can't be initialized.
  */
-static int pch_vbus_gpio_init(struct pch_udc_dev *dev)
+static int pch_vbus_gpio_init(struct pch_udc_dev *dev, int vbus_gpio_port)
 {
 	int err;
 	int irq_num = 0;
-	struct gpio_desc *gpiod;
 
-	dev->vbus_gpio.port = NULL;
+	dev->vbus_gpio.port = 0;
 	dev->vbus_gpio.intr = 0;
 
-	/* Retrieve the GPIO line from the USB gadget device */
-	gpiod = devm_gpiod_get(dev->gadget.dev.parent, NULL, GPIOD_IN);
-	if (IS_ERR(gpiod))
-		return PTR_ERR(gpiod);
-	gpiod_set_consumer_name(gpiod, "pch_vbus");
+	if (vbus_gpio_port <= -1)
+		return -EINVAL;
 
-	dev->vbus_gpio.port = gpiod;
+	err = gpio_is_valid(vbus_gpio_port);
+	if (!err) {
+		pr_err("%s: gpio port %d is invalid\n",
+			__func__, vbus_gpio_port);
+		return -EINVAL;
+	}
+
+	err = gpio_request(vbus_gpio_port, "pch_vbus");
+	if (err) {
+		pr_err("%s: can't request gpio port %d, err: %d\n",
+			__func__, vbus_gpio_port, err);
+		return -EINVAL;
+	}
+
+	dev->vbus_gpio.port = vbus_gpio_port;
+	gpio_direction_input(vbus_gpio_port);
 	INIT_WORK(&dev->vbus_gpio.irq_work_fall, pch_vbus_gpio_work_fall);
 
-	irq_num = gpiod_to_irq(gpiod);
+	irq_num = gpio_to_irq(vbus_gpio_port);
 	if (irq_num > 0) {
 		irq_set_irq_type(irq_num, IRQ_TYPE_EDGE_BOTH);
 		err = request_irq(irq_num, pch_vbus_gpio_irq, 0,
@@ -1402,6 +1425,9 @@ static void pch_vbus_gpio_free(struct pch_udc_dev *dev)
 {
 	if (dev->vbus_gpio.intr)
 		free_irq(dev->vbus_gpio.intr, dev);
+
+	if (dev->vbus_gpio.port)
+		gpio_free(dev->vbus_gpio.port);
 }
 
 /**
@@ -1482,8 +1508,8 @@ static void empty_req_queue(struct pch_udc_ep *ep)
 /**
  * pch_udc_free_dma_chain() - This function frees the DMA chain created
  *				for the request
- * @dev:	Reference to the driver structure
- * @req:	Reference to the request to be freed
+ * @dev		Reference to the driver structure
+ * @req		Reference to the request to be freed
  *
  * Return codes:
  *	0: Success
@@ -1690,7 +1716,7 @@ static int pch_udc_pcd_ep_enable(struct usb_ep *usbep,
 /**
  * pch_udc_pcd_ep_disable() - This API disables endpoint and is called
  *				from gadget driver
- * @usbep:	Reference to the USB endpoint structure
+ * @usbep	Reference to the USB endpoint structure
  *
  * Return codes:
  *	0:		Success
@@ -1756,7 +1782,7 @@ static struct usb_request *pch_udc_alloc_request(struct usb_ep *usbep,
 	}
 	/* prevent from using desc. - set HOST BUSY */
 	dma_desc->status |= PCH_UDC_BS_HST_BSY;
-	dma_desc->dataptr = cpu_to_le32(DMA_ADDR_INVALID);
+	dma_desc->dataptr = lower_32_bits(DMA_ADDR_INVALID);
 	req->td_data = dma_desc;
 	req->td_data_last = dma_desc;
 	req->chain_len = 1;
@@ -1979,6 +2005,7 @@ static int pch_udc_pcd_set_halt(struct usb_ep *usbep, int halt)
  * pch_udc_pcd_set_wedge() - This function Sets or clear the endpoint
  *				halt feature
  * @usbep:	Reference to the USB endpoint structure
+ * @halt:	Specifies whether to set or clear the feature
  *
  * Return codes:
  *	0:			Success
@@ -2298,6 +2325,21 @@ static void pch_udc_svc_data_out(struct pch_udc_dev *dev, int ep_num)
 		pch_udc_set_dma(dev, DMA_DIR_RX);
 }
 
+static int pch_udc_gadget_setup(struct pch_udc_dev *dev)
+	__must_hold(&dev->lock)
+{
+	int rc;
+
+	/* In some cases we can get an interrupt before driver gets setup */
+	if (!dev->driver)
+		return -ESHUTDOWN;
+
+	spin_unlock(&dev->lock);
+	rc = dev->driver->setup(&dev->gadget, &dev->setup_data);
+	spin_lock(&dev->lock);
+	return rc;
+}
+
 /**
  * pch_udc_svc_control_in() - Handle Control IN endpoint interrupts
  * @dev:	Reference to the device structure
@@ -2369,15 +2411,12 @@ static void pch_udc_svc_control_out(struct pch_udc_dev *dev)
 			dev->gadget.ep0 = &dev->ep[UDC_EP0IN_IDX].ep;
 		else /* OUT */
 			dev->gadget.ep0 = &ep->ep;
-		spin_lock(&dev->lock);
 		/* If Mass storage Reset */
 		if ((dev->setup_data.bRequestType == 0x21) &&
 		    (dev->setup_data.bRequest == 0xFF))
 			dev->prot_stall = 0;
 		/* call gadget with setup data received */
-		setup_supported = dev->driver->setup(&dev->gadget,
-						     &dev->setup_data);
-		spin_unlock(&dev->lock);
+		setup_supported = pch_udc_gadget_setup(dev);
 
 		if (dev->setup_data.bRequestType & USB_DIR_IN) {
 			ep->td_data->status = (ep->td_data->status &
@@ -2625,9 +2664,7 @@ static void pch_udc_svc_intf_interrupt(struct pch_udc_dev *dev)
 		dev->ep[i].halted = 0;
 	}
 	dev->stall = 0;
-	spin_unlock(&dev->lock);
-	dev->driver->setup(&dev->gadget, &dev->setup_data);
-	spin_lock(&dev->lock);
+	pch_udc_gadget_setup(dev);
 }
 
 /**
@@ -2662,9 +2699,7 @@ static void pch_udc_svc_cfg_interrupt(struct pch_udc_dev *dev)
 	dev->stall = 0;
 
 	/* call gadget zero with setup data received */
-	spin_unlock(&dev->lock);
-	dev->driver->setup(&dev->gadget, &dev->setup_data);
-	spin_lock(&dev->lock);
+	pch_udc_gadget_setup(dev);
 }
 
 /**
@@ -2732,7 +2767,7 @@ static void pch_udc_dev_isr(struct pch_udc_dev *dev, u32 dev_intr)
 /**
  * pch_udc_isr() - This function handles interrupts from the PCH USB Device
  * @irq:	Interrupt request number
- * @pdev:	Reference to the device structure
+ * @dev:	Reference to the device structure
  */
 static irqreturn_t pch_udc_isr(int irq, void *pdev)
 {
@@ -2876,13 +2911,13 @@ static int pch_udc_pcd_init(struct pch_udc_dev *dev)
 {
 	pch_udc_init(dev);
 	pch_udc_pcd_reinit(dev);
-	pch_vbus_gpio_init(dev);
+	pch_vbus_gpio_init(dev, vbus_gpio_port);
 	return 0;
 }
 
 /**
  * init_dma_pools() - create dma pools during initialization
- * @dev:	reference to struct pci_dev
+ * @pdev:	reference to struct pci_dev
  */
 static int init_dma_pools(struct pch_udc_dev *dev)
 {
@@ -2938,7 +2973,7 @@ static int init_dma_pools(struct pch_udc_dev *dev)
 	dev->dma_addr = dma_map_single(&dev->pdev->dev, ep0out_buf,
 				       UDC_EP0OUT_BUFF_SIZE * 4,
 				       DMA_FROM_DEVICE);
-	return 0;
+	return dma_mapping_error(&dev->pdev->dev, dev->dma_addr);
 }
 
 static int pch_udc_start(struct usb_gadget *g,
@@ -3077,13 +3112,6 @@ static int pch_udc_probe(struct pci_dev *pdev,
 		return retval;
 
 	dev->base_addr = pcim_iomap_table(pdev)[bar];
-
-	/*
-	 * FIXME: add a GPIO descriptor table to pdev.dev using
-	 * gpiod_add_descriptor_table() from <linux/gpio/machine.h> based on
-	 * the PCI subsystem ID. The system-dependent GPIO is necessary for
-	 * VBUS operation.
-	 */
 
 	/* initialize the hardware */
 	if (pch_udc_pcd_init(dev))

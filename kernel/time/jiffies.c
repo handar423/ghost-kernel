@@ -58,9 +58,7 @@ static struct clocksource clocksource_jiffies = {
 	.max_cycles	= 10,
 };
 
-__cacheline_aligned_in_smp DEFINE_RAW_SPINLOCK(jiffies_lock);
-__cacheline_aligned_in_smp seqcount_raw_spinlock_t jiffies_seq =
-	SEQCNT_RAW_SPINLOCK_ZERO(jiffies_seq, &jiffies_lock);
+__cacheline_aligned_in_smp DEFINE_SEQLOCK(jiffies_lock);
 
 #if (BITS_PER_LONG < 64)
 u64 get_jiffies_64(void)
@@ -69,9 +67,9 @@ u64 get_jiffies_64(void)
 	u64 ret;
 
 	do {
-		seq = read_seqcount_begin(&jiffies_seq);
+		seq = read_seqbegin(&jiffies_lock);
 		ret = jiffies_64;
-	} while (read_seqcount_retry(&jiffies_seq, seq));
+	} while (read_seqretry(&jiffies_lock, seq));
 	return ret;
 }
 EXPORT_SYMBOL(get_jiffies_64);

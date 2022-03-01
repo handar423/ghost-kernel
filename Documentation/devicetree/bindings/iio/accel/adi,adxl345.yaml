@@ -12,18 +12,14 @@ maintainers:
 description: |
   Analog Devices ADXL345/ADXL375 3-Axis Digital Accelerometers that supports
   both I2C & SPI interfaces.
-    https://www.analog.com/en/products/mems/accelerometers/adxl345.html
-    https://www.analog.com/en/products/sensors-mems/accelerometers/adxl375.html
+    http://www.analog.com/en/products/mems/accelerometers/adxl345.html
+    http://www.analog.com/en/products/sensors-mems/accelerometers/adxl375.html
 
 properties:
   compatible:
-    oneOf:
-      - items:
-          - const: adi,adxl346
-          - const: adi,adxl345
-      - enum:
-          - adi,adxl345
-          - adi,adxl375
+    enum:
+      - adi,adxl345
+      - adi,adxl375
 
   reg:
     maxItems: 1
@@ -32,8 +28,6 @@ properties:
 
   spi-cpol: true
 
-  spi-max-frequency: true
-
   interrupts:
     maxItems: 1
 
@@ -41,8 +35,6 @@ required:
   - compatible
   - reg
   - interrupts
-
-additionalProperties: false
 
 examples:
   - |

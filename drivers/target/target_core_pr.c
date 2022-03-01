@@ -337,7 +337,6 @@ static int core_scsi3_pr_seq_non_holder(struct se_cmd *cmd, u32 pr_reg_type,
 	switch (pr_reg_type) {
 	case PR_TYPE_WRITE_EXCLUSIVE:
 		we = 1;
-		fallthrough;
 	case PR_TYPE_EXCLUSIVE_ACCESS:
 		/*
 		 * Some commands are only allowed for the persistent reservation
@@ -346,7 +345,7 @@ static int core_scsi3_pr_seq_non_holder(struct se_cmd *cmd, u32 pr_reg_type,
 		break;
 	case PR_TYPE_WRITE_EXCLUSIVE_REGONLY:
 		we = 1;
-		fallthrough;
+		/* fall through */
 	case PR_TYPE_EXCLUSIVE_ACCESS_REGONLY:
 		/*
 		 * Some commands are only allowed for registered I_T Nexuses.
@@ -355,7 +354,7 @@ static int core_scsi3_pr_seq_non_holder(struct se_cmd *cmd, u32 pr_reg_type,
 		break;
 	case PR_TYPE_WRITE_EXCLUSIVE_ALLREG:
 		we = 1;
-		fallthrough;
+		/* fall through */
 	case PR_TYPE_EXCLUSIVE_ACCESS_ALLREG:
 		/*
 		 * Each registered I_T Nexus is a reservation holder.
@@ -1160,6 +1159,7 @@ static struct t10_pr_registration *__core_scsi3_locate_pr_reg(
 {
 	struct t10_reservation *pr_tmpl = &dev->t10_pr;
 	struct t10_pr_registration *pr_reg, *pr_reg_tmp;
+	struct se_portal_group *tpg;
 
 	spin_lock(&pr_tmpl->registration_lock);
 	list_for_each_entry_safe(pr_reg, pr_reg_tmp,
@@ -1170,11 +1170,21 @@ static struct t10_pr_registration *__core_scsi3_locate_pr_reg(
 		if (pr_reg->pr_reg_nacl != nacl)
 			continue;
 
+		tpg = pr_reg->pr_reg_nacl->se_tpg;
 		/*
 		 * If this registration does NOT contain a fabric provided
 		 * ISID, then we have found a match.
 		 */
 		if (!pr_reg->isid_present_at_reg) {
+			/*
+			 * Determine if this SCSI device server requires that
+			 * SCSI Intiatior TransportID w/ ISIDs is enforced
+			 * for fabric modules (iSCSI) requiring them.
+			 */
+			if (tpg->se_tpg_tfo->sess_get_initiator_sid != NULL) {
+				if (dev->dev_attrib.enforce_pr_isids)
+					continue;
+			}
 			atomic_inc_mb(&pr_reg->pr_res_holders);
 			spin_unlock(&pr_tmpl->registration_lock);
 			return pr_reg;
@@ -1520,16 +1530,13 @@ core_scsi3_decode_spec_i_port(
 		kfree(tidh_new);
 		return TCM_INSUFFICIENT_REGISTRATION_RESOURCES;
 	}
-
-	if (core_scsi3_lunacl_depend_item(local_pr_reg->pr_reg_deve)) {
-		kfree(tidh_new);
-		kref_put(&local_pr_reg->pr_reg_deve->pr_kref,
-			 target_pr_kref_release);
-		kmem_cache_free(t10_pr_reg_cache, local_pr_reg);
-		return TCM_INSUFFICIENT_REGISTRATION_RESOURCES;
-	}
-
 	tidh_new->dest_pr_reg = local_pr_reg;
+	/*
+	 * The local I_T nexus does not hold any configfs dependances,
+	 * so we set tidh_new->dest_se_deve to NULL to prevent the
+	 * configfs_undepend_item() calls in the tid_dest_list loops below.
+	 */
+	tidh_new->dest_se_deve = NULL;
 	list_add_tail(&tidh_new->dest_list, &tid_dest_list);
 
 	if (cmd->data_length < 28) {
@@ -1584,25 +1591,10 @@ core_scsi3_decode_spec_i_port(
 				continue;
 			dest_rtpi = tmp_lun->lun_rtpi;
 
-			iport_ptr = NULL;
 			i_str = target_parse_pr_out_transport_id(tmp_tpg,
 					ptr, &tid_len, &iport_ptr);
 			if (!i_str)
 				continue;
-			/*
-			 * Determine if this SCSI device server requires that
-			 * SCSI Intiatior TransportID w/ ISIDs is enforced
-			 * for fabric modules (iSCSI) requiring them.
-			 */
-			if (tpg->se_tpg_tfo->sess_get_initiator_sid &&
-			    dev->dev_attrib.enforce_pr_isids &&
-			    !iport_ptr) {
-				pr_warn("SPC-PR: enforce_pr_isids is set but a isid has not been sent in the SPEC_I_PT data for %s.",
-					i_str);
-				ret = TCM_INVALID_PARAMETER_LIST;
-				spin_unlock(&dev->se_port_lock);
-				goto out_unmap;
-			}
 
 			atomic_inc_mb(&tmp_tpg->tpg_pr_ref_count);
 			spin_unlock(&dev->se_port_lock);
@@ -1818,9 +1810,12 @@ core_scsi3_decode_spec_i_port(
 			dest_node_acl->initiatorname, i_buf, (dest_se_deve) ?
 			dest_se_deve->mapped_lun : 0);
 
-		if (dest_pr_reg == local_pr_reg)
+		if (!dest_se_deve) {
+			kref_put(&local_pr_reg->pr_reg_deve->pr_kref,
+				 target_pr_kref_release);
 			continue;
-
+		}
+		core_scsi3_lunacl_undepend_item(dest_se_deve);
 		core_scsi3_nodeacl_undepend_item(dest_node_acl);
 		core_scsi3_tpg_undepend_item(dest_tpg);
 	}
@@ -1834,15 +1829,10 @@ out:
 	 * including *dest_pr_reg and the configfs dependances..
 	 */
 	list_for_each_entry_safe(tidh, tidh_tmp, &tid_dest_list, dest_list) {
-		bool is_local = false;
-
 		dest_tpg = tidh->dest_tpg;
 		dest_node_acl = tidh->dest_node_acl;
 		dest_se_deve = tidh->dest_se_deve;
 		dest_pr_reg = tidh->dest_pr_reg;
-
-		if (dest_pr_reg == local_pr_reg)
-			is_local = true;
 
 		list_del(&tidh->dest_list);
 		kfree(tidh);
@@ -1859,11 +1849,13 @@ out:
 		}
 
 		kmem_cache_free(t10_pr_reg_cache, dest_pr_reg);
-		core_scsi3_lunacl_undepend_item(dest_se_deve);
 
-		if (is_local)
+		if (!dest_se_deve) {
+			kref_put(&local_pr_reg->pr_reg_deve->pr_kref,
+				 target_pr_kref_release);
 			continue;
-
+		}
+		core_scsi3_lunacl_undepend_item(dest_se_deve);
 		core_scsi3_nodeacl_undepend_item(dest_node_acl);
 		core_scsi3_tpg_undepend_item(dest_tpg);
 	}
@@ -3739,6 +3731,7 @@ core_scsi3_pri_read_keys(struct se_cmd *cmd)
 	spin_unlock(&dev->t10_pr.registration_lock);
 
 	put_unaligned_be32(add_len, &buf[4]);
+	target_set_cmd_data_length(cmd, 8 + add_len);
 
 	transport_kunmap_data_sg(cmd);
 
@@ -3757,7 +3750,7 @@ core_scsi3_pri_read_reservation(struct se_cmd *cmd)
 	struct t10_pr_registration *pr_reg;
 	unsigned char *buf;
 	u64 pr_res_key;
-	u32 add_len = 16; /* Hardcoded to 16 when a reservation is held. */
+	u32 add_len = 0;
 
 	if (cmd->data_length < 8) {
 		pr_err("PRIN SA READ_RESERVATIONS SCSI Data Length: %u"
@@ -3775,8 +3768,9 @@ core_scsi3_pri_read_reservation(struct se_cmd *cmd)
 	pr_reg = dev->dev_pr_res_holder;
 	if (pr_reg) {
 		/*
-		 * Set the hardcoded Additional Length
+		 * Set the Additional Length to 16 when a reservation is held
 		 */
+		add_len = 16;
 		put_unaligned_be32(add_len, &buf[4]);
 
 		if (cmd->data_length < 22)
@@ -3812,6 +3806,8 @@ core_scsi3_pri_read_reservation(struct se_cmd *cmd)
 			  (pr_reg->pr_res_type & 0x0f);
 	}
 
+	target_set_cmd_data_length(cmd, 8 + add_len);
+
 err:
 	spin_unlock(&dev->dev_reservation_lock);
 	transport_kunmap_data_sg(cmd);
@@ -3830,7 +3826,7 @@ core_scsi3_pri_report_capabilities(struct se_cmd *cmd)
 	struct se_device *dev = cmd->se_dev;
 	struct t10_reservation *pr_tmpl = &dev->t10_pr;
 	unsigned char *buf;
-	u16 add_len = 8; /* Hardcoded to 8. */
+	u16 len = 8; /* Hardcoded to 8. */
 
 	if (cmd->data_length < 6) {
 		pr_err("PRIN SA REPORT_CAPABILITIES SCSI Data Length:"
@@ -3842,7 +3838,7 @@ core_scsi3_pri_report_capabilities(struct se_cmd *cmd)
 	if (!buf)
 		return TCM_LOGICAL_UNIT_COMMUNICATION_FAILURE;
 
-	put_unaligned_be16(add_len, &buf[0]);
+	put_unaligned_be16(len, &buf[0]);
 	buf[2] |= 0x10; /* CRH: Compatible Reservation Hanlding bit. */
 	buf[2] |= 0x08; /* SIP_C: Specify Initiator Ports Capable bit */
 	buf[2] |= 0x04; /* ATP_C: All Target Ports Capable bit */
@@ -3870,6 +3866,8 @@ core_scsi3_pri_report_capabilities(struct se_cmd *cmd)
 	buf[4] |= 0x08; /* PR_TYPE_EXCLUSIVE_ACCESS */
 	buf[4] |= 0x02; /* PR_TYPE_WRITE_EXCLUSIVE */
 	buf[5] |= 0x01; /* PR_TYPE_EXCLUSIVE_ACCESS_ALLREG */
+
+	target_set_cmd_data_length(cmd, len);
 
 	transport_kunmap_data_sg(cmd);
 
@@ -4031,6 +4029,7 @@ core_scsi3_pri_read_full_status(struct se_cmd *cmd)
 	 * Set ADDITIONAL_LENGTH
 	 */
 	put_unaligned_be32(add_len, &buf[4]);
+	target_set_cmd_data_length(cmd, 8 + add_len);
 
 	transport_kunmap_data_sg(cmd);
 
@@ -4094,7 +4093,7 @@ target_check_reservation(struct se_cmd *cmd)
 		return 0;
 	if (!dev->dev_attrib.emulate_pr)
 		return 0;
-	if (dev->transport_flags & TRANSPORT_FLAG_PASSTHROUGH_PGR)
+	if (dev->transport->transport_flags & TRANSPORT_FLAG_PASSTHROUGH_PGR)
 		return 0;
 
 	spin_lock(&dev->dev_reservation_lock);

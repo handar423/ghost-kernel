@@ -73,11 +73,10 @@ int athub_v1_0_set_clockgating(struct amdgpu_device *adev,
 	case CHIP_VEGA12:
 	case CHIP_VEGA20:
 	case CHIP_RAVEN:
-	case CHIP_RENOIR:
 		athub_update_medium_grain_clock_gating(adev,
-				state == AMD_CG_STATE_GATE);
+				state == AMD_CG_STATE_GATE ? true : false);
 		athub_update_medium_grain_light_sleep(adev,
-				state == AMD_CG_STATE_GATE);
+				state == AMD_CG_STATE_GATE ? true : false);
 		break;
 	default:
 		break;

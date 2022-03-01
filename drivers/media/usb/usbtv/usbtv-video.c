@@ -872,6 +872,7 @@ static void usbtv_release(struct v4l2_device *v4l2_dev)
 
 	v4l2_device_unregister(&usbtv->v4l2_dev);
 	v4l2_ctrl_handler_free(&usbtv->ctrl);
+	vb2_queue_release(&usbtv->vb2q);
 	kfree(usbtv);
 }
 
@@ -940,7 +941,7 @@ int usbtv_video_init(struct usbtv *usbtv)
 	usbtv->vdev.device_caps = V4L2_CAP_VIDEO_CAPTURE | V4L2_CAP_READWRITE |
 				  V4L2_CAP_STREAMING;
 	video_set_drvdata(&usbtv->vdev, usbtv);
-	ret = video_register_device(&usbtv->vdev, VFL_TYPE_VIDEO, -1);
+	ret = video_register_device(&usbtv->vdev, VFL_TYPE_GRABBER, -1);
 	if (ret < 0) {
 		dev_warn(usbtv->dev, "Could not register video device\n");
 		goto vdev_fail;
@@ -953,6 +954,7 @@ vdev_fail:
 v4l2_fail:
 ctrl_fail:
 	v4l2_ctrl_handler_free(&usbtv->ctrl);
+	vb2_queue_release(&usbtv->vb2q);
 
 	return ret;
 }
@@ -963,7 +965,7 @@ void usbtv_video_free(struct usbtv *usbtv)
 	mutex_lock(&usbtv->v4l2_lock);
 
 	usbtv_stop(usbtv);
-	vb2_video_unregister_device(&usbtv->vdev);
+	video_unregister_device(&usbtv->vdev);
 	v4l2_device_disconnect(&usbtv->v4l2_dev);
 
 	mutex_unlock(&usbtv->v4l2_lock);

@@ -30,7 +30,8 @@
 #include <linux/of_address.h>
 #include <linux/of_irq.h>
 #include <linux/of_platform.h>
-#include <linux/gpio/consumer.h>
+#include <linux/gpio.h>
+#include <linux/of_gpio.h>
 #include <linux/clk.h>
 
 #include <asm/io.h>
@@ -38,6 +39,10 @@
 #include <asm/delay.h>
 #include <asm/fs_pd.h>
 #include <asm/udbg.h>
+
+#if defined(CONFIG_SERIAL_CPM_CONSOLE) && defined(CONFIG_MAGIC_SYSRQ)
+#define SUPPORT_SYSRQ
+#endif
 
 #include <linux/serial_core.h>
 #include <linux/kernel.h>
@@ -87,11 +92,11 @@ static void cpm_uart_set_mctrl(struct uart_port *port, unsigned int mctrl)
 	struct uart_cpm_port *pinfo =
 		container_of(port, struct uart_cpm_port, port);
 
-	if (pinfo->gpios[GPIO_RTS])
-		gpiod_set_value(pinfo->gpios[GPIO_RTS], !(mctrl & TIOCM_RTS));
+	if (pinfo->gpios[GPIO_RTS] >= 0)
+		gpio_set_value(pinfo->gpios[GPIO_RTS], !(mctrl & TIOCM_RTS));
 
-	if (pinfo->gpios[GPIO_DTR])
-		gpiod_set_value(pinfo->gpios[GPIO_DTR], !(mctrl & TIOCM_DTR));
+	if (pinfo->gpios[GPIO_DTR] >= 0)
+		gpio_set_value(pinfo->gpios[GPIO_DTR], !(mctrl & TIOCM_DTR));
 }
 
 static unsigned int cpm_uart_get_mctrl(struct uart_port *port)
@@ -100,23 +105,23 @@ static unsigned int cpm_uart_get_mctrl(struct uart_port *port)
 		container_of(port, struct uart_cpm_port, port);
 	unsigned int mctrl = TIOCM_CTS | TIOCM_DSR | TIOCM_CAR;
 
-	if (pinfo->gpios[GPIO_CTS]) {
-		if (gpiod_get_value(pinfo->gpios[GPIO_CTS]))
+	if (pinfo->gpios[GPIO_CTS] >= 0) {
+		if (gpio_get_value(pinfo->gpios[GPIO_CTS]))
 			mctrl &= ~TIOCM_CTS;
 	}
 
-	if (pinfo->gpios[GPIO_DSR]) {
-		if (gpiod_get_value(pinfo->gpios[GPIO_DSR]))
+	if (pinfo->gpios[GPIO_DSR] >= 0) {
+		if (gpio_get_value(pinfo->gpios[GPIO_DSR]))
 			mctrl &= ~TIOCM_DSR;
 	}
 
-	if (pinfo->gpios[GPIO_DCD]) {
-		if (gpiod_get_value(pinfo->gpios[GPIO_DCD]))
+	if (pinfo->gpios[GPIO_DCD] >= 0) {
+		if (gpio_get_value(pinfo->gpios[GPIO_DCD]))
 			mctrl &= ~TIOCM_CAR;
 	}
 
-	if (pinfo->gpios[GPIO_RI]) {
-		if (!gpiod_get_value(pinfo->gpios[GPIO_RI]))
+	if (pinfo->gpios[GPIO_RI] >= 0) {
+		if (!gpio_get_value(pinfo->gpios[GPIO_RI]))
 			mctrl |= TIOCM_RNG;
 	}
 
@@ -342,7 +347,9 @@ static void cpm_uart_int_rx(struct uart_port *port)
 		/* ASSUMPTION: it contains nothing valid */
 		i = 0;
 	}
+#ifdef SUPPORT_SYSRQ
 	port->sysrq = 0;
+#endif
 	goto error_return;
 }
 
@@ -1138,7 +1145,6 @@ static int cpm_uart_init_port(struct device_node *np,
 {
 	const u32 *data;
 	void __iomem *mem, *pram;
-	struct device *dev = pinfo->port.dev;
 	int len;
 	int ret;
 	int i;
@@ -1198,8 +1204,7 @@ static int cpm_uart_init_port(struct device_node *np,
 	pinfo->port.uartclk = ppc_proc_freq;
 	pinfo->port.mapbase = (unsigned long)mem;
 	pinfo->port.type = PORT_CPM;
-	pinfo->port.ops = &cpm_uart_pops;
-	pinfo->port.has_sysrq = IS_ENABLED(CONFIG_SERIAL_CPM_CONSOLE);
+	pinfo->port.ops = &cpm_uart_pops,
 	pinfo->port.iotype = UPIO_MEM;
 	pinfo->port.fifosize = pinfo->tx_nrfifos * pinfo->tx_fifosize;
 	spin_lock_init(&pinfo->port.lock);
@@ -1211,28 +1216,29 @@ static int cpm_uart_init_port(struct device_node *np,
 	}
 
 	for (i = 0; i < NUM_GPIOS; i++) {
-		struct gpio_desc *gpiod;
+		int gpio;
 
-		pinfo->gpios[i] = NULL;
+		pinfo->gpios[i] = -1;
 
-		gpiod = devm_gpiod_get_index_optional(dev, NULL, i, GPIOD_ASIS);
+		gpio = of_get_gpio(np, i);
 
-		if (IS_ERR(gpiod)) {
-			ret = PTR_ERR(gpiod);
-			goto out_irq;
-		}
-
-		if (gpiod) {
+		if (gpio_is_valid(gpio)) {
+			ret = gpio_request(gpio, "cpm_uart");
+			if (ret) {
+				pr_err("can't request gpio #%d: %d\n", i, ret);
+				continue;
+			}
 			if (i == GPIO_RTS || i == GPIO_DTR)
-				ret = gpiod_direction_output(gpiod, 0);
+				ret = gpio_direction_output(gpio, 0);
 			else
-				ret = gpiod_direction_input(gpiod);
+				ret = gpio_direction_input(gpio);
 			if (ret) {
 				pr_err("can't set direction for gpio #%d: %d\n",
 					i, ret);
+				gpio_free(gpio);
 				continue;
 			}
-			pinfo->gpios[i] = gpiod;
+			pinfo->gpios[i] = gpio;
 		}
 	}
 
@@ -1242,8 +1248,6 @@ static int cpm_uart_init_port(struct device_node *np,
 
 	return cpm_uart_request_port(&pinfo->port);
 
-out_irq:
-	irq_dispose_mapping(pinfo->port.irq);
 out_pram:
 	cpm_uart_unmap_pram(pinfo, pram);
 out_mem:
@@ -1374,7 +1378,6 @@ static struct console cpm_scc_uart_console = {
 
 static int __init cpm_uart_console_init(void)
 {
-	cpm_muram_init();
 	register_console(&cpm_scc_uart_console);
 	return 0;
 }

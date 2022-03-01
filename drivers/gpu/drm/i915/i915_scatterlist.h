@@ -27,17 +27,13 @@ static __always_inline struct sgt_iter {
 } __sgt_iter(struct scatterlist *sgl, bool dma) {
 	struct sgt_iter s = { .sgp = sgl };
 
-	if (dma && s.sgp && sg_dma_len(s.sgp) == 0) {
-		s.sgp = NULL;
-	} else if (s.sgp) {
+	if (s.sgp) {
 		s.max = s.curr = s.sgp->offset;
-		if (dma) {
+		s.max += s.sgp->length;
+		if (dma)
 			s.dma = sg_dma_address(s.sgp);
-			s.max += sg_dma_len(s.sgp);
-		} else {
+		else
 			s.pfn = page_to_pfn(sg_page(s.sgp));
-			s.max += s.sgp->length;
-		}
 	}
 
 	return s;
@@ -46,11 +42,6 @@ static __always_inline struct sgt_iter {
 static inline int __sg_page_count(const struct scatterlist *sg)
 {
 	return sg->length >> PAGE_SHIFT;
-}
-
-static inline int __sg_dma_page_count(const struct scatterlist *sg)
-{
-	return sg_dma_len(sg) >> PAGE_SHIFT;
 }
 
 static inline struct scatterlist *____sg_next(struct scatterlist *sg)
@@ -76,15 +67,15 @@ static inline struct scatterlist *__sg_next(struct scatterlist *sg)
 }
 
 /**
- * __for_each_sgt_daddr - iterate over the device addresses of the given sg_table
- * @__dp:	Device address (output)
+ * __for_each_sgt_dma - iterate over the DMA addresses of the given sg_table
+ * @__dmap:	DMA address (output)
  * @__iter:	'struct sgt_iter' (iterator state, internal)
  * @__sgt:	sg_table to iterate over (input)
  * @__step:	step size
  */
-#define __for_each_sgt_daddr(__dp, __iter, __sgt, __step)		\
+#define __for_each_sgt_dma(__dmap, __iter, __sgt, __step)		\
 	for ((__iter) = __sgt_iter((__sgt)->sgl, true);			\
-	     ((__dp) = (__iter).dma + (__iter).curr), (__iter).sgp;	\
+	     ((__dmap) = (__iter).dma + (__iter).curr);			\
 	     (((__iter).curr += (__step)) >= (__iter).max) ?		\
 	     (__iter) = __sgt_iter(__sg_next((__iter).sgp), true), 0 : 0)
 
@@ -121,7 +112,7 @@ static inline unsigned int i915_sg_segment_size(void)
 	unsigned int size = swiotlb_max_segment();
 
 	if (size == 0)
-		size = UINT_MAX;
+		return SCATTERLIST_MAX_SEGMENT;
 
 	size = rounddown(size, PAGE_SIZE);
 	/* swiotlb_max_segment_size can return 1 byte when it means one page. */

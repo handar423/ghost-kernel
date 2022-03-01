@@ -10,8 +10,9 @@
 #ifdef __KERNEL__
 
 #ifndef __powerpc64__
-#include <linux/pgtable.h>
+#include <asm/pgtable.h>
 #endif
+#include <asm/pgalloc.h>
 #ifndef __powerpc64__
 #include <asm/page.h>
 #include <asm/mmu.h>
@@ -39,6 +40,9 @@ extern void tlb_flush(struct mmu_gather *tlb);
 
 /* Get the generic bits... */
 #include <asm-generic/tlb.h>
+
+extern void flush_hash_entry(struct mm_struct *mm, pte_t *ptep,
+			     unsigned long address);
 
 static inline void __tlb_remove_tlb_entry(struct mmu_gather *tlb, pte_t *ptep,
 					  unsigned long address)

@@ -53,12 +53,14 @@ struct btrfs_workqueue {
 	struct __btrfs_workqueue *high;
 };
 
-struct btrfs_fs_info * __pure btrfs_workqueue_owner(const struct __btrfs_workqueue *wq)
+struct btrfs_fs_info *
+btrfs_workqueue_owner(const struct __btrfs_workqueue *wq)
 {
 	return wq->fs_info;
 }
 
-struct btrfs_fs_info * __pure btrfs_work_owner(const struct btrfs_work *work)
+struct btrfs_fs_info *
+btrfs_work_owner(const struct btrfs_work *work)
 {
 	return work->wq->fs_info;
 }
@@ -224,6 +226,7 @@ static void run_ordered_work(struct __btrfs_workqueue *wq,
 	struct btrfs_work *work;
 	spinlock_t *lock = &wq->list_lock;
 	unsigned long flags;
+	void *wtag;
 	bool free_self = false;
 
 	while (1) {
@@ -234,6 +237,13 @@ static void run_ordered_work(struct __btrfs_workqueue *wq,
 				  ordered_list);
 		if (!test_bit(WORK_DONE_BIT, &work->flags))
 			break;
+		/*
+		 * Orders all subsequent loads after reading WORK_DONE_BIT,
+		 * paired with the smp_mb__before_atomic in btrfs_work_helper
+		 * this guarantees that the ordered function will see all
+		 * updates from ordinary work function.
+		 */
+		smp_rmb();
 
 		/*
 		 * we are going to call the ordered done function, but
@@ -278,19 +288,21 @@ static void run_ordered_work(struct __btrfs_workqueue *wq,
 		} else {
 			/*
 			 * We don't want to call the ordered free functions with
-			 * the lock held.
+			 * the lock held though. Save the work as tag for the
+			 * trace event, because the callback could free the
+			 * structure.
 			 */
+			wtag = work;
 			work->ordered_free(work);
-			/* NB: work must not be dereferenced past this point. */
-			trace_btrfs_all_work_done(wq->fs_info, work);
+			trace_btrfs_all_work_done(wq->fs_info, wtag);
 		}
 	}
 	spin_unlock_irqrestore(lock, flags);
 
 	if (free_self) {
+		wtag = self;
 		self->ordered_free(self);
-		/* NB: self must not be dereferenced past this point. */
-		trace_btrfs_all_work_done(wq->fs_info, self);
+		trace_btrfs_all_work_done(wq->fs_info, wtag);
 	}
 }
 
@@ -299,6 +311,7 @@ static void btrfs_work_helper(struct work_struct *normal_work)
 	struct btrfs_work *work = container_of(normal_work, struct btrfs_work,
 					       normal_work);
 	struct __btrfs_workqueue *wq;
+	void *wtag;
 	int need_order = 0;
 
 	/*
@@ -312,17 +325,25 @@ static void btrfs_work_helper(struct work_struct *normal_work)
 	if (work->ordered_func)
 		need_order = 1;
 	wq = work->wq;
+	/* Safe for tracepoints in case work gets freed by the callback */
+	wtag = work;
 
 	trace_btrfs_work_sched(work);
 	thresh_exec_hook(wq);
 	work->func(work);
 	if (need_order) {
+		/*
+		 * Ensures all memory accesses done in the work function are
+		 * ordered before setting the WORK_DONE_BIT. Ensuring the thread
+		 * which is going to executed the ordered work sees them.
+		 * Pairs with the smp_rmb in run_ordered_work.
+		 */
+		smp_mb__before_atomic();
 		set_bit(WORK_DONE_BIT, &work->flags);
 		run_ordered_work(wq, work);
-	} else {
-		/* NB: work must not be dereferenced past this point. */
-		trace_btrfs_all_work_done(wq->fs_info, work);
 	}
+	if (!need_order)
+		trace_btrfs_all_work_done(wq->fs_info, wtag);
 }
 
 void btrfs_init_work(struct btrfs_work *work, btrfs_func_t func,

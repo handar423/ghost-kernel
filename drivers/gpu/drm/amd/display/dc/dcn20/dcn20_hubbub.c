@@ -153,8 +153,6 @@ bool hubbub2_dcc_support_pixel_format(
 	case SURFACE_PIXEL_FORMAT_GRPH_BGR101111_FIX:
 	case SURFACE_PIXEL_FORMAT_GRPH_RGB111110_FLOAT:
 	case SURFACE_PIXEL_FORMAT_GRPH_BGR101111_FLOAT:
-	case SURFACE_PIXEL_FORMAT_GRPH_RGBE:
-	case SURFACE_PIXEL_FORMAT_GRPH_RGBE_ALPHA:
 		*bytes_per_element = 4;
 		return true;
 	case SURFACE_PIXEL_FORMAT_GRPH_ARGB16161616:
@@ -188,13 +186,14 @@ static void hubbub2_get_blk256_size(unsigned int *blk256_width, unsigned int *bl
 }
 
 static void hubbub2_det_request_size(
-		unsigned int detile_buf_size,
 		unsigned int height,
 		unsigned int width,
 		unsigned int bpe,
 		bool *req128_horz_wc,
 		bool *req128_vert_wc)
 {
+	unsigned int detile_buf_size = 164 * 1024;  /* 164KB for DCN1.0 */
+
 	unsigned int blk256_height = 0;
 	unsigned int blk256_width = 0;
 	unsigned int swath_bytes_horz_wc, swath_bytes_vert_wc;
@@ -237,8 +236,7 @@ bool hubbub2_get_dcc_compression_cap(struct hubbub *hubbub,
 			&segment_order_horz, &segment_order_vert))
 		return false;
 
-	hubbub2_det_request_size(TO_DCN20_HUBBUB(hubbub)->detile_buf_size,
-			input->surface_size.height,  input->surface_size.width,
+	hubbub2_det_request_size(input->surface_size.height,  input->surface_size.width,
 			bpe, &req128_horz_wc, &req128_vert_wc);
 
 	if (!req128_horz_wc && !req128_vert_wc) {
@@ -295,9 +293,6 @@ bool hubbub2_get_dcc_compression_cap(struct hubbub *hubbub,
 		output->grph.rgb.max_compressed_blk_size = 64;
 		output->grph.rgb.independent_64b_blks = true;
 		break;
-	default:
-		ASSERT(false);
-		break;
 	}
 	output->capable = true;
 	output->const_color_support = true;
@@ -340,9 +335,6 @@ static enum dcn_hubbub_page_table_block_size page_table_block_size_to_hw(unsigne
 		break;
 	case 65536:
 		block_size = DCN_PAGE_TABLE_BLOCK_SIZE_64KB;
-		break;
-	case 32768:
-		block_size = DCN_PAGE_TABLE_BLOCK_SIZE_32KB;
 		break;
 	default:
 		ASSERT(false);
@@ -567,23 +559,19 @@ void hubbub2_get_dchub_ref_freq(struct hubbub *hubbub,
 	}
 }
 
-static bool hubbub2_program_watermarks(
+static void hubbub2_program_watermarks(
 		struct hubbub *hubbub,
 		struct dcn_watermark_set *watermarks,
 		unsigned int refclk_mhz,
 		bool safe_to_lower)
 {
 	struct dcn20_hubbub *hubbub1 = TO_DCN20_HUBBUB(hubbub);
-	bool wm_pending = false;
 	/*
 	 * Need to clamp to max of the register values (i.e. no wrap)
 	 * for dcn1, all wm registers are 21-bit wide
 	 */
-	if (hubbub1_program_urgent_watermarks(hubbub, watermarks, refclk_mhz, safe_to_lower))
-		wm_pending = true;
-
-	if (hubbub1_program_stutter_watermarks(hubbub, watermarks, refclk_mhz, safe_to_lower))
-		wm_pending = true;
+	hubbub1_program_urgent_watermarks(hubbub, watermarks, refclk_mhz, safe_to_lower);
+	hubbub1_program_stutter_watermarks(hubbub, watermarks, refclk_mhz, safe_to_lower);
 
 	/*
 	 * There's a special case when going from p-state support to p-state unsupported
@@ -600,8 +588,7 @@ static bool hubbub2_program_watermarks(
 			DCHUBBUB_ARB_SAT_LEVEL, 60 * refclk_mhz);
 	REG_UPDATE(DCHUBBUB_ARB_DF_REQ_OUTSTAND, DCHUBBUB_ARB_MIN_REQ_OUTSTAND, 180);
 
-	hubbub->funcs->allow_self_refresh_control(hubbub, !hubbub->ctx->dc->debug.disable_stutter);
-	return wm_pending;
+	hubbub1_allow_self_refresh_control(hubbub, !hubbub->ctx->dc->debug.disable_stutter);
 }
 
 static const struct hubbub_funcs hubbub2_funcs = {
@@ -613,9 +600,7 @@ static const struct hubbub_funcs hubbub2_funcs = {
 	.get_dcc_compression_cap = hubbub2_get_dcc_compression_cap,
 	.wm_read_state = hubbub2_wm_read_state,
 	.get_dchub_ref_freq = hubbub2_get_dchub_ref_freq,
-	.program_watermarks = hubbub2_program_watermarks,
-	.is_allow_self_refresh_enabled = hubbub1_is_allow_self_refresh_enabled,
-	.allow_self_refresh_control = hubbub1_allow_self_refresh_control,
+	.program_watermarks = hubbub2_program_watermarks
 };
 
 void hubbub2_construct(struct dcn20_hubbub *hubbub,
@@ -633,5 +618,4 @@ void hubbub2_construct(struct dcn20_hubbub *hubbub,
 	hubbub->masks = hubbub_mask;
 
 	hubbub->debug_test_index_pstate = 0xB;
-	hubbub->detile_buf_size = 164 * 1024; /* 164KB for DCN2.0 */
 }

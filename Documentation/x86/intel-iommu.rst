@@ -95,10 +95,9 @@ and any RMRR's processed::
 When DMAR is enabled for use, you will notice..
 
 PCI-DMA: Using DMAR IOMMU
--------------------------
 
 Fault reporting
-^^^^^^^^^^^^^^^
+---------------
 
 ::
 

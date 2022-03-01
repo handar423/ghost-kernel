@@ -59,6 +59,7 @@
 struct uniphier_sd_priv {
 	struct tmio_mmc_data tmio_data;
 	struct pinctrl *pinctrl;
+	struct pinctrl_state *pinstate_default;
 	struct pinctrl_state *pinstate_uhs;
 	struct clk *clk;
 	struct reset_control *rst;
@@ -409,9 +410,8 @@ static void uniphier_sd_clk_disable(struct tmio_mmc_host *host)
 	clk_disable_unprepare(priv->clk);
 }
 
-static void uniphier_sd_hw_reset(struct mmc_host *mmc)
+static void uniphier_sd_hw_reset(struct tmio_mmc_host *host)
 {
-	struct tmio_mmc_host *host = mmc_priv(mmc);
 	struct uniphier_sd_priv *priv = uniphier_sd_priv(host);
 
 	reset_control_assert(priv->rst_hw);
@@ -500,12 +500,13 @@ static int uniphier_sd_start_signal_voltage_switch(struct mmc_host *mmc,
 {
 	struct tmio_mmc_host *host = mmc_priv(mmc);
 	struct uniphier_sd_priv *priv = uniphier_sd_priv(host);
-	struct pinctrl_state *pinstate = NULL;
+	struct pinctrl_state *pinstate;
 	u32 val, tmp;
 
 	switch (ios->signal_voltage) {
 	case MMC_SIGNAL_VOLTAGE_330:
 		val = UNIPHIER_SD_VOLT_330;
+		pinstate = priv->pinstate_default;
 		break;
 	case MMC_SIGNAL_VOLTAGE_180:
 		val = UNIPHIER_SD_VOLT_180;
@@ -520,10 +521,7 @@ static int uniphier_sd_start_signal_voltage_switch(struct mmc_host *mmc,
 	tmp |= FIELD_PREP(UNIPHIER_SD_VOLT_MASK, val);
 	writel(tmp, host->ctl + UNIPHIER_SD_VOLT);
 
-	if (pinstate)
-		pinctrl_select_state(priv->pinctrl, pinstate);
-	else
-		pinctrl_select_default_state(mmc_dev(mmc));
+	pinctrl_select_state(priv->pinctrl, pinstate);
 
 	return 0;
 }
@@ -534,6 +532,11 @@ static int uniphier_sd_uhs_init(struct tmio_mmc_host *host,
 	priv->pinctrl = devm_pinctrl_get(mmc_dev(host->mmc));
 	if (IS_ERR(priv->pinctrl))
 		return PTR_ERR(priv->pinctrl);
+
+	priv->pinstate_default = pinctrl_lookup_state(priv->pinctrl,
+						      PINCTRL_STATE_DEFAULT);
+	if (IS_ERR(priv->pinstate_default))
+		return PTR_ERR(priv->pinstate_default);
 
 	priv->pinstate_uhs = pinctrl_lookup_state(priv->pinctrl, "uhs");
 	if (IS_ERR(priv->pinstate_uhs))
@@ -586,7 +589,6 @@ static int uniphier_sd_probe(struct platform_device *pdev)
 
 	tmio_data = &priv->tmio_data;
 	tmio_data->flags |= TMIO_MMC_32BIT_DATA_PORT;
-	tmio_data->flags |= TMIO_MMC_USE_BUSY_TIMEOUT;
 
 	host = tmio_mmc_host_alloc(pdev, tmio_data);
 	if (IS_ERR(host))
@@ -599,7 +601,7 @@ static int uniphier_sd_probe(struct platform_device *pdev)
 			ret = PTR_ERR(priv->rst_hw);
 			goto free_host;
 		}
-		host->ops.hw_reset = uniphier_sd_hw_reset;
+		host->hw_reset = uniphier_sd_hw_reset;
 	}
 
 	if (host->mmc->caps & MMC_CAP_UHS) {
@@ -637,7 +639,7 @@ static int uniphier_sd_probe(struct platform_device *pdev)
 
 	ret = tmio_mmc_host_probe(host);
 	if (ret)
-		goto free_host;
+		goto disable_clk;
 
 	ret = devm_request_irq(dev, irq, tmio_mmc_irq, IRQF_SHARED,
 			       dev_name(dev), host);
@@ -648,6 +650,8 @@ static int uniphier_sd_probe(struct platform_device *pdev)
 
 remove_host:
 	tmio_mmc_host_remove(host);
+disable_clk:
+	uniphier_sd_clk_disable(host);
 free_host:
 	tmio_mmc_host_free(host);
 
@@ -660,6 +664,7 @@ static int uniphier_sd_remove(struct platform_device *pdev)
 
 	tmio_mmc_host_remove(host);
 	uniphier_sd_clk_disable(host);
+	tmio_mmc_host_free(host);
 
 	return 0;
 }
@@ -686,7 +691,6 @@ static struct platform_driver uniphier_sd_driver = {
 	.remove = uniphier_sd_remove,
 	.driver = {
 		.name = "uniphier-sd",
-		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 		.of_match_table = uniphier_sd_match,
 	},
 };

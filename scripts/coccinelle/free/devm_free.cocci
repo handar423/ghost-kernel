@@ -52,6 +52,8 @@ expression x;
 |
  x = devm_ioremap(...)
 |
+ x = devm_ioremap_nocache(...)
+|
  x = devm_ioport_map(...)
 )
 
@@ -83,13 +85,17 @@ position p;
 |
  x = ioremap(...)
 |
+ x = ioremap_nocache(...)
+|
  x = ioport_map(...)
 )
 ...
 (
  kfree@p(x)
 |
- kfree_sensitive@p(x)
+ kzfree@p(x)
+|
+ __krealloc@p(x, ...)
 |
  krealloc@p(x, ...)
 |
@@ -112,7 +118,9 @@ position p != safe.p;
 (
 * kfree@p(x)
 |
-* kfree_sensitive@p(x)
+* kzfree@p(x)
+|
+* __krealloc@p(x, ...)
 |
 * krealloc@p(x, ...)
 |

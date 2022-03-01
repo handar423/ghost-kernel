@@ -225,7 +225,7 @@ static void i2c_acpi_register_device(struct i2c_adapter *adapter,
 	adev->power.flags.ignore_parent = true;
 	acpi_device_set_enumerated(adev);
 
-	if (IS_ERR(i2c_new_client_device(adapter, info))) {
+	if (!i2c_new_device(adapter, info)) {
 		adev->power.flags.ignore_parent = false;
 		dev_err(&adapter->dev,
 			"failed to add I2C device %s from ACPI\n",
@@ -286,6 +286,16 @@ void i2c_acpi_register_devices(struct i2c_adapter *adap)
 	acpi_walk_dep_device_list(handle);
 }
 
+const struct acpi_device_id *
+i2c_acpi_match_device(const struct acpi_device_id *matches,
+		      struct i2c_client *client)
+{
+	if (!(client && matches))
+		return NULL;
+
+	return acpi_match_device(matches, &client->dev);
+}
+
 static const struct acpi_device_id i2c_acpi_force_400khz_device_ids[] = {
 	/*
 	 * These Silead touchscreen controllers only work at 400KHz, for
@@ -318,7 +328,7 @@ static acpi_status i2c_acpi_lookup_speed(acpi_handle handle, u32 level,
 		lookup->min_speed = lookup->speed;
 
 	if (acpi_match_device_ids(adev, i2c_acpi_force_400khz_device_ids) == 0)
-		lookup->force_speed = I2C_MAX_FAST_MODE_FREQ;
+		lookup->force_speed = 400000;
 
 	return AE_OK;
 }
@@ -426,6 +436,7 @@ static int i2c_acpi_notify(struct notifier_block *nb, unsigned long value,
 			break;
 
 		i2c_acpi_register_device(adapter, adev, &info);
+		put_device(&adapter->dev);
 		break;
 	case ACPI_RECONFIG_DEVICE_REMOVE:
 		if (!acpi_device_enumerated(adev))
@@ -459,8 +470,7 @@ struct notifier_block i2c_acpi_notifier = {
  * resources, in that case this function can be used to create an i2c-client
  * for other I2cSerialBus resources in the Current Resource Settings table.
  *
- * Also see i2c_new_client_device, which this function calls to create the
- * i2c-client.
+ * Also see i2c_new_device, which this function calls to create the i2c-client.
  *
  * Returns a pointer to the new i2c-client, or error pointer in case of failure.
  * Specifically, -EPROBE_DEFER is returned if the adapter is not found.
@@ -468,11 +478,16 @@ struct notifier_block i2c_acpi_notifier = {
 struct i2c_client *i2c_acpi_new_device(struct device *dev, int index,
 				       struct i2c_board_info *info)
 {
-	struct acpi_device *adev = ACPI_COMPANION(dev);
 	struct i2c_acpi_lookup lookup;
 	struct i2c_adapter *adapter;
+	struct i2c_client *client;
+	struct acpi_device *adev;
 	LIST_HEAD(resource_list);
 	int ret;
+
+	adev = ACPI_COMPANION(dev);
+	if (!adev)
+		return ERR_PTR(-EINVAL);
 
 	memset(&lookup, 0, sizeof(lookup));
 	lookup.info = info;
@@ -493,7 +508,11 @@ struct i2c_client *i2c_acpi_new_device(struct device *dev, int index,
 	if (!adapter)
 		return ERR_PTR(-EPROBE_DEFER);
 
-	return i2c_new_client_device(adapter, info);
+	client = i2c_new_device(adapter, info);
+	if (!client)
+		return ERR_PTR(-ENODEV);
+
+	return client;
 }
 EXPORT_SYMBOL_GPL(i2c_acpi_new_device);
 

@@ -7,6 +7,8 @@
  * Author: Wu Zhangjin <wuzhangjin@gmail.com>
  */
 
+#define DISABLE_BRANCH_PROFILING
+
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
@@ -71,10 +73,6 @@ void error(char *x)
 
 #ifdef CONFIG_KERNEL_XZ
 #include "../../../../lib/decompress_unxz.c"
-#endif
-
-#ifdef CONFIG_KERNEL_ZSTD
-#include "../../../../lib/decompress_unzstd.c"
 #endif
 
 const unsigned long __stack_chk_guard = 0x000a0dff;

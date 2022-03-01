@@ -11,7 +11,6 @@
 #include <linux/virtio.h>
 #include <linux/virtio_rng.h>
 #include <linux/module.h>
-#include <linux/slab.h>
 
 static DEFINE_IDA(rng_index_ida);
 
@@ -195,7 +194,7 @@ static int virtrng_restore(struct virtio_device *vdev)
 }
 #endif
 
-static const struct virtio_device_id id_table[] = {
+static struct virtio_device_id id_table[] = {
 	{ VIRTIO_ID_RNG, VIRTIO_DEV_ANY_ID },
 	{ 0 },
 };

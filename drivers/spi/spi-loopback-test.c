@@ -298,18 +298,12 @@ static struct spi_test spi_tests[] = {
 			{
 				.tx_buf = TX(0),
 				.rx_buf = RX(0),
-				.delay = {
-					.value = 1000,
-					.unit = SPI_DELAY_UNIT_USECS,
-				},
+				.delay_usecs = 1000,
 			},
 			{
 				.tx_buf = TX(0),
 				.rx_buf = RX(0),
-				.delay = {
-					.value = 1000,
-					.unit = SPI_DELAY_UNIT_USECS,
-				},
+				.delay_usecs = 1000,
 			},
 		},
 	},
@@ -543,7 +537,7 @@ static int spi_test_check_elapsed_time(struct spi_device *spi,
 		unsigned long long nbits = (unsigned long long)BITS_PER_BYTE *
 					   xfer->len;
 
-		delay_usecs += xfer->delay.value;
+		delay_usecs += xfer->delay_usecs;
 		if (!xfer->speed_hz)
 			continue;
 		estimated_time += div_u64(nbits * NSEC_PER_SEC, xfer->speed_hz);
@@ -874,7 +868,7 @@ static int spi_test_run_iter(struct spi_device *spi,
 		test.transfers[i].len = len;
 		if (test.transfers[i].tx_buf)
 			test.transfers[i].tx_buf += tx_off;
-		if (test.transfers[i].tx_buf)
+		if (test.transfers[i].rx_buf)
 			test.transfers[i].rx_buf += rx_off;
 	}
 
@@ -885,10 +879,10 @@ static int spi_test_run_iter(struct spi_device *spi,
 /**
  * spi_test_execute_msg - default implementation to run a test
  *
- * @spi: @spi_device on which to run the @spi_message
- * @test: the test to execute, which already contains @msg
- * @tx:   the tx buffer allocated for the test sequence
- * @rx:   the rx buffer allocated for the test sequence
+ * spi: @spi_device on which to run the @spi_message
+ * test: the test to execute, which already contains @msg
+ * tx:   the tx buffer allocated for the test sequence
+ * rx:   the rx buffer allocated for the test sequence
  *
  * Returns: error code of spi_sync as well as basic error checking
  */
@@ -957,10 +951,10 @@ EXPORT_SYMBOL_GPL(spi_test_execute_msg);
  *                     including all the relevant iterations on:
  *                     length and buffer alignment
  *
- * @spi:  the spi_device to send the messages to
- * @test: the test which we need to execute
- * @tx:   the tx buffer allocated for the test sequence
- * @rx:   the rx buffer allocated for the test sequence
+ * spi:  the spi_device to send the messages to
+ * test: the test which we need to execute
+ * tx:   the tx buffer allocated for the test sequence
+ * rx:   the rx buffer allocated for the test sequence
  *
  * Returns: status code of spi_sync or other failures
  */

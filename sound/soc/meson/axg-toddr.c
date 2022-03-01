@@ -176,12 +176,7 @@ static const struct snd_soc_component_driver axg_toddr_component_drv = {
 	.num_dapm_widgets	= ARRAY_SIZE(axg_toddr_dapm_widgets),
 	.dapm_routes		= axg_toddr_dapm_routes,
 	.num_dapm_routes	= ARRAY_SIZE(axg_toddr_dapm_routes),
-	.open			= axg_fifo_pcm_open,
-	.close			= axg_fifo_pcm_close,
-	.hw_params		= axg_fifo_pcm_hw_params,
-	.hw_free		= axg_fifo_pcm_hw_free,
-	.pointer		= axg_fifo_pcm_pointer,
-	.trigger		= axg_fifo_pcm_trigger,
+	.ops			= &axg_fifo_pcm_ops
 };
 
 static const struct axg_fifo_match_data axg_toddr_match_data = {
@@ -236,12 +231,7 @@ static const struct snd_soc_component_driver g12a_toddr_component_drv = {
 	.num_dapm_widgets	= ARRAY_SIZE(axg_toddr_dapm_widgets),
 	.dapm_routes		= axg_toddr_dapm_routes,
 	.num_dapm_routes	= ARRAY_SIZE(axg_toddr_dapm_routes),
-	.open			= axg_fifo_pcm_open,
-	.close			= axg_fifo_pcm_close,
-	.hw_params		= g12a_fifo_pcm_hw_params,
-	.hw_free		= axg_fifo_pcm_hw_free,
-	.pointer		= axg_fifo_pcm_pointer,
-	.trigger		= axg_fifo_pcm_trigger,
+	.ops			= &g12a_fifo_pcm_ops
 };
 
 static const struct axg_fifo_match_data g12a_toddr_match_data = {
@@ -306,12 +296,7 @@ static const struct snd_soc_component_driver sm1_toddr_component_drv = {
 	.num_dapm_widgets	= ARRAY_SIZE(sm1_toddr_dapm_widgets),
 	.dapm_routes		= sm1_toddr_dapm_routes,
 	.num_dapm_routes	= ARRAY_SIZE(sm1_toddr_dapm_routes),
-	.open			= axg_fifo_pcm_open,
-	.close			= axg_fifo_pcm_close,
-	.hw_params		= g12a_fifo_pcm_hw_params,
-	.hw_free		= axg_fifo_pcm_hw_free,
-	.pointer		= axg_fifo_pcm_pointer,
-	.trigger		= axg_fifo_pcm_trigger,
+	.ops			= &g12a_fifo_pcm_ops
 };
 
 static const struct axg_fifo_match_data sm1_toddr_match_data = {

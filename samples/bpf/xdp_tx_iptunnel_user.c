@@ -15,7 +15,7 @@
 #include <netinet/ether.h>
 #include <unistd.h>
 #include <time.h>
-#include <bpf/libbpf.h>
+#include "libbpf.h"
 #include <bpf/bpf.h>
 #include "bpf_util.h"
 #include "xdp_tx_iptunnel_common.h"
@@ -155,6 +155,7 @@ int main(int argc, char **argv)
 	struct bpf_prog_load_attr prog_load_attr = {
 		.prog_type	= BPF_PROG_TYPE_XDP,
 	};
+	struct rlimit r = {RLIM_INFINITY, RLIM_INFINITY};
 	int min_port = 0, max_port = 0, vip2tnl_map_fd;
 	const char *optstr = "i:a:p:s:d:m:T:P:FSNh";
 	unsigned char opt_flags[256] = {};
@@ -230,7 +231,7 @@ int main(int argc, char **argv)
 			xdp_flags |= XDP_FLAGS_SKB_MODE;
 			break;
 		case 'N':
-			/* default, set below */
+			xdp_flags |= XDP_FLAGS_DRV_MODE;
 			break;
 		case 'F':
 			xdp_flags &= ~XDP_FLAGS_UPDATE_IF_NOEXIST;
@@ -242,15 +243,17 @@ int main(int argc, char **argv)
 		opt_flags[opt] = 0;
 	}
 
-	if (!(xdp_flags & XDP_FLAGS_SKB_MODE))
-		xdp_flags |= XDP_FLAGS_DRV_MODE;
-
 	for (i = 0; i < strlen(optstr); i++) {
 		if (opt_flags[(unsigned int)optstr[i]]) {
 			fprintf(stderr, "Missing argument -%c\n", optstr[i]);
 			usage(argv[0]);
 			return 1;
 		}
+	}
+
+	if (setrlimit(RLIMIT_MEMLOCK, &r)) {
+		perror("setrlimit(RLIMIT_MEMLOCK, RLIM_INFINITY)");
+		return 1;
 	}
 
 	if (!ifindex) {
@@ -265,7 +268,7 @@ int main(int argc, char **argv)
 		return 1;
 
 	if (!prog_fd) {
-		printf("bpf_prog_load_xattr: %s\n", strerror(errno));
+		printf("load_bpf_file: %s\n", strerror(errno));
 		return 1;
 	}
 

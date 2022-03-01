@@ -13,6 +13,7 @@
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/slab.h>
+#include <linux/notifier.h>
 #include <linux/kobject.h>
 #include <linux/cpu.h>
 #include <crypto/pcrypt.h>
@@ -78,12 +79,14 @@ static void pcrypt_aead_enc(struct padata_priv *padata)
 {
 	struct pcrypt_request *preq = pcrypt_padata_request(padata);
 	struct aead_request *req = pcrypt_request_ctx(preq);
+	int ret;
 
-	padata->info = crypto_aead_encrypt(req);
+	ret = crypto_aead_encrypt(req);
 
-	if (padata->info == -EINPROGRESS)
+	if (ret == -EINPROGRESS)
 		return;
 
+	padata->info = ret;
 	padata_do_serial(padata);
 }
 
@@ -123,12 +126,14 @@ static void pcrypt_aead_dec(struct padata_priv *padata)
 {
 	struct pcrypt_request *preq = pcrypt_padata_request(padata);
 	struct aead_request *req = pcrypt_request_ctx(preq);
+	int ret;
 
-	padata->info = crypto_aead_decrypt(req);
+	ret = crypto_aead_decrypt(req);
 
-	if (padata->info == -EINPROGRESS)
+	if (ret == -EINPROGRESS)
 		return;
 
+	padata->info = ret;
 	padata_do_serial(padata);
 }
 
@@ -226,13 +231,22 @@ static int pcrypt_init_instance(struct crypto_instance *inst,
 }
 
 static int pcrypt_create_aead(struct crypto_template *tmpl, struct rtattr **tb,
-			      struct crypto_attr_type *algt)
+			      u32 type, u32 mask)
 {
 	struct pcrypt_instance_ctx *ctx;
+	struct crypto_attr_type *algt;
 	struct aead_instance *inst;
 	struct aead_alg *alg;
-	u32 mask = crypto_algt_inherited_mask(algt);
+	const char *name;
 	int err;
+
+	algt = crypto_get_attr_type(tb);
+	if (IS_ERR(algt))
+		return PTR_ERR(algt);
+
+	name = crypto_attr_alg_name(tb[1]);
+	if (IS_ERR(name))
+		return PTR_ERR(name);
 
 	inst = kzalloc(sizeof(*inst) + sizeof(*ctx), GFP_KERNEL);
 	if (!inst)
@@ -243,23 +257,24 @@ static int pcrypt_create_aead(struct crypto_template *tmpl, struct rtattr **tb,
 	ctx = aead_instance_ctx(inst);
 	ctx->psenc = padata_alloc_shell(pencrypt);
 	if (!ctx->psenc)
-		goto err_free_inst;
+		goto out_free_inst;
 
 	ctx->psdec = padata_alloc_shell(pdecrypt);
 	if (!ctx->psdec)
-		goto err_free_inst;
+		goto out_free_psenc;
 
-	err = crypto_grab_aead(&ctx->spawn, aead_crypto_instance(inst),
-			       crypto_attr_alg_name(tb[1]), 0, mask);
+	crypto_set_aead_spawn(&ctx->spawn, aead_crypto_instance(inst));
+
+	err = crypto_grab_aead(&ctx->spawn, name, 0, 0);
 	if (err)
-		goto err_free_inst;
+		goto out_free_psdec;
 
 	alg = crypto_spawn_aead_alg(&ctx->spawn);
 	err = pcrypt_init_instance(aead_crypto_instance(inst), &alg->base);
 	if (err)
-		goto err_free_inst;
+		goto out_drop_aead;
 
-	inst->alg.base.cra_flags |= CRYPTO_ALG_ASYNC;
+	inst->alg.base.cra_flags = CRYPTO_ALG_ASYNC;
 
 	inst->alg.ivsize = crypto_aead_alg_ivsize(alg);
 	inst->alg.maxauthsize = crypto_aead_alg_maxauthsize(alg);
@@ -277,11 +292,21 @@ static int pcrypt_create_aead(struct crypto_template *tmpl, struct rtattr **tb,
 	inst->free = pcrypt_free;
 
 	err = aead_register_instance(tmpl, inst);
-	if (err) {
-err_free_inst:
-		pcrypt_free(inst);
-	}
+	if (err)
+		goto out_drop_aead;
+
+out:
 	return err;
+
+out_drop_aead:
+	crypto_drop_aead(&ctx->spawn);
+out_free_psdec:
+	padata_free_shell(ctx->psdec);
+out_free_psenc:
+	padata_free_shell(ctx->psenc);
+out_free_inst:
+	kfree(inst);
+	goto out;
 }
 
 static int pcrypt_create(struct crypto_template *tmpl, struct rtattr **tb)
@@ -294,7 +319,7 @@ static int pcrypt_create(struct crypto_template *tmpl, struct rtattr **tb)
 
 	switch (algt->type & algt->mask & CRYPTO_ALG_TYPE_MASK) {
 	case CRYPTO_ALG_TYPE_AEAD:
-		return pcrypt_create_aead(tmpl, tb, algt);
+		return pcrypt_create_aead(tmpl, tb, algt->type, algt->mask);
 	}
 
 	return -EINVAL;
@@ -316,7 +341,7 @@ static int pcrypt_init_padata(struct padata_instance **pinst, const char *name)
 {
 	int ret = -ENOMEM;
 
-	*pinst = padata_alloc(name);
+	*pinst = padata_alloc_possible(name);
 	if (!*pinst)
 		return ret;
 
@@ -325,6 +350,12 @@ static int pcrypt_init_padata(struct padata_instance **pinst, const char *name)
 		padata_free(*pinst);
 
 	return ret;
+}
+
+static void pcrypt_fini_padata(struct padata_instance *pinst)
+{
+	padata_stop(pinst);
+	padata_free(pinst);
 }
 
 static struct crypto_template pcrypt_tmpl = {
@@ -349,10 +380,13 @@ static int __init pcrypt_init(void)
 	if (err)
 		goto err_deinit_pencrypt;
 
+	padata_start(pencrypt);
+	padata_start(pdecrypt);
+
 	return crypto_register_template(&pcrypt_tmpl);
 
 err_deinit_pencrypt:
-	padata_free(pencrypt);
+	pcrypt_fini_padata(pencrypt);
 err_unreg_kset:
 	kset_unregister(pcrypt_kset);
 err:
@@ -363,8 +397,8 @@ static void __exit pcrypt_exit(void)
 {
 	crypto_unregister_template(&pcrypt_tmpl);
 
-	padata_free(pencrypt);
-	padata_free(pdecrypt);
+	pcrypt_fini_padata(pencrypt);
+	pcrypt_fini_padata(pdecrypt);
 
 	kset_unregister(pcrypt_kset);
 }

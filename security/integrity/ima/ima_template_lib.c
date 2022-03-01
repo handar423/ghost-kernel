@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2013 Politecnico di Torino, Italy
- *                    TORSEC group -- https://security.polito.it
+ *                    TORSEC group -- http://security.polito.it
  *
  * Author: Roberto Sassu <roberto.sassu@polito.it>
  *
  * File: ima_template_lib.c
  *      Library of supported template fields.
  */
+
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include "ima_template_lib.h"
 
@@ -77,7 +79,7 @@ static void ima_show_template_data_ascii(struct seq_file *m,
 		/* skip ':' and '\0' */
 		buf_ptr += 2;
 		buflen -= buf_ptr - field_data->data;
-		fallthrough;
+		/* fall through */
 	case DATA_FMT_DIGEST:
 	case DATA_FMT_HEX:
 		if (!buflen)

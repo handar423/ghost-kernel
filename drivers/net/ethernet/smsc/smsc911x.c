@@ -1196,8 +1196,9 @@ smsc911x_rx_fastforward(struct smsc911x_data *pdata, unsigned int pktwords)
 			SMSC_WARN(pdata, hw, "Timed out waiting for "
 				  "RX FFWD to finish, RX_DP_CTRL: 0x%08X", val);
 	} else {
+		unsigned int temp;
 		while (pktwords--)
-			smsc911x_reg_read(pdata, RX_DATA_FIFO);
+			temp = smsc911x_reg_read(pdata, RX_DATA_FIFO);
 	}
 }
 
@@ -1942,6 +1943,15 @@ static int smsc911x_set_mac_address(struct net_device *dev, void *p)
 	return 0;
 }
 
+/* Standard ioctls for mii-tool */
+static int smsc911x_do_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
+{
+	if (!netif_running(dev) || !dev->phydev)
+		return -EINVAL;
+
+	return phy_mii_ioctl(dev->phydev, ifr, cmd);
+}
+
 static void smsc911x_ethtool_getdrvinfo(struct net_device *dev,
 					struct ethtool_drvinfo *info)
 {
@@ -2054,6 +2064,7 @@ static int smsc911x_eeprom_write_location(struct smsc911x_data *pdata,
 					  u8 address, u8 data)
 {
 	u32 op = E2P_CMD_EPC_CMD_ERASE_ | address;
+	u32 temp;
 	int ret;
 
 	SMSC_TRACE(pdata, drv, "address 0x%x, data 0x%x", address, data);
@@ -2064,7 +2075,7 @@ static int smsc911x_eeprom_write_location(struct smsc911x_data *pdata,
 		smsc911x_reg_write(pdata, E2P_DATA, (u32)data);
 
 		/* Workaround for hardware read-after-write restriction */
-		smsc911x_reg_read(pdata, BYTE_TEST);
+		temp = smsc911x_reg_read(pdata, BYTE_TEST);
 
 		ret = smsc911x_eeprom_send_cmd(pdata, op);
 	}
@@ -2140,7 +2151,7 @@ static const struct net_device_ops smsc911x_netdev_ops = {
 	.ndo_start_xmit		= smsc911x_hard_start_xmit,
 	.ndo_get_stats		= smsc911x_get_stats,
 	.ndo_set_rx_mode	= smsc911x_set_multicast_list,
-	.ndo_do_ioctl		= phy_do_ioctl_running,
+	.ndo_do_ioctl		= smsc911x_do_ioctl,
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_set_mac_address 	= smsc911x_set_mac_address,
 #ifdef CONFIG_NET_POLL_CONTROLLER
@@ -2443,7 +2454,7 @@ static int smsc911x_drv_probe(struct platform_device *pdev)
 
 	pdata = netdev_priv(dev);
 	dev->irq = irq;
-	pdata->ioaddr = ioremap(res->start, res_size);
+	pdata->ioaddr = ioremap_nocache(res->start, res_size);
 	if (!pdata->ioaddr) {
 		retval = -ENOMEM;
 		goto out_ioremap_fail;

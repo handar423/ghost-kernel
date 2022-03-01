@@ -23,6 +23,7 @@
 #include "ftmac100.h"
 
 #define DRV_NAME	"ftmac100"
+#define DRV_VERSION	"0.2"
 
 #define RX_QUEUE_ENTRIES	128	/* must be power of 2 */
 #define TX_QUEUE_ENTRIES	16	/* must be power of 2 */
@@ -808,6 +809,7 @@ static void ftmac100_get_drvinfo(struct net_device *netdev,
 				 struct ethtool_drvinfo *info)
 {
 	strlcpy(info->driver, DRV_NAME, sizeof(info->driver));
+	strlcpy(info->version, DRV_VERSION, sizeof(info->version));
 	strlcpy(info->bus_info, dev_name(&netdev->dev), sizeof(info->bus_info));
 }
 
@@ -1057,6 +1059,9 @@ static int ftmac100_probe(struct platform_device *pdev)
 	struct ftmac100 *priv;
 	int err;
 
+	if (!pdev)
+		return -ENODEV;
+
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!res)
 		return -ENXIO;
@@ -1179,6 +1184,7 @@ static struct platform_driver ftmac100_driver = {
  *****************************************************************************/
 static int __init ftmac100_init(void)
 {
+	pr_info("Loading version " DRV_VERSION " ...\n");
 	return platform_driver_register(&ftmac100_driver);
 }
 

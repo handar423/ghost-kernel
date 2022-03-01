@@ -41,6 +41,7 @@ properties:
   avdd-supply:
     description:
       Definition of the regulator used as analog supply
+    maxItems: 1
 
   clock-frequency:
     minimum: 20000
@@ -52,8 +53,6 @@ required:
   - sck-gpios
   - dout-gpios
   - avdd-supply
-
-additionalProperties: false
 
 examples:
   - |

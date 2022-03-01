@@ -154,9 +154,9 @@ architectures. These are the recommended replacements:
 
 	Use ktime_get() or ktime_get_ts64() instead.
 
-.. c:function:: void do_gettimeofday( struct timeval * )
-		void getnstimeofday( struct timespec * )
-		void getnstimeofday64( struct timespec64 * )
+.. c:function:: struct timeval do_gettimeofday( void )
+		struct timespec getnstimeofday( void )
+		struct timespec64 getnstimeofday64( void )
 		void ktime_get_real_ts( struct timespec * )
 
 	ktime_get_real_ts64() is a direct replacement, but consider using

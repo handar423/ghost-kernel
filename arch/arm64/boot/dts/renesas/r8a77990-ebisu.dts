@@ -182,7 +182,8 @@
 
 		gpios = <&gpio5 18 GPIO_ACTIVE_HIGH>;
 		gpios-states = <1>;
-		states = <3300000 1>, <1800000 0>;
+		states = <3300000 1
+			  1800000 0>;
 	};
 
 	vcc_sdhi1: regulator-vcc-sdhi1 {
@@ -205,7 +206,8 @@
 
 		gpios = <&gpio3 15 GPIO_ACTIVE_HIGH>;
 		gpios-states = <1>;
-		states = <3300000 1>, <1800000 0>;
+		states = <3300000 1
+			  1800000 0>;
 	};
 
 	vga {
@@ -360,6 +362,8 @@
 		adi,input-depth = <8>;
 		adi,input-colorspace = "rgb";
 		adi,input-clock = "1x";
+		adi,input-style = <1>;
+		adi,input-justification = "evenly";
 
 		ports {
 			#address-cells = <1>;
@@ -520,8 +524,10 @@
 
 &pfc {
 	avb_pins: avb {
-		groups = "avb_link", "avb_mii";
-		function = "avb";
+		mux {
+			groups = "avb_link", "avb_mii";
+			function = "avb";
+		};
 	};
 
 	canfd0_pins: canfd0 {
@@ -713,7 +719,6 @@
 	mmc-hs400-1_8v;
 	bus-width = <8>;
 	non-removable;
-	full-pwr-cycle-in-suspend;
 	status = "okay";
 };
 

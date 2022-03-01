@@ -104,7 +104,7 @@ def plot_perf_busy_with_sample(cpu_index):
     if os.path.exists(file_name):
         output_png = "cpu%03d_perf_busy_vs_samples.png" % cpu_index
         g_plot = common_all_gnuplot_settings(output_png)
-#   autoscale this one, no set y1 range
+        g_plot('set yrange [0:40]')
         g_plot('set y2range [0:200]')
         g_plot('set y2tics 0, 10')
         g_plot('set title "{} : cpu perf busy vs. sample : CPU {:0>3} : {:%F %H:%M}"'.format(testname, cpu_index, datetime.now()))
@@ -125,7 +125,7 @@ def plot_perf_busy(cpu_index):
     if os.path.exists(file_name):
         output_png = "cpu%03d_perf_busy.png" % cpu_index
         g_plot = common_all_gnuplot_settings(output_png)
-#   autoscale this one, no set y1 range
+        g_plot('set yrange [0:40]')
         g_plot('set y2range [0:200]')
         g_plot('set y2tics 0, 10')
         g_plot('set title "{} : perf busy : CPU {:0>3} : {:%F %H:%M}"'.format(testname, cpu_index, datetime.now()))
@@ -144,7 +144,9 @@ def plot_durations(cpu_index):
     if os.path.exists(file_name):
         output_png = "cpu%03d_durations.png" % cpu_index
         g_plot = common_all_gnuplot_settings(output_png)
-#       autoscale this one, no set y range
+#       Should autoscale be used here? Should seconds be used here?
+        g_plot('set yrange [0:5000]')
+        g_plot('set ytics 0, 500')
         g_plot('set title "{} : durations : CPU {:0>3} : {:%F %H:%M}"'.format(testname, cpu_index, datetime.now()))
         g_plot('set ylabel "Timer Duration (MilliSeconds)"')
 #       override common
@@ -174,7 +176,7 @@ def plot_pstate_cpu_with_sample():
     if os.path.exists('cpu.csv'):
         output_png = 'all_cpu_pstates_vs_samples.png'
         g_plot = common_all_gnuplot_settings(output_png)
-#       autoscale this one, no set y range
+        g_plot('set yrange [0:40]')
 #       override common
         g_plot('set xlabel "Samples"')
         g_plot('set ylabel "P-State"')
@@ -189,7 +191,7 @@ def plot_pstate_cpu():
 
     output_png = 'all_cpu_pstates.png'
     g_plot = common_all_gnuplot_settings(output_png)
-#   autoscale this one, no set y range
+    g_plot('set yrange [0:40]')
     g_plot('set ylabel "P-State"')
     g_plot('set title "{} : cpu pstates : {:%F %H:%M}"'.format(testname, datetime.now()))
 
@@ -220,7 +222,7 @@ def plot_frequency_cpu():
 
     output_png = 'all_cpu_frequencies.png'
     g_plot = common_all_gnuplot_settings(output_png)
-#   autoscale this one, no set y range
+    g_plot('set yrange [0:4]')
     g_plot('set ylabel "CPU Frequency (GHz)"')
     g_plot('set title "{} : cpu frequencies : {:%F %H:%M}"'.format(testname, datetime.now()))
 
@@ -234,7 +236,8 @@ def plot_duration_cpu():
 
     output_png = 'all_cpu_durations.png'
     g_plot = common_all_gnuplot_settings(output_png)
-#   autoscale this one, no set y range
+    g_plot('set yrange [0:5000]')
+    g_plot('set ytics 0, 500')
     g_plot('set ylabel "Timer Duration (MilliSeconds)"')
     g_plot('set title "{} : cpu durations : {:%F %H:%M}"'.format(testname, datetime.now()))
 

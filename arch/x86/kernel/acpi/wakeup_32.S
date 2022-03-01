@@ -91,7 +91,7 @@ SYM_CODE_END(do_suspend_lowlevel)
 
 .data
 ALIGN
-SYM_DATA(saved_magic,	.long 0)
+ENTRY(saved_magic)	.long	0
 saved_eip:		.long 0
 
 # saved registers

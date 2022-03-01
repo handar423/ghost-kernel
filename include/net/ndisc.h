@@ -41,7 +41,6 @@ enum {
 	ND_OPT_DNSSL = 31,		/* RFC6106 */
 	ND_OPT_6CO = 34,		/* RFC6775 */
 	ND_OPT_CAPTIVE_PORTAL = 37,	/* RFC7710 */
-	ND_OPT_PREF64 = 38,		/* RFC8781 */
 	__ND_OPT_MAX
 };
 
@@ -81,12 +80,12 @@ extern struct neigh_table nd_tbl;
 struct nd_msg {
         struct icmp6hdr	icmph;
         struct in6_addr	target;
-	__u8		opt[];
+	__u8		opt[0];
 };
 
 struct rs_msg {
 	struct icmp6hdr	icmph;
-	__u8		opt[];
+	__u8		opt[0];
 };
 
 struct ra_msg {
@@ -99,7 +98,7 @@ struct rd_msg {
 	struct icmp6hdr icmph;
 	struct in6_addr	target;
 	struct in6_addr	dest;
-	__u8		opt[];
+	__u8		opt[0];
 };
 
 struct nd_opt_hdr {
@@ -494,7 +493,7 @@ int igmp6_event_report(struct sk_buff *skb);
 
 #ifdef CONFIG_SYSCTL
 int ndisc_ifinfo_sysctl_change(struct ctl_table *ctl, int write,
-			       void *buffer, size_t *lenp, loff_t *ppos);
+			       void __user *buffer, size_t *lenp, loff_t *ppos);
 int ndisc_ifinfo_sysctl_strategy(struct ctl_table *ctl,
 				 void __user *oldval, size_t __user *oldlenp,
 				 void __user *newval, size_t newlen);

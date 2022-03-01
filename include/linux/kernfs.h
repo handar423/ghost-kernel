@@ -37,10 +37,8 @@ enum kernfs_node_type {
 	KERNFS_LINK		= 0x0004,
 };
 
-#define KERNFS_TYPE_MASK		0x000f
-#define KERNFS_FLAG_MASK		~KERNFS_TYPE_MASK
-#define KERNFS_MAX_USER_XATTRS		128
-#define KERNFS_USER_XATTR_SIZE_LIMIT	(128 << 10)
+#define KERNFS_TYPE_MASK	0x000f
+#define KERNFS_FLAG_MASK	~KERNFS_TYPE_MASK
 
 enum kernfs_node_flag {
 	KERNFS_ACTIVATED	= 0x0010,
@@ -80,11 +78,6 @@ enum kernfs_root_flag {
 	 * fhandle to access nodes of the fs.
 	 */
 	KERNFS_ROOT_SUPPORT_EXPORTOP		= 0x0004,
-
-	/*
-	 * Support user xattrs to be written to nodes rooted at this root.
-	 */
-	KERNFS_ROOT_SUPPORT_USER_XATTR		= 0x0008,
 };
 
 /* type-specific structures for kernfs_node union members */
@@ -111,12 +104,27 @@ struct kernfs_elem_attr {
 	struct kernfs_node	*notify_next;	/* for kernfs_notify() */
 };
 
+/* represent a kernfs node */
+union kernfs_node_id {
+	struct {
+		/*
+		 * blktrace will export this struct as a simplified 'struct
+		 * fid' (which is a big data struction), so userspace can use
+		 * it to find kernfs node. The layout must match the first two
+		 * fields of 'struct fid' exactly.
+		 */
+		u32		ino;
+		u32		generation;
+	};
+	u64			id;
+};
+
 /*
  * kernfs_node - the building block of kernfs hierarchy.  Each and every
  * kernfs node is represented by single kernfs_node.  Most fields are
  * private to kernfs and shouldn't be accessed directly by kernfs users.
  *
- * As long as count reference is held, the kernfs_node itself is
+ * As long as s_count reference is held, the kernfs_node itself is
  * accessible.  Dereferencing elem or any other outer entity requires
  * active reference.
  */
@@ -147,12 +155,7 @@ struct kernfs_node {
 
 	void			*priv;
 
-	/*
-	 * 64bit unique ID.  On 64bit ino setups, id is the ino.  On 32bit,
-	 * the low 32bits are ino and upper generation.
-	 */
-	u64			id;
-
+	union kernfs_node_id	id;
 	unsigned short		flags;
 	umode_t			mode;
 	struct kernfs_iattrs	*iattr;
@@ -184,8 +187,8 @@ struct kernfs_root {
 
 	/* private fields, do not use outside kernfs proper */
 	struct idr		ino_idr;
-	u32			last_id_lowbits;
-	u32			id_highbits;
+	u32			last_ino;
+	u32			next_generation;
 	struct kernfs_syscall_ops *syscall_ops;
 
 	/* list of kernfs_super_info of this root, protected by kernfs_mutex */
@@ -263,9 +266,6 @@ struct kernfs_ops {
 	__poll_t (*poll)(struct kernfs_open_file *of,
 			 struct poll_table_struct *pt);
 
-	long (*ioctl)(struct kernfs_open_file *of, unsigned int cmd,
-		      unsigned long arg);
-
 	int (*mmap)(struct kernfs_open_file *of, struct vm_area_struct *vma);
 
 #ifdef CONFIG_DEBUG_LOCK_ALLOC
@@ -290,34 +290,6 @@ struct kernfs_fs_context {
 static inline enum kernfs_node_type kernfs_type(struct kernfs_node *kn)
 {
 	return kn->flags & KERNFS_TYPE_MASK;
-}
-
-static inline ino_t kernfs_id_ino(u64 id)
-{
-	/* id is ino if ino_t is 64bit; otherwise, low 32bits */
-	if (sizeof(ino_t) >= sizeof(u64))
-		return id;
-	else
-		return (u32)id;
-}
-
-static inline u32 kernfs_id_gen(u64 id)
-{
-	/* gen is fixed at 1 if ino_t is 64bit; otherwise, high 32bits */
-	if (sizeof(ino_t) >= sizeof(u64))
-		return 1;
-	else
-		return id >> 32;
-}
-
-static inline ino_t kernfs_ino(struct kernfs_node *kn)
-{
-	return kernfs_id_ino(kn->id);
-}
-
-static inline ino_t kernfs_gen(struct kernfs_node *kn)
-{
-	return kernfs_id_gen(kn->id);
 }
 
 /**
@@ -360,7 +332,6 @@ void kernfs_get(struct kernfs_node *kn);
 void kernfs_put(struct kernfs_node *kn);
 
 struct kernfs_node *kernfs_node_from_dentry(struct dentry *dentry);
-struct kernfs_node *kernfs_node_from_file(struct file *file);
 struct kernfs_root *kernfs_root_from_sb(struct super_block *sb);
 struct inode *kernfs_get_inode(struct super_block *sb, struct kernfs_node *kn);
 
@@ -412,8 +383,8 @@ void kernfs_kill_sb(struct super_block *sb);
 
 void kernfs_init(void);
 
-struct kernfs_node *kernfs_find_and_get_node_by_id(struct kernfs_root *root,
-						   u64 id);
+struct kernfs_node *kernfs_get_node_by_id(struct kernfs_root *root,
+	const union kernfs_node_id *id);
 #else	/* CONFIG_KERNFS */
 
 static inline enum kernfs_node_type kernfs_type(struct kernfs_node *kn)

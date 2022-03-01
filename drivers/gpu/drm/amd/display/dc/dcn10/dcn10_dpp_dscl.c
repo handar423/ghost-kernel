@@ -198,20 +198,6 @@ static enum dscl_mode_sel dpp1_dscl_get_dscl_mode(
 	return DSCL_MODE_SCALING_420_YCBCR_ENABLE;
 }
 
-static void dpp1_power_on_dscl(
-	struct dpp *dpp_base,
-	bool power_on)
-{
-	struct dcn10_dpp *dpp = TO_DCN10_DPP(dpp_base);
-
-	if (dpp->tf_regs->DSCL_MEM_PWR_CTRL) {
-		REG_UPDATE(DSCL_MEM_PWR_CTRL, LUT_MEM_PWR_FORCE, power_on ? 0 : 3);
-		if (power_on)
-			REG_WAIT(DSCL_MEM_PWR_STATUS, LUT_MEM_PWR_STATE, 0, 1, 5);
-	}
-}
-
-
 static void dpp1_dscl_set_lb(
 	struct dcn10_dpp *dpp,
 	const struct line_buffer_params *lb_params,
@@ -232,12 +218,14 @@ static void dpp1_dscl_set_lb(
 			INTERLEAVE_EN, lb_params->interleave_en, /* Interleave source enable */
 			LB_DATA_FORMAT__ALPHA_EN, lb_params->alpha_en); /* Alpha enable */
 	}
+#if defined(CONFIG_DRM_AMD_DC_DCN2_0)
 	else {
 		/* DSCL caps: pixel data processed in float format */
 		REG_SET_2(LB_DATA_FORMAT, 0,
 			INTERLEAVE_EN, lb_params->interleave_en, /* Interleave source enable */
 			LB_DATA_FORMAT__ALPHA_EN, lb_params->alpha_en); /* Alpha enable */
 	}
+#endif
 
 	REG_SET_2(LB_MEMORY_CTRL, 0,
 		MEMORY_CONFIG, mem_size_config,
@@ -496,10 +484,13 @@ static enum lb_memory_config dpp1_dscl_find_lb_memory_config(struct dcn10_dpp *d
 	int vtaps_c = scl_data->taps.v_taps_c;
 	int ceil_vratio = dc_fixpt_ceil(scl_data->ratios.vert);
 	int ceil_vratio_c = dc_fixpt_ceil(scl_data->ratios.vert_c);
-	enum lb_memory_config mem_cfg = LB_MEMORY_CONFIG_0;
 
-	if (dpp->base.ctx->dc->debug.use_max_lb)
-		return mem_cfg;
+	if (dpp->base.ctx->dc->debug.use_max_lb) {
+		if (scl_data->format == PIXEL_FORMAT_420BPP8
+				|| scl_data->format == PIXEL_FORMAT_420BPP10)
+			return LB_MEMORY_CONFIG_3;
+		return LB_MEMORY_CONFIG_0;
+	}
 
 	dpp->base.caps->dscl_calc_lb_num_partitions(
 			scl_data, LB_MEMORY_CONFIG_1, &num_part_y, &num_part_c);
@@ -670,7 +661,7 @@ static void dpp1_dscl_set_recout(
 			 RECOUT_WIDTH, recout->width,
 		/* Number of RECOUT vertical lines */
 			 RECOUT_HEIGHT, recout->height
-			 - visual_confirm_on * 2 * (dpp->base.inst + 1));
+			 - visual_confirm_on * 4 * (dpp->base.inst + 1));
 }
 
 /* Main function to program scaler and line buffer in manual scaling mode */
@@ -692,11 +683,6 @@ void dpp1_dscl_set_scaler_manual_scale(
 
 	dpp->scl_data = *scl_data;
 
-	if (dpp_base->ctx->dc->debug.enable_mem_low_power.bits.dscl) {
-		if (dscl_mode != DSCL_MODE_DSCL_BYPASS)
-			dpp1_power_on_dscl(dpp_base, true);
-	}
-
 	/* Autocal off */
 	REG_SET_3(DSCL_AUTOCAL, 0,
 		AUTOCAL_MODE, AUTOCAL_MODE_OFF,
@@ -716,11 +702,8 @@ void dpp1_dscl_set_scaler_manual_scale(
 	/* SCL mode */
 	REG_UPDATE(SCL_MODE, DSCL_MODE, dscl_mode);
 
-	if (dscl_mode == DSCL_MODE_DSCL_BYPASS) {
-		if (dpp_base->ctx->dc->debug.enable_mem_low_power.bits.dscl)
-			dpp1_power_on_dscl(dpp_base, false);
+	if (dscl_mode == DSCL_MODE_DSCL_BYPASS)
 		return;
-	}
 
 	/* LB */
 	lb_config =  dpp1_dscl_find_lb_memory_config(dpp, scl_data);

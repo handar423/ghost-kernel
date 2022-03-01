@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Opening fs-verity files
+ * fs/verity/open.c: opening fs-verity files
  *
  * Copyright 2019 Google LLC
  */
@@ -31,7 +31,7 @@ int fsverity_init_merkle_tree_params(struct merkle_tree_params *params,
 				     unsigned int log_blocksize,
 				     const u8 *salt, size_t salt_size)
 {
-	struct fsverity_hash_alg *hash_alg;
+	const struct fsverity_hash_alg *hash_alg;
 	int err;
 	u64 blocks;
 	u64 offset;
@@ -89,7 +89,7 @@ int fsverity_init_merkle_tree_params(struct merkle_tree_params *params,
 	 */
 
 	/* Compute number of levels and the number of blocks in each level */
-	blocks = (inode->i_size + params->block_size - 1) >> log_blocksize;
+	blocks = ((u64)inode->i_size + params->block_size - 1) >> log_blocksize;
 	pr_debug("Data is %lld bytes (%llu blocks)\n", inode->i_size, blocks);
 	while (blocks > 1) {
 		if (params->num_levels >= FS_VERITY_MAX_LEVELS) {
@@ -102,7 +102,6 @@ int fsverity_init_merkle_tree_params(struct merkle_tree_params *params,
 		/* temporarily using level_start[] to store blocks in level */
 		params->level_start[params->num_levels++] = blocks;
 	}
-	params->level0_blocks = params->level_start[0];
 
 	/* Compute the starting block of each level */
 	offset = 0;
@@ -124,18 +123,18 @@ out_err:
 }
 
 /*
- * Compute the file digest by hashing the fsverity_descriptor excluding the
+ * Compute the file measurement by hashing the fsverity_descriptor excluding the
  * signature and with the sig_size field set to 0.
  */
-static int compute_file_digest(struct fsverity_hash_alg *hash_alg,
-			       struct fsverity_descriptor *desc,
-			       u8 *file_digest)
+static int compute_file_measurement(const struct fsverity_hash_alg *hash_alg,
+				    struct fsverity_descriptor *desc,
+				    u8 *measurement)
 {
 	__le32 sig_size = desc->sig_size;
 	int err;
 
 	desc->sig_size = 0;
-	err = fsverity_hash_buffer(hash_alg, desc, sizeof(*desc), file_digest);
+	err = fsverity_hash_buffer(hash_alg, desc, sizeof(*desc), measurement);
 	desc->sig_size = sig_size;
 
 	return err;
@@ -199,15 +198,15 @@ struct fsverity_info *fsverity_create_info(const struct inode *inode,
 
 	memcpy(vi->root_hash, desc->root_hash, vi->tree_params.digest_size);
 
-	err = compute_file_digest(vi->tree_params.hash_alg, desc,
-				  vi->file_digest);
+	err = compute_file_measurement(vi->tree_params.hash_alg, desc,
+				       vi->measurement);
 	if (err) {
-		fsverity_err(inode, "Error %d computing file digest", err);
+		fsverity_err(inode, "Error %d computing file measurement", err);
 		goto out;
 	}
-	pr_debug("Computed file digest: %s:%*phN\n",
+	pr_debug("Computed file measurement: %s:%*phN\n",
 		 vi->tree_params.hash_alg->name,
-		 vi->tree_params.digest_size, vi->file_digest);
+		 vi->tree_params.digest_size, vi->measurement);
 
 	err = fsverity_verify_signature(vi, desc, desc_size);
 out:
@@ -221,20 +220,11 @@ out:
 void fsverity_set_info(struct inode *inode, struct fsverity_info *vi)
 {
 	/*
-	 * Multiple tasks may race to set ->i_verity_info, so use
-	 * cmpxchg_release().  This pairs with the smp_load_acquire() in
-	 * fsverity_get_info().  I.e., here we publish ->i_verity_info with a
-	 * RELEASE barrier so that other tasks can ACQUIRE it.
+	 * Multiple processes may race to set ->i_verity_info, so use cmpxchg.
+	 * This pairs with the READ_ONCE() in fsverity_get_info().
 	 */
-	if (cmpxchg_release(&inode->i_verity_info, NULL, vi) != NULL) {
-		/* Lost the race, so free the fsverity_info we allocated. */
+	if (cmpxchg(&inode->i_verity_info, NULL, vi) != NULL)
 		fsverity_free_info(vi);
-		/*
-		 * Afterwards, the caller may access ->i_verity_info directly,
-		 * so make sure to ACQUIRE the winning fsverity_info.
-		 */
-		(void)fsverity_get_info(inode);
-	}
 }
 
 void fsverity_free_info(struct fsverity_info *vi)
@@ -339,7 +329,6 @@ EXPORT_SYMBOL_GPL(fsverity_prepare_setattr);
 
 /**
  * fsverity_cleanup_inode() - free the inode's verity info, if present
- * @inode: an inode being evicted
  *
  * Filesystems must call this on inode eviction to free ->i_verity_info.
  */
@@ -354,7 +343,7 @@ int __init fsverity_init_info_cache(void)
 {
 	fsverity_info_cachep = KMEM_CACHE_USERCOPY(fsverity_info,
 						   SLAB_RECLAIM_ACCOUNT,
-						   file_digest);
+						   measurement);
 	if (!fsverity_info_cachep)
 		return -ENOMEM;
 	return 0;

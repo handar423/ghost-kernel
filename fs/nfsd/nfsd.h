@@ -19,7 +19,6 @@
 #include <linux/sunrpc/svc.h>
 #include <linux/sunrpc/svc_xprt.h>
 #include <linux/sunrpc/msg_prot.h>
-#include <linux/sunrpc/addr.h>
 
 #include <uapi/linux/nfsd/debug.h>
 
@@ -74,14 +73,6 @@ extern unsigned long		nfsd_drc_mem_used;
 extern const struct seq_operations nfs_exports_op;
 
 /*
- * Common void argument and result helpers
- */
-struct nfsd_voidargs { };
-struct nfsd_voidres { };
-int		nfssvc_decode_voidarg(struct svc_rqst *rqstp, __be32 *p);
-int		nfssvc_encode_voidres(struct svc_rqst *rqstp, __be32 *p);
-
-/*
  * Function prototypes.
  */
 int		nfsd_svc(int nrservs, struct net *net, const struct cred *cred);
@@ -95,8 +86,6 @@ int		nfsd_pool_stats_open(struct inode *, struct file *);
 int		nfsd_pool_stats_release(struct inode *, struct file *);
 
 void		nfsd_destroy(struct net *net);
-
-bool		i_am_nfsd(void);
 
 int get_nfsdfs(struct net *);
 
@@ -156,6 +145,7 @@ int nfs4_state_start(void);
 int nfs4_state_start_net(struct net *net);
 void nfs4_state_shutdown(void);
 void nfs4_state_shutdown_net(struct net *net);
+void nfs4_reset_lease(time_t leasetime);
 int nfs4_reset_recoverydir(char *recdir);
 char * nfs4_recoverydir(void);
 bool nfsd4_spo_must_allow(struct svc_rqst *rqstp);
@@ -166,6 +156,7 @@ static inline int nfs4_state_start(void) { return 0; }
 static inline int nfs4_state_start_net(struct net *net) { return 0; }
 static inline void nfs4_state_shutdown(void) { }
 static inline void nfs4_state_shutdown_net(struct net *net) { }
+static inline void nfs4_reset_lease(time_t leasetime) { }
 static inline int nfs4_reset_recoverydir(char *recdir) { return 0; }
 static inline char * nfs4_recoverydir(void) {return NULL; }
 static inline bool nfsd4_spo_must_allow(struct svc_rqst *rqstp)
@@ -292,10 +283,7 @@ void		nfsd_lockd_shutdown(void);
 #define nfserr_union_notsupp		cpu_to_be32(NFS4ERR_UNION_NOTSUPP)
 #define nfserr_offload_denied		cpu_to_be32(NFS4ERR_OFFLOAD_DENIED)
 #define nfserr_wrong_lfs		cpu_to_be32(NFS4ERR_WRONG_LFS)
-#define nfserr_badlabel			cpu_to_be32(NFS4ERR_BADLABEL)
-#define nfserr_file_open		cpu_to_be32(NFS4ERR_FILE_OPEN)
-#define nfserr_xattr2big		cpu_to_be32(NFS4ERR_XATTR2BIG)
-#define nfserr_noxattr			cpu_to_be32(NFS4ERR_NOXATTR)
+#define nfserr_badlabel		cpu_to_be32(NFS4ERR_BADLABEL)
 
 /* error codes for internal use */
 /* if a request fails due to kmalloc failure, it gets dropped.
@@ -395,42 +383,11 @@ void		nfsd_lockd_shutdown(void);
 
 #define NFSD4_2_SUPPORTED_ATTRS_WORD2 \
 	(NFSD4_1_SUPPORTED_ATTRS_WORD2 | \
+	FATTR4_WORD2_CHANGE_ATTR_TYPE | \
 	FATTR4_WORD2_MODE_UMASK | \
-	NFSD4_2_SECURITY_ATTRS | \
-	FATTR4_WORD2_XATTR_SUPPORT)
+	NFSD4_2_SECURITY_ATTRS)
 
 extern const u32 nfsd_suppattrs[3][3];
-
-static inline __be32 nfsd4_set_netaddr(struct sockaddr *addr,
-				    struct nfs42_netaddr *netaddr)
-{
-	struct sockaddr_in *sin = (struct sockaddr_in *)addr;
-	struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)addr;
-	unsigned int port;
-	size_t ret_addr, ret_port;
-
-	switch (addr->sa_family) {
-	case AF_INET:
-		port = ntohs(sin->sin_port);
-		sprintf(netaddr->netid, "tcp");
-		netaddr->netid_len = 3;
-		break;
-	case AF_INET6:
-		port = ntohs(sin6->sin6_port);
-		sprintf(netaddr->netid, "tcp6");
-		netaddr->netid_len = 4;
-		break;
-	default:
-		return nfserr_inval;
-	}
-	ret_addr = rpc_ntop(addr, netaddr->addr, sizeof(netaddr->addr));
-	ret_port = snprintf(netaddr->addr + ret_addr,
-			    RPCBIND_MAXUADDRLEN + 1 - ret_addr,
-			    ".%u.%u", port >> 8, port & 0xff);
-	WARN_ON(ret_port >= RPCBIND_MAXUADDRLEN + 1 - ret_addr);
-	netaddr->addr_len = ret_addr + ret_port;
-	return 0;
-}
 
 static inline bool bmval_is_subset(const u32 *bm1, const u32 *bm2)
 {

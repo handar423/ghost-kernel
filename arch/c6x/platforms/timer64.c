@@ -165,6 +165,13 @@ static irqreturn_t timer_interrupt(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
+static struct irqaction timer_iact = {
+	.name		= "timer",
+	.flags		= IRQF_TIMER,
+	.handler	= timer_interrupt,
+	.dev_id		= &t64_clockevent_device,
+};
+
 void __init timer64_init(void)
 {
 	struct clock_event_device *cd = &t64_clockevent_device;
@@ -231,9 +238,7 @@ void __init timer64_init(void)
 	cd->cpumask		= cpumask_of(smp_processor_id());
 
 	clockevents_register_device(cd);
-	if (request_irq(cd->irq, timer_interrupt, IRQF_TIMER, "timer",
-			&t64_clockevent_device))
-		pr_err("Failed to request irq %d (timer)\n", cd->irq);
+	setup_irq(cd->irq, &timer_iact);
 
 out:
 	of_node_put(np);

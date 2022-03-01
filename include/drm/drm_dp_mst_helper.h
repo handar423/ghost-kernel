@@ -26,26 +26,6 @@
 #include <drm/drm_dp_helper.h>
 #include <drm/drm_atomic.h>
 
-#if IS_ENABLED(CONFIG_DRM_DEBUG_DP_MST_TOPOLOGY_REFS)
-#include <linux/stackdepot.h>
-#include <linux/timekeeping.h>
-
-enum drm_dp_mst_topology_ref_type {
-	DRM_DP_MST_TOPOLOGY_REF_GET,
-	DRM_DP_MST_TOPOLOGY_REF_PUT,
-};
-
-struct drm_dp_mst_topology_ref_history {
-	struct drm_dp_mst_topology_ref_entry {
-		enum drm_dp_mst_topology_ref_type type;
-		int count;
-		ktime_t ts_nsec;
-		depot_stack_handle_t backtrace;
-	} *entries;
-	int len;
-};
-#endif /* IS_ENABLED(CONFIG_DRM_DEBUG_DP_MST_TOPOLOGY_REFS) */
-
 struct drm_dp_mst_branch;
 
 /**
@@ -65,31 +45,21 @@ struct drm_dp_vcpi {
 /**
  * struct drm_dp_mst_port - MST port
  * @port_num: port number
- * @input: if this port is an input port. Protected by
- * &drm_dp_mst_topology_mgr.base.lock.
- * @mcs: message capability status - DP 1.2 spec. Protected by
- * &drm_dp_mst_topology_mgr.base.lock.
- * @ddps: DisplayPort Device Plug Status - DP 1.2. Protected by
- * &drm_dp_mst_topology_mgr.base.lock.
- * @pdt: Peer Device Type. Protected by
- * &drm_dp_mst_topology_mgr.base.lock.
- * @ldps: Legacy Device Plug Status. Protected by
- * &drm_dp_mst_topology_mgr.base.lock.
- * @dpcd_rev: DPCD revision of device on this port. Protected by
- * &drm_dp_mst_topology_mgr.base.lock.
- * @num_sdp_streams: Number of simultaneous streams. Protected by
- * &drm_dp_mst_topology_mgr.base.lock.
- * @num_sdp_stream_sinks: Number of stream sinks. Protected by
- * &drm_dp_mst_topology_mgr.base.lock.
- * @full_pbn: Max possible bandwidth for this port. Protected by
- * &drm_dp_mst_topology_mgr.base.lock.
+ * @input: if this port is an input port.
+ * @mcs: message capability status - DP 1.2 spec.
+ * @ddps: DisplayPort Device Plug Status - DP 1.2
+ * @pdt: Peer Device Type
+ * @ldps: Legacy Device Plug Status
+ * @dpcd_rev: DPCD revision of device on this port
+ * @num_sdp_streams: Number of simultaneous streams
+ * @num_sdp_stream_sinks: Number of stream sinks
+ * @available_pbn: Available bandwidth for this port.
  * @next: link to next port on this branch device
- * @aux: i2c aux transport to talk to device connected to this port, protected
- * by &drm_dp_mst_topology_mgr.base.lock.
+ * @mstb: branch device attach below this port
+ * @aux: i2c aux transport to talk to device connected to this port.
  * @parent: branch device parent of this port
  * @vcpi: Virtual Channel Payload info for this port.
- * @connector: DRM connector this port is connected to. Protected by
- * &drm_dp_mst_topology_mgr.base.lock.
+ * @connector: DRM connector this port is connected to.
  * @mgr: topology manager this port lives under.
  *
  * This structure represents an MST port endpoint on a device somewhere
@@ -109,14 +79,6 @@ struct drm_dp_mst_port {
 	 */
 	struct kref malloc_kref;
 
-#if IS_ENABLED(CONFIG_DRM_DEBUG_DP_MST_TOPOLOGY_REFS)
-	/**
-	 * @topology_ref_history: A history of each topology
-	 * reference/dereference. See CONFIG_DRM_DEBUG_DP_MST_TOPOLOGY_REFS.
-	 */
-	struct drm_dp_mst_topology_ref_history topology_ref_history;
-#endif
-
 	u8 port_num;
 	bool input;
 	bool mcs;
@@ -126,19 +88,9 @@ struct drm_dp_mst_port {
 	u8 dpcd_rev;
 	u8 num_sdp_streams;
 	u8 num_sdp_stream_sinks;
-	uint16_t full_pbn;
+	uint16_t available_pbn;
 	struct list_head next;
-	/**
-	 * @mstb: the branch device connected to this port, if there is one.
-	 * This should be considered protected for reading by
-	 * &drm_dp_mst_topology_mgr.lock. There are two exceptions to this:
-	 * &drm_dp_mst_topology_mgr.up_req_work and
-	 * &drm_dp_mst_topology_mgr.work, which do not grab
-	 * &drm_dp_mst_topology_mgr.lock during reads but are the only
-	 * updaters of this list and are protected from writing concurrently
-	 * by &drm_dp_mst_topology_mgr.probe_lock.
-	 */
-	struct drm_dp_mst_branch *mstb;
+	struct drm_dp_mst_branch *mstb; /* pointer to an mstb if this port has one */
 	struct drm_dp_aux aux; /* i2c bus for this port? */
 	struct drm_dp_mst_branch *parent;
 
@@ -156,37 +108,6 @@ struct drm_dp_mst_port {
 	 * audio-capable.
 	 */
 	bool has_audio;
-
-	/**
-	 * @fec_capable: bool indicating if FEC can be supported up to that
-	 * point in the MST topology.
-	 */
-	bool fec_capable;
-};
-
-/* sideband msg header - not bit struct */
-struct drm_dp_sideband_msg_hdr {
-	u8 lct;
-	u8 lcr;
-	u8 rad[8];
-	bool broadcast;
-	bool path_msg;
-	u8 msg_len;
-	bool somt;
-	bool eomt;
-	bool seqno;
-};
-
-struct drm_dp_sideband_msg_rx {
-	u8 chunk[48];
-	u8 msg[256];
-	u8 curchunk_len;
-	u8 curchunk_idx; /* chunk we are parsing now */
-	u8 curchunk_hdrlen;
-	u8 curlen; /* total length of the msg */
-	bool have_somt;
-	bool have_eomt;
-	struct drm_dp_sideband_msg_hdr initial_hdr;
 };
 
 /**
@@ -194,8 +115,12 @@ struct drm_dp_sideband_msg_rx {
  * @rad: Relative Address to talk to this branch device.
  * @lct: Link count total to talk to this branch device.
  * @num_ports: number of ports on the branch.
+ * @msg_slots: one bit per transmitted msg slot.
+ * @ports: linked list of ports on this branch.
  * @port_parent: pointer to the port parent, NULL if toplevel.
  * @mgr: topology manager for this branch device.
+ * @tx_slots: transmission slots for this device.
+ * @last_seqno: last sequence number used to talk to this.
  * @link_address_sent: if a link address message has been sent to this device yet.
  * @guid: guid for DP 1.2 branch device. port under this branch can be
  * identified by port #.
@@ -218,45 +143,39 @@ struct drm_dp_mst_branch {
 	 */
 	struct kref malloc_kref;
 
-#if IS_ENABLED(CONFIG_DRM_DEBUG_DP_MST_TOPOLOGY_REFS)
-	/**
-	 * @topology_ref_history: A history of each topology
-	 * reference/dereference. See CONFIG_DRM_DEBUG_DP_MST_TOPOLOGY_REFS.
-	 */
-	struct drm_dp_mst_topology_ref_history topology_ref_history;
-#endif
-
-	/**
-	 * @destroy_next: linked-list entry used by
-	 * drm_dp_delayed_destroy_work()
-	 */
-	struct list_head destroy_next;
-
 	u8 rad[8];
 	u8 lct;
 	int num_ports;
 
-	/**
-	 * @ports: the list of ports on this branch device. This should be
-	 * considered protected for reading by &drm_dp_mst_topology_mgr.lock.
-	 * There are two exceptions to this:
-	 * &drm_dp_mst_topology_mgr.up_req_work and
-	 * &drm_dp_mst_topology_mgr.work, which do not grab
-	 * &drm_dp_mst_topology_mgr.lock during reads but are the only
-	 * updaters of this list and are protected from updating the list
-	 * concurrently by @drm_dp_mst_topology_mgr.probe_lock
-	 */
+	int msg_slots;
 	struct list_head ports;
 
+	/* list of tx ops queue for this port */
 	struct drm_dp_mst_port *port_parent;
 	struct drm_dp_mst_topology_mgr *mgr;
 
+	/* slots are protected by mstb->mgr->qlock */
+	struct drm_dp_sideband_msg_tx *tx_slots[2];
+	int last_seqno;
 	bool link_address_sent;
 
 	/* global unique identifier to identify branch devices */
 	u8 guid[16];
 };
 
+
+/* sideband msg header - not bit struct */
+struct drm_dp_sideband_msg_hdr {
+	u8 lct;
+	u8 lcr;
+	u8 rad[8];
+	bool broadcast;
+	bool path_msg;
+	u8 msg_len;
+	bool somt;
+	bool eomt;
+	bool seqno;
+};
 
 struct drm_dp_nak_reply {
 	u8 guid[16];
@@ -313,33 +232,17 @@ struct drm_dp_remote_i2c_write_ack_reply {
 	u8 port_number;
 };
 
-struct drm_dp_query_stream_enc_status_ack_reply {
-	/* Bit[23:16]- Stream Id */
-	u8 stream_id;
 
-	/* Bit[15]- Signed */
-	bool reply_signed;
-
-	/* Bit[10:8]- Stream Output Sink Type */
-	bool unauthorizable_device_present;
-	bool legacy_device_present;
-	bool query_capable_device_present;
-
-	/* Bit[12:11]- Stream Output CP Type */
-	bool hdcp_1x_device_present;
-	bool hdcp_2x_device_present;
-
-	/* Bit[4]- Stream Authentication */
-	bool auth_completed;
-
-	/* Bit[3]- Stream Encryption */
-	bool encryption_enabled;
-
-	/* Bit[2]- Stream Repeater Function Present */
-	bool repeater_present;
-
-	/* Bit[1:0]- Stream State */
-	u8 state;
+struct drm_dp_sideband_msg_rx {
+	u8 chunk[48];
+	u8 msg[256];
+	u8 curchunk_len;
+	u8 curchunk_idx; /* chunk we are parsing now */
+	u8 curchunk_hdrlen;
+	u8 curlen; /* total length of the msg */
+	bool have_somt;
+	bool have_eomt;
+	struct drm_dp_sideband_msg_hdr initial_hdr;
 };
 
 #define DRM_DP_MAX_SDP_STREAMS 16
@@ -384,7 +287,7 @@ struct drm_dp_remote_dpcd_write {
 struct drm_dp_remote_i2c_read {
 	u8 num_transactions;
 	u8 port_number;
-	struct drm_dp_remote_i2c_read_tx {
+	struct {
 		u8 i2c_dev_id;
 		u8 num_bytes;
 		u8 *bytes;
@@ -402,15 +305,6 @@ struct drm_dp_remote_i2c_write {
 	u8 *bytes;
 };
 
-struct drm_dp_query_stream_enc_status {
-	u8 stream_id;
-	u8 client_id[7];	/* 56-bit nonce */
-	u8 stream_event;
-	bool valid_stream_event;
-	u8 stream_behavior;
-	u8 valid_stream_behavior;
-};
-
 /* this covers ENUM_RESOURCES, POWER_DOWN_PHY, POWER_UP_PHY */
 struct drm_dp_port_number_req {
 	u8 port_number;
@@ -418,7 +312,6 @@ struct drm_dp_port_number_req {
 
 struct drm_dp_enum_path_resources_ack_reply {
 	u8 port_number;
-	bool fec_capable;
 	u16 full_payload_bw_number;
 	u16 avail_payload_bw_number;
 };
@@ -459,8 +352,6 @@ struct drm_dp_sideband_msg_req_body {
 
 		struct drm_dp_remote_i2c_read i2c_read;
 		struct drm_dp_remote_i2c_write i2c_write;
-
-		struct drm_dp_query_stream_enc_status enc_status;
 	} u;
 };
 
@@ -483,8 +374,6 @@ struct drm_dp_sideband_msg_reply_body {
 		struct drm_dp_remote_i2c_read_ack_reply remote_i2c_read_ack;
 		struct drm_dp_remote_i2c_read_nak_reply remote_i2c_read_nack;
 		struct drm_dp_remote_i2c_write_ack_reply remote_i2c_write_ack;
-
-		struct drm_dp_query_stream_enc_status_ack_reply enc_status;
 	} u;
 };
 
@@ -516,15 +405,9 @@ struct drm_dp_mst_topology_mgr;
 struct drm_dp_mst_topology_cbs {
 	/* create a connector for a port */
 	struct drm_connector *(*add_connector)(struct drm_dp_mst_topology_mgr *mgr, struct drm_dp_mst_port *port, const char *path);
-	/*
-	 * Checks for any pending MST interrupts, passing them to MST core for
-	 * processing, the same way an HPD IRQ pulse handler would do this.
-	 * If provided MST core calls this callback from a poll-waiting loop
-	 * when waiting for MST down message replies. The driver is expected
-	 * to guard against a race between this callback and the driver's HPD
-	 * IRQ pulse handler.
-	 */
-	void (*poll_hpd_irq)(struct drm_dp_mst_topology_mgr *mgr);
+	void (*register_connector)(struct drm_connector *connector);
+	void (*destroy_connector)(struct drm_dp_mst_topology_mgr *mgr,
+				  struct drm_connector *connector);
 };
 
 #define DP_MAX_PAYLOAD (sizeof(unsigned long) * 8)
@@ -545,8 +428,6 @@ struct drm_dp_payload {
 struct drm_dp_vcpi_allocation {
 	struct drm_dp_mst_port *port;
 	int vcpi;
-	int pbn;
-	bool dsc_enabled;
 	struct list_head next;
 };
 
@@ -600,41 +481,28 @@ struct drm_dp_mst_topology_mgr {
 	int conn_base_id;
 
 	/**
-	 * @up_req_recv: Message receiver state for up requests.
+	 * @down_rep_recv: Message receiver state for down replies. This and
+	 * @up_req_recv are only ever access from the work item, which is
+	 * serialised.
+	 */
+	struct drm_dp_sideband_msg_rx down_rep_recv;
+	/**
+	 * @up_req_recv: Message receiver state for up requests. This and
+	 * @down_rep_recv are only ever access from the work item, which is
+	 * serialised.
 	 */
 	struct drm_dp_sideband_msg_rx up_req_recv;
 
 	/**
-	 * @down_rep_recv: Message receiver state for replies to down
-	 * requests.
-	 */
-	struct drm_dp_sideband_msg_rx down_rep_recv;
-
-	/**
-	 * @lock: protects @mst_state, @mst_primary, @dpcd, and
-	 * @payload_id_table_cleared.
+	 * @lock: protects mst state, primary, dpcd.
 	 */
 	struct mutex lock;
-
-	/**
-	 * @probe_lock: Prevents @work and @up_req_work, the only writers of
-	 * &drm_dp_mst_port.mstb and &drm_dp_mst_branch.ports, from racing
-	 * while they update the topology.
-	 */
-	struct mutex probe_lock;
 
 	/**
 	 * @mst_state: If this manager is enabled for an MST capable port. False
 	 * if no MST sink/branch devices is connected.
 	 */
-	bool mst_state : 1;
-
-	/**
-	 * @payload_id_table_cleared: Whether or not we've cleared the payload
-	 * ID table for @mst_primary. Protected by @lock.
-	 */
-	bool payload_id_table_cleared : 1;
-
+	bool mst_state;
 	/**
 	 * @mst_primary: Pointer to the primary/first branch device.
 	 */
@@ -659,12 +527,12 @@ struct drm_dp_mst_topology_mgr {
 	const struct drm_private_state_funcs *funcs;
 
 	/**
-	 * @qlock: protects @tx_msg_downq and &drm_dp_sideband_msg_tx.state
+	 * @qlock: protects @tx_msg_downq, the &drm_dp_mst_branch.txslost and
+	 * &drm_dp_sideband_msg_tx.state once they are queued
 	 */
 	struct mutex qlock;
-
 	/**
-	 * @tx_msg_downq: List of pending down requests
+	 * @tx_msg_downq: List of pending down replies.
 	 */
 	struct list_head tx_msg_downq;
 
@@ -674,13 +542,11 @@ struct drm_dp_mst_topology_mgr {
 	struct mutex payload_lock;
 	/**
 	 * @proposed_vcpis: Array of pointers for the new VCPI allocation. The
-	 * VCPI structure itself is &drm_dp_mst_port.vcpi, and the size of
-	 * this array is determined by @max_payloads.
+	 * VCPI structure itself is &drm_dp_mst_port.vcpi.
 	 */
 	struct drm_dp_vcpi **proposed_vcpis;
 	/**
-	 * @payloads: Array of payloads. The size of this array is determined
-	 * by @max_payloads.
+	 * @payloads: Array of payloads.
 	 */
 	struct drm_dp_payload *payloads;
 	/**
@@ -709,57 +575,18 @@ struct drm_dp_mst_topology_mgr {
 	struct work_struct tx_work;
 
 	/**
-	 * @destroy_port_list: List of to be destroyed connectors.
+	 * @destroy_connector_list: List of to be destroyed connectors.
 	 */
-	struct list_head destroy_port_list;
+	struct list_head destroy_connector_list;
 	/**
-	 * @destroy_branch_device_list: List of to be destroyed branch
-	 * devices.
+	 * @destroy_connector_lock: Protects @connector_list.
 	 */
-	struct list_head destroy_branch_device_list;
+	struct mutex destroy_connector_lock;
 	/**
-	 * @delayed_destroy_lock: Protects @destroy_port_list and
-	 * @destroy_branch_device_list.
+	 * @destroy_connector_work: Work item to destroy connectors. Needed to
+	 * avoid locking inversion.
 	 */
-	struct mutex delayed_destroy_lock;
-
-	/**
-	 * @delayed_destroy_wq: Workqueue used for delayed_destroy_work items.
-	 * A dedicated WQ makes it possible to drain any requeued work items
-	 * on it.
-	 */
-	struct workqueue_struct *delayed_destroy_wq;
-
-	/**
-	 * @delayed_destroy_work: Work item to destroy MST port and branch
-	 * devices, needed to avoid locking inversion.
-	 */
-	struct work_struct delayed_destroy_work;
-
-	/**
-	 * @up_req_list: List of pending up requests from the topology that
-	 * need to be processed, in chronological order.
-	 */
-	struct list_head up_req_list;
-	/**
-	 * @up_req_lock: Protects @up_req_list
-	 */
-	struct mutex up_req_lock;
-	/**
-	 * @up_req_work: Work item to process up requests received from the
-	 * topology. Needed to avoid blocking hotplug handling and sideband
-	 * transmissions.
-	 */
-	struct work_struct up_req_work;
-
-#if IS_ENABLED(CONFIG_DRM_DEBUG_DP_MST_TOPOLOGY_REFS)
-	/**
-	 * @topology_ref_history_lock: protects
-	 * &drm_dp_mst_port.topology_ref_history and
-	 * &drm_dp_mst_branch.topology_ref_history.
-	 */
-	struct mutex topology_ref_history_lock;
-#endif
+	struct work_struct destroy_connector_work;
 };
 
 int drm_dp_mst_topology_mgr_init(struct drm_dp_mst_topology_mgr *mgr,
@@ -769,23 +596,22 @@ int drm_dp_mst_topology_mgr_init(struct drm_dp_mst_topology_mgr *mgr,
 
 void drm_dp_mst_topology_mgr_destroy(struct drm_dp_mst_topology_mgr *mgr);
 
-bool drm_dp_read_mst_cap(struct drm_dp_aux *aux, const u8 dpcd[DP_RECEIVER_CAP_SIZE]);
+
 int drm_dp_mst_topology_mgr_set_mst(struct drm_dp_mst_topology_mgr *mgr, bool mst_state);
+
 
 int drm_dp_mst_hpd_irq(struct drm_dp_mst_topology_mgr *mgr, u8 *esi, bool *handled);
 
 
-int
-drm_dp_mst_detect_port(struct drm_connector *connector,
-		       struct drm_modeset_acquire_ctx *ctx,
-		       struct drm_dp_mst_topology_mgr *mgr,
-		       struct drm_dp_mst_port *port);
+enum drm_connector_status drm_dp_mst_detect_port(struct drm_connector *connector, struct drm_dp_mst_topology_mgr *mgr, struct drm_dp_mst_port *port);
 
+bool drm_dp_mst_port_has_audio(struct drm_dp_mst_topology_mgr *mgr,
+					struct drm_dp_mst_port *port);
 struct edid *drm_dp_mst_get_edid(struct drm_connector *connector, struct drm_dp_mst_topology_mgr *mgr, struct drm_dp_mst_port *port);
 
-int drm_dp_get_vc_payload_bw(int link_rate, int link_lane_count);
 
-int drm_dp_calc_pbn_mode(int clock, int bpp, bool dsc);
+int drm_dp_calc_pbn_mode(int clock, int bpp);
+
 
 bool drm_dp_mst_allocate_vcpi(struct drm_dp_mst_topology_mgr *mgr,
 			      struct drm_dp_mst_port *port, int pbn, int slots);
@@ -816,8 +642,7 @@ void drm_dp_mst_dump_topology(struct seq_file *m,
 
 void drm_dp_mst_topology_mgr_suspend(struct drm_dp_mst_topology_mgr *mgr);
 int __must_check
-drm_dp_mst_topology_mgr_resume(struct drm_dp_mst_topology_mgr *mgr,
-			       bool sync);
+drm_dp_mst_topology_mgr_resume(struct drm_dp_mst_topology_mgr *mgr);
 
 ssize_t drm_dp_mst_dpcd_read(struct drm_dp_aux *aux,
 			     unsigned int offset, void *buffer, size_t size);
@@ -834,30 +659,17 @@ struct drm_dp_mst_topology_state *drm_atomic_get_mst_topology_state(struct drm_a
 int __must_check
 drm_dp_atomic_find_vcpi_slots(struct drm_atomic_state *state,
 			      struct drm_dp_mst_topology_mgr *mgr,
-			      struct drm_dp_mst_port *port, int pbn,
-			      int pbn_div);
-int drm_dp_mst_atomic_enable_dsc(struct drm_atomic_state *state,
-				 struct drm_dp_mst_port *port,
-				 int pbn, int pbn_div,
-				 bool enable);
-int __must_check
-drm_dp_mst_add_affected_dsc_crtcs(struct drm_atomic_state *state,
-				  struct drm_dp_mst_topology_mgr *mgr);
+			      struct drm_dp_mst_port *port, int pbn);
 int __must_check
 drm_dp_atomic_release_vcpi_slots(struct drm_atomic_state *state,
 				 struct drm_dp_mst_topology_mgr *mgr,
 				 struct drm_dp_mst_port *port);
 int drm_dp_send_power_updown_phy(struct drm_dp_mst_topology_mgr *mgr,
 				 struct drm_dp_mst_port *port, bool power_up);
-int drm_dp_send_query_stream_enc_status(struct drm_dp_mst_topology_mgr *mgr,
-		struct drm_dp_mst_port *port,
-		struct drm_dp_query_stream_enc_status_ack_reply *status);
 int __must_check drm_dp_mst_atomic_check(struct drm_atomic_state *state);
 
 void drm_dp_mst_get_port_malloc(struct drm_dp_mst_port *port);
 void drm_dp_mst_put_port_malloc(struct drm_dp_mst_port *port);
-
-struct drm_dp_aux *drm_dp_mst_dsc_aux_for_port(struct drm_dp_mst_port *port);
 
 extern const struct drm_private_state_funcs drm_dp_mst_topology_state_funcs;
 

@@ -44,6 +44,7 @@
 #include "gemini.h"
 
 #define DRV_NAME		"gmac-gemini"
+#define DRV_VERSION		"1.0"
 
 #define DEFAULT_MSG_ENABLE (NETIF_MSG_DRV | NETIF_MSG_PROBE | NETIF_MSG_LINK)
 static int debug = -1;
@@ -85,8 +86,6 @@ MODULE_PARM_DESC(debug, "Debug level (0=none,...,16=all)");
 
 /**
  * struct gmac_queue_page - page buffer per-page info
- * @page: the page struct
- * @mapping: the dma address handle
  */
 struct gmac_queue_page {
 	struct page *page;
@@ -305,21 +304,21 @@ static void gmac_speed_set(struct net_device *netdev)
 	switch (phydev->speed) {
 	case 1000:
 		status.bits.speed = GMAC_SPEED_1000;
-		if (phydev->interface == PHY_INTERFACE_MODE_RGMII)
+		if (phy_interface_mode_is_rgmii(phydev->interface))
 			status.bits.mii_rmii = GMAC_PHY_RGMII_1000;
 		netdev_dbg(netdev, "connect %s to RGMII @ 1Gbit\n",
 			   phydev_name(phydev));
 		break;
 	case 100:
 		status.bits.speed = GMAC_SPEED_100;
-		if (phydev->interface == PHY_INTERFACE_MODE_RGMII)
+		if (phy_interface_mode_is_rgmii(phydev->interface))
 			status.bits.mii_rmii = GMAC_PHY_RGMII_100_10;
 		netdev_dbg(netdev, "connect %s to RGMII @ 100 Mbit\n",
 			   phydev_name(phydev));
 		break;
 	case 10:
 		status.bits.speed = GMAC_SPEED_10;
-		if (phydev->interface == PHY_INTERFACE_MODE_RGMII)
+		if (phy_interface_mode_is_rgmii(phydev->interface))
 			status.bits.mii_rmii = GMAC_PHY_RGMII_100_10;
 		netdev_dbg(netdev, "connect %s to RGMII @ 10 Mbit\n",
 			   phydev_name(phydev));
@@ -389,6 +388,9 @@ static int gmac_setup_phy(struct net_device *netdev)
 		status.bits.mii_rmii = GMAC_PHY_GMII;
 		break;
 	case PHY_INTERFACE_MODE_RGMII:
+	case PHY_INTERFACE_MODE_RGMII_ID:
+	case PHY_INTERFACE_MODE_RGMII_TXID:
+	case PHY_INTERFACE_MODE_RGMII_RXID:
 		netdev_dbg(netdev,
 			   "RGMII: set GMAC0 and GMAC1 to MII/RGMII mode\n");
 		status.bits.mii_rmii = GMAC_PHY_RGMII_100_10;
@@ -511,6 +513,7 @@ static int gmac_init(struct net_device *netdev)
 		.rel_threshold = 0,
 	} };
 	union gmac_config0 tmp;
+	u32 val;
 
 	config0.bits.max_len = gmac_pick_rx_max_len(netdev->mtu);
 	tmp.bits32 = readl(port->gmac_base + GMAC_CONFIG0);
@@ -520,7 +523,7 @@ static int gmac_init(struct net_device *netdev)
 	writel(config2.bits32, port->gmac_base + GMAC_CONFIG2);
 	writel(config3.bits32, port->gmac_base + GMAC_CONFIG3);
 
-	readl(port->dma_base + GMAC_AHB_WEIGHT_REG);
+	val = readl(port->dma_base + GMAC_AHB_WEIGHT_REG);
 	writel(ahb_weight.bits32, port->dma_base + GMAC_AHB_WEIGHT_REG);
 
 	writel(hw_weigh.bits32,
@@ -538,6 +541,12 @@ static int gmac_init(struct net_device *netdev)
 	port->irq_every_tx_packets = 1 << (port->txq_order - 2);
 
 	return 0;
+}
+
+static void gmac_uninit(struct net_device *netdev)
+{
+	if (netdev->phydev)
+		phy_disconnect(netdev->phydev);
 }
 
 static int gmac_setup_txqs(struct net_device *netdev)
@@ -1219,8 +1228,7 @@ map_error:
 	return -ENOMEM;
 }
 
-static netdev_tx_t gmac_start_xmit(struct sk_buff *skb,
-				   struct net_device *netdev)
+static int gmac_start_xmit(struct sk_buff *skb, struct net_device *netdev)
 {
 	struct gemini_ethernet_port *port = netdev_priv(netdev);
 	unsigned short m = (1 << port->txq_order) - 1;
@@ -1293,7 +1301,7 @@ out_drop:
 	return NETDEV_TX_OK;
 }
 
-static void gmac_tx_timeout(struct net_device *netdev, unsigned int txqueue)
+static void gmac_tx_timeout(struct net_device *netdev)
 {
 	netdev_err(netdev, "Tx timeout\n");
 	gmac_dump_dma_state(netdev);
@@ -1763,6 +1771,15 @@ static int gmac_open(struct net_device *netdev)
 	struct gemini_ethernet_port *port = netdev_priv(netdev);
 	int err;
 
+	if (!netdev->phydev) {
+		err = gmac_setup_phy(netdev);
+		if (err) {
+			netif_err(port, ifup, netdev,
+				  "PHY init failed: %d\n", err);
+			return err;
+		}
+	}
+
 	err = request_irq(netdev->irq, gmac_irq,
 			  IRQF_SHARED, netdev->name, netdev);
 	if (err) {
@@ -2108,8 +2125,9 @@ static void gmac_get_ringparam(struct net_device *netdev,
 			       struct ethtool_ringparam *rp)
 {
 	struct gemini_ethernet_port *port = netdev_priv(netdev);
+	union gmac_config0 config0;
 
-	readl(port->gmac_base + GMAC_CONFIG0);
+	config0.bits32 = readl(port->gmac_base + GMAC_CONFIG0);
 
 	rp->rx_max_pending = 1 << 15;
 	rp->rx_mini_max_pending = 0;
@@ -2189,11 +2207,13 @@ static void gmac_get_drvinfo(struct net_device *netdev,
 			     struct ethtool_drvinfo *info)
 {
 	strcpy(info->driver,  DRV_NAME);
+	strcpy(info->version, DRV_VERSION);
 	strcpy(info->bus_info, netdev->dev_id ? "1" : "0");
 }
 
 static const struct net_device_ops gmac_351x_ops = {
 	.ndo_init		= gmac_init,
+	.ndo_uninit		= gmac_uninit,
 	.ndo_open		= gmac_open,
 	.ndo_stop		= gmac_stop,
 	.ndo_start_xmit		= gmac_start_xmit,
@@ -2207,8 +2227,6 @@ static const struct net_device_ops gmac_351x_ops = {
 };
 
 static const struct ethtool_ops gmac_351x_ethtool_ops = {
-	.supported_coalesce_params = ETHTOOL_COALESCE_RX_USECS |
-				     ETHTOOL_COALESCE_MAX_FRAMES,
 	.get_sset_count	= gmac_get_sset_count,
 	.get_strings	= gmac_get_strings,
 	.get_ethtool_stats = gmac_get_ethtool_stats,
@@ -2279,10 +2297,8 @@ static irqreturn_t gemini_port_irq(int irq, void *data)
 
 static void gemini_port_remove(struct gemini_ethernet_port *port)
 {
-	if (port->netdev) {
-		phy_disconnect(port->netdev->phydev);
+	if (port->netdev)
 		unregister_netdev(port->netdev);
-	}
 	clk_disable_unprepare(port->pclk);
 	geth_cleanup_freeq(port->geth);
 }
@@ -2491,13 +2507,6 @@ static int gemini_ethernet_port_probe(struct platform_device *pdev)
 	if (ret)
 		goto unprepare;
 
-	ret = gmac_setup_phy(netdev);
-	if (ret) {
-		netdev_err(netdev,
-			   "PHY init failed\n");
-		goto unprepare;
-	}
-
 	ret = register_netdev(netdev);
 	if (ret)
 		goto unprepare;
@@ -2506,6 +2515,10 @@ static int gemini_ethernet_port_probe(struct platform_device *pdev)
 		    "irq %d, DMA @ 0x%pap, GMAC @ 0x%pap\n",
 		    port->irq, &dmares->start,
 		    &gmacres->start);
+	ret = gmac_setup_phy(netdev);
+	if (ret)
+		netdev_info(netdev,
+			    "PHY init failed, deferring to ifup time\n");
 	return 0;
 
 unprepare:
@@ -2518,7 +2531,6 @@ static int gemini_ethernet_port_remove(struct platform_device *pdev)
 	struct gemini_ethernet_port *port = platform_get_drvdata(pdev);
 
 	gemini_port_remove(port);
-
 	return 0;
 }
 

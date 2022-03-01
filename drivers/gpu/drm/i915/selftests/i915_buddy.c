@@ -8,6 +8,8 @@
 #include "../i915_selftest.h"
 #include "i915_random.h"
 
+#define SZ_8G (1ULL << 33)
+
 static void __igt_dump_block(struct i915_buddy_mm *mm,
 			     struct i915_buddy_block *block,
 			     bool buddy)
@@ -279,33 +281,27 @@ static int igt_check_mm(struct i915_buddy_mm *mm)
 static void igt_mm_config(u64 *size, u64 *chunk_size)
 {
 	I915_RND_STATE(prng);
-	u32 s, ms;
+	u64 s, ms;
 
 	/* Nothing fancy, just try to get an interesting bit pattern */
 
 	prandom_seed_state(&prng, i915_selftest.random_seed);
 
-	/* Let size be a random number of pages up to 8 GB (2M pages) */
-	s = 1 + i915_prandom_u32_max_state((BIT(33 - 12)) - 1, &prng);
-	/* Let the chunk size be a random power of 2 less than size */
-	ms = BIT(i915_prandom_u32_max_state(ilog2(s), &prng));
-	/* Round size down to the chunk size */
-	s &= -ms;
+	s = i915_prandom_u64_state(&prng) & (SZ_8G - 1);
+	ms = BIT_ULL(12 + (prandom_u32_state(&prng) % ilog2(s >> 12)));
+	s = max(s & -ms, ms);
 
-	/* Convert from pages to bytes */
-	*chunk_size = (u64)ms << 12;
-	*size = (u64)s << 12;
+	*chunk_size = ms;
+	*size = s;
 }
 
 static int igt_buddy_alloc_smoke(void *arg)
 {
 	struct i915_buddy_mm mm;
-	IGT_TIMEOUT(end_time);
-	I915_RND_STATE(prng);
+	int max_order;
 	u64 chunk_size;
 	u64 mm_size;
-	int *order;
-	int err, i;
+	int err;
 
 	igt_mm_config(&mm_size, &chunk_size);
 
@@ -317,16 +313,10 @@ static int igt_buddy_alloc_smoke(void *arg)
 		return err;
 	}
 
-	order = i915_random_order(mm.max_order + 1, &prng);
-	if (!order)
-		goto out_fini;
-
-	for (i = 0; i <= mm.max_order; ++i) {
+	for (max_order = mm.max_order; max_order >= 0; max_order--) {
 		struct i915_buddy_block *block;
-		int max_order = order[i];
-		bool timeout = false;
-		LIST_HEAD(blocks);
 		int order;
+		LIST_HEAD(blocks);
 		u64 total;
 
 		err = igt_check_mm(&mm);
@@ -370,11 +360,6 @@ retry:
 			}
 
 			total += i915_buddy_block_size(&mm, block);
-
-			if (__igt_timeout(end_time, NULL)) {
-				timeout = true;
-				break;
-			}
 		} while (total < mm.size);
 
 		if (!err)
@@ -388,17 +373,13 @@ retry:
 				pr_err("post-mm check failed\n");
 		}
 
-		if (err || timeout)
+		if (err)
 			break;
-
-		cond_resched();
 	}
 
 	if (err == -ENOMEM)
 		err = 0;
 
-	kfree(order);
-out_fini:
 	i915_buddy_fini(&mm);
 
 	return err;
@@ -706,8 +687,6 @@ static int igt_buddy_alloc_range(void *arg)
 		rem -= size;
 		if (!rem)
 			break;
-
-		cond_resched();
 	}
 
 	if (err == -ENOMEM)

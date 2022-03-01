@@ -194,19 +194,23 @@ static const struct rtc_class_ops lpc24xx_rtc_ops = {
 static int lpc24xx_rtc_probe(struct platform_device *pdev)
 {
 	struct lpc24xx_rtc *rtc;
+	struct resource *res;
 	int irq, ret;
 
 	rtc = devm_kzalloc(&pdev->dev, sizeof(*rtc), GFP_KERNEL);
 	if (!rtc)
 		return -ENOMEM;
 
-	rtc->rtc_base = devm_platform_ioremap_resource(pdev, 0);
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	rtc->rtc_base = devm_ioremap_resource(&pdev->dev, res);
 	if (IS_ERR(rtc->rtc_base))
 		return PTR_ERR(rtc->rtc_base);
 
 	irq = platform_get_irq(pdev, 0);
-	if (irq < 0)
+	if (irq < 0) {
+		dev_warn(&pdev->dev, "can't get interrupt resource\n");
 		return irq;
+	}
 
 	rtc->clk_rtc = devm_clk_get(&pdev->dev, "rtc");
 	if (IS_ERR(rtc->clk_rtc)) {

@@ -96,7 +96,11 @@ struct bmg160_data {
 	struct iio_trigger *motion_trig;
 	struct iio_mount_matrix orientation;
 	struct mutex mutex;
-	s16 buffer[8];
+	/* Ensure naturally aligned timestamp */
+	struct {
+		s16 chans[3];
+		s64 timestamp __aligned(8);
+	} scan;
 	u32 dps_range;
 	int ev_enable_state;
 	int slope_thres;
@@ -880,12 +884,12 @@ static irqreturn_t bmg160_trigger_handler(int irq, void *p)
 
 	mutex_lock(&data->mutex);
 	ret = regmap_bulk_read(data->regmap, BMG160_REG_XOUT_L,
-			       data->buffer, AXIS_MAX * 2);
+			       data->scan.chans, AXIS_MAX * 2);
 	mutex_unlock(&data->mutex);
 	if (ret < 0)
 		goto err;
 
-	iio_push_to_buffers_with_timestamp(indio_dev, data->buffer,
+	iio_push_to_buffers_with_timestamp(indio_dev, &data->scan,
 					   pf->timestamp);
 err:
 	iio_trigger_notify_done(indio_dev->trig);
@@ -893,7 +897,7 @@ err:
 	return IRQ_HANDLED;
 }
 
-static void bmg160_trig_reen(struct iio_trigger *trig)
+static int bmg160_trig_try_reen(struct iio_trigger *trig)
 {
 	struct iio_dev *indio_dev = iio_trigger_get_drvdata(trig);
 	struct bmg160_data *data = iio_priv(indio_dev);
@@ -902,14 +906,18 @@ static void bmg160_trig_reen(struct iio_trigger *trig)
 
 	/* new data interrupts don't need ack */
 	if (data->dready_trigger_on)
-		return;
+		return 0;
 
 	/* Set latched mode interrupt and clear any latched interrupt */
 	ret = regmap_write(data->regmap, BMG160_REG_INT_RST_LATCH,
 			   BMG160_INT_MODE_LATCH_INT |
 			   BMG160_INT_MODE_LATCH_RESET);
-	if (ret < 0)
+	if (ret < 0) {
 		dev_err(dev, "Error writing reg_rst_latch\n");
+		return ret;
+	}
+
+	return 0;
 }
 
 static int bmg160_data_rdy_trigger_set_state(struct iio_trigger *trig,
@@ -957,7 +965,7 @@ static int bmg160_data_rdy_trigger_set_state(struct iio_trigger *trig,
 
 static const struct iio_trigger_ops bmg160_trigger_ops = {
 	.set_trigger_state = bmg160_data_rdy_trigger_set_state,
-	.reenable = bmg160_trig_reen,
+	.try_reenable = bmg160_trig_try_reen,
 };
 
 static irqreturn_t bmg160_event_handler(int irq, void *private)
@@ -1047,6 +1055,8 @@ static int bmg160_buffer_postdisable(struct iio_dev *indio_dev)
 
 static const struct iio_buffer_setup_ops bmg160_buffer_setup_ops = {
 	.preenable = bmg160_buffer_preenable,
+	.postenable = iio_triggered_buffer_postenable,
+	.predisable = iio_triggered_buffer_predisable,
 	.postdisable = bmg160_buffer_postdisable,
 };
 
@@ -1091,6 +1101,7 @@ int bmg160_core_probe(struct device *dev, struct regmap *regmap, int irq,
 	if (ACPI_HANDLE(dev))
 		name = bmg160_match_acpi_device(dev);
 
+	indio_dev->dev.parent = dev;
 	indio_dev->channels = bmg160_channels;
 	indio_dev->num_channels = ARRAY_SIZE(bmg160_channels);
 	indio_dev->name = name;

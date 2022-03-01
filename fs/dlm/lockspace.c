@@ -197,6 +197,8 @@ static struct kset *dlm_kset;
 
 static int do_uevent(struct dlm_ls *ls, int in)
 {
+	int error;
+
 	if (in)
 		kobject_uevent(&ls->ls_kobj, KOBJ_ONLINE);
 	else
@@ -207,12 +209,20 @@ static int do_uevent(struct dlm_ls *ls, int in)
 	/* dlm_controld will see the uevent, do the necessary group management
 	   and then write to sysfs to wake us */
 
-	wait_event(ls->ls_uevent_wait,
-		   test_and_clear_bit(LSFL_UEVENT_WAIT, &ls->ls_flags));
+	error = wait_event_interruptible(ls->ls_uevent_wait,
+			test_and_clear_bit(LSFL_UEVENT_WAIT, &ls->ls_flags));
 
-	log_rinfo(ls, "group event done %d", ls->ls_uevent_result);
+	log_rinfo(ls, "group event done %d %d", error, ls->ls_uevent_result);
 
-	return ls->ls_uevent_result;
+	if (error)
+		goto out;
+
+	error = ls->ls_uevent_result;
+ out:
+	if (error)
+		log_error(ls, "group %s failed %d %d", in ? "join" : "leave",
+			  error, ls->ls_uevent_result);
+	return error;
 }
 
 static int dlm_uevent(struct kset *kset, struct kobject *kobj,
@@ -572,7 +582,7 @@ static int new_lockspace(const char *name, const char *cluster,
 	mutex_init(&ls->ls_requestqueue_mutex);
 	mutex_init(&ls->ls_clear_proc_locks);
 
-	ls->ls_recover_buf = kmalloc(LOWCOMMS_MAX_TX_BUFFER_LEN, GFP_NOFS);
+	ls->ls_recover_buf = kmalloc(dlm_config.ci_buffer_size, GFP_NOFS);
 	if (!ls->ls_recover_buf)
 		goto out_lkbidr;
 

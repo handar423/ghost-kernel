@@ -10,7 +10,7 @@
 
 #include <drm/drm_fourcc.h>
 #include <linux/fb.h>
-#include <linux/types.h>
+#include <linux/kernel.h>
 
 /* format array, use it to initialize a "struct simplefb_format" array */
 #define SIMPLEFB_FORMATS \

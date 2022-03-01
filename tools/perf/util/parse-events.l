@@ -41,6 +41,14 @@ static int value(yyscan_t scanner, int base)
 	return __value(yylval, text, base, PE_VALUE);
 }
 
+static int raw(yyscan_t scanner)
+{
+	YYSTYPE *yylval = parse_events_get_lval(scanner);
+	char *text = parse_events_get_text(scanner);
+
+	return __value(yylval, text + 1, 16, PE_RAW);
+}
+
 static int str(yyscan_t scanner, int token)
 {
 	YYSTYPE *yylval = parse_events_get_lval(scanner);
@@ -62,17 +70,6 @@ static int str(yyscan_t scanner, int token)
 	}
 
 	return token;
-}
-
-static int raw(yyscan_t scanner)
-{
-	YYSTYPE *yylval = parse_events_get_lval(scanner);
-	char *text = parse_events_get_text(scanner);
-
-	if (perf_pmu__parse_check(text) == PMU_EVENT_SYMBOL)
-		return str(scanner, PE_NAME);
-
-	return __value(yylval, text + 1, 16, PE_RAW);
 }
 
 static bool isbpf_suffix(char *text)
@@ -132,16 +129,12 @@ do {								\
 	yyless(0);						\
 } while (0)
 
-static int pmu_str_check(yyscan_t scanner, struct parse_events_state *parse_state)
+static int pmu_str_check(yyscan_t scanner)
 {
 	YYSTYPE *yylval = parse_events_get_lval(scanner);
 	char *text = parse_events_get_text(scanner);
 
 	yylval->str = strdup(text);
-
-	if (parse_state->fake_pmu)
-		return PE_PMU_EVENT_FAKE;
-
 	switch (perf_pmu__parse_check(text)) {
 		case PMU_EVENT_SYMBOL_PREFIX:
 			return PE_PMU_EVENT_PRE;
@@ -210,16 +203,16 @@ name_tag	[\'][a-zA-Z_*?\[\]][a-zA-Z0-9_*?\-,\.\[\]:=]*[\']
 name_minus	[a-zA-Z_*?][a-zA-Z0-9\-_*?.:]*
 drv_cfg_term	[a-zA-Z0-9_\.]+(=[a-zA-Z0-9_*?\.:]+)?
 /* If you add a modifier you need to update check_modifier() */
-modifier_event	[ukhpPGHSDIWe]+
+modifier_event	[ukhpPGHSDIW]+
 modifier_bp	[rwx]{1,3}
 
 %%
 
 %{
-	struct parse_events_state *_parse_state = parse_events_get_extra(yyscanner);
-
 	{
-		int start_token = _parse_state->stoken;
+		int start_token;
+
+		start_token = parse_events_get_extra(yyscanner);
 
 		if (start_token == PE_START_TERMS)
 			BEGIN(config);
@@ -227,7 +220,7 @@ modifier_bp	[rwx]{1,3}
 			BEGIN(event);
 
 		if (start_token) {
-			_parse_state->stoken = 0;
+			parse_events_set_extra(NULL, yyscanner);
 			/*
 			 * The flex parser does not init locations variable
 			 * via the scan_string interface, so we need do the
@@ -259,9 +252,7 @@ modifier_bp	[rwx]{1,3}
 			BEGIN(INITIAL);
 			REWIND(0);
 		}
-,		{
-			return ',';
-		}
+
 }
 
 <array>{
@@ -294,9 +285,6 @@ overwrite		{ return term(yyscanner, PARSE_EVENTS__TERM_TYPE_OVERWRITE); }
 no-overwrite		{ return term(yyscanner, PARSE_EVENTS__TERM_TYPE_NOOVERWRITE); }
 percore			{ return term(yyscanner, PARSE_EVENTS__TERM_TYPE_PERCORE); }
 aux-output		{ return term(yyscanner, PARSE_EVENTS__TERM_TYPE_AUX_OUTPUT); }
-aux-sample-size		{ return term(yyscanner, PARSE_EVENTS__TERM_TYPE_AUX_SAMPLE_SIZE); }
-r{num_raw_hex}		{ return raw(yyscanner); }
-r0x{num_raw_hex}	{ return raw(yyscanner); }
 ,			{ return ','; }
 "/"			{ BEGIN(INITIAL); return '/'; }
 {name_minus}		{ return str(yyscanner, PE_NAME); }
@@ -353,13 +341,11 @@ bpf-output					{ return sym(yyscanner, PERF_TYPE_SOFTWARE, PERF_COUNT_SW_BPF_OUT
 	 * Because the prefix cycles is mixed up with cpu-cycles.
 	 * loads and stores are mixed up with cache event
 	 */
-cycles-ct				|
-cycles-t				|
-mem-loads				|
-mem-stores				|
-topdown-[a-z-]+				|
-tx-capacity-[a-z-]+			|
-el-capacity-[a-z-]+			{ return str(yyscanner, PE_KERNEL_PMU_EVENT); }
+cycles-ct					{ return str(yyscanner, PE_KERNEL_PMU_EVENT); }
+cycles-t					{ return str(yyscanner, PE_KERNEL_PMU_EVENT); }
+mem-loads					{ return str(yyscanner, PE_KERNEL_PMU_EVENT); }
+mem-stores					{ return str(yyscanner, PE_KERNEL_PMU_EVENT); }
+topdown-[a-z-]+					{ return str(yyscanner, PE_KERNEL_PMU_EVENT); }
 
 L1-dcache|l1-d|l1d|L1-data		|
 L1-icache|l1-i|l1i|L1-instruction	|
@@ -384,7 +370,7 @@ r{num_raw_hex}		{ return raw(yyscanner); }
 {modifier_event}	{ return str(yyscanner, PE_MODIFIER_EVENT); }
 {bpf_object}		{ if (!isbpf(yyscanner)) { USER_REJECT }; return str(yyscanner, PE_BPF_OBJECT); }
 {bpf_source}		{ if (!isbpf(yyscanner)) { USER_REJECT }; return str(yyscanner, PE_BPF_SOURCE); }
-{name}			{ return pmu_str_check(yyscanner, _parse_state); }
+{name}			{ return pmu_str_check(yyscanner); }
 {name_tag}		{ return str(yyscanner, PE_NAME); }
 "/"			{ BEGIN(config); return '/'; }
 -			{ return '-'; }

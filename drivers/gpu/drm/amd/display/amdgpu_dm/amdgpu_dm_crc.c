@@ -101,7 +101,7 @@ int amdgpu_dm_crtc_configure_crc_source(struct drm_crtc *crtc,
 					struct dm_crtc_state *dm_crtc_state,
 					enum amdgpu_dm_pipe_crc_source source)
 {
-	struct amdgpu_device *adev = drm_to_adev(crtc->dev);
+	struct amdgpu_device *adev = crtc->dev->dev_private;
 	struct dc_stream_state *stream_state = dm_crtc_state->stream;
 	bool enable = amdgpu_dm_is_valid_crc_source(source);
 	int ret = 0;
@@ -115,23 +115,18 @@ int amdgpu_dm_crtc_configure_crc_source(struct drm_crtc *crtc,
 	/* Enable CRTC CRC generation if necessary. */
 	if (dm_is_crc_source_crtc(source) || source == AMDGPU_DM_PIPE_CRC_SOURCE_NONE) {
 		if (!dc_stream_configure_crc(stream_state->ctx->dc,
-					     stream_state, NULL, enable, enable)) {
+					     stream_state, enable, enable)) {
 			ret = -EINVAL;
 			goto unlock;
 		}
 	}
 
 	/* Configure dithering */
-	if (!dm_need_crc_dither(source)) {
+	if (!dm_need_crc_dither(source))
 		dc_stream_set_dither_option(stream_state, DITHER_OPTION_TRUN8);
-		dc_stream_set_dyn_expansion(stream_state->ctx->dc, stream_state,
-					    DYN_EXPANSION_DISABLE);
-	} else {
+	else
 		dc_stream_set_dither_option(stream_state,
 					    DITHER_OPTION_DEFAULT);
-		dc_stream_set_dyn_expansion(stream_state->ctx->dc, stream_state,
-					    DYN_EXPANSION_AUTO);
-	}
 
 unlock:
 	mutex_unlock(&adev->dm.dc_lock);
@@ -226,6 +221,14 @@ int amdgpu_dm_crtc_set_crc_source(struct drm_crtc *crtc, const char *src_name)
 			ret = -EINVAL;
 			goto cleanup;
 		}
+
+		if ((aconn->base.connector_type != DRM_MODE_CONNECTOR_DisplayPort) &&
+				(aconn->base.connector_type != DRM_MODE_CONNECTOR_eDP)) {
+			DRM_DEBUG_DRIVER("No DP connector available for CRC source\n");
+			ret = -EINVAL;
+			goto cleanup;
+		}
+
 	}
 
 	if (amdgpu_dm_crtc_configure_crc_source(crtc, crtc_state, source)) {

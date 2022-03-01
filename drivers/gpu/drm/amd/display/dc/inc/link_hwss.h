@@ -51,7 +51,6 @@ void dp_enable_link_phy(
 	const struct dc_link_settings *link_settings);
 
 void dp_receiver_power_ctrl(struct dc_link *link, bool on);
-void edp_add_delay_for_T9(struct dc_link *link);
 bool edp_receiver_ready_T9(struct dc_link *link);
 bool edp_receiver_ready_T7(struct dc_link *link);
 
@@ -61,13 +60,11 @@ void dp_disable_link_phy_mst(struct dc_link *link, enum signal_type signal);
 
 bool dp_set_hw_training_pattern(
 	struct dc_link *link,
-	enum dc_dp_training_pattern pattern,
-	uint32_t offset);
+	enum dc_dp_training_pattern pattern);
 
 void dp_set_hw_lane_settings(
 	struct dc_link *link,
-	const struct link_training_settings *link_settings,
-	uint32_t offset);
+	const struct link_training_settings *link_settings);
 
 void dp_set_hw_test_pattern(
 	struct dc_link *link,

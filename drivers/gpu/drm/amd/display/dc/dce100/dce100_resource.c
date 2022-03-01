@@ -46,7 +46,6 @@
 #include "dce/dce_audio.h"
 #include "dce/dce_hwseq.h"
 #include "dce100/dce100_hw_sequencer.h"
-#include "dce/dce_panel_cntl.h"
 
 #include "reg_helper.h"
 
@@ -250,18 +249,6 @@ static const struct dce_stream_encoder_mask se_mask = {
 		SE_COMMON_MASK_SH_LIST_DCE80_100(_MASK)
 };
 
-static const struct dce_panel_cntl_registers panel_cntl_regs[] = {
-	{ DCE_PANEL_CNTL_REG_LIST() }
-};
-
-static const struct dce_panel_cntl_shift panel_cntl_shift = {
-	DCE_PANEL_CNTL_MASK_SH_LIST(__SHIFT)
-};
-
-static const struct dce_panel_cntl_mask panel_cntl_mask = {
-	DCE_PANEL_CNTL_MASK_SH_LIST(_MASK)
-};
-
 #define opp_regs(id)\
 [id] = {\
 	OPP_DCE_100_REG_LIST(id),\
@@ -412,30 +399,6 @@ static const struct dc_plane_cap plane_cap = {
 #define CC_DC_HDMI_STRAPS__AUDIO_STREAM_NUMBER__SHIFT 0x8
 #endif
 
-static int map_transmitter_id_to_phy_instance(
-	enum transmitter transmitter)
-{
-	switch (transmitter) {
-	case TRANSMITTER_UNIPHY_A:
-		return 0;
-	case TRANSMITTER_UNIPHY_B:
-		return 1;
-	case TRANSMITTER_UNIPHY_C:
-		return 2;
-	case TRANSMITTER_UNIPHY_D:
-		return 3;
-	case TRANSMITTER_UNIPHY_E:
-		return 4;
-	case TRANSMITTER_UNIPHY_F:
-		return 5;
-	case TRANSMITTER_UNIPHY_G:
-		return 6;
-	default:
-		ASSERT(0);
-		return 0;
-	}
-}
-
 static void read_dce_straps(
 	struct dc_context *ctx,
 	struct resource_straps *straps)
@@ -543,14 +506,6 @@ static const struct dce_mem_input_mask mi_masks = {
 		.ENABLE = MC_HUB_RDREQ_DMIF_LIMIT__ENABLE_MASK
 };
 
-static const struct dce110_aux_registers_shift aux_shift = {
-	DCE10_AUX_MASK_SH_LIST(__SHIFT)
-};
-
-static const struct dce110_aux_registers_mask aux_mask = {
-	DCE10_AUX_MASK_SH_LIST(_MASK)
-};
-
 static struct mem_input *dce100_mem_input_create(
 	struct dc_context *ctx,
 	uint32_t inst)
@@ -616,38 +571,17 @@ struct link_encoder *dce100_link_encoder_create(
 {
 	struct dce110_link_encoder *enc110 =
 		kzalloc(sizeof(struct dce110_link_encoder), GFP_KERNEL);
-	int link_regs_id;
 
 	if (!enc110)
 		return NULL;
 
-	link_regs_id =
-		map_transmitter_id_to_phy_instance(enc_init_data->transmitter);
-
 	dce110_link_encoder_construct(enc110,
 				      enc_init_data,
 				      &link_enc_feature,
-				      &link_enc_regs[link_regs_id],
+				      &link_enc_regs[enc_init_data->transmitter],
 				      &link_enc_aux_regs[enc_init_data->channel - 1],
 				      &link_enc_hpd_regs[enc_init_data->hpd_source]);
 	return &enc110->base;
-}
-
-static struct panel_cntl *dce100_panel_cntl_create(const struct panel_cntl_init_data *init_data)
-{
-	struct dce_panel_cntl *panel_cntl =
-		kzalloc(sizeof(struct dce_panel_cntl), GFP_KERNEL);
-
-	if (!panel_cntl)
-		return NULL;
-
-	dce_panel_cntl_construct(panel_cntl,
-			init_data,
-			&panel_cntl_regs[init_data->inst],
-			&panel_cntl_shift,
-			&panel_cntl_mask);
-
-	return &panel_cntl->base;
 }
 
 struct output_pixel_processor *dce100_opp_create(
@@ -677,10 +611,7 @@ struct dce_aux *dce100_aux_engine_create(
 
 	dce110_aux_engine_construct(aux_engine, ctx, inst,
 				    SW_AUX_TIMEOUT_PERIOD_MULTIPLIER * AUX_TIMEOUT_PERIOD,
-				    &aux_engine_regs[inst],
-					&aux_mask,
-					&aux_shift,
-					ctx->dc->caps.extended_aux_timeout_support);
+				    &aux_engine_regs[inst]);
 
 	return &aux_engine->base;
 }
@@ -748,7 +679,7 @@ void dce100_clock_source_destroy(struct clock_source **clk_src)
 	*clk_src = NULL;
 }
 
-static void dce100_resource_destruct(struct dce110_resource_pool *pool)
+static void destruct(struct dce110_resource_pool *pool)
 {
 	unsigned int i;
 
@@ -908,7 +839,7 @@ static void dce100_destroy_resource_pool(struct resource_pool **pool)
 {
 	struct dce110_resource_pool *dce110_pool = TO_DCE110_RES_POOL(*pool);
 
-	dce100_resource_destruct(dce110_pool);
+	destruct(dce110_pool);
 	kfree(dce110_pool);
 	*pool = NULL;
 }
@@ -966,7 +897,6 @@ struct stream_encoder *dce100_find_first_free_match_stream_enc_for_link(
 static const struct resource_funcs dce100_res_pool_funcs = {
 	.destroy = dce100_destroy_resource_pool,
 	.link_enc_create = dce100_link_encoder_create,
-	.panel_cntl_create = dce100_panel_cntl_create,
 	.validate_bandwidth = dce100_validate_bandwidth,
 	.validate_plane = dce100_validate_plane,
 	.add_stream_to_ctx = dce100_add_stream_to_ctx,
@@ -974,7 +904,7 @@ static const struct resource_funcs dce100_res_pool_funcs = {
 	.find_first_free_match_stream_enc_for_link = dce100_find_first_free_match_stream_enc_for_link
 };
 
-static bool dce100_resource_construct(
+static bool construct(
 	uint8_t num_virtual_links,
 	struct dc  *dc,
 	struct dce110_resource_pool *pool)
@@ -1064,13 +994,9 @@ static bool dce100_resource_construct(
 	pool->base.timing_generator_count = pool->base.res_cap->num_timing_generator;
 	dc->caps.max_downscale_ratio = 200;
 	dc->caps.i2c_speed_in_khz = 40;
-	dc->caps.i2c_speed_in_khz = 40;
 	dc->caps.max_cursor_size = 128;
-	dc->caps.min_horizontal_blanking_period = 80;
 	dc->caps.dual_link_dvi = true;
 	dc->caps.disable_dp_clk_share = true;
-	dc->caps.extended_aux_timeout_support = false;
-
 	for (i = 0; i < pool->base.pipe_count; i++) {
 		pool->base.timing_generators[i] =
 			dce100_timing_generator_create(
@@ -1148,7 +1074,7 @@ static bool dce100_resource_construct(
 	return true;
 
 res_create_fail:
-	dce100_resource_destruct(pool);
+	destruct(pool);
 
 	return false;
 }
@@ -1163,7 +1089,7 @@ struct resource_pool *dce100_create_resource_pool(
 	if (!pool)
 		return NULL;
 
-	if (dce100_resource_construct(num_virtual_links, dc, pool))
+	if (construct(num_virtual_links, dc, pool))
 		return &pool->base;
 
 	kfree(pool);

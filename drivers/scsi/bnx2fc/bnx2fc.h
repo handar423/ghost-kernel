@@ -51,6 +51,7 @@
 #include <scsi/scsi_tcq.h>
 #include <scsi/libfc.h>
 #include <scsi/libfcoe.h>
+#include <scsi/fc_encode.h>
 #include <scsi/scsi_transport.h>
 #include <scsi/scsi_transport_fc.h>
 #include <scsi/fc/fc_fip.h>
@@ -65,7 +66,7 @@
 #include "bnx2fc_constants.h"
 
 #define BNX2FC_NAME		"bnx2fc"
-#define BNX2FC_VERSION		"2.12.13"
+#define BNX2FC_VERSION		"2.12.10"
 
 #define PFX			"bnx2fc: "
 
@@ -481,10 +482,7 @@ struct io_bdt {
 struct bnx2fc_work {
 	struct list_head list;
 	struct bnx2fc_rport *tgt;
-	struct fcoe_task_ctx_entry *task;
-	unsigned char rq_data[BNX2FC_RQ_BUF_SZ];
 	u16 wqe;
-	u8 num_rq;
 };
 struct bnx2fc_unsol_els {
 	struct fc_lport *lport;
@@ -552,7 +550,7 @@ void bnx2fc_rport_event_handler(struct fc_lport *lport,
 				enum fc_rport_event event);
 void bnx2fc_process_scsi_cmd_compl(struct bnx2fc_cmd *io_req,
 				   struct fcoe_task_ctx_entry *task,
-				   u8 num_rq, unsigned char *rq_data);
+				   u8 num_rq);
 void bnx2fc_process_cleanup_compl(struct bnx2fc_cmd *io_req,
 			       struct fcoe_task_ctx_entry *task,
 			       u8 num_rq);
@@ -561,7 +559,7 @@ void bnx2fc_process_abts_compl(struct bnx2fc_cmd *io_req,
 			       u8 num_rq);
 void bnx2fc_process_tm_compl(struct bnx2fc_cmd *io_req,
 			     struct fcoe_task_ctx_entry *task,
-			     u8 num_rq, unsigned char *rq_data);
+			     u8 num_rq);
 void bnx2fc_process_els_compl(struct bnx2fc_cmd *els_req,
 			      struct fcoe_task_ctx_entry *task,
 			      u8 num_rq);
@@ -579,9 +577,7 @@ struct fc_seq *bnx2fc_elsct_send(struct fc_lport *lport, u32 did,
 				      void *arg, u32 timeout);
 void bnx2fc_arm_cq(struct bnx2fc_rport *tgt);
 int bnx2fc_process_new_cqes(struct bnx2fc_rport *tgt);
-void bnx2fc_process_cq_compl(struct bnx2fc_rport *tgt, u16 wqe,
-			     unsigned char *rq_data, u8 num_rq,
-			     struct fcoe_task_ctx_entry *task);
+void bnx2fc_process_cq_compl(struct bnx2fc_rport *tgt, u16 wqe);
 struct bnx2fc_rport *bnx2fc_tgt_lookup(struct fcoe_port *port,
 					     u32 port_id);
 void bnx2fc_process_l2_frame_compl(struct bnx2fc_rport *tgt,

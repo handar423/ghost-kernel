@@ -152,7 +152,7 @@ static int uac_clock_selector_set_val(struct snd_usb_audio *chip, int selector_i
 }
 
 static bool uac_clock_source_is_valid_quirk(struct snd_usb_audio *chip,
-					    const struct audioformat *fmt,
+					    struct audioformat *fmt,
 					    int source_id)
 {
 	bool ret = false;
@@ -215,7 +215,7 @@ static bool uac_clock_source_is_valid_quirk(struct snd_usb_audio *chip,
 }
 
 static bool uac_clock_source_is_valid(struct snd_usb_audio *chip,
-				      const struct audioformat *fmt,
+				      struct audioformat *fmt,
 				      int source_id)
 {
 	int err;
@@ -264,7 +264,7 @@ static bool uac_clock_source_is_valid(struct snd_usb_audio *chip,
 }
 
 static int __uac_clock_find_source(struct snd_usb_audio *chip,
-				   const struct audioformat *fmt, int entity_id,
+				   struct audioformat *fmt, int entity_id,
 				   unsigned long *visited, bool validate)
 {
 	struct uac_clock_source_descriptor *source;
@@ -296,7 +296,7 @@ static int __uac_clock_find_source(struct snd_usb_audio *chip,
 
 	selector = snd_usb_find_clock_selector(chip->ctrl_intf, entity_id);
 	if (selector) {
-		int ret, i, cur;
+		int ret, i, cur, err;
 
 		/* the entity ID we are looking for is a selector.
 		 * find out what it currently selects */
@@ -318,13 +318,23 @@ static int __uac_clock_find_source(struct snd_usb_audio *chip,
 		ret = __uac_clock_find_source(chip, fmt,
 					      selector->baCSourceID[ret - 1],
 					      visited, validate);
+		if (ret > 0) {
+			/*
+			 * For Samsung USBC Headset (AKG), setting clock selector again
+			 * will result in incorrect default clock setting problems
+			 */
+			if (chip->usb_id == USB_ID(0x04e8, 0xa051))
+				return ret;
+			err = uac_clock_selector_set_val(chip, entity_id, cur);
+			if (err < 0)
+				return err;
+		}
+
 		if (!validate || ret > 0 || !chip->autoclock)
 			return ret;
 
 		/* The current clock source is invalid, try others. */
 		for (i = 1; i <= selector->bNrInPins; i++) {
-			int err;
-
 			if (i == cur)
 				continue;
 
@@ -358,7 +368,7 @@ static int __uac_clock_find_source(struct snd_usb_audio *chip,
 }
 
 static int __uac3_clock_find_source(struct snd_usb_audio *chip,
-				    const struct audioformat *fmt, int entity_id,
+				    struct audioformat *fmt, int entity_id,
 				    unsigned long *visited, bool validate)
 {
 	struct uac3_clock_source_descriptor *source;
@@ -390,7 +400,7 @@ static int __uac3_clock_find_source(struct snd_usb_audio *chip,
 
 	selector = snd_usb_find_clock_selector_v3(chip->ctrl_intf, entity_id);
 	if (selector) {
-		int ret, i, cur;
+		int ret, i, cur, err;
 
 		/* the entity ID we are looking for is a selector.
 		 * find out what it currently selects */
@@ -412,6 +422,12 @@ static int __uac3_clock_find_source(struct snd_usb_audio *chip,
 		ret = __uac3_clock_find_source(chip, fmt,
 					       selector->baCSourceID[ret - 1],
 					       visited, validate);
+		if (ret > 0) {
+			err = uac_clock_selector_set_val(chip, entity_id, cur);
+			if (err < 0)
+				return err;
+		}
+
 		if (!validate || ret > 0 || !chip->autoclock)
 			return ret;
 
@@ -464,7 +480,7 @@ static int __uac3_clock_find_source(struct snd_usb_audio *chip,
  * Returns the clock source UnitID (>=0) on success, or an error.
  */
 int snd_usb_clock_find_source(struct snd_usb_audio *chip,
-			      const struct audioformat *fmt, bool validate)
+			      struct audioformat *fmt, bool validate)
 {
 	DECLARE_BITMAP(visited, 256);
 	memset(visited, 0, sizeof(visited));
@@ -481,12 +497,18 @@ int snd_usb_clock_find_source(struct snd_usb_audio *chip,
 	}
 }
 
-static int set_sample_rate_v1(struct snd_usb_audio *chip,
-			      const struct audioformat *fmt, int rate)
+static int set_sample_rate_v1(struct snd_usb_audio *chip, int iface,
+			      struct usb_host_interface *alts,
+			      struct audioformat *fmt, int rate)
 {
 	struct usb_device *dev = chip->dev;
+	unsigned int ep;
 	unsigned char data[3];
 	int err, crate;
+
+	if (get_iface_desc(alts)->bNumEndpoints < 1)
+		return -EINVAL;
+	ep = get_endpoint(alts, 0)->bEndpointAddress;
 
 	/* if endpoint doesn't have sampling rate control, bail out */
 	if (!(fmt->attributes & UAC_EP_CS_ATTR_SAMPLE_RATE))
@@ -497,11 +519,11 @@ static int set_sample_rate_v1(struct snd_usb_audio *chip,
 	data[2] = rate >> 16;
 	err = snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0), UAC_SET_CUR,
 			      USB_TYPE_CLASS | USB_RECIP_ENDPOINT | USB_DIR_OUT,
-			      UAC_EP_CS_ATTR_SAMPLE_RATE << 8,
-			      fmt->endpoint, data, sizeof(data));
+			      UAC_EP_CS_ATTR_SAMPLE_RATE << 8, ep,
+			      data, sizeof(data));
 	if (err < 0) {
 		dev_err(&dev->dev, "%d:%d: cannot set freq %d to ep %#x\n",
-			fmt->iface, fmt->altsetting, rate, fmt->endpoint);
+			iface, fmt->altsetting, rate, ep);
 		return err;
 	}
 
@@ -515,11 +537,11 @@ static int set_sample_rate_v1(struct snd_usb_audio *chip,
 
 	err = snd_usb_ctl_msg(dev, usb_rcvctrlpipe(dev, 0), UAC_GET_CUR,
 			      USB_TYPE_CLASS | USB_RECIP_ENDPOINT | USB_DIR_IN,
-			      UAC_EP_CS_ATTR_SAMPLE_RATE << 8,
-			      fmt->endpoint, data, sizeof(data));
+			      UAC_EP_CS_ATTR_SAMPLE_RATE << 8, ep,
+			      data, sizeof(data));
 	if (err < 0) {
 		dev_err(&dev->dev, "%d:%d: cannot get freq at ep %#x\n",
-			fmt->iface, fmt->altsetting, fmt->endpoint);
+			iface, fmt->altsetting, ep);
 		chip->sample_rate_read_error++;
 		return 0; /* some devices don't support reading */
 	}
@@ -560,58 +582,16 @@ static int get_sample_rate_v2v3(struct snd_usb_audio *chip, int iface,
 	return le32_to_cpu(data);
 }
 
-/*
- * Try to set the given sample rate:
- *
- * Return 0 if the clock source is read-only, the actual rate on success,
- * or a negative error code.
- *
- * This function gets called from format.c to validate each sample rate, too.
- * Hence no message is shown upon error
- */
-int snd_usb_set_sample_rate_v2v3(struct snd_usb_audio *chip,
-				 const struct audioformat *fmt,
-				 int clock, int rate)
+static int set_sample_rate_v2v3(struct snd_usb_audio *chip, int iface,
+			      struct usb_host_interface *alts,
+			      struct audioformat *fmt, int rate)
 {
+	struct usb_device *dev = chip->dev;
+	__le32 data;
+	int err, cur_rate, prev_rate;
+	int clock;
 	bool writeable;
 	u32 bmControls;
-	__le32 data;
-	int err;
-
-	if (fmt->protocol == UAC_VERSION_3) {
-		struct uac3_clock_source_descriptor *cs_desc;
-
-		cs_desc = snd_usb_find_clock_source_v3(chip->ctrl_intf, clock);
-		bmControls = le32_to_cpu(cs_desc->bmControls);
-	} else {
-		struct uac_clock_source_descriptor *cs_desc;
-
-		cs_desc = snd_usb_find_clock_source(chip->ctrl_intf, clock);
-		bmControls = cs_desc->bmControls;
-	}
-
-	writeable = uac_v2v3_control_is_writeable(bmControls,
-						  UAC2_CS_CONTROL_SAM_FREQ);
-	if (!writeable)
-		return 0;
-
-	data = cpu_to_le32(rate);
-	err = snd_usb_ctl_msg(chip->dev, usb_sndctrlpipe(chip->dev, 0), UAC2_CS_CUR,
-			      USB_TYPE_CLASS | USB_RECIP_INTERFACE | USB_DIR_OUT,
-			      UAC2_CS_CONTROL_SAM_FREQ << 8,
-			      snd_usb_ctrl_intf(chip) | (clock << 8),
-			      &data, sizeof(data));
-	if (err < 0)
-		return err;
-
-	return get_sample_rate_v2v3(chip, fmt->iface, fmt->altsetting, clock);
-}
-
-static int set_sample_rate_v2v3(struct snd_usb_audio *chip,
-				const struct audioformat *fmt, int rate)
-{
-	int cur_rate, prev_rate;
-	int clock;
 
 	/* First, try to find a valid clock. This may trigger
 	 * automatic clock selection if the current clock is not
@@ -630,26 +610,63 @@ static int set_sample_rate_v2v3(struct snd_usb_audio *chip,
 			return clock;
 	}
 
-	prev_rate = get_sample_rate_v2v3(chip, fmt->iface, fmt->altsetting, clock);
+	prev_rate = get_sample_rate_v2v3(chip, iface, fmt->altsetting, clock);
 	if (prev_rate == rate)
 		goto validation;
 
-	cur_rate = snd_usb_set_sample_rate_v2v3(chip, fmt, clock, rate);
-	if (cur_rate < 0) {
-		usb_audio_err(chip,
-			      "%d:%d: cannot set freq %d (v2/v3): err %d\n",
-			      fmt->iface, fmt->altsetting, rate, cur_rate);
-		return cur_rate;
+	if (fmt->protocol == UAC_VERSION_3) {
+		struct uac3_clock_source_descriptor *cs_desc;
+
+		cs_desc = snd_usb_find_clock_source_v3(chip->ctrl_intf, clock);
+		bmControls = le32_to_cpu(cs_desc->bmControls);
+	} else {
+		struct uac_clock_source_descriptor *cs_desc;
+
+		cs_desc = snd_usb_find_clock_source(chip->ctrl_intf, clock);
+		bmControls = cs_desc->bmControls;
 	}
 
-	if (!cur_rate)
+	writeable = uac_v2v3_control_is_writeable(bmControls,
+						  UAC2_CS_CONTROL_SAM_FREQ);
+	if (writeable) {
+		data = cpu_to_le32(rate);
+		err = snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0), UAC2_CS_CUR,
+				      USB_TYPE_CLASS | USB_RECIP_INTERFACE | USB_DIR_OUT,
+				      UAC2_CS_CONTROL_SAM_FREQ << 8,
+				      snd_usb_ctrl_intf(chip) | (clock << 8),
+				      &data, sizeof(data));
+		if (err < 0) {
+			usb_audio_err(chip,
+				"%d:%d: cannot set freq %d (v2/v3): err %d\n",
+				iface, fmt->altsetting, rate, err);
+			return err;
+		}
+
+		cur_rate = get_sample_rate_v2v3(chip, iface,
+						fmt->altsetting, clock);
+	} else {
 		cur_rate = prev_rate;
+	}
 
 	if (cur_rate != rate) {
-		usb_audio_warn(chip,
-			       "%d:%d: freq mismatch (RO clock): req %d, clock runs @%d\n",
-			       fmt->iface, fmt->altsetting, rate, cur_rate);
-		return -ENXIO;
+		if (!writeable) {
+			usb_audio_warn(chip,
+				 "%d:%d: freq mismatch (RO clock): req %d, clock runs @%d\n",
+				 iface, fmt->altsetting, rate, cur_rate);
+			return -ENXIO;
+		}
+		usb_audio_dbg(chip,
+			"current rate %d is different from the runtime rate %d\n",
+			cur_rate, rate);
+	}
+
+	/* Some devices doesn't respond to sample rate changes while the
+	 * interface is active. */
+	if (rate != prev_rate) {
+		usb_set_interface(dev, iface, 0);
+		snd_usb_set_interface_quirk(dev);
+		usb_set_interface(dev, iface, fmt->altsetting);
+		snd_usb_set_interface_quirk(dev);
 	}
 
 validation:
@@ -659,16 +676,14 @@ validation:
 	return 0;
 }
 
-int snd_usb_init_sample_rate(struct snd_usb_audio *chip,
-			     const struct audioformat *fmt, int rate)
+int snd_usb_init_sample_rate(struct snd_usb_audio *chip, int iface,
+			     struct usb_host_interface *alts,
+			     struct audioformat *fmt, int rate)
 {
-	usb_audio_dbg(chip, "%d:%d Set sample rate %d, clock %d\n",
-		      fmt->iface, fmt->altsetting, rate, fmt->clock);
-
 	switch (fmt->protocol) {
 	case UAC_VERSION_1:
 	default:
-		return set_sample_rate_v1(chip, fmt, rate);
+		return set_sample_rate_v1(chip, iface, alts, fmt, rate);
 
 	case UAC_VERSION_3:
 		if (chip->badd_profile >= UAC3_FUNCTION_SUBCLASS_GENERIC_IO) {
@@ -677,9 +692,9 @@ int snd_usb_init_sample_rate(struct snd_usb_audio *chip,
 			else
 				return 0;
 		}
-		fallthrough;
+	/* fall through */
 	case UAC_VERSION_2:
-		return set_sample_rate_v2v3(chip, fmt, rate);
+		return set_sample_rate_v2v3(chip, iface, alts, fmt, rate);
 	}
 }
 

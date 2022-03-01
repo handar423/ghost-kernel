@@ -7,7 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
-#include <bpf/libbpf.h>
+#include <libbpf.h>
 
 #include "disasm.h"
 #include "json_writer.h"

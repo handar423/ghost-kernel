@@ -114,6 +114,12 @@ void send_ipi(const struct cpumask *cpumask, enum ipi_message_type msg)
 	local_irq_restore(flags);
 }
 
+static struct irqaction ipi_intdesc = {
+	.handler = handle_ipi,
+	.flags = IRQF_TRIGGER_RISING,
+	.name = "ipi_handler"
+};
+
 void __init smp_prepare_boot_cpu(void)
 {
 }
@@ -126,8 +132,8 @@ void __init smp_prepare_boot_cpu(void)
 
 void start_secondary(void)
 {
+	unsigned int cpu;
 	unsigned long thread_ptr;
-	unsigned int cpu, irq;
 
 	/*  Calculate thread_info pointer from stack pointer  */
 	__asm__ __volatile__(
@@ -149,10 +155,7 @@ void start_secondary(void)
 
 	cpu = smp_processor_id();
 
-	irq = BASE_IPI_IRQ + cpu;
-	if (request_irq(irq, handle_ipi, IRQF_TRIGGER_RISING, "ipi_handler",
-			NULL))
-		pr_err("Failed to request irq %u (ipi_handler)\n", irq);
+	setup_irq(BASE_IPI_IRQ + cpu, &ipi_intdesc);
 
 	/*  Register the clock_event dummy  */
 	setup_percpu_clockdev();
@@ -198,7 +201,7 @@ void __init smp_cpus_done(unsigned int max_cpus)
 
 void __init smp_prepare_cpus(unsigned int max_cpus)
 {
-	int i, irq = BASE_IPI_IRQ;
+	int i;
 
 	/*
 	 * should eventually have some sort of machine
@@ -210,11 +213,8 @@ void __init smp_prepare_cpus(unsigned int max_cpus)
 		set_cpu_present(i, true);
 
 	/*  Also need to register the interrupts for IPI  */
-	if (max_cpus > 1) {
-		if (request_irq(irq, handle_ipi, IRQF_TRIGGER_RISING,
-				"ipi_handler", NULL))
-			pr_err("Failed to request irq %d (ipi_handler)\n", irq);
-	}
+	if (max_cpus > 1)
+		setup_irq(BASE_IPI_IRQ, &ipi_intdesc);
 }
 
 void smp_send_reschedule(int cpu)

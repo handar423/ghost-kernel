@@ -478,7 +478,7 @@ struct drvint_cmd_parm {
 	unsigned char *pbuf;
 };
 
-/*------------------- Below are used for RF/BB tuning ---------------------*/
+/*------------------- Below are used for RF/BB tunning ---------------------*/
 
 struct	setantenna_parm {
 	u8	tx_antset;

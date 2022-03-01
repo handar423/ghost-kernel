@@ -29,23 +29,10 @@
 						 SB_BARRIER_INSN"nop\n",	\
 						 ARM64_HAS_SB))
 
-#ifdef CONFIG_ARM64_PSEUDO_NMI
-#define pmr_sync()						\
-	do {							\
-		extern struct static_key_false gic_pmr_sync;	\
-								\
-		if (static_branch_unlikely(&gic_pmr_sync))	\
-			dsb(sy);				\
-	} while(0)
-#else
-#define pmr_sync()	do {} while (0)
-#endif
-
 #define mb()		dsb(sy)
 #define rmb()		dsb(ld)
 #define wmb()		dsb(st)
 
-#define dma_mb()	dmb(osh)
 #define dma_rmb()	dmb(oshld)
 #define dma_wmb()	dmb(oshst)
 
@@ -70,6 +57,25 @@ static inline unsigned long array_index_mask_nospec(unsigned long idx,
 	return mask;
 }
 
+/*
+ * Ensure that reads of the counter are treated the same as memory reads
+ * for the purposes of ordering by subsequent memory barriers.
+ *
+ * This insanity brought to you by speculative system register reads,
+ * out-of-order memory accesses, sequence locks and Thomas Gleixner.
+ *
+ * http://lists.infradead.org/pipermail/linux-arm-kernel/2019-February/631195.html
+ */
+#define arch_counter_enforce_ordering(val) do {				\
+	u64 tmp, _val = (val);						\
+									\
+	asm volatile(							\
+	"	eor	%0, %1, %1\n"					\
+	"	add	%0, sp, %0\n"					\
+	"	ldr	xzr, [%0]"					\
+	: "=r" (tmp) : "r" (_val));					\
+} while (0)
+
 #define __smp_mb()	dmb(ish)
 #define __smp_rmb()	dmb(ishld)
 #define __smp_wmb()	dmb(ishst)
@@ -77,8 +83,8 @@ static inline unsigned long array_index_mask_nospec(unsigned long idx,
 #define __smp_store_release(p, v)					\
 do {									\
 	typeof(p) __p = (p);						\
-	union { __unqual_scalar_typeof(*p) __val; char __c[1]; } __u =	\
-		{ .__val = (__force __unqual_scalar_typeof(*p)) (v) };	\
+	union { typeof(*p) __val; char __c[1]; } __u =			\
+		{ .__val = (__force typeof(*p)) (v) };			\
 	compiletime_assert_atomic_type(*p);				\
 	kasan_check_write(__p, sizeof(*p));				\
 	switch (sizeof(*p)) {						\
@@ -111,7 +117,7 @@ do {									\
 
 #define __smp_load_acquire(p)						\
 ({									\
-	union { __unqual_scalar_typeof(*p) __val; char __c[1]; } __u;	\
+	union { typeof(*p) __val; char __c[1]; } __u;			\
 	typeof(p) __p = (p);						\
 	compiletime_assert_atomic_type(*p);				\
 	kasan_check_read(__p, sizeof(*p));				\
@@ -137,33 +143,33 @@ do {									\
 			: "Q" (*__p) : "memory");			\
 		break;							\
 	}								\
-	(typeof(*p))__u.__val;						\
+	__u.__val;							\
 })
 
 #define smp_cond_load_relaxed(ptr, cond_expr)				\
 ({									\
 	typeof(ptr) __PTR = (ptr);					\
-	__unqual_scalar_typeof(*ptr) VAL;				\
+	typeof(*ptr) VAL;						\
 	for (;;) {							\
 		VAL = READ_ONCE(*__PTR);				\
 		if (cond_expr)						\
 			break;						\
 		__cmpwait_relaxed(__PTR, VAL);				\
 	}								\
-	(typeof(*ptr))VAL;						\
+	VAL;								\
 })
 
 #define smp_cond_load_acquire(ptr, cond_expr)				\
 ({									\
 	typeof(ptr) __PTR = (ptr);					\
-	__unqual_scalar_typeof(*ptr) VAL;				\
+	typeof(*ptr) VAL;						\
 	for (;;) {							\
 		VAL = smp_load_acquire(__PTR);				\
 		if (cond_expr)						\
 			break;						\
 		__cmpwait_relaxed(__PTR, VAL);				\
 	}								\
-	(typeof(*ptr))VAL;						\
+	VAL;								\
 })
 
 #include <asm-generic/barrier.h>

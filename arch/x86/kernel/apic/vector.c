@@ -161,7 +161,6 @@ static void apic_update_vector(struct irq_data *irqd, unsigned int newvec,
 		apicd->move_in_progress = true;
 		apicd->prev_vector = apicd->vector;
 		apicd->prev_cpu = apicd->cpu;
-		WARN_ON_ONCE(apicd->cpu == newcpu);
 	} else {
 		irq_matrix_free(vector_matrix, apicd->cpu, apicd->vector,
 				managed);
@@ -559,12 +558,6 @@ static int x86_vector_alloc_irqs(struct irq_domain *domain, unsigned int virq,
 		irqd->chip_data = apicd;
 		irqd->hwirq = virq + i;
 		irqd_set_single_target(irqd);
-		/*
-		 * Prevent that any of these interrupts is invoked in
-		 * non interrupt context via e.g. generic_handle_irq()
-		 * as that can corrupt the affinity move state.
-		 */
-		irqd_set_handle_enforce_irqctx(irqd);
 
 		/* Don't invoke affinity setter on deactivated interrupts */
 		irqd_set_affinity_on_activate(irqd);
@@ -640,50 +633,7 @@ static void x86_vector_debug_show(struct seq_file *m, struct irq_domain *d,
 }
 #endif
 
-int x86_fwspec_is_ioapic(struct irq_fwspec *fwspec)
-{
-	if (fwspec->param_count != 1)
-		return 0;
-
-	if (is_fwnode_irqchip(fwspec->fwnode)) {
-		const char *fwname = fwnode_get_name(fwspec->fwnode);
-		return fwname && !strncmp(fwname, "IO-APIC-", 8) &&
-			simple_strtol(fwname+8, NULL, 10) == fwspec->param[0];
-	}
-	return to_of_node(fwspec->fwnode) &&
-		of_device_is_compatible(to_of_node(fwspec->fwnode),
-					"intel,ce4100-ioapic");
-}
-
-int x86_fwspec_is_hpet(struct irq_fwspec *fwspec)
-{
-	if (fwspec->param_count != 1)
-		return 0;
-
-	if (is_fwnode_irqchip(fwspec->fwnode)) {
-		const char *fwname = fwnode_get_name(fwspec->fwnode);
-		return fwname && !strncmp(fwname, "HPET-MSI-", 9) &&
-			simple_strtol(fwname+9, NULL, 10) == fwspec->param[0];
-	}
-	return 0;
-}
-
-static int x86_vector_select(struct irq_domain *d, struct irq_fwspec *fwspec,
-			     enum irq_domain_bus_token bus_token)
-{
-	/*
-	 * HPET and I/OAPIC cannot be parented in the vector domain
-	 * if IRQ remapping is enabled. APIC IDs above 15 bits are
-	 * only permitted if IRQ remapping is enabled, so check that.
-	 */
-	if (apic->apic_id_valid(32768))
-		return 0;
-
-	return x86_fwspec_is_ioapic(fwspec) || x86_fwspec_is_hpet(fwspec);
-}
-
 static const struct irq_domain_ops x86_vector_domain_ops = {
-	.select		= x86_vector_select,
 	.alloc		= x86_vector_alloc_irqs,
 	.free		= x86_vector_free_irqs,
 	.activate	= x86_vector_activate,
@@ -730,6 +680,26 @@ void lapic_assign_legacy_vector(unsigned int irq, bool replace)
 	irq_matrix_assign_system(vector_matrix, ISA_IRQ_VECTOR(irq), replace);
 }
 
+void __init lapic_update_legacy_vectors(void)
+{
+	unsigned int i;
+
+	if (IS_ENABLED(CONFIG_X86_IO_APIC) && nr_ioapics > 0)
+		return;
+
+	/*
+	 * If the IO/APIC is disabled via config, kernel command line or
+	 * lack of enumeration then all legacy interrupts are routed
+	 * through the PIC. Make sure that they are marked as legacy
+	 * vectors. PIC_CASCADE_IRQ has already been marked in
+	 * lapic_assign_system_vectors().
+	 */
+	for (i = 0; i < nr_legacy_irqs(); i++) {
+		if (i != PIC_CASCADE_IR)
+			lapic_assign_legacy_vector(i, true);
+	}
+}
+
 void __init lapic_assign_system_vectors(void)
 {
 	unsigned int i, vector = 0;
@@ -760,6 +730,8 @@ int __init arch_early_irq_init(void)
 						   NULL);
 	BUG_ON(x86_vector_domain == NULL);
 	irq_set_default_host(x86_vector_domain);
+
+	arch_init_msi_domain(x86_vector_domain);
 
 	BUG_ON(!alloc_cpumask_var(&vector_searchmask, GFP_KERNEL));
 
@@ -865,17 +837,10 @@ void apic_ack_edge(struct irq_data *irqd)
 	apic_ack_irq(irqd);
 }
 
-static void x86_vector_msi_compose_msg(struct irq_data *data,
-				       struct msi_msg *msg)
-{
-       __irq_msi_compose_msg(irqd_cfg(data), msg, false);
-}
-
 static struct irq_chip lapic_controller = {
 	.name			= "APIC",
 	.irq_ack		= apic_ack_edge,
 	.irq_set_affinity	= apic_set_affinity,
-	.irq_compose_msi_msg	= x86_vector_msi_compose_msg,
 	.irq_retrigger		= apic_retrigger_irq,
 };
 
@@ -888,15 +853,13 @@ static void free_moved_vector(struct apic_chip_data *apicd)
 	bool managed = apicd->is_managed;
 
 	/*
-	 * Managed interrupts are usually not migrated away
-	 * from an online CPU, but CPU isolation 'managed_irq'
-	 * can make that happen.
-	 * 1) Activation does not take the isolation into account
-	 *    to keep the code simple
-	 * 2) Migration away from an isolated CPU can happen when
-	 *    a non-isolated CPU which is in the calculated
-	 *    affinity mask comes online.
+	 * This should never happen. Managed interrupts are not
+	 * migrated except on CPU down, which does not involve the
+	 * cleanup vector. But try to keep the accounting correct
+	 * nevertheless.
 	 */
+	WARN_ON_ONCE(managed);
+
 	trace_vector_free_moved(apicd->irq, cpu, vector, managed);
 	irq_matrix_free(vector_matrix, cpu, vector, managed);
 	per_cpu(vector_irq, cpu)[vector] = VECTOR_UNUSED;
@@ -905,13 +868,13 @@ static void free_moved_vector(struct apic_chip_data *apicd)
 	apicd->move_in_progress = 0;
 }
 
-DEFINE_IDTENTRY_SYSVEC(sysvec_irq_move_cleanup)
+asmlinkage __visible void __irq_entry smp_irq_move_cleanup_interrupt(void)
 {
 	struct hlist_head *clhead = this_cpu_ptr(&cleanup_list);
 	struct apic_chip_data *apicd;
 	struct hlist_node *tmp;
 
-	ack_APIC_irq();
+	entering_ack_irq();
 	/* Prevent vectors vanishing under us */
 	raw_spin_lock(&vector_lock);
 
@@ -936,6 +899,7 @@ DEFINE_IDTENTRY_SYSVEC(sysvec_irq_move_cleanup)
 	}
 
 	raw_spin_unlock(&vector_lock);
+	exiting_irq();
 }
 
 static void __send_cleanup_vector(struct apic_chip_data *apicd)
@@ -963,7 +927,7 @@ void send_cleanup_vector(struct irq_cfg *cfg)
 		__send_cleanup_vector(apicd);
 }
 
-void irq_complete_move(struct irq_cfg *cfg)
+static void __irq_complete_move(struct irq_cfg *cfg, unsigned vector)
 {
 	struct apic_chip_data *apicd;
 
@@ -971,14 +935,13 @@ void irq_complete_move(struct irq_cfg *cfg)
 	if (likely(!apicd->move_in_progress))
 		return;
 
-	/*
-	 * If the interrupt arrived on the new target CPU, cleanup the
-	 * vector on the old target CPU. A vector check is not required
-	 * because an interrupt can never move from one vector to another
-	 * on the same CPU.
-	 */
-	if (apicd->cpu == smp_processor_id())
+	if (vector == apicd->vector && apicd->cpu == smp_processor_id())
 		__send_cleanup_vector(apicd);
+}
+
+void irq_complete_move(struct irq_cfg *cfg)
+{
+	__irq_complete_move(cfg, ~get_irq_regs()->orig_ax);
 }
 
 /*

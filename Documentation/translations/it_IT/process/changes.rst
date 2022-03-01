@@ -32,10 +32,9 @@ PC Card, per esempio, probabilmente non dovreste preoccuparvi di pcmciautils.
 ====================== =================  ========================================
         Programma       Versione minima       Comando per verificare la versione
 ====================== =================  ========================================
-GNU C                  4.9                gcc --version
-Clang/LLVM (optional)  10.0.1             clang --version
+GNU C                  4.6                gcc --version
 GNU make               3.81               make --version
-binutils               2.23               ld -v
+binutils               2.21               ld -v
 flex                   2.5.35             flex --version
 bison                  2.0                bison --version
 util-linux             2.10o              fdformat --version
@@ -72,16 +71,6 @@ GCC
 La versione necessaria di gcc potrebbe variare a seconda del tipo di CPU nel
 vostro calcolatore.
 
-Clang/LLVM (opzionale)
-----------------------
-
-L'ultima versione di clang e *LLVM utils* (secondo `releases.llvm.org
-<https://releases.llvm.org>`_) sono supportati per la generazione del
-kernel. Non garantiamo che anche i rilasci più vecchi funzionino, inoltre
-potremmo rimuovere gli espedienti che abbiamo implementato per farli
-funzionare. Per maggiori informazioni
-:ref:`Building Linux with Clang/LLVM <kbuild_llvm>`.
-
 Make
 ----
 
@@ -90,7 +79,7 @@ Per compilare il kernel vi servirà GNU make 3.81 o successivo.
 Binutils
 --------
 
-Per generare il kernel è necessario avere Binutils 2.23 o superiore.
+Per generare il kernel è necessario avere Binutils 2.21 o superiore.
 
 pkg-config
 ----------
@@ -349,11 +338,6 @@ gcc
 
 - <ftp://ftp.gnu.org/gnu/gcc/>
 
-Clang/LLVM
-----------
-
-- :ref:`Getting LLVM <getting_llvm>`.
-
 Make
 ----
 
@@ -406,8 +390,7 @@ Mkinitrd
 E2fsprogs
 ---------
 
-- <https://www.kernel.org/pub/linux/kernel/people/tytso/e2fsprogs/>
-- <https://git.kernel.org/pub/scm/fs/ext2/e2fsprogs.git/>
+- <http://prdownloads.sourceforge.net/e2fsprogs/e2fsprogs-1.29.tar.gz>
 
 JFSutils
 --------
@@ -417,13 +400,12 @@ JFSutils
 Reiserfsprogs
 -------------
 
-- <https://git.kernel.org/pub/scm/linux/kernel/git/jeffm/reiserfsprogs.git/>
+- <http://www.kernel.org/pub/linux/utils/fs/reiserfs/>
 
 Xfsprogs
 --------
 
-- <https://git.kernel.org/pub/scm/fs/xfs/xfsprogs-dev.git>
-- <https://www.kernel.org/pub/linux/utils/fs/xfs/xfsprogs/>
+- <ftp://oss.sgi.com/projects/xfs/>
 
 Pcmciautils
 -----------
@@ -462,9 +444,7 @@ Rete
 PPP
 ---
 
-- <https://download.samba.org/pub/ppp/>
-- <https://git.ozlabs.org/?p=ppp.git>
-- <https://github.com/paulusmack/ppp/>
+- <ftp://ftp.samba.org/pub/ppp/>
 
 
 NFS-utils
@@ -475,7 +455,7 @@ NFS-utils
 Iptables
 --------
 
-- <https://netfilter.org/projects/iptables/index.html>
+- <http://www.iptables.org/downloads.html>
 
 Ip-route2
 ---------

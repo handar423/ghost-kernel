@@ -93,7 +93,7 @@ static void netlbl_domhsh_free_entry(struct rcu_head *entry)
 
 /**
  * netlbl_domhsh_hash - Hashing function for the domain hash table
- * @key: the domain name to hash
+ * @domain: the domain name to hash
  *
  * Description:
  * This is the hashing function for the domain hash table, it returns the
@@ -144,8 +144,7 @@ static struct netlbl_dom_map *netlbl_domhsh_search(const char *domain,
 	if (domain != NULL) {
 		bkt = netlbl_domhsh_hash(domain);
 		bkt_list = &netlbl_domhsh_rcu_deref(netlbl_domhsh)->tbl[bkt];
-		list_for_each_entry_rcu(iter, bkt_list, list,
-					lockdep_is_held(&netlbl_domhsh_lock))
+		list_for_each_entry_rcu(iter, bkt_list, list)
 			if (iter->valid &&
 			    netlbl_family_match(iter->family, family) &&
 			    strcmp(iter->domain, domain) == 0)
@@ -612,8 +611,9 @@ int netlbl_domhsh_remove_entry(struct netlbl_dom_map *entry,
 	audit_buf = netlbl_audit_start_common(AUDIT_MAC_MAP_DEL, audit_info);
 	if (audit_buf != NULL) {
 		audit_log_format(audit_buf,
-				 " nlbl_domain=%s res=1",
-				 entry->domain ? entry->domain : "(default)");
+				 " nlbl_domain=%s res=%u",
+				 entry->domain ? entry->domain : "(default)",
+				 ret_val == 0 ? 1 : 0);
 		audit_log_end(audit_buf);
 	}
 

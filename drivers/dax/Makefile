@@ -8,4 +8,3 @@ dax-y += bus.o
 device_dax-y := device.o
 
 obj-y += pmem/
-obj-y += hmem/

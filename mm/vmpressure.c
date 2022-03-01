@@ -280,7 +280,7 @@ void vmpressure(gfp_t gfp, struct mem_cgroup *memcg, bool tree,
 		enum vmpressure_levels level;
 
 		/* For now, no users for root-level efficiency */
-		if (!memcg || mem_cgroup_is_root(memcg))
+		if (!memcg || memcg == root_mem_cgroup)
 			return;
 
 		spin_lock(&vmpr->sr_lock);
@@ -371,8 +371,10 @@ int vmpressure_register_event(struct mem_cgroup *memcg,
 	int ret = 0;
 
 	spec_orig = spec = kstrndup(args, MAX_VMPRESSURE_ARGS_LEN, GFP_KERNEL);
-	if (!spec)
-		return -ENOMEM;
+	if (!spec) {
+		ret = -ENOMEM;
+		goto out;
+	}
 
 	/* Find required level */
 	token = strsep(&spec, ",");

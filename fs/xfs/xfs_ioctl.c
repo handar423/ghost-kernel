@@ -33,10 +33,6 @@
 #include "xfs_sb.h"
 #include "xfs_ag.h"
 #include "xfs_health.h"
-#include "xfs_reflink.h"
-#include "xfs_ioctl.h"
-#include "xfs_da_format.h"
-#include "xfs_da_btree.h"
 
 #include <linux/mount.h>
 #include <linux/namei.h>
@@ -294,173 +290,138 @@ xfs_readlink_by_handle(
 	return error;
 }
 
-/*
- * Format an attribute and copy it out to the user's buffer.
- * Take care to check values and protect against them changing later,
- * we may be reading them directly out of a user buffer.
- */
-static void
-xfs_ioc_attr_put_listent(
-	struct xfs_attr_list_context *context,
-	int			flags,
-	unsigned char		*name,
-	int			namelen,
-	int			valuelen)
+int
+xfs_set_dmattrs(
+	xfs_inode_t     *ip,
+	uint		evmask,
+	uint16_t	state)
 {
-	struct xfs_attrlist	*alist = context->buffer;
-	struct xfs_attrlist_ent	*aep;
-	int			arraytop;
+	xfs_mount_t	*mp = ip->i_mount;
+	xfs_trans_t	*tp;
+	int		error;
 
-	ASSERT(!context->seen_enough);
-	ASSERT(context->count >= 0);
-	ASSERT(context->count < (ATTR_MAX_VALUELEN/8));
-	ASSERT(context->firstu >= sizeof(*alist));
-	ASSERT(context->firstu <= context->bufsize);
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
 
-	/*
-	 * Only list entries in the right namespace.
-	 */
-	if (context->attr_filter != (flags & XFS_ATTR_NSP_ONDISK_MASK))
-		return;
+	if (XFS_FORCED_SHUTDOWN(mp))
+		return -EIO;
 
-	arraytop = sizeof(*alist) +
-			context->count * sizeof(alist->al_offset[0]);
+	error = xfs_trans_alloc(mp, &M_RES(mp)->tr_ichange, 0, 0, 0, &tp);
+	if (error)
+		return error;
 
-	/* decrement by the actual bytes used by the attr */
-	context->firstu -= round_up(offsetof(struct xfs_attrlist_ent, a_name) +
-			namelen + 1, sizeof(uint32_t));
-	if (context->firstu < arraytop) {
-		trace_xfs_attr_list_full(context);
-		alist->al_more = 1;
-		context->seen_enough = 1;
-		return;
+	xfs_ilock(ip, XFS_ILOCK_EXCL);
+	xfs_trans_ijoin(tp, ip, XFS_ILOCK_EXCL);
+
+	ip->i_d.di_dmevmask = evmask;
+	ip->i_d.di_dmstate  = state;
+
+	xfs_trans_log_inode(tp, ip, XFS_ILOG_CORE);
+	error = xfs_trans_commit(tp);
+
+	return error;
+}
+
+STATIC int
+xfs_fssetdm_by_handle(
+	struct file		*parfilp,
+	void			__user *arg)
+{
+	int			error;
+	struct fsdmidata	fsd;
+	xfs_fsop_setdm_handlereq_t dmhreq;
+	struct dentry		*dentry;
+
+	if (!capable(CAP_MKNOD))
+		return -EPERM;
+	if (copy_from_user(&dmhreq, arg, sizeof(xfs_fsop_setdm_handlereq_t)))
+		return -EFAULT;
+
+	error = mnt_want_write_file(parfilp);
+	if (error)
+		return error;
+
+	dentry = xfs_handlereq_to_dentry(parfilp, &dmhreq.hreq);
+	if (IS_ERR(dentry)) {
+		mnt_drop_write_file(parfilp);
+		return PTR_ERR(dentry);
 	}
 
-	aep = context->buffer + context->firstu;
-	aep->a_valuelen = valuelen;
-	memcpy(aep->a_name, name, namelen);
-	aep->a_name[namelen] = 0;
-	alist->al_offset[context->count++] = context->firstu;
-	alist->al_count = context->count;
-	trace_xfs_attr_list_add(context);
-}
+	if (IS_IMMUTABLE(d_inode(dentry)) || IS_APPEND(d_inode(dentry))) {
+		error = -EPERM;
+		goto out;
+	}
 
-static unsigned int
-xfs_attr_filter(
-	u32			ioc_flags)
-{
-	if (ioc_flags & XFS_IOC_ATTR_ROOT)
-		return XFS_ATTR_ROOT;
-	if (ioc_flags & XFS_IOC_ATTR_SECURE)
-		return XFS_ATTR_SECURE;
-	return 0;
-}
-
-static unsigned int
-xfs_attr_flags(
-	u32			ioc_flags)
-{
-	if (ioc_flags & XFS_IOC_ATTR_CREATE)
-		return XATTR_CREATE;
-	if (ioc_flags & XFS_IOC_ATTR_REPLACE)
-		return XATTR_REPLACE;
-	return 0;
-}
-
-int
-xfs_ioc_attr_list(
-	struct xfs_inode		*dp,
-	void __user			*ubuf,
-	int				bufsize,
-	int				flags,
-	struct xfs_attrlist_cursor __user *ucursor)
-{
-	struct xfs_attr_list_context	context = { };
-	struct xfs_attrlist		*alist;
-	void				*buffer;
-	int				error;
-
-	if (bufsize < sizeof(struct xfs_attrlist) ||
-	    bufsize > XFS_XATTR_LIST_MAX)
-		return -EINVAL;
-
-	/*
-	 * Reject flags, only allow namespaces.
-	 */
-	if (flags & ~(XFS_IOC_ATTR_ROOT | XFS_IOC_ATTR_SECURE))
-		return -EINVAL;
-	if (flags == (XFS_IOC_ATTR_ROOT | XFS_IOC_ATTR_SECURE))
-		return -EINVAL;
-
-	/*
-	 * Validate the cursor.
-	 */
-	if (copy_from_user(&context.cursor, ucursor, sizeof(context.cursor)))
-		return -EFAULT;
-	if (context.cursor.pad1 || context.cursor.pad2)
-		return -EINVAL;
-	if (!context.cursor.initted &&
-	    (context.cursor.hashval || context.cursor.blkno ||
-	     context.cursor.offset))
-		return -EINVAL;
-
-	buffer = kvzalloc(bufsize, GFP_KERNEL);
-	if (!buffer)
-		return -ENOMEM;
-
-	/*
-	 * Initialize the output buffer.
-	 */
-	context.dp = dp;
-	context.resynch = 1;
-	context.attr_filter = xfs_attr_filter(flags);
-	context.buffer = buffer;
-	context.bufsize = round_down(bufsize, sizeof(uint32_t));
-	context.firstu = context.bufsize;
-	context.put_listent = xfs_ioc_attr_put_listent;
-
-	alist = context.buffer;
-	alist->al_count = 0;
-	alist->al_more = 0;
-	alist->al_offset[0] = context.bufsize;
-
-	error = xfs_attr_list(&context);
-	if (error)
-		goto out_free;
-
-	if (copy_to_user(ubuf, buffer, bufsize) ||
-	    copy_to_user(ucursor, &context.cursor, sizeof(context.cursor)))
+	if (copy_from_user(&fsd, dmhreq.data, sizeof(fsd))) {
 		error = -EFAULT;
-out_free:
-	kmem_free(buffer);
+		goto out;
+	}
+
+	error = xfs_set_dmattrs(XFS_I(d_inode(dentry)), fsd.fsd_dmevmask,
+				 fsd.fsd_dmstate);
+
+ out:
+	mnt_drop_write_file(parfilp);
+	dput(dentry);
 	return error;
 }
 
 STATIC int
 xfs_attrlist_by_handle(
 	struct file		*parfilp,
-	struct xfs_fsop_attrlist_handlereq __user *p)
+	void			__user *arg)
 {
-	struct xfs_fsop_attrlist_handlereq al_hreq;
-	struct dentry		*dentry;
 	int			error = -ENOMEM;
+	attrlist_cursor_kern_t	*cursor;
+	struct xfs_fsop_attrlist_handlereq __user	*p = arg;
+	xfs_fsop_attrlist_handlereq_t al_hreq;
+	struct dentry		*dentry;
+	char			*kbuf;
 
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
-	if (copy_from_user(&al_hreq, p, sizeof(al_hreq)))
+	if (copy_from_user(&al_hreq, arg, sizeof(xfs_fsop_attrlist_handlereq_t)))
 		return -EFAULT;
+	if (al_hreq.buflen < sizeof(struct attrlist) ||
+	    al_hreq.buflen > XFS_XATTR_LIST_MAX)
+		return -EINVAL;
+
+	/*
+	 * Reject flags, only allow namespaces.
+	 */
+	if (al_hreq.flags & ~(ATTR_ROOT | ATTR_SECURE))
+		return -EINVAL;
 
 	dentry = xfs_handlereq_to_dentry(parfilp, &al_hreq.hreq);
 	if (IS_ERR(dentry))
 		return PTR_ERR(dentry);
 
-	error = xfs_ioc_attr_list(XFS_I(d_inode(dentry)), al_hreq.buffer,
-				  al_hreq.buflen, al_hreq.flags, &p->pos);
+	kbuf = kmem_zalloc_large(al_hreq.buflen, 0);
+	if (!kbuf)
+		goto out_dput;
+
+	cursor = (attrlist_cursor_kern_t *)&al_hreq.pos;
+	error = xfs_attr_list(XFS_I(d_inode(dentry)), kbuf, al_hreq.buflen,
+					al_hreq.flags, cursor);
+	if (error)
+		goto out_kfree;
+
+	if (copy_to_user(&p->pos, cursor, sizeof(attrlist_cursor_kern_t))) {
+		error = -EFAULT;
+		goto out_kfree;
+	}
+
+	if (copy_to_user(al_hreq.buffer, kbuf, al_hreq.buflen))
+		error = -EFAULT;
+
+out_kfree:
+	kmem_free(kbuf);
+out_dput:
 	dput(dentry);
 	return error;
 }
 
-static int
+int
 xfs_attrmulti_attr_get(
 	struct inode		*inode,
 	unsigned char		*name,
@@ -468,33 +429,28 @@ xfs_attrmulti_attr_get(
 	uint32_t		*len,
 	uint32_t		flags)
 {
-	struct xfs_da_args	args = {
-		.dp		= XFS_I(inode),
-		.attr_filter	= xfs_attr_filter(flags),
-		.attr_flags	= xfs_attr_flags(flags),
-		.name		= name,
-		.namelen	= strlen(name),
-		.valuelen	= *len,
-	};
-	int			error;
+	unsigned char		*kbuf;
+	int			error = -EFAULT;
 
 	if (*len > XFS_XATTR_SIZE_MAX)
 		return -EINVAL;
+	kbuf = kmem_zalloc_large(*len, 0);
+	if (!kbuf)
+		return -ENOMEM;
 
-	error = xfs_attr_get(&args);
+	error = xfs_attr_get(XFS_I(inode), name, &kbuf, (int *)len, flags);
 	if (error)
 		goto out_kfree;
 
-	*len = args.valuelen;
-	if (copy_to_user(ubuf, args.value, args.valuelen))
+	if (copy_to_user(ubuf, kbuf, *len))
 		error = -EFAULT;
 
 out_kfree:
-	kmem_free(args.value);
+	kmem_free(kbuf);
 	return error;
 }
 
-static int
+int
 xfs_attrmulti_attr_set(
 	struct inode		*inode,
 	unsigned char		*name,
@@ -502,75 +458,38 @@ xfs_attrmulti_attr_set(
 	uint32_t		len,
 	uint32_t		flags)
 {
-	struct xfs_da_args	args = {
-		.dp		= XFS_I(inode),
-		.attr_filter	= xfs_attr_filter(flags),
-		.attr_flags	= xfs_attr_flags(flags),
-		.name		= name,
-		.namelen	= strlen(name),
-	};
+	unsigned char		*kbuf;
 	int			error;
 
 	if (IS_IMMUTABLE(inode) || IS_APPEND(inode))
 		return -EPERM;
+	if (len > XFS_XATTR_SIZE_MAX)
+		return -EINVAL;
 
-	if (ubuf) {
-		if (len > XFS_XATTR_SIZE_MAX)
-			return -EINVAL;
-		args.value = memdup_user(ubuf, len);
-		if (IS_ERR(args.value))
-			return PTR_ERR(args.value);
-		args.valuelen = len;
-	}
+	kbuf = memdup_user(ubuf, len);
+	if (IS_ERR(kbuf))
+		return PTR_ERR(kbuf);
 
-	error = xfs_attr_set(&args);
-	if (!error && (flags & XFS_IOC_ATTR_ROOT))
-		xfs_forget_acl(inode, name);
-	kfree(args.value);
+	error = xfs_attr_set(XFS_I(inode), name, kbuf, len, flags);
+	if (!error)
+		xfs_forget_acl(inode, name, flags);
+	kfree(kbuf);
 	return error;
 }
 
 int
-xfs_ioc_attrmulti_one(
-	struct file		*parfilp,
+xfs_attrmulti_attr_remove(
 	struct inode		*inode,
-	uint32_t		opcode,
-	void __user		*uname,
-	void __user		*value,
-	uint32_t		*len,
+	unsigned char		*name,
 	uint32_t		flags)
 {
-	unsigned char		*name;
 	int			error;
 
-	if ((flags & XFS_IOC_ATTR_ROOT) && (flags & XFS_IOC_ATTR_SECURE))
-		return -EINVAL;
-
-	name = strndup_user(uname, MAXNAMELEN);
-	if (IS_ERR(name))
-		return PTR_ERR(name);
-
-	switch (opcode) {
-	case ATTR_OP_GET:
-		error = xfs_attrmulti_attr_get(inode, name, value, len, flags);
-		break;
-	case ATTR_OP_REMOVE:
-		value = NULL;
-		*len = 0;
-		/* fall through */
-	case ATTR_OP_SET:
-		error = mnt_want_write_file(parfilp);
-		if (error)
-			break;
-		error = xfs_attrmulti_attr_set(inode, name, value, *len, flags);
-		mnt_drop_write_file(parfilp);
-		break;
-	default:
-		error = -EINVAL;
-		break;
-	}
-
-	kfree(name);
+	if (IS_IMMUTABLE(inode) || IS_APPEND(inode))
+		return -EPERM;
+	error = xfs_attr_remove(XFS_I(inode), name, flags);
+	if (!error)
+		xfs_forget_acl(inode, name, flags);
 	return error;
 }
 
@@ -584,6 +503,7 @@ xfs_attrmulti_by_handle(
 	xfs_fsop_attrmulti_handlereq_t am_hreq;
 	struct dentry		*dentry;
 	unsigned int		i, size;
+	unsigned char		*attr_name;
 
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
@@ -609,17 +529,58 @@ xfs_attrmulti_by_handle(
 		goto out_dput;
 	}
 
+	error = -ENOMEM;
+	attr_name = kmalloc(MAXNAMELEN, GFP_KERNEL);
+	if (!attr_name)
+		goto out_kfree_ops;
+
 	error = 0;
 	for (i = 0; i < am_hreq.opcount; i++) {
-		ops[i].am_error = xfs_ioc_attrmulti_one(parfilp,
-				d_inode(dentry), ops[i].am_opcode,
-				ops[i].am_attrname, ops[i].am_attrvalue,
-				&ops[i].am_length, ops[i].am_flags);
+		ops[i].am_flags &= ~ATTR_KERNEL_FLAGS;
+
+		ops[i].am_error = strncpy_from_user((char *)attr_name,
+				ops[i].am_attrname, MAXNAMELEN);
+		if (ops[i].am_error == 0 || ops[i].am_error == MAXNAMELEN)
+			error = -ERANGE;
+		if (ops[i].am_error < 0)
+			break;
+
+		switch (ops[i].am_opcode) {
+		case ATTR_OP_GET:
+			ops[i].am_error = xfs_attrmulti_attr_get(
+					d_inode(dentry), attr_name,
+					ops[i].am_attrvalue, &ops[i].am_length,
+					ops[i].am_flags);
+			break;
+		case ATTR_OP_SET:
+			ops[i].am_error = mnt_want_write_file(parfilp);
+			if (ops[i].am_error)
+				break;
+			ops[i].am_error = xfs_attrmulti_attr_set(
+					d_inode(dentry), attr_name,
+					ops[i].am_attrvalue, ops[i].am_length,
+					ops[i].am_flags);
+			mnt_drop_write_file(parfilp);
+			break;
+		case ATTR_OP_REMOVE:
+			ops[i].am_error = mnt_want_write_file(parfilp);
+			if (ops[i].am_error)
+				break;
+			ops[i].am_error = xfs_attrmulti_attr_remove(
+					d_inode(dentry), attr_name,
+					ops[i].am_flags);
+			mnt_drop_write_file(parfilp);
+			break;
+		default:
+			ops[i].am_error = -EINVAL;
+		}
 	}
 
 	if (copy_to_user(am_hreq.ops, ops, size))
 		error = -EFAULT;
 
+	kfree(attr_name);
+ out_kfree_ops:
 	kfree(ops);
  out_dput:
 	dput(dentry);
@@ -629,12 +590,13 @@ xfs_attrmulti_by_handle(
 int
 xfs_ioc_space(
 	struct file		*filp,
+	unsigned int		cmd,
 	xfs_flock64_t		*bf)
 {
 	struct inode		*inode = file_inode(filp);
 	struct xfs_inode	*ip = XFS_I(inode);
 	struct iattr		iattr;
-	enum xfs_prealloc_flags	flags = XFS_PREALLOC_CLEAR;
+	enum xfs_prealloc_flags	flags = 0;
 	uint			iolock = XFS_IOLOCK_EXCL | XFS_MMAPLOCK_EXCL;
 	int			error;
 
@@ -646,9 +608,6 @@ xfs_ioc_space(
 
 	if (!S_ISREG(inode->i_mode))
 		return -EINVAL;
-
-	if (xfs_is_always_cow_inode(ip))
-		return -EOPNOTSUPP;
 
 	if (filp->f_flags & O_DSYNC)
 		flags |= XFS_PREALLOC_SYNC;
@@ -663,7 +622,6 @@ xfs_ioc_space(
 	error = xfs_break_layouts(inode, &iolock, BREAK_UNMAP);
 	if (error)
 		goto out_unlock;
-	inode_dio_wait(inode);
 
 	switch (bf->l_whence) {
 	case 0: /*SEEK_SET*/
@@ -679,21 +637,99 @@ xfs_ioc_space(
 		goto out_unlock;
 	}
 
-	if (bf->l_start < 0 || bf->l_start > inode->i_sb->s_maxbytes) {
+	/*
+	 * length of <= 0 for resv/unresv/zero is invalid.  length for
+	 * alloc/free is ignored completely and we have no idea what userspace
+	 * might have set it to, so set it to zero to allow range
+	 * checks to pass.
+	 */
+	switch (cmd) {
+	case XFS_IOC_ZERO_RANGE:
+	case XFS_IOC_RESVSP:
+	case XFS_IOC_RESVSP64:
+	case XFS_IOC_UNRESVSP:
+	case XFS_IOC_UNRESVSP64:
+		if (bf->l_len <= 0) {
+			error = -EINVAL;
+			goto out_unlock;
+		}
+		break;
+	default:
+		bf->l_len = 0;
+		break;
+	}
+
+	if (bf->l_start < 0 ||
+	    bf->l_start > inode->i_sb->s_maxbytes ||
+	    bf->l_start + bf->l_len < 0 ||
+	    bf->l_start + bf->l_len >= inode->i_sb->s_maxbytes) {
 		error = -EINVAL;
 		goto out_unlock;
 	}
 
-	if (bf->l_start > XFS_ISIZE(ip)) {
-		error = xfs_alloc_file_space(ip, XFS_ISIZE(ip),
-				bf->l_start - XFS_ISIZE(ip), 0);
+	/*
+	 * Must wait for all AIO to complete before we continue as AIO can
+	 * change the file size on completion without holding any locks we
+	 * currently hold. We must do this first because AIO can update both
+	 * the on disk and in memory inode sizes, and the operations that follow
+	 * require the in-memory size to be fully up-to-date.
+	 */
+	inode_dio_wait(inode);
+
+	/*
+	 * Now that AIO and DIO has drained we can flush and (if necessary)
+	 * invalidate the cached range over the first operation we are about to
+	 * run. We include zero range here because it starts with a hole punch
+	 * over the target range.
+	 */
+	switch (cmd) {
+	case XFS_IOC_ZERO_RANGE:
+	case XFS_IOC_UNRESVSP:
+	case XFS_IOC_UNRESVSP64:
+		error = xfs_flush_unmap_range(ip, bf->l_start, bf->l_len);
 		if (error)
 			goto out_unlock;
+		break;
 	}
 
-	iattr.ia_valid = ATTR_SIZE;
-	iattr.ia_size = bf->l_start;
-	error = xfs_vn_setattr_size(file_dentry(filp), &iattr);
+	switch (cmd) {
+	case XFS_IOC_ZERO_RANGE:
+		flags |= XFS_PREALLOC_SET;
+		error = xfs_zero_file_space(ip, bf->l_start, bf->l_len);
+		break;
+	case XFS_IOC_RESVSP:
+	case XFS_IOC_RESVSP64:
+		flags |= XFS_PREALLOC_SET;
+		error = xfs_alloc_file_space(ip, bf->l_start, bf->l_len,
+						XFS_BMAPI_PREALLOC);
+		break;
+	case XFS_IOC_UNRESVSP:
+	case XFS_IOC_UNRESVSP64:
+		error = xfs_free_file_space(ip, bf->l_start, bf->l_len);
+		break;
+	case XFS_IOC_ALLOCSP:
+	case XFS_IOC_ALLOCSP64:
+	case XFS_IOC_FREESP:
+	case XFS_IOC_FREESP64:
+		flags |= XFS_PREALLOC_CLEAR;
+		if (bf->l_start > XFS_ISIZE(ip)) {
+			error = xfs_alloc_file_space(ip, XFS_ISIZE(ip),
+					bf->l_start - XFS_ISIZE(ip),
+					XFS_BMAPI_PREALLOC);
+			if (error)
+				goto out_unlock;
+		}
+
+		iattr.ia_valid = ATTR_SIZE;
+		iattr.ia_size = bf->l_start;
+
+		error = xfs_vn_setattr_size(file_dentry(filp), &iattr);
+		break;
+	default:
+		ASSERT(0);
+		error = -EINVAL;
+	}
+
 	if (error)
 		goto out_unlock;
 
@@ -1075,18 +1111,13 @@ xfs_merge_ioc_xflags(
 		xflags |= FS_XFLAG_NODUMP;
 	else
 		xflags &= ~FS_XFLAG_NODUMP;
-	if (flags & FS_DAX_FL)
-		xflags |= FS_XFLAG_DAX;
-	else
-		xflags &= ~FS_XFLAG_DAX;
 
 	return xflags;
 }
 
 STATIC unsigned int
 xfs_di2lxflags(
-	uint16_t	di_flags,
-	uint64_t	di_flags2)
+	uint16_t	di_flags)
 {
 	unsigned int	flags = 0;
 
@@ -1100,9 +1131,6 @@ xfs_di2lxflags(
 		flags |= FS_NOATIME_FL;
 	if (di_flags & XFS_DIFLAG_NODUMP)
 		flags |= FS_NODUMP_FL;
-	if (di_flags2 & XFS_DIFLAG2_DAX) {
-		flags |= FS_DAX_FL;
-	}
 	return flags;
 }
 
@@ -1112,17 +1140,26 @@ xfs_fill_fsxattr(
 	bool			attr,
 	struct fsxattr		*fa)
 {
-	struct xfs_ifork	*ifp = attr ? ip->i_afp : &ip->i_df;
-
 	simple_fill_fsxattr(fa, xfs_ip2xflags(ip));
 	fa->fsx_extsize = ip->i_d.di_extsize << ip->i_mount->m_sb.sb_blocklog;
 	fa->fsx_cowextsize = ip->i_d.di_cowextsize <<
 			ip->i_mount->m_sb.sb_blocklog;
-	fa->fsx_projid = ip->i_d.di_projid;
-	if (ifp && (ifp->if_flags & XFS_IFEXTENTS))
-		fa->fsx_nextents = xfs_iext_count(ifp);
-	else
-		fa->fsx_nextents = xfs_ifork_nextents(ifp);
+	fa->fsx_projid = xfs_get_projid(ip);
+
+	if (attr) {
+		if (ip->i_afp) {
+			if (ip->i_afp->if_flags & XFS_IFEXTENTS)
+				fa->fsx_nextents = xfs_iext_count(ip->i_afp);
+			else
+				fa->fsx_nextents = ip->i_d.di_anextents;
+		} else
+			fa->fsx_nextents = 0;
+	} else {
+		if (ip->i_df.if_flags & XFS_IFEXTENTS)
+			fa->fsx_nextents = xfs_iext_count(&ip->i_df);
+		else
+			fa->fsx_nextents = ip->i_d.di_nextents;
+	}
 }
 
 STATIC int
@@ -1190,8 +1227,7 @@ xfs_flags2diflags2(
 	unsigned int		xflags)
 {
 	uint64_t		di_flags2 =
-		(ip->i_d.di_flags2 & (XFS_DIFLAG2_REFLINK |
-				      XFS_DIFLAG2_BIGTIME));
+		(ip->i_d.di_flags2 & XFS_DIFLAG2_REFLINK);
 
 	if (xflags & FS_XFLAG_DAX)
 		di_flags2 |= XFS_DIFLAG2_DAX;
@@ -1199,6 +1235,37 @@ xfs_flags2diflags2(
 		di_flags2 |= XFS_DIFLAG2_COWEXTSIZE;
 
 	return di_flags2;
+}
+
+STATIC void
+xfs_diflags_to_linux(
+	struct xfs_inode	*ip)
+{
+	struct inode		*inode = VFS_I(ip);
+	unsigned int		xflags = xfs_ip2xflags(ip);
+
+	if (xflags & FS_XFLAG_IMMUTABLE)
+		inode->i_flags |= S_IMMUTABLE;
+	else
+		inode->i_flags &= ~S_IMMUTABLE;
+	if (xflags & FS_XFLAG_APPEND)
+		inode->i_flags |= S_APPEND;
+	else
+		inode->i_flags &= ~S_APPEND;
+	if (xflags & FS_XFLAG_SYNC)
+		inode->i_flags |= S_SYNC;
+	else
+		inode->i_flags &= ~S_SYNC;
+	if (xflags & FS_XFLAG_NOATIME)
+		inode->i_flags |= S_NOATIME;
+	else
+		inode->i_flags &= ~S_NOATIME;
+#if 0	/* disabled until the flag switching races are sorted out */
+	if (xflags & FS_XFLAG_DAX)
+		inode->i_flags |= S_DAX;
+	else
+		inode->i_flags &= ~S_DAX;
+#endif
 }
 
 static int
@@ -1211,7 +1278,7 @@ xfs_ioctl_setattr_xflags(
 	uint64_t		di_flags2;
 
 	/* Can't change realtime flag if any extents are allocated. */
-	if ((ip->i_df.if_nextents || ip->i_delayed_blks) &&
+	if ((ip->i_d.di_nextents || ip->i_delayed_blks) &&
 	    XFS_IS_REALTIME_INODE(ip) != (fa->fsx_xflags & FS_XFLAG_REALTIME))
 		return -EINVAL;
 
@@ -1232,39 +1299,78 @@ xfs_ioctl_setattr_xflags(
 
 	/* diflags2 only valid for v3 inodes. */
 	di_flags2 = xfs_flags2diflags2(ip, fa->fsx_xflags);
-	if (di_flags2 && !xfs_sb_version_has_v3inode(&mp->m_sb))
+	if (di_flags2 && ip->i_d.di_version < 3)
 		return -EINVAL;
 
 	ip->i_d.di_flags = xfs_flags2diflags(ip, fa->fsx_xflags);
 	ip->i_d.di_flags2 = di_flags2;
 
-	xfs_diflags_to_iflags(ip, false);
+	xfs_diflags_to_linux(ip);
 	xfs_trans_ichgtime(tp, ip, XFS_ICHGTIME_CHG);
 	xfs_trans_log_inode(tp, ip, XFS_ILOG_CORE);
 	XFS_STATS_INC(mp, xs_ig_attrchg);
 	return 0;
 }
 
-static void
-xfs_ioctl_setattr_prepare_dax(
+/*
+ * If we are changing DAX flags, we have to ensure the file is clean and any
+ * cached objects in the address space are invalidated and removed. This
+ * requires us to lock out other IO and page faults similar to a truncate
+ * operation. The locks need to be held until the transaction has been committed
+ * so that the cache invalidation is atomic with respect to the DAX flag
+ * manipulation.
+ */
+static int
+xfs_ioctl_setattr_dax_invalidate(
 	struct xfs_inode	*ip,
-	struct fsxattr		*fa)
+	struct fsxattr		*fa,
+	int			*join_flags)
 {
-	struct xfs_mount	*mp = ip->i_mount;
-	struct inode            *inode = VFS_I(ip);
+	struct inode		*inode = VFS_I(ip);
+	struct super_block	*sb = inode->i_sb;
+	int			error;
+
+	*join_flags = 0;
+
+	/*
+	 * It is only valid to set the DAX flag on regular files and
+	 * directories on filesystems where the block size is equal to the page
+	 * size. On directories it serves as an inherited hint so we don't
+	 * have to check the device for dax support or flush pagecache.
+	 */
+	if (fa->fsx_xflags & FS_XFLAG_DAX) {
+		if (!(S_ISREG(inode->i_mode) || S_ISDIR(inode->i_mode)))
+			return -EINVAL;
+		if (!bdev_dax_supported(xfs_find_bdev_for_inode(VFS_I(ip)),
+				sb->s_blocksize))
+			return -EINVAL;
+	}
+
+	/* If the DAX state is not changing, we have nothing to do here. */
+	if ((fa->fsx_xflags & FS_XFLAG_DAX) && IS_DAX(inode))
+		return 0;
+	if (!(fa->fsx_xflags & FS_XFLAG_DAX) && !IS_DAX(inode))
+		return 0;
 
 	if (S_ISDIR(inode->i_mode))
-		return;
+		return 0;
 
-	if ((mp->m_flags & XFS_MOUNT_DAX_ALWAYS) ||
-	    (mp->m_flags & XFS_MOUNT_DAX_NEVER))
-		return;
+	/* lock, flush and invalidate mapping in preparation for flag change */
+	xfs_ilock(ip, XFS_MMAPLOCK_EXCL | XFS_IOLOCK_EXCL);
+	error = filemap_write_and_wait(inode->i_mapping);
+	if (error)
+		goto out_unlock;
+	error = invalidate_inode_pages2(inode->i_mapping);
+	if (error)
+		goto out_unlock;
 
-	if (((fa->fsx_xflags & FS_XFLAG_DAX) &&
-	    !(ip->i_d.di_flags2 & XFS_DIFLAG2_DAX)) ||
-	    (!(fa->fsx_xflags & FS_XFLAG_DAX) &&
-	     (ip->i_d.di_flags2 & XFS_DIFLAG2_DAX)))
-		d_mark_dontcache(inode);
+	*join_flags = XFS_MMAPLOCK_EXCL | XFS_IOLOCK_EXCL;
+	return 0;
+
+out_unlock:
+	xfs_iunlock(ip, XFS_MMAPLOCK_EXCL | XFS_IOLOCK_EXCL);
+	return error;
+
 }
 
 /*
@@ -1272,10 +1378,17 @@ xfs_ioctl_setattr_prepare_dax(
  * have permission to do so. On success, return a clean transaction and the
  * inode locked exclusively ready for further operation specific checks. On
  * failure, return an error without modifying or locking the inode.
+ *
+ * The inode might already be IO locked on call. If this is the case, it is
+ * indicated in @join_flags and we take full responsibility for ensuring they
+ * are unlocked from now on. Hence if we have an error here, we still have to
+ * unlock them. Otherwise, once they are joined to the transaction, they will
+ * be unlocked on commit/cancel.
  */
 static struct xfs_trans *
 xfs_ioctl_setattr_get_trans(
-	struct xfs_inode	*ip)
+	struct xfs_inode	*ip,
+	int			join_flags)
 {
 	struct xfs_mount	*mp = ip->i_mount;
 	struct xfs_trans	*tp;
@@ -1292,7 +1405,8 @@ xfs_ioctl_setattr_get_trans(
 		goto out_unlock;
 
 	xfs_ilock(ip, XFS_ILOCK_EXCL);
-	xfs_trans_ijoin(tp, ip, XFS_ILOCK_EXCL);
+	xfs_trans_ijoin(tp, ip, XFS_ILOCK_EXCL | join_flags);
+	join_flags = 0;
 
 	/*
 	 * CAP_FOWNER overrides the following restrictions:
@@ -1313,6 +1427,8 @@ xfs_ioctl_setattr_get_trans(
 out_cancel:
 	xfs_trans_cancel(tp);
 out_unlock:
+	if (join_flags)
+		xfs_iunlock(ip, join_flags);
 	return ERR_PTR(error);
 }
 
@@ -1341,7 +1457,7 @@ xfs_ioctl_setattr_check_extsize(
 	xfs_extlen_t		size;
 	xfs_fsblock_t		extsize_fsb;
 
-	if (S_ISREG(VFS_I(ip)->i_mode) && ip->i_df.if_nextents &&
+	if (S_ISREG(VFS_I(ip)->i_mode) && ip->i_d.di_nextents &&
 	    ((ip->i_d.di_extsize << mp->m_sb.sb_blocklog) != fa->fsx_extsize))
 		return -EINVAL;
 
@@ -1394,7 +1510,8 @@ xfs_ioctl_setattr_check_cowextsize(
 	if (!(fa->fsx_xflags & FS_XFLAG_COWEXTSIZE))
 		return 0;
 
-	if (!xfs_sb_version_hasreflink(&ip->i_mount->m_sb))
+	if (!xfs_sb_version_hasreflink(&ip->i_mount->m_sb) ||
+	    ip->i_d.di_version != 3)
 		return -EINVAL;
 
 	if (fa->fsx_cowextsize == 0)
@@ -1434,9 +1551,11 @@ xfs_ioctl_setattr(
 	struct fsxattr		old_fa;
 	struct xfs_mount	*mp = ip->i_mount;
 	struct xfs_trans	*tp;
+	struct xfs_dquot	*udqp = NULL;
 	struct xfs_dquot	*pdqp = NULL;
 	struct xfs_dquot	*olddquot = NULL;
 	int			code;
+	int			join_flags = 0;
 
 	trace_xfs_ioctl_setattr(ip);
 
@@ -1453,24 +1572,33 @@ xfs_ioctl_setattr(
 	 * because the i_*dquot fields will get updated anyway.
 	 */
 	if (XFS_IS_QUOTA_ON(mp)) {
-		code = xfs_qm_vop_dqalloc(ip, VFS_I(ip)->i_uid,
-				VFS_I(ip)->i_gid, fa->fsx_projid,
-				XFS_QMOPT_PQUOTA, NULL, NULL, &pdqp);
+		code = xfs_qm_vop_dqalloc(ip, ip->i_d.di_uid,
+					 ip->i_d.di_gid, fa->fsx_projid,
+					 XFS_QMOPT_PQUOTA, &udqp, NULL, &pdqp);
 		if (code)
 			return code;
 	}
 
-	xfs_ioctl_setattr_prepare_dax(ip, fa);
+	/*
+	 * Changing DAX config may require inode locking for mapping
+	 * invalidation. These need to be held all the way to transaction commit
+	 * or cancel time, so need to be passed through to
+	 * xfs_ioctl_setattr_get_trans() so it can apply them to the join call
+	 * appropriately.
+	 */
+	code = xfs_ioctl_setattr_dax_invalidate(ip, fa, &join_flags);
+	if (code)
+		goto error_free_dquots;
 
-	tp = xfs_ioctl_setattr_get_trans(ip);
+	tp = xfs_ioctl_setattr_get_trans(ip, join_flags);
 	if (IS_ERR(tp)) {
 		code = PTR_ERR(tp);
 		goto error_free_dquots;
 	}
 
 	if (XFS_IS_QUOTA_RUNNING(mp) && XFS_IS_PQUOTA_ON(mp) &&
-	    ip->i_d.di_projid != fa->fsx_projid) {
-		code = xfs_qm_vop_chown_reserve(tp, ip, NULL, NULL, pdqp,
+	    xfs_get_projid(ip) != fa->fsx_projid) {
+		code = xfs_qm_vop_chown_reserve(tp, ip, udqp, NULL, pdqp,
 				capable(CAP_FOWNER) ?  XFS_QMOPT_FORCE_RES : 0);
 		if (code)	/* out of quota */
 			goto error_trans_cancel;
@@ -1506,12 +1634,13 @@ xfs_ioctl_setattr(
 		VFS_I(ip)->i_mode &= ~(S_ISUID|S_ISGID);
 
 	/* Change the ownerships and register project quota modifications */
-	if (ip->i_d.di_projid != fa->fsx_projid) {
+	if (xfs_get_projid(ip) != fa->fsx_projid) {
 		if (XFS_IS_QUOTA_RUNNING(mp) && XFS_IS_PQUOTA_ON(mp)) {
 			olddquot = xfs_qm_vop_chown(tp, ip,
 						&ip->i_pdquot, pdqp);
 		}
-		ip->i_d.di_projid = fa->fsx_projid;
+		ASSERT(ip->i_d.di_version > 1);
+		xfs_set_projid(ip, fa->fsx_projid);
 	}
 
 	/*
@@ -1523,7 +1652,7 @@ xfs_ioctl_setattr(
 		ip->i_d.di_extsize = fa->fsx_extsize >> mp->m_sb.sb_blocklog;
 	else
 		ip->i_d.di_extsize = 0;
-	if (xfs_sb_version_has_v3inode(&mp->m_sb) &&
+	if (ip->i_d.di_version == 3 &&
 	    (ip->i_d.di_flags2 & XFS_DIFLAG2_COWEXTSIZE))
 		ip->i_d.di_cowextsize = fa->fsx_cowextsize >>
 				mp->m_sb.sb_blocklog;
@@ -1536,6 +1665,7 @@ xfs_ioctl_setattr(
 	 * Release any dquot(s) the inode had kept before chown.
 	 */
 	xfs_qm_dqrele(olddquot);
+	xfs_qm_dqrele(udqp);
 	xfs_qm_dqrele(pdqp);
 
 	return code;
@@ -1543,6 +1673,7 @@ xfs_ioctl_setattr(
 error_trans_cancel:
 	xfs_trans_cancel(tp);
 error_free_dquots:
+	xfs_qm_dqrele(udqp);
 	xfs_qm_dqrele(pdqp);
 	return code;
 }
@@ -1574,7 +1705,7 @@ xfs_ioc_getxflags(
 {
 	unsigned int		flags;
 
-	flags = xfs_di2lxflags(ip->i_d.di_flags, ip->i_d.di_flags2);
+	flags = xfs_di2lxflags(ip->i_d.di_flags);
 	if (copy_to_user(arg, &flags, sizeof(flags)))
 		return -EFAULT;
 	return 0;
@@ -1590,6 +1721,7 @@ xfs_ioc_setxflags(
 	struct fsxattr		fa;
 	struct fsxattr		old_fa;
 	unsigned int		flags;
+	int			join_flags = 0;
 	int			error;
 
 	if (copy_from_user(&flags, arg, sizeof(flags)))
@@ -1597,7 +1729,7 @@ xfs_ioc_setxflags(
 
 	if (flags & ~(FS_IMMUTABLE_FL | FS_APPEND_FL | \
 		      FS_NOATIME_FL | FS_NODUMP_FL | \
-		      FS_SYNC_FL | FS_DAX_FL))
+		      FS_SYNC_FL))
 		return -EOPNOTSUPP;
 
 	fa.fsx_xflags = xfs_merge_ioc_xflags(flags, xfs_ip2xflags(ip));
@@ -1606,9 +1738,18 @@ xfs_ioc_setxflags(
 	if (error)
 		return error;
 
-	xfs_ioctl_setattr_prepare_dax(ip, &fa);
+	/*
+	 * Changing DAX config may require inode locking for mapping
+	 * invalidation. These need to be held all the way to transaction commit
+	 * or cancel time, so need to be passed through to
+	 * xfs_ioctl_setattr_get_trans() so it can apply them to the join call
+	 * appropriately.
+	 */
+	error = xfs_ioctl_setattr_dax_invalidate(ip, &fa, &join_flags);
+	if (error)
+		goto out_drop_write;
 
-	tp = xfs_ioctl_setattr_get_trans(ip);
+	tp = xfs_ioctl_setattr_get_trans(ip, join_flags);
 	if (IS_ERR(tp)) {
 		error = PTR_ERR(tp);
 		goto out_drop_write;
@@ -1691,7 +1832,7 @@ xfs_ioc_getbmap(
 	if (bmx.bmv_count > ULONG_MAX / recsize)
 		return -ENOMEM;
 
-	buf = kvzalloc(bmx.bmv_count * sizeof(*buf), GFP_KERNEL);
+	buf = kmem_zalloc_large(bmx.bmv_count * sizeof(*buf), 0);
 	if (!buf)
 		return -ENOMEM;
 
@@ -2032,41 +2173,6 @@ out:
 	return error;
 }
 
-static inline int
-xfs_fs_eofblocks_from_user(
-	struct xfs_fs_eofblocks		*src,
-	struct xfs_eofblocks		*dst)
-{
-	if (src->eof_version != XFS_EOFBLOCKS_VERSION)
-		return -EINVAL;
-
-	if (src->eof_flags & ~XFS_EOF_FLAGS_VALID)
-		return -EINVAL;
-
-	if (memchr_inv(&src->pad32, 0, sizeof(src->pad32)) ||
-	    memchr_inv(src->pad64, 0, sizeof(src->pad64)))
-		return -EINVAL;
-
-	dst->eof_flags = src->eof_flags;
-	dst->eof_prid = src->eof_prid;
-	dst->eof_min_file_size = src->eof_min_file_size;
-
-	dst->eof_uid = INVALID_UID;
-	if (src->eof_flags & XFS_EOF_FLAGS_UID) {
-		dst->eof_uid = make_kuid(current_user_ns(), src->eof_uid);
-		if (!uid_valid(dst->eof_uid))
-			return -EINVAL;
-	}
-
-	dst->eof_gid = INVALID_GID;
-	if (src->eof_flags & XFS_EOF_FLAGS_GID) {
-		dst->eof_gid = make_kgid(current_user_ns(), src->eof_gid);
-		if (!gid_valid(dst->eof_gid))
-			return -EINVAL;
-	}
-	return 0;
-}
-
 /*
  * Note: some of the ioctl's return positive numbers as a
  * byte count indicating success, such as readlink_by_handle.
@@ -2096,17 +2202,24 @@ xfs_file_ioctl(
 		return xfs_ioc_setlabel(filp, mp, arg);
 	case XFS_IOC_ALLOCSP:
 	case XFS_IOC_FREESP:
+	case XFS_IOC_RESVSP:
+	case XFS_IOC_UNRESVSP:
 	case XFS_IOC_ALLOCSP64:
-	case XFS_IOC_FREESP64: {
+	case XFS_IOC_FREESP64:
+	case XFS_IOC_RESVSP64:
+	case XFS_IOC_UNRESVSP64:
+	case XFS_IOC_ZERO_RANGE: {
 		xfs_flock64_t		bf;
 
 		if (copy_from_user(&bf, arg, sizeof(bf)))
 			return -EFAULT;
-		return xfs_ioc_space(filp, &bf);
+		return xfs_ioc_space(filp, cmd, &bf);
 	}
 	case XFS_IOC_DIOINFO: {
-		struct xfs_buftarg	*target = xfs_inode_buftarg(ip);
-		struct dioattr		da;
+		struct dioattr	da;
+		xfs_buftarg_t	*target =
+			XFS_IS_REALTIME_INODE(ip) ?
+			mp->m_rtdev_targp : mp->m_ddev_targp;
 
 		da.d_mem =  da.d_miniosz = target->bt_logical_sectorsize;
 		da.d_maxiosz = INT_MAX & ~(da.d_miniosz - 1);
@@ -2150,6 +2263,22 @@ xfs_file_ioctl(
 	case XFS_IOC_SETXFLAGS:
 		return xfs_ioc_setxflags(ip, filp, arg);
 
+	case XFS_IOC_FSSETDM: {
+		struct fsdmidata	dmi;
+
+		if (copy_from_user(&dmi, arg, sizeof(dmi)))
+			return -EFAULT;
+
+		error = mnt_want_write_file(filp);
+		if (error)
+			return error;
+
+		error = xfs_set_dmattrs(ip, dmi.fsd_dmevmask,
+				dmi.fsd_dmstate);
+		mnt_drop_write_file(filp);
+		return error;
+	}
+
 	case XFS_IOC_GETBMAP:
 	case XFS_IOC_GETBMAPA:
 	case XFS_IOC_GETBMAPX:
@@ -2177,6 +2306,8 @@ xfs_file_ioctl(
 			return -EFAULT;
 		return xfs_open_by_handle(filp, &hreq);
 	}
+	case XFS_IOC_FSSETDM_BY_HANDLE:
+		return xfs_fssetdm_by_handle(filp, arg);
 
 	case XFS_IOC_READLINK_BY_HANDLE: {
 		xfs_fsop_handlereq_t	hreq;

@@ -279,17 +279,17 @@ static bool uas_evaluate_response_iu(struct response_iu *riu, struct scsi_cmnd *
 
 	switch (response_code) {
 	case RC_INCORRECT_LUN:
-		set_host_byte(cmnd, DID_BAD_TARGET);
+		cmnd->result = DID_BAD_TARGET << 16;
 		break;
 	case RC_TMF_SUCCEEDED:
-		set_host_byte(cmnd, DID_OK);
+		cmnd->result = DID_OK << 16;
 		break;
 	case RC_TMF_NOT_SUPPORTED:
-		set_host_byte(cmnd, DID_TARGET_FAILURE);
+		cmnd->result = DID_TARGET_FAILURE << 16;
 		break;
 	default:
 		uas_log_cmd_state(cmnd, "response iu", response_code);
-		set_host_byte(cmnd, DID_ERROR);
+		cmnd->result = DID_ERROR << 16;
 		break;
 	}
 
@@ -660,7 +660,7 @@ static int uas_queuecommand_lck(struct scsi_cmnd *cmnd,
 	spin_lock_irqsave(&devinfo->lock, flags);
 
 	if (devinfo->resetting) {
-		set_host_byte(cmnd, DID_ERROR);
+		cmnd->result = DID_ERROR << 16;
 		cmnd->scsi_done(cmnd);
 		goto zombie;
 	}
@@ -687,10 +687,9 @@ static int uas_queuecommand_lck(struct scsi_cmnd *cmnd,
 		break;
 	case DMA_BIDIRECTIONAL:
 		cmdinfo->state |= ALLOC_DATA_IN_URB | SUBMIT_DATA_IN_URB;
-		fallthrough;
+		/* fall through */
 	case DMA_TO_DEVICE:
 		cmdinfo->state |= ALLOC_DATA_OUT_URB | SUBMIT_DATA_OUT_URB;
-		break;
 	case DMA_NONE:
 		break;
 	}
@@ -705,7 +704,7 @@ static int uas_queuecommand_lck(struct scsi_cmnd *cmnd,
 	 * of queueing, no matter how fatal the error
 	 */
 	if (err == -ENODEV) {
-		set_host_byte(cmnd, DID_ERROR);
+		cmnd->result = DID_ERROR << 16;
 		cmnd->scsi_done(cmnd);
 		goto zombie;
 	}
@@ -911,6 +910,7 @@ static struct scsi_host_template uas_host_template = {
 	.eh_abort_handler = uas_eh_abort_handler,
 	.eh_device_reset_handler = uas_eh_device_reset_handler,
 	.this_id = -1,
+	.sg_tablesize = SG_NONE,
 	.skip_settle_delay = 1,
 	.dma_boundary = PAGE_SIZE - 1,
 };

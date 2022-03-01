@@ -12,7 +12,6 @@
 #include <linux/uaccess.h>
 #include <linux/mm.h>
 #include <linux/of.h>
-#include <linux/slab.h>
 #include <soc/bcm2835/raspberrypi-firmware.h>
 
 #define TOTAL_SLOTS (VCHIQ_SLOT_ZERO_SLOTS + 2 * 32)
@@ -70,7 +69,7 @@ static irqreturn_t
 vchiq_doorbell_irq(int irq, void *dev_id);
 
 static struct vchiq_pagelist_info *
-create_pagelist(char *buf, char __user *ubuf, size_t count, unsigned short type);
+create_pagelist(char __user *buf, size_t count, unsigned short type);
 
 static void
 free_pagelist(struct vchiq_pagelist_info *pagelistinfo,
@@ -82,6 +81,7 @@ int vchiq_platform_init(struct platform_device *pdev, struct vchiq_state *state)
 	struct vchiq_drvdata *drvdata = platform_get_drvdata(pdev);
 	struct rpi_firmware *fw = drvdata->fw;
 	struct vchiq_slot_zero *vchiq_slot_zero;
+	struct resource *res;
 	void *slot_mem;
 	dma_addr_t slot_phys;
 	u32 channelbase;
@@ -135,7 +135,8 @@ int vchiq_platform_init(struct platform_device *pdev, struct vchiq_state *state)
 	if (vchiq_init_state(state, vchiq_slot_zero) != VCHIQ_SUCCESS)
 		return -EINVAL;
 
-	g_regs = devm_platform_ioremap_resource(pdev, 0);
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	g_regs = devm_ioremap_resource(&pdev->dev, res);
 	if (IS_ERR(g_regs))
 		return PTR_ERR(g_regs);
 
@@ -169,10 +170,10 @@ int vchiq_platform_init(struct platform_device *pdev, struct vchiq_state *state)
 	return 0;
 }
 
-enum vchiq_status
+VCHIQ_STATUS_T
 vchiq_platform_init_state(struct vchiq_state *state)
 {
-	enum vchiq_status status = VCHIQ_SUCCESS;
+	VCHIQ_STATUS_T status = VCHIQ_SUCCESS;
 	struct vchiq_2835_state *platform_state;
 
 	state->platform_state = kzalloc(sizeof(*platform_state), GFP_KERNEL);
@@ -215,13 +216,13 @@ remote_event_signal(struct remote_event *event)
 		writel(0, g_regs + BELL2); /* trigger vc interrupt */
 }
 
-enum vchiq_status
-vchiq_prepare_bulk_data(struct vchiq_bulk *bulk, void *offset,
-			void __user *uoffset, int size, int dir)
+VCHIQ_STATUS_T
+vchiq_prepare_bulk_data(struct vchiq_bulk *bulk, void *offset, int size,
+			int dir)
 {
 	struct vchiq_pagelist_info *pagelistinfo;
 
-	pagelistinfo = create_pagelist(offset, uoffset, size,
+	pagelistinfo = create_pagelist((char __user *)offset, size,
 				       (dir == VCHIQ_BULK_RECEIVE)
 				       ? PAGELIST_READ
 				       : PAGELIST_WRITE);
@@ -229,7 +230,7 @@ vchiq_prepare_bulk_data(struct vchiq_bulk *bulk, void *offset,
 	if (!pagelistinfo)
 		return VCHIQ_ERROR;
 
-	bulk->data = pagelistinfo->dma_addr;
+	bulk->data = (void *)(unsigned long)pagelistinfo->dma_addr;
 
 	/*
 	 * Store the pagelistinfo address in remote_data,
@@ -248,16 +249,60 @@ vchiq_complete_bulk(struct vchiq_bulk *bulk)
 			      bulk->actual);
 }
 
-int vchiq_dump_platform_state(void *dump_context)
+void
+vchiq_dump_platform_state(void *dump_context)
 {
 	char buf[80];
 	int len;
 
 	len = snprintf(buf, sizeof(buf),
 		"  Platform: 2835 (VC master)");
-	return vchiq_dump(dump_context, buf, len + 1);
+	vchiq_dump(dump_context, buf, len + 1);
 }
 
+VCHIQ_STATUS_T
+vchiq_platform_suspend(struct vchiq_state *state)
+{
+	return VCHIQ_ERROR;
+}
+
+VCHIQ_STATUS_T
+vchiq_platform_resume(struct vchiq_state *state)
+{
+	return VCHIQ_SUCCESS;
+}
+
+void
+vchiq_platform_paused(struct vchiq_state *state)
+{
+}
+
+void
+vchiq_platform_resumed(struct vchiq_state *state)
+{
+}
+
+int
+vchiq_platform_videocore_wanted(struct vchiq_state *state)
+{
+	return 1; // autosuspend not supported - videocore always wanted
+}
+
+int
+vchiq_platform_use_suspend_timer(void)
+{
+	return 0;
+}
+void
+vchiq_dump_platform_use_state(struct vchiq_state *state)
+{
+	vchiq_log_info(vchiq_arm_log_level, "Suspend timer not in use");
+}
+void
+vchiq_platform_handle_timeout(struct vchiq_state *state)
+{
+	(void)state;
+}
 /*
  * Local functions
  */
@@ -288,8 +333,12 @@ cleanup_pagelistinfo(struct vchiq_pagelist_info *pagelistinfo)
 			     pagelistinfo->num_pages, pagelistinfo->dma_dir);
 	}
 
-	if (pagelistinfo->pages_need_release)
-		unpin_user_pages(pagelistinfo->pages, pagelistinfo->num_pages);
+	if (pagelistinfo->pages_need_release) {
+		unsigned int i;
+
+		for (i = 0; i < pagelistinfo->num_pages; i++)
+			put_page(pagelistinfo->pages[i]);
+	}
 
 	dma_free_coherent(g_dev, pagelistinfo->pagelist_buffer_size,
 			  pagelistinfo->pagelist, pagelistinfo->dma_addr);
@@ -304,8 +353,7 @@ cleanup_pagelistinfo(struct vchiq_pagelist_info *pagelistinfo)
  */
 
 static struct vchiq_pagelist_info *
-create_pagelist(char *buf, char __user *ubuf,
-		size_t count, unsigned short type)
+create_pagelist(char __user *buf, size_t count, unsigned short type)
 {
 	struct pagelist *pagelist;
 	struct vchiq_pagelist_info *pagelistinfo;
@@ -321,10 +369,7 @@ create_pagelist(char *buf, char __user *ubuf,
 	if (count >= INT_MAX - PAGE_SIZE)
 		return NULL;
 
-	if (buf)
-		offset = (uintptr_t)buf & (PAGE_SIZE - 1);
-	else
-		offset = (uintptr_t)ubuf & (PAGE_SIZE - 1);
+	offset = ((unsigned int)(unsigned long)buf & (PAGE_SIZE - 1));
 	num_pages = DIV_ROUND_UP(count + offset, PAGE_SIZE);
 
 	if (num_pages > (SIZE_MAX - sizeof(struct pagelist) -
@@ -372,15 +417,14 @@ create_pagelist(char *buf, char __user *ubuf,
 	pagelistinfo->scatterlist = scatterlist;
 	pagelistinfo->scatterlist_mapped = 0;
 
-	if (buf) {
+	if (is_vmalloc_addr(buf)) {
 		unsigned long length = count;
 		unsigned int off = offset;
 
 		for (actual_pages = 0; actual_pages < num_pages;
 		     actual_pages++) {
-			struct page *pg =
-				vmalloc_to_page((buf +
-						 (actual_pages * PAGE_SIZE)));
+			struct page *pg = vmalloc_to_page(buf + (actual_pages *
+								 PAGE_SIZE));
 			size_t bytes = PAGE_SIZE - off;
 
 			if (!pg) {
@@ -396,8 +440,8 @@ create_pagelist(char *buf, char __user *ubuf,
 		}
 		/* do not try and release vmalloc pages */
 	} else {
-		actual_pages = pin_user_pages_fast(
-					  (unsigned long)ubuf & PAGE_MASK,
+		actual_pages = get_user_pages_fast(
+					  (unsigned long)buf & PAGE_MASK,
 					  num_pages,
 					  type == PAGELIST_READ,
 					  pages);
@@ -408,8 +452,10 @@ create_pagelist(char *buf, char __user *ubuf,
 				       __func__, actual_pages, num_pages);
 
 			/* This is probably due to the process being killed */
-			if (actual_pages > 0)
-				unpin_user_pages(pages, actual_pages);
+			while (actual_pages > 0) {
+				actual_pages--;
+				put_page(pages[actual_pages]);
+			}
 			cleanup_pagelistinfo(pagelistinfo);
 			return NULL;
 		}
@@ -480,11 +526,11 @@ create_pagelist(char *buf, char __user *ubuf,
 			return NULL;
 		}
 
-		WARN_ON(!g_free_fragments);
+		WARN_ON(g_free_fragments == NULL);
 
 		down(&g_free_fragments_mutex);
 		fragments = g_free_fragments;
-		WARN_ON(!fragments);
+		WARN_ON(fragments == NULL);
 		g_free_fragments = *(char **) g_free_fragments;
 		up(&g_free_fragments_mutex);
 		pagelist->type = PAGELIST_READ_WITH_FRAGMENTS +

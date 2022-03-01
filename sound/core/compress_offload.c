@@ -488,49 +488,6 @@ out:
 }
 #endif /* !COMPR_CODEC_CAPS_OVERFLOW */
 
-int snd_compr_malloc_pages(struct snd_compr_stream *stream, size_t size)
-{
-	struct snd_dma_buffer *dmab;
-	int ret;
-
-	if (snd_BUG_ON(!(stream) || !(stream)->runtime))
-		return -EINVAL;
-	dmab = kzalloc(sizeof(*dmab), GFP_KERNEL);
-	if (!dmab)
-		return -ENOMEM;
-	dmab->dev = stream->dma_buffer.dev;
-	ret = snd_dma_alloc_pages(dmab->dev.type, dmab->dev.dev, size, dmab);
-	if (ret < 0) {
-		kfree(dmab);
-		return ret;
-	}
-
-	snd_compr_set_runtime_buffer(stream, dmab);
-	stream->runtime->dma_bytes = size;
-	return 1;
-}
-EXPORT_SYMBOL(snd_compr_malloc_pages);
-
-int snd_compr_free_pages(struct snd_compr_stream *stream)
-{
-	struct snd_compr_runtime *runtime;
-
-	if (snd_BUG_ON(!(stream) || !(stream)->runtime))
-		return -EINVAL;
-	runtime = stream->runtime;
-	if (runtime->dma_area == NULL)
-		return 0;
-	if (runtime->dma_buffer_p != &stream->dma_buffer) {
-		/* It's a newly allocated buffer. Release it now. */
-		snd_dma_free_pages(runtime->dma_buffer_p);
-		kfree(runtime->dma_buffer_p);
-	}
-
-	snd_compr_set_runtime_buffer(stream, NULL);
-	return 0;
-}
-EXPORT_SYMBOL(snd_compr_free_pages);
-
 /* revisit this with snd_pcm_preallocate_xxx */
 static int snd_compr_allocate_buffer(struct snd_compr_stream *stream,
 		struct snd_compr_params *params)
@@ -709,22 +666,11 @@ static int snd_compr_pause(struct snd_compr_stream *stream)
 {
 	int retval;
 
-	switch (stream->runtime->state) {
-	case SNDRV_PCM_STATE_RUNNING:
-		retval = stream->ops->trigger(stream, SNDRV_PCM_TRIGGER_PAUSE_PUSH);
-		if (!retval)
-			stream->runtime->state = SNDRV_PCM_STATE_PAUSED;
-		break;
-	case SNDRV_PCM_STATE_DRAINING:
-		if (!stream->device->use_pause_in_draining)
-			return -EPERM;
-		retval = stream->ops->trigger(stream, SNDRV_PCM_TRIGGER_PAUSE_PUSH);
-		if (!retval)
-			stream->pause_in_draining = true;
-		break;
-	default:
+	if (stream->runtime->state != SNDRV_PCM_STATE_RUNNING)
 		return -EPERM;
-	}
+	retval = stream->ops->trigger(stream, SNDRV_PCM_TRIGGER_PAUSE_PUSH);
+	if (!retval)
+		stream->runtime->state = SNDRV_PCM_STATE_PAUSED;
 	return retval;
 }
 
@@ -732,22 +678,11 @@ static int snd_compr_resume(struct snd_compr_stream *stream)
 {
 	int retval;
 
-	switch (stream->runtime->state) {
-	case SNDRV_PCM_STATE_PAUSED:
-		retval = stream->ops->trigger(stream, SNDRV_PCM_TRIGGER_PAUSE_RELEASE);
-		if (!retval)
-			stream->runtime->state = SNDRV_PCM_STATE_RUNNING;
-		break;
-	case SNDRV_PCM_STATE_DRAINING:
-		if (!stream->pause_in_draining)
-			return -EPERM;
-		retval = stream->ops->trigger(stream, SNDRV_PCM_TRIGGER_PAUSE_RELEASE);
-		if (!retval)
-			stream->pause_in_draining = false;
-		break;
-	default:
+	if (stream->runtime->state != SNDRV_PCM_STATE_PAUSED)
 		return -EPERM;
-	}
+	retval = stream->ops->trigger(stream, SNDRV_PCM_TRIGGER_PAUSE_RELEASE);
+	if (!retval)
+		stream->runtime->state = SNDRV_PCM_STATE_RUNNING;
 	return retval;
 }
 
@@ -790,7 +725,6 @@ static int snd_compr_stop(struct snd_compr_stream *stream)
 		/* clear flags and stop any drain wait */
 		stream->partial_drain = false;
 		stream->metadata_set = false;
-		stream->pause_in_draining = false;
 		snd_compr_drain_notify(stream);
 		stream->runtime->total_bytes_available = 0;
 		stream->runtime->total_bytes_transferred = 0;
@@ -1055,7 +989,7 @@ static const struct file_operations snd_compr_file_ops = {
 
 static int snd_compress_dev_register(struct snd_device *device)
 {
-	int ret;
+	int ret = -EINVAL;
 	struct snd_compr *compr;
 
 	if (snd_BUG_ON(!device || !device->device_data))
@@ -1169,7 +1103,7 @@ static int snd_compress_dev_free(struct snd_device *device)
 int snd_compress_new(struct snd_card *card, int device,
 			int dirn, const char *id, struct snd_compr *compr)
 {
-	static const struct snd_device_ops ops = {
+	static struct snd_device_ops ops = {
 		.dev_free = snd_compress_dev_free,
 		.dev_register = snd_compress_dev_register,
 		.dev_disconnect = snd_compress_dev_disconnect,

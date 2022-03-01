@@ -8,7 +8,6 @@
  * which provide mailbox interface for power management usage.
  */
 
-#include <linux/acpi.h>
 #include <linux/bitops.h>
 #include <linux/delay.h>
 #include <linux/device.h>
@@ -224,6 +223,7 @@ static irqreturn_t intel_punit_ioc(int irq, void *dev_id)
 
 static int intel_punit_get_bars(struct platform_device *pdev)
 {
+	struct resource *res;
 	void __iomem *addr;
 
 	/*
@@ -231,12 +231,14 @@ static int intel_punit_get_bars(struct platform_device *pdev)
 	 * - BIOS_IPC BASE_DATA
 	 * - BIOS_IPC BASE_IFACE
 	 */
-	addr = devm_platform_ioremap_resource(pdev, 0);
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	addr = devm_ioremap_resource(&pdev->dev, res);
 	if (IS_ERR(addr))
 		return PTR_ERR(addr);
 	punit_ipcdev->base[BIOS_IPC][BASE_DATA] = addr;
 
-	addr = devm_platform_ioremap_resource(pdev, 1);
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 1);
+	addr = devm_ioremap_resource(&pdev->dev, res);
 	if (IS_ERR(addr))
 		return PTR_ERR(addr);
 	punit_ipcdev->base[BIOS_IPC][BASE_IFACE] = addr;
@@ -248,21 +250,33 @@ static int intel_punit_get_bars(struct platform_device *pdev)
 	 * - GTDRIVER_IPC BASE_DATA
 	 * - GTDRIVER_IPC BASE_IFACE
 	 */
-	addr = devm_platform_ioremap_resource(pdev, 2);
-	if (!IS_ERR(addr))
-		punit_ipcdev->base[ISPDRIVER_IPC][BASE_DATA] = addr;
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 2);
+	if (res) {
+		addr = devm_ioremap_resource(&pdev->dev, res);
+		if (!IS_ERR(addr))
+			punit_ipcdev->base[ISPDRIVER_IPC][BASE_DATA] = addr;
+	}
 
-	addr = devm_platform_ioremap_resource(pdev, 3);
-	if (!IS_ERR(addr))
-		punit_ipcdev->base[ISPDRIVER_IPC][BASE_IFACE] = addr;
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 3);
+	if (res) {
+		addr = devm_ioremap_resource(&pdev->dev, res);
+		if (!IS_ERR(addr))
+			punit_ipcdev->base[ISPDRIVER_IPC][BASE_IFACE] = addr;
+	}
 
-	addr = devm_platform_ioremap_resource(pdev, 4);
-	if (!IS_ERR(addr))
-		punit_ipcdev->base[GTDRIVER_IPC][BASE_DATA] = addr;
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 4);
+	if (res) {
+		addr = devm_ioremap_resource(&pdev->dev, res);
+		if (!IS_ERR(addr))
+			punit_ipcdev->base[GTDRIVER_IPC][BASE_DATA] = addr;
+	}
 
-	addr = devm_platform_ioremap_resource(pdev, 5);
-	if (!IS_ERR(addr))
-		punit_ipcdev->base[GTDRIVER_IPC][BASE_IFACE] = addr;
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 5);
+	if (res) {
+		addr = devm_ioremap_resource(&pdev->dev, res);
+		if (!IS_ERR(addr))
+			punit_ipcdev->base[GTDRIVER_IPC][BASE_IFACE] = addr;
+	}
 
 	return 0;
 }
@@ -294,13 +308,14 @@ static int intel_punit_ipc_probe(struct platform_device *pdev)
 
 	ret = intel_punit_get_bars(pdev);
 	if (ret)
-		return ret;
+		goto out;
 
 	punit_ipcdev->dev = &pdev->dev;
 	mutex_init(&punit_ipcdev->lock);
 	init_completion(&punit_ipcdev->cmd_complete);
 
-	return 0;
+out:
+	return ret;
 }
 
 static int intel_punit_ipc_remove(struct platform_device *pdev)
@@ -312,13 +327,14 @@ static const struct acpi_device_id punit_ipc_acpi_ids[] = {
 	{ "INT34D4", 0 },
 	{ }
 };
+MODULE_DEVICE_TABLE(acpi, punit_ipc_acpi_ids);
 
 static struct platform_driver intel_punit_ipc_driver = {
 	.probe = intel_punit_ipc_probe,
 	.remove = intel_punit_ipc_remove,
 	.driver = {
 		.name = "intel_punit_ipc",
-		.acpi_match_table = ACPI_PTR(punit_ipc_acpi_ids),
+		.acpi_match_table = punit_ipc_acpi_ids,
 	},
 };
 

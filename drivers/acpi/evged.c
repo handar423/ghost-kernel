@@ -106,7 +106,7 @@ static acpi_status acpi_ged_request_interrupt(struct acpi_resource *ares,
 
 		if (ACPI_SUCCESS(acpi_get_handle(handle, ev_name, &evt_handle)))
 			break;
-		fallthrough;
+		/* fall through */
 	default:
 		if (ACPI_SUCCESS(acpi_get_handle(handle, "_EVT", &evt_handle)))
 			break;

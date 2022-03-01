@@ -64,21 +64,6 @@ mt76_get_of_eeprom(struct mt76_dev *dev, int len)
 		goto out_put_node;
 	}
 
-	if (of_property_read_bool(dev->dev->of_node, "big-endian")) {
-		u8 *data = (u8 *)dev->eeprom.data;
-		int i;
-
-		/* convert eeprom data in Little Endian */
-		for (i = 0; i < round_down(len, 2); i += 2)
-			put_unaligned_le16(get_unaligned_be16(&data[i]),
-					   &data[i]);
-	}
-
-#ifdef CONFIG_NL80211_TESTMODE
-	dev->test.mtd_name = devm_kstrdup(dev->dev, part, GFP_KERNEL);
-	dev->test.mtd_offset = offset;
-#endif
-
 out_put_node:
 	of_node_put(np);
 	return ret;
@@ -88,25 +73,25 @@ out_put_node:
 }
 
 void
-mt76_eeprom_override(struct mt76_phy *phy)
+mt76_eeprom_override(struct mt76_dev *dev)
 {
-	struct mt76_dev *dev = phy->dev;
-
 #ifdef CONFIG_OF
 	struct device_node *np = dev->dev->of_node;
-	const u8 *mac = NULL;
+	const u8 *mac;
 
-	if (np)
-		mac = of_get_mac_address(np);
-	if (!IS_ERR_OR_NULL(mac))
-		ether_addr_copy(phy->macaddr, mac);
+	if (!np)
+		return;
+
+	mac = of_get_mac_address(np);
+	if (!IS_ERR(mac))
+		ether_addr_copy(dev->macaddr, mac);
 #endif
 
-	if (!is_valid_ether_addr(phy->macaddr)) {
-		eth_random_addr(phy->macaddr);
+	if (!is_valid_ether_addr(dev->macaddr)) {
+		eth_random_addr(dev->macaddr);
 		dev_info(dev->dev,
 			 "Invalid MAC address, using random address %pM\n",
-			 phy->macaddr);
+			 dev->macaddr);
 	}
 }
 EXPORT_SYMBOL_GPL(mt76_eeprom_override);

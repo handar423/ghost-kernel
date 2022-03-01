@@ -37,7 +37,6 @@
 #include <linux/pci.h>
 #include <linux/seq_file.h>
 #include <linux/vmalloc.h>
-#include <linux/pgtable.h>
 
 #if defined(__ia64__)
 #include <linux/efi.h>
@@ -45,12 +44,14 @@
 #endif
 #include <linux/mem_encrypt.h>
 
+#include <asm/pgtable.h>
 
 #include <drm/drm_agpsupport.h>
 #include <drm/drm_device.h>
 #include <drm/drm_drv.h>
 #include <drm/drm_file.h>
 #include <drm/drm_framebuffer.h>
+#include <drm/drm_gem.h>
 #include <drm/drm_print.h>
 
 #include "drm_internal.h"
@@ -69,6 +70,9 @@ static pgprot_t drm_io_prot(struct drm_local_map *map,
 			    struct vm_area_struct *vma)
 {
 	pgprot_t tmp = vm_get_page_prot(vma->vm_flags);
+
+	/* We don't want graphics memory to be mapped encrypted */
+	tmp = pgprot_decrypted(tmp);
 
 #if defined(__i386__) || defined(__x86_64__) || defined(__powerpc__) || \
     defined(__mips__)
@@ -98,7 +102,7 @@ static pgprot_t drm_dma_prot(uint32_t map_type, struct vm_area_struct *vma)
 	return tmp;
 }
 
-/*
+/**
  * \c fault method for AGP virtual memory.
  *
  * \param vma virtual memory area.
@@ -188,7 +192,7 @@ static vm_fault_t drm_vm_fault(struct vm_fault *vmf)
 }
 #endif
 
-/*
+/**
  * \c nopage method for shared virtual memory.
  *
  * \param vma virtual memory area.
@@ -221,7 +225,7 @@ static vm_fault_t drm_vm_shm_fault(struct vm_fault *vmf)
 	return 0;
 }
 
-/*
+/**
  * \c close method for shared virtual memory.
  *
  * \param vma virtual memory area.
@@ -265,6 +269,8 @@ static void drm_vm_shm_close(struct vm_area_struct *vma)
 		}
 
 		if (!found_maps) {
+			drm_dma_handle_t dmah;
+
 			switch (map->type) {
 			case _DRM_REGISTERS:
 			case _DRM_FRAME_BUFFER:
@@ -278,10 +284,10 @@ static void drm_vm_shm_close(struct vm_area_struct *vma)
 			case _DRM_SCATTER_GATHER:
 				break;
 			case _DRM_CONSISTENT:
-				dma_free_coherent(&dev->pdev->dev,
-						  map->size,
-						  map->handle,
-						  map->offset);
+				dmah.vaddr = map->handle;
+				dmah.busaddr = map->offset;
+				dmah.size = map->size;
+				__drm_legacy_pci_free(dev, &dmah);
 				break;
 			}
 			kfree(map);
@@ -290,7 +296,7 @@ static void drm_vm_shm_close(struct vm_area_struct *vma)
 	mutex_unlock(&dev->struct_mutex);
 }
 
-/*
+/**
  * \c fault method for DMA virtual memory.
  *
  * \param address access address.
@@ -325,7 +331,7 @@ static vm_fault_t drm_vm_dma_fault(struct vm_fault *vmf)
 	return 0;
 }
 
-/*
+/**
  * \c fault method for scatter-gather virtual memory.
  *
  * \param address access address.
@@ -431,7 +437,7 @@ static void drm_vm_close_locked(struct drm_device *dev,
 	}
 }
 
-/*
+/**
  * \c close method for all virtual memory types.
  *
  * \param vma virtual memory area.
@@ -449,7 +455,7 @@ static void drm_vm_close(struct vm_area_struct *vma)
 	mutex_unlock(&dev->struct_mutex);
 }
 
-/*
+/**
  * mmap DMA memory.
  *
  * \param file_priv DRM file private.
@@ -509,7 +515,7 @@ static resource_size_t drm_core_get_reg_ofs(struct drm_device *dev)
 #endif
 }
 
-/*
+/**
  * mmap DMA memory.
  *
  * \param file_priv DRM file private.
@@ -591,8 +597,8 @@ static int drm_mmap_locked(struct file *filp, struct vm_area_struct *vma)
 			vma->vm_ops = &drm_vm_ops;
 			break;
 		}
-		fallthrough;	/* to _DRM_FRAME_BUFFER... */
 #endif
+		/* fall through - to _DRM_FRAME_BUFFER... */
 	case _DRM_FRAME_BUFFER:
 	case _DRM_REGISTERS:
 		offset = drm_core_get_reg_ofs(dev);
@@ -617,7 +623,7 @@ static int drm_mmap_locked(struct file *filp, struct vm_area_struct *vma)
 		    vma->vm_end - vma->vm_start, vma->vm_page_prot))
 			return -EAGAIN;
 		vma->vm_page_prot = drm_dma_prot(map->type, vma);
-		fallthrough;	/* to _DRM_SHM */
+		/* fall through - to _DRM_SHM */
 	case _DRM_SHM:
 		vma->vm_ops = &drm_vm_shm_ops;
 		vma->vm_private_data = (void *)map;

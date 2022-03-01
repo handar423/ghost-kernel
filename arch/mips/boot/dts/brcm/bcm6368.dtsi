@@ -59,7 +59,7 @@
 
 		periph_cntl: syscon@100000008 {
 			compatible = "syscon";
-			reg = <0x10000000 0xc>;
+			reg = <0x10000008 0x4>;
 			native-endian;
 		};
 
@@ -68,12 +68,6 @@
 			regmap = <&periph_cntl>;
 			offset = <0x0>;
 			mask = <0x1>;
-		};
-
-		periph_rst: reset-controller@10000010 {
-			compatible = "brcm,bcm6345-reset";
-			reg = <0x10000010 0x4>;
-			#reset-cells = <1>;
 		};
 
 		periph_intc: interrupt-controller@10000020 {

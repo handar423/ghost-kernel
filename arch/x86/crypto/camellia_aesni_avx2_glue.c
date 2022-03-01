@@ -142,7 +142,8 @@ static const struct common_glue_ctx camellia_dec_xts = {
 static int camellia_setkey(struct crypto_skcipher *tfm, const u8 *key,
 			   unsigned int keylen)
 {
-	return __camellia_setkey(crypto_skcipher_ctx(tfm), key, keylen);
+	return __camellia_setkey(crypto_skcipher_ctx(tfm), key, keylen,
+				 &tfm->base.crt_flags);
 }
 
 static int ecb_encrypt(struct skcipher_request *req)

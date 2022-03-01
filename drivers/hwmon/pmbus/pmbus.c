@@ -20,8 +20,6 @@ struct pmbus_device_info {
 	u32 flags;
 };
 
-static const struct i2c_device_id pmbus_id[];
-
 /*
  * Find sensor groups and status registers on each page.
  */
@@ -104,10 +102,10 @@ static int pmbus_identify(struct i2c_client *client,
 			int page;
 
 			for (page = 1; page < PMBUS_PAGES; page++) {
-				if (pmbus_set_page(client, page, 0xff) < 0)
+				if (pmbus_set_page(client, page) < 0)
 					break;
 			}
-			pmbus_set_page(client, 0, 0xff);
+			pmbus_set_page(client, 0);
 			info->pages = page;
 		} else {
 			info->pages = 1;
@@ -117,7 +115,7 @@ static int pmbus_identify(struct i2c_client *client,
 	}
 
 	if (pmbus_check_byte_register(client, 0, PMBUS_VOUT_MODE)) {
-		int vout_mode, i;
+		int vout_mode;
 
 		vout_mode = pmbus_read_byte_data(client, 0, PMBUS_VOUT_MODE);
 		if (vout_mode >= 0 && vout_mode != 0xff) {
@@ -126,8 +124,7 @@ static int pmbus_identify(struct i2c_client *client,
 				break;
 			case 1:
 				info->format[PSC_VOLTAGE_OUT] = vid;
-				for (i = 0; i < info->pages; i++)
-					info->vrm_version[i] = vr11;
+				info->vrm_version = vr11;
 				break;
 			case 2:
 				info->format[PSC_VOLTAGE_OUT] = direct;
@@ -161,7 +158,8 @@ abort:
 	return ret;
 }
 
-static int pmbus_probe(struct i2c_client *client)
+static int pmbus_probe(struct i2c_client *client,
+		       const struct i2c_device_id *id)
 {
 	struct pmbus_driver_info *info;
 	struct pmbus_platform_data *pdata = NULL;
@@ -172,7 +170,7 @@ static int pmbus_probe(struct i2c_client *client)
 	if (!info)
 		return -ENOMEM;
 
-	device_info = (struct pmbus_device_info *)i2c_match_id(pmbus_id, client)->driver_data;
+	device_info = (struct pmbus_device_info *)id->driver_data;
 	if (device_info->flags & PMBUS_SKIP_STATUS_CHECK) {
 		pdata = devm_kzalloc(dev, sizeof(struct pmbus_platform_data),
 				     GFP_KERNEL);
@@ -186,7 +184,7 @@ static int pmbus_probe(struct i2c_client *client)
 	info->identify = pmbus_identify;
 	dev->platform_data = pdata;
 
-	return pmbus_do_probe(client, info);
+	return pmbus_do_probe(client, id, info);
 }
 
 static const struct pmbus_device_info pmbus_info_one = {
@@ -212,7 +210,6 @@ static const struct i2c_device_id pmbus_id[] = {
 	{"dps460", (kernel_ulong_t)&pmbus_info_one_skip},
 	{"dps650ab", (kernel_ulong_t)&pmbus_info_one_skip},
 	{"dps800", (kernel_ulong_t)&pmbus_info_one_skip},
-	{"max20796", (kernel_ulong_t)&pmbus_info_one},
 	{"mdt040", (kernel_ulong_t)&pmbus_info_one},
 	{"ncp4200", (kernel_ulong_t)&pmbus_info_one},
 	{"ncp4208", (kernel_ulong_t)&pmbus_info_one},
@@ -237,7 +234,8 @@ static struct i2c_driver pmbus_driver = {
 	.driver = {
 		   .name = "pmbus",
 		   },
-	.probe_new = pmbus_probe,
+	.probe = pmbus_probe,
+	.remove = pmbus_do_remove,
 	.id_table = pmbus_id,
 };
 

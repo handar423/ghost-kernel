@@ -541,10 +541,12 @@ static int eeepc_led_init(struct eeepc_laptop *eeepc)
 
 static void eeepc_led_exit(struct eeepc_laptop *eeepc)
 {
-	led_classdev_unregister(&eeepc->tpd_led);
+	if (!IS_ERR_OR_NULL(eeepc->tpd_led.dev))
+		led_classdev_unregister(&eeepc->tpd_led);
 	if (eeepc->led_workqueue)
 		destroy_workqueue(eeepc->led_workqueue);
 }
+
 
 /*
  * PCI hotplug (for wlan rfkill)
@@ -576,7 +578,7 @@ static void eeepc_rfkill_hotplug(struct eeepc_laptop *eeepc, acpi_handle handle)
 
 	port = acpi_get_pci_dev(handle);
 	if (!port) {
-		pr_warn("Unable to find port\n");
+		pr_warning("Unable to find port\n");
 		goto out_unlock;
 	}
 

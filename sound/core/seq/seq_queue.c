@@ -234,12 +234,15 @@ struct snd_seq_queue *snd_seq_queue_find_name(char *name)
 
 /* -------------------------------------------------------- */
 
+#define MAX_CELL_PROCESSES_IN_QUEUE	1000
+
 void snd_seq_check_queue(struct snd_seq_queue *q, int atomic, int hop)
 {
 	unsigned long flags;
 	struct snd_seq_event_cell *cell;
 	snd_seq_tick_time_t cur_tick;
 	snd_seq_real_time_t cur_time;
+	int processed = 0;
 
 	if (q == NULL)
 		return;
@@ -262,6 +265,8 @@ void snd_seq_check_queue(struct snd_seq_queue *q, int atomic, int hop)
 		if (!cell)
 			break;
 		snd_seq_dispatch_event(cell, atomic, hop);
+		if (++processed >= MAX_CELL_PROCESSES_IN_QUEUE)
+			goto out; /* the rest processed at the next batch */
 	}
 
 	/* Process time queue... */
@@ -271,14 +276,19 @@ void snd_seq_check_queue(struct snd_seq_queue *q, int atomic, int hop)
 		if (!cell)
 			break;
 		snd_seq_dispatch_event(cell, atomic, hop);
+		if (++processed >= MAX_CELL_PROCESSES_IN_QUEUE)
+			goto out; /* the rest processed at the next batch */
 	}
 
+ out:
 	/* free lock */
 	spin_lock_irqsave(&q->check_lock, flags);
 	if (q->check_again) {
 		q->check_again = 0;
-		spin_unlock_irqrestore(&q->check_lock, flags);
-		goto __again;
+		if (processed < MAX_CELL_PROCESSES_IN_QUEUE) {
+			spin_unlock_irqrestore(&q->check_lock, flags);
+			goto __again;
+		}
 	}
 	q->check_blocked = 0;
 	spin_unlock_irqrestore(&q->check_lock, flags);
@@ -536,6 +546,33 @@ int snd_seq_queue_is_used(int queueid, int client)
 
 
 /*----------------------------------------------------------------*/
+
+/* notification that client has left the system -
+ * stop the timer on all queues owned by this client
+ */
+void snd_seq_queue_client_termination(int client)
+{
+	unsigned long flags;
+	int i;
+	struct snd_seq_queue *q;
+	bool matched;
+
+	for (i = 0; i < SNDRV_SEQ_MAX_QUEUES; i++) {
+		if ((q = queueptr(i)) == NULL)
+			continue;
+		spin_lock_irqsave(&q->owner_lock, flags);
+		matched = (q->owner == client);
+		if (matched)
+			q->klocked = 1;
+		spin_unlock_irqrestore(&q->owner_lock, flags);
+		if (matched) {
+			if (q->timer->running)
+				snd_seq_timer_stop(q->timer);
+			snd_seq_timer_reset(q->timer);
+		}
+		queuefree(q);
+	}
+}
 
 /* final stage notification -
  * remove cells for no longer exist client (for non-owned queue)

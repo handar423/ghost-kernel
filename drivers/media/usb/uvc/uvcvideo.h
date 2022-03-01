@@ -165,10 +165,6 @@
 	{0x32, 0x00, 0x00, 0x00, 0x02, 0x00, 0x10, 0x00, \
 	 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}
 
-#define UVC_GUID_FORMAT_HEVC \
-	{ 'H',  'E',  'V',  'C', 0x00, 0x00, 0x10, 0x00, \
-	 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}
-
 
 /* ------------------------------------------------------------------------
  * Driver specific constants.
@@ -183,7 +179,7 @@
 /* Maximum status buffer size in bytes of interrupt URB. */
 #define UVC_MAX_STATUS_SIZE	16
 
-#define UVC_CTRL_CONTROL_TIMEOUT	500
+#define UVC_CTRL_CONTROL_TIMEOUT	5000
 #define UVC_CTRL_STREAMING_TIMEOUT	5000
 
 /* Maximum allowed number of control mappings per device */
@@ -374,9 +370,7 @@ struct uvc_format {
 	u8 type;
 	u8 index;
 	u8 bpp;
-	enum v4l2_colorspace colorspace;
-	enum v4l2_xfer_func xfer_func;
-	enum v4l2_ycbcr_encoding ycbcr_enc;
+	u8 colorspace;
 	u32 fcc;
 	u32 flags;
 
@@ -498,7 +492,7 @@ struct uvc_stats_stream {
 	unsigned int max_sof;		/* Maximum STC.SOF value */
 };
 
-#define UVC_METADATA_BUF_SIZE 1024
+#define UVC_METATADA_BUF_SIZE 1024
 
 /**
  * struct uvc_copy_op: Context structure to schedule asynchronous memcpy

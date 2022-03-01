@@ -28,8 +28,6 @@
 #include "clockdomain.h"
 #include "pm.h"
 
-u32 enable_off_mode;
-
 #ifdef CONFIG_SUSPEND
 /*
  * omap_pm_suspend: points to a function that does the SoC-specific
@@ -150,7 +148,6 @@ int __init omap2_common_pm_late_init(void)
 	/* Init the voltage layer */
 	omap3_twl_init();
 	omap4_twl_init();
-	omap4_cpcap_init();
 	omap_voltage_late_init();
 
 	/* Smartreflex device init */

@@ -144,8 +144,9 @@ out:
 }
 
 static const struct nla_policy ctinfo_policy[TCA_CTINFO_MAX + 1] = {
-	[TCA_CTINFO_ACT]		  =
-		NLA_POLICY_EXACT_LEN(sizeof(struct tc_ctinfo)),
+	[TCA_CTINFO_ACT]		  = { .type = NLA_EXACT_LEN,
+					      .len = sizeof(struct
+							    tc_ctinfo) },
 	[TCA_CTINFO_ZONE]		  = { .type = NLA_U16 },
 	[TCA_CTINFO_PARMS_DSCP_MASK]	  = { .type = NLA_U32 },
 	[TCA_CTINFO_PARMS_DSCP_STATEMASK] = { .type = NLA_U32 },
@@ -155,7 +156,7 @@ static const struct nla_policy ctinfo_policy[TCA_CTINFO_MAX + 1] = {
 static int tcf_ctinfo_init(struct net *net, struct nlattr *nla,
 			   struct nlattr *est, struct tc_action **a,
 			   int ovr, int bind, bool rtnl_held,
-			   struct tcf_proto *tp, u32 flags,
+			   struct tcf_proto *tp,
 			   struct netlink_ext_ack *extack)
 {
 	struct tc_action_net *tn = net_generic(net, ctinfo_net_id);
@@ -212,7 +213,7 @@ static int tcf_ctinfo_init(struct net *net, struct nlattr *nla,
 	err = tcf_idr_check_alloc(tn, &index, a, bind);
 	if (!err) {
 		ret = tcf_idr_create(tn, index, est, a,
-				     &act_ctinfo_ops, bind, false, 0);
+				     &act_ctinfo_ops, bind, false);
 		if (ret) {
 			tcf_idr_cleanup(tn, index);
 			return ret;
@@ -259,8 +260,8 @@ static int tcf_ctinfo_init(struct net *net, struct nlattr *nla,
 
 	spin_lock_bh(&ci->tcf_lock);
 	goto_ch = tcf_action_set_ctrlact(*a, actparm->action, goto_ch);
-	cp_new = rcu_replace_pointer(ci->params, cp_new,
-				     lockdep_is_held(&ci->tcf_lock));
+	rcu_swap_protected(ci->params, cp_new,
+			   lockdep_is_held(&ci->tcf_lock));
 	spin_unlock_bh(&ci->tcf_lock);
 
 	if (goto_ch)

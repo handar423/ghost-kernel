@@ -10,7 +10,6 @@
 #include <linux/module.h>
 #include <linux/netlink.h>
 #include <linux/netfilter.h>
-#include <linux/if_arp.h>
 #include <linux/netfilter/nf_tables.h>
 #include <net/netfilter/nf_tables_core.h>
 #include <net/netfilter/nf_tables_offload.h>
@@ -43,7 +42,7 @@ void nft_cmp_eval(const struct nft_expr *expr,
 	case NFT_CMP_LT:
 		if (d == 0)
 			goto mismatch;
-		fallthrough;
+		/* fall through */
 	case NFT_CMP_LTE:
 		if (d > 0)
 			goto mismatch;
@@ -51,7 +50,7 @@ void nft_cmp_eval(const struct nft_expr *expr,
 	case NFT_CMP_GT:
 		if (d == 0)
 			goto mismatch;
-		fallthrough;
+		/* fall through */
 	case NFT_CMP_GTE:
 		if (d < 0)
 			goto mismatch;
@@ -123,21 +122,16 @@ static int __nft_cmp_offload(struct nft_offload_ctx *ctx,
 	u8 *mask = (u8 *)&flow->match.mask;
 	u8 *key = (u8 *)&flow->match.key;
 
-	if (priv->op != NFT_CMP_EQ || priv->len > reg->len)
+	if (priv->op != NFT_CMP_EQ || reg->len != priv->len)
 		return -EOPNOTSUPP;
 
-	memcpy(key + reg->offset, &priv->data, reg->len);
-	memcpy(mask + reg->offset, &reg->mask, reg->len);
+	memcpy(key + reg->offset, &priv->data, priv->len);
+	memcpy(mask + reg->offset, &reg->mask, priv->len);
 
 	flow->match.dissector.used_keys |= BIT(reg->key);
 	flow->match.dissector.offset[reg->key] = reg->base_offset;
 
-	if (reg->key == FLOW_DISSECTOR_KEY_META &&
-	    reg->offset == offsetof(struct nft_flow_key, meta.ingress_iftype) &&
-	    nft_reg_load16(priv->data.data) != ARPHRD_ETHER)
-		return -EOPNOTSUPP;
-
-	nft_offload_update_dependency(ctx, &priv->data, reg->len);
+	nft_offload_update_dependency(ctx, &priv->data, priv->len);
 
 	return 0;
 }
@@ -167,6 +161,7 @@ static int nft_cmp_fast_init(const struct nft_ctx *ctx,
 	struct nft_cmp_fast_expr *priv = nft_expr_priv(expr);
 	struct nft_data_desc desc;
 	struct nft_data data;
+	u32 mask;
 	int err;
 
 	err = nft_data_init(NULL, &data, sizeof(data), &desc,
@@ -180,11 +175,10 @@ static int nft_cmp_fast_init(const struct nft_ctx *ctx,
 		return err;
 
 	desc.len *= BITS_PER_BYTE;
+	mask = nft_cmp_fast_mask(desc.len);
 
-	priv->mask = nft_cmp_fast_mask(desc.len);
-	priv->data = data.data[0] & priv->mask;
+	priv->data = data.data[0] & mask;
 	priv->len  = desc.len;
-	priv->inv  = ntohl(nla_get_be32(tb[NFTA_CMP_OP])) != NFT_CMP_EQ;
 	return 0;
 }
 
@@ -201,7 +195,7 @@ static int nft_cmp_fast_offload(struct nft_offload_ctx *ctx,
 		},
 		.sreg	= priv->sreg,
 		.len	= priv->len / BITS_PER_BYTE,
-		.op	= priv->inv ? NFT_CMP_NEQ : NFT_CMP_EQ,
+		.op	= NFT_CMP_EQ,
 	};
 
 	return __nft_cmp_offload(ctx, flow, &cmp);
@@ -210,12 +204,11 @@ static int nft_cmp_fast_offload(struct nft_offload_ctx *ctx,
 static int nft_cmp_fast_dump(struct sk_buff *skb, const struct nft_expr *expr)
 {
 	const struct nft_cmp_fast_expr *priv = nft_expr_priv(expr);
-	enum nft_cmp_ops op = priv->inv ? NFT_CMP_NEQ : NFT_CMP_EQ;
 	struct nft_data data;
 
 	if (nft_dump_register(skb, NFTA_CMP_SREG, priv->sreg))
 		goto nla_put_failure;
-	if (nla_put_be32(skb, NFTA_CMP_OP, htonl(op)))
+	if (nla_put_be32(skb, NFTA_CMP_OP, htonl(NFT_CMP_EQ)))
 		goto nla_put_failure;
 
 	data.data[0] = priv->data;
@@ -273,7 +266,7 @@ nft_cmp_select_ops(const struct nft_ctx *ctx, const struct nlattr * const tb[])
 		goto err1;
 	}
 
-	if (desc.len <= sizeof(u32) && (op == NFT_CMP_EQ || op == NFT_CMP_NEQ))
+	if (desc.len <= sizeof(u32) && op == NFT_CMP_EQ)
 		return &nft_cmp_fast_ops;
 
 	return &nft_cmp_ops;

@@ -12,7 +12,6 @@
 #include <linux/platform_device.h>
 
 #include <drm/drm_atomic_helper.h>
-#include <drm/drm_bridge.h>
 #include <drm/drm_device.h>
 #include <drm/drm_panel.h>
 #include <drm/drm_print.h>
@@ -66,7 +65,7 @@ static struct dvo_config rgb_24bit_de_cfg = {
 	.awg_fwgen_fct = sti_awg_generate_code_data_enable_mode,
 };
 
-/*
+/**
  * STI digital video output structure
  *
  * @dev: driver device
@@ -196,16 +195,16 @@ static struct drm_info_list dvo_debugfs_files[] = {
 	{ "dvo", dvo_dbg_show, 0, NULL },
 };
 
-static void dvo_debugfs_init(struct sti_dvo *dvo, struct drm_minor *minor)
+static int dvo_debugfs_init(struct sti_dvo *dvo, struct drm_minor *minor)
 {
 	unsigned int i;
 
 	for (i = 0; i < ARRAY_SIZE(dvo_debugfs_files); i++)
 		dvo_debugfs_files[i].data = dvo;
 
-	drm_debugfs_create_files(dvo_debugfs_files,
-				 ARRAY_SIZE(dvo_debugfs_files),
-				 minor->debugfs_root, minor);
+	return drm_debugfs_create_files(dvo_debugfs_files,
+					ARRAY_SIZE(dvo_debugfs_files),
+					minor->debugfs_root, minor);
 }
 
 static void sti_dvo_disable(struct drm_bridge *bridge)
@@ -339,7 +338,7 @@ static int sti_dvo_connector_get_modes(struct drm_connector *connector)
 	struct sti_dvo *dvo = dvo_connector->dvo;
 
 	if (dvo->panel)
-		return drm_panel_get_modes(dvo->panel, connector);
+		return drm_panel_get_modes(dvo->panel);
 
 	return 0;
 }
@@ -389,6 +388,8 @@ sti_dvo_connector_detect(struct drm_connector *connector, bool force)
 		dvo->panel = of_drm_find_panel(dvo->panel_node);
 		if (IS_ERR(dvo->panel))
 			dvo->panel = NULL;
+		else
+			drm_panel_attach(dvo->panel, connector);
 	}
 
 	if (dvo->panel)
@@ -403,7 +404,10 @@ static int sti_dvo_late_register(struct drm_connector *connector)
 		= to_sti_dvo_connector(connector);
 	struct sti_dvo *dvo = dvo_connector->dvo;
 
-	dvo_debugfs_init(dvo, dvo->drm_dev->primary);
+	if (dvo_debugfs_init(dvo, dvo->drm_dev->primary)) {
+		DRM_ERROR("DVO debugfs setup failed\n");
+		return -EINVAL;
+	}
 
 	return 0;
 }
@@ -462,7 +466,7 @@ static int sti_dvo_bind(struct device *dev, struct device *master, void *data)
 	bridge->of_node = dvo->dev.of_node;
 	drm_bridge_add(bridge);
 
-	err = drm_bridge_attach(encoder, bridge, NULL, 0);
+	err = drm_bridge_attach(encoder, bridge, NULL);
 	if (err) {
 		DRM_ERROR("Failed to attach bridge\n");
 		return err;
@@ -529,7 +533,7 @@ static int sti_dvo_probe(struct platform_device *pdev)
 		DRM_ERROR("Invalid dvo resource\n");
 		return -ENOMEM;
 	}
-	dvo->regs = devm_ioremap(dev, res->start,
+	dvo->regs = devm_ioremap_nocache(dev, res->start,
 			resource_size(res));
 	if (!dvo->regs)
 		return -ENOMEM;

@@ -154,10 +154,13 @@ csio_dfs_create(struct csio_hw *hw)
 /*
  * csio_dfs_destroy - Destroys per-hw debugfs.
  */
-static void
+static int
 csio_dfs_destroy(struct csio_hw *hw)
 {
-	debugfs_remove_recursive(hw->debugfs_root);
+	if (hw->debugfs_root)
+		debugfs_remove_recursive(hw->debugfs_root);
+
+	return 0;
 }
 
 /*
@@ -529,7 +532,7 @@ static struct csio_hw *csio_hw_alloc(struct pci_dev *pdev)
 		goto err_free_hw;
 
 	/* Get the start address of registers from BAR 0 */
-	hw->regstart = ioremap(pci_resource_start(pdev, 0),
+	hw->regstart = ioremap_nocache(pci_resource_start(pdev, 0),
 				       pci_resource_len(pdev, 0));
 	if (!hw->regstart) {
 		csio_err(hw, "Could not map BAR 0, regstart = %p\n",
@@ -582,7 +585,7 @@ csio_hw_free(struct csio_hw *hw)
  * @hw:		The HW module.
  * @dev:	The device associated with this invocation.
  * @probe:	Called from probe context or not?
- * @pln:	Parent lnode if any.
+ * @os_pln:	Parent lnode if any.
  *
  * Allocates lnode structure via scsi_host_alloc, initializes
  * shost, initializes lnode module and registers with SCSI ML
@@ -1254,3 +1257,4 @@ MODULE_DEVICE_TABLE(pci, csio_pci_tbl);
 MODULE_VERSION(CSIO_DRV_VERSION);
 MODULE_FIRMWARE(FW_FNAME_T5);
 MODULE_FIRMWARE(FW_FNAME_T6);
+MODULE_SOFTDEP("pre: cxgb4");

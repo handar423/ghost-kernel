@@ -246,9 +246,6 @@ static int enable_monitor_mode(void)
 	case ARM_DEBUG_ARCH_V7_ECP14:
 	case ARM_DEBUG_ARCH_V7_1:
 	case ARM_DEBUG_ARCH_V8:
-	case ARM_DEBUG_ARCH_V8_1:
-	case ARM_DEBUG_ARCH_V8_2:
-	case ARM_DEBUG_ARCH_V8_4:
 		ARM_DBG_WRITE(c0, c2, 2, (dscr | ARM_DSCR_MDBGEN));
 		isb();
 		break;
@@ -547,7 +544,7 @@ static int arch_build_bp_info(struct perf_event *bp,
 		if ((hw->ctrl.type != ARM_BREAKPOINT_EXECUTE)
 			&& max_watchpoint_len >= 8)
 			break;
-		fallthrough;
+		/* Else, fall through */
 	default:
 		return -EINVAL;
 	}
@@ -612,12 +609,12 @@ int hw_breakpoint_arch_parse(struct perf_event *bp,
 		/* Allow halfword watchpoints and breakpoints. */
 		if (hw->ctrl.len == ARM_BREAKPOINT_LEN_2)
 			break;
-		fallthrough;
+		/* Else, fall through */
 	case 3:
 		/* Allow single byte watchpoint. */
 		if (hw->ctrl.len == ARM_BREAKPOINT_LEN_1)
 			break;
-		fallthrough;
+		/* Else, fall through */
 	default:
 		ret = -EINVAL;
 		goto out;
@@ -886,7 +883,7 @@ static void breakpoint_handler(unsigned long unknown, struct pt_regs *regs)
 			info->trigger = addr;
 			pr_debug("breakpoint fired: address = 0x%x\n", addr);
 			perf_bp_event(bp, regs);
-			if (!bp->overflow_handler)
+			if (is_default_overflow_handler(bp))
 				enable_single_step(bp, addr);
 			goto unlock;
 		}
@@ -928,7 +925,7 @@ static int hw_breakpoint_pending(unsigned long addr, unsigned int fsr,
 		break;
 	case ARM_ENTRY_ASYNC_WATCHPOINT:
 		WARN(1, "Asynchronous watchpoint exception taken. Debugging results may be unreliable\n");
-		fallthrough;
+		/* Fall through */
 	case ARM_ENTRY_SYNC_WATCHPOINT:
 		watchpoint_handler(addr, fsr, regs);
 		break;
@@ -977,7 +974,7 @@ static bool core_has_os_save_restore(void)
 		ARM_DBG_READ(c1, c1, 4, oslsr);
 		if (oslsr & ARM_OSLSR_OSLM0)
 			return true;
-		fallthrough;
+		/* Else, fall through */
 	default:
 		return false;
 	}

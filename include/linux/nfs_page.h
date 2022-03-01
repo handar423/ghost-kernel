@@ -55,7 +55,6 @@ struct nfs_page {
 	unsigned short		wb_nio;		/* Number of I/O attempts */
 };
 
-struct nfs_pgio_mirror;
 struct nfs_pageio_descriptor;
 struct nfs_pageio_ops {
 	void	(*pg_init)(struct nfs_pageio_descriptor *, struct nfs_page *);
@@ -65,9 +64,6 @@ struct nfs_pageio_ops {
 	unsigned int	(*pg_get_mirror_count)(struct nfs_pageio_descriptor *,
 				       struct nfs_page *);
 	void	(*pg_cleanup)(struct nfs_pageio_descriptor *);
-	struct nfs_pgio_mirror *
-		(*pg_get_mirror)(struct nfs_pageio_descriptor *, u32);
-	u32	(*pg_set_mirror)(struct nfs_pageio_descriptor *, u32);
 };
 
 struct nfs_rw_ops {
@@ -143,9 +139,6 @@ extern size_t nfs_generic_pg_test(struct nfs_pageio_descriptor *desc,
 extern  int nfs_wait_on_request(struct nfs_page *);
 extern	void nfs_unlock_request(struct nfs_page *req);
 extern	void nfs_unlock_and_release_request(struct nfs_page *);
-extern	struct nfs_page *nfs_page_group_lock_head(struct nfs_page *req);
-extern	int nfs_page_group_lock_subrequests(struct nfs_page *head);
-extern	void nfs_join_page_group(struct nfs_page *head, struct inode *inode);
 extern int nfs_page_group_lock(struct nfs_page *);
 extern void nfs_page_group_unlock(struct nfs_page *);
 extern bool nfs_page_group_sync_on_bit(struct nfs_page *, unsigned int);

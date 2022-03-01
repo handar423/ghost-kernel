@@ -11,24 +11,22 @@
 
 #include <linux/linkage.h>
 #include <linux/init.h>
-#include <linux/pgtable.h>
+#include <linux/irqchip/arm-gic-v3.h>
 
-#include <asm/asm_pointer_auth.h>
 #include <asm/assembler.h>
 #include <asm/boot.h>
 #include <asm/ptrace.h>
 #include <asm/asm-offsets.h>
 #include <asm/cache.h>
 #include <asm/cputype.h>
-#include <asm/el2_setup.h>
 #include <asm/elf.h>
 #include <asm/image.h>
 #include <asm/kernel-pgtable.h>
 #include <asm/kvm_arm.h>
 #include <asm/memory.h>
 #include <asm/pgtable-hwdef.h>
+#include <asm/pgtable.h>
 #include <asm/page.h>
-#include <asm/scs.h>
 #include <asm/smp.h>
 #include <asm/sysreg.h>
 #include <asm/thread_info.h>
@@ -36,10 +34,14 @@
 
 #include "efi-header.S"
 
-#define __PHYS_OFFSET	KERNEL_START
+#define __PHYS_OFFSET	(KERNEL_START - TEXT_OFFSET)
 
-#if (PAGE_OFFSET & 0x1fffff) != 0
+#if (TEXT_OFFSET & 0xfff) != 0
+#error TEXT_OFFSET must be at least 4KB aligned
+#elif (PAGE_OFFSET & 0x1fffff) != 0
 #error PAGE_OFFSET must be at least 2MB aligned
+#elif TEXT_OFFSET > 0x1fffff
+#error TEXT_OFFSET must be less than 2MB
 #endif
 
 /*
@@ -51,28 +53,43 @@
  *   x0 = physical address to the FDT blob.
  *
  * This code is mostly position independent so you call this at
- * __pa(PAGE_OFFSET).
+ * __pa(PAGE_OFFSET + TEXT_OFFSET).
  *
  * Note that the callee-saved registers are used for storing variables
  * that are useful before the MMU is enabled. The allocations are described
  * in the entry routines.
  */
 	__HEAD
+_head:
 	/*
 	 * DO NOT MODIFY. Image header expected by Linux boot-loaders.
 	 */
-	efi_signature_nop			// special NOP to identity as PE/COFF executable
-	b	primary_entry			// branch to kernel start, magic
-	.quad	0				// Image load offset from start of RAM, little-endian
+#ifdef CONFIG_EFI
+	/*
+	 * This add instruction has no meaningful effect except that
+	 * its opcode forms the magic "MZ" signature required by UEFI.
+	 */
+	add	x13, x18, #0x16
+	b	stext
+#else
+	b	stext				// branch to kernel start, magic
+	.long	0				// reserved
+#endif
+	le64sym	_kernel_offset_le		// Image load offset from start of RAM, little-endian
 	le64sym	_kernel_size_le			// Effective size of kernel image, little-endian
 	le64sym	_kernel_flags_le		// Informative flags, little-endian
 	.quad	0				// reserved
 	.quad	0				// reserved
 	.quad	0				// reserved
 	.ascii	ARM64_IMAGE_MAGIC		// Magic number
-	.long	.Lpe_header_offset		// Offset to the PE header.
+#ifdef CONFIG_EFI
+	.long	pe_header - _head		// Offset to the PE header.
 
+pe_header:
 	__EFI_PE_HEADER
+#else
+	.long	0				// reserved
+#endif
 
 	__INIT
 
@@ -81,15 +98,16 @@
 	 * primary lowlevel boot path:
 	 *
 	 *  Register   Scope                      Purpose
-	 *  x21        primary_entry() .. start_kernel()        FDT pointer passed at boot in x0
-	 *  x23        primary_entry() .. start_kernel()        physical misalignment/KASLR offset
-	 *  x28        __create_page_tables()                   callee preserved temp register
-	 *  x19/x20    __primary_switch()                       callee preserved temp registers
-	 *  x24        __primary_switch() .. relocate_kernel()  current RELR displacement
+	 *  x21        stext() .. start_kernel()  FDT pointer passed at boot in x0
+	 *  x23        stext() .. start_kernel()  physical misalignment/KASLR offset
+	 *  x28        __create_page_tables()     callee preserved temp register
+	 *  x19/x20    __primary_switch()         callee preserved temp registers
+	 *  x24        __primary_switch() .. relocate_kernel()
+	 *                                        current RELR displacement
 	 */
-SYM_CODE_START(primary_entry)
+ENTRY(stext)
 	bl	preserve_boot_args
-	bl	init_kernel_el			// w0=cpu_boot_mode
+	bl	el2_setup			// Drop to EL1, w0=cpu_boot_mode
 	adrp	x23, __PHYS_OFFSET
 	and	x23, x23, MIN_KIMG_ALIGN - 1	// KASLR offset, defaults to 0
 	bl	set_cpu_boot_mode_flag
@@ -102,12 +120,12 @@ SYM_CODE_START(primary_entry)
 	 */
 	bl	__cpu_setup			// initialise processor
 	b	__primary_switch
-SYM_CODE_END(primary_entry)
+ENDPROC(stext)
 
 /*
  * Preserve the arguments passed by the bootloader in x0 .. x3
  */
-SYM_CODE_START_LOCAL(preserve_boot_args)
+preserve_boot_args:
 	mov	x21, x0				// x21=FDT
 
 	adr_l	x0, boot_args			// record the contents of
@@ -119,7 +137,7 @@ SYM_CODE_START_LOCAL(preserve_boot_args)
 
 	mov	x1, #0x20			// 4 x 8 bytes
 	b	__inval_dcache_area		// tail call
-SYM_CODE_END(preserve_boot_args)
+ENDPROC(preserve_boot_args)
 
 /*
  * Macro to create a table entry to the next page.
@@ -176,7 +194,7 @@ SYM_CODE_END(preserve_boot_args)
  * to be composed of multiple pages. (This effectively scales the end index).
  *
  *	vstart:	virtual address of start of range
- *	vend:	virtual address of end of range
+ *	vend:	virtual address of end of range - we map [vstart, vend]
  *	shift:	shift used to transform virtual address into index
  *	ptrs:	number of entries in page table
  *	istart:	index in table corresponding to vstart
@@ -213,17 +231,18 @@ SYM_CODE_END(preserve_boot_args)
  *
  *	tbl:	location of page table
  *	rtbl:	address to be used for first level page table entry (typically tbl + PAGE_SIZE)
- *	vstart:	start address to map
- *	vend:	end address to map - we map [vstart, vend]
+ *	vstart:	virtual address of start of range
+ *	vend:	virtual address of end of range - we map [vstart, vend - 1]
  *	flags:	flags to use to map last level entries
  *	phys:	physical address corresponding to vstart - physical memory is contiguous
  *	pgds:	the number of pgd entries
  *
  * Temporaries:	istart, iend, tmp, count, sv - these need to be different registers
- * Preserves:	vstart, vend, flags
- * Corrupts:	tbl, rtbl, istart, iend, tmp, count, sv
+ * Preserves:	vstart, flags
+ * Corrupts:	tbl, rtbl, vend, istart, iend, tmp, count, sv
  */
 	.macro map_memory, tbl, rtbl, vstart, vend, flags, phys, pgds, istart, iend, tmp, count, sv
+	sub \vend, \vend, #1
 	add \rtbl, \tbl, #PAGE_SIZE
 	mov \sv, \rtbl
 	mov \count, #0
@@ -257,7 +276,7 @@ SYM_CODE_END(preserve_boot_args)
  *   - first few MB of the kernel linear mapping to jump to once the MMU has
  *     been enabled
  */
-SYM_FUNC_START_LOCAL(__create_page_tables)
+__create_page_tables:
 	mov	x28, lr
 
 	/*
@@ -319,7 +338,7 @@ SYM_FUNC_START_LOCAL(__create_page_tables)
 	 */
 	adrp	x5, __idmap_text_end
 	clz	x5, x5
-	cmp	x5, TCR_T0SZ(VA_BITS)	// default T0SZ small enough?
+	cmp	x5, TCR_T0SZ(VA_BITS_MIN) // default T0SZ small enough?
 	b.ge	1f			// .. then skip VA range extension
 
 	adr_l	x6, idmap_t0sz
@@ -363,7 +382,7 @@ SYM_FUNC_START_LOCAL(__create_page_tables)
 	 * Map the kernel image (starting with PHYS_OFFSET).
 	 */
 	adrp	x0, init_pg_dir
-	mov_q	x5, KIMAGE_VADDR		// compile time __va(_text)
+	mov_q	x5, KIMAGE_VADDR + TEXT_OFFSET	// compile time __va(_text)
 	add	x5, x5, x23			// add KASLR displacement
 	mov	x4, PTRS_PER_PGD
 	adrp	x6, _end			// runtime __pa(_end)
@@ -391,22 +410,19 @@ SYM_FUNC_START_LOCAL(__create_page_tables)
 	bl	__inval_dcache_area
 
 	ret	x28
-SYM_FUNC_END(__create_page_tables)
+ENDPROC(__create_page_tables)
+	.ltorg
 
 /*
  * The following fragment of code is executed with the MMU enabled.
  *
  *   x0 = __PHYS_OFFSET
  */
-SYM_FUNC_START_LOCAL(__primary_switched)
+__primary_switched:
 	adrp	x4, init_thread_union
 	add	sp, x4, #THREAD_SIZE
 	adr_l	x5, init_task
 	msr	sp_el0, x5			// Save thread_info
-
-#ifdef CONFIG_ARM64_PTR_AUTH
-	__ptrauth_keys_init_cpu	x5, x6, x7, x8
-#endif
 
 	adr_l	x8, vectors			// load VBAR_EL1 with virtual
 	msr	vbar_el1, x8			// vector table address
@@ -414,10 +430,6 @@ SYM_FUNC_START_LOCAL(__primary_switched)
 
 	stp	xzr, x30, [sp, #-16]!
 	mov	x29, sp
-
-#ifdef CONFIG_SHADOW_CALL_STACK
-	adr_l	scs_sp, init_shadow_call_stack	// Set shadow call stack
-#endif
 
 	str_l	x21, __fdt_pointer, x5		// Save FDT pointer
 
@@ -433,7 +445,7 @@ SYM_FUNC_START_LOCAL(__primary_switched)
 	bl	__pi_memset
 	dsb	ishst				// Make zero page visible to PTW
 
-#if defined(CONFIG_KASAN_GENERIC) || defined(CONFIG_KASAN_SW_TAGS)
+#ifdef CONFIG_KASAN
 	bl	kasan_early_init
 #endif
 #ifdef CONFIG_RANDOMIZE_BASE
@@ -451,14 +463,7 @@ SYM_FUNC_START_LOCAL(__primary_switched)
 	mov	x29, #0
 	mov	x30, #0
 	b	start_kernel
-SYM_FUNC_END(__primary_switched)
-
-	.pushsection ".rodata", "a"
-SYM_DATA_START(kimage_vaddr)
-	.quad		_text
-SYM_DATA_END(kimage_vaddr)
-EXPORT_SYMBOL(kimage_vaddr)
-	.popsection
+ENDPROC(__primary_switched)
 
 /*
  * end early head section, begin head code that is also used for
@@ -466,93 +471,185 @@ EXPORT_SYMBOL(kimage_vaddr)
  */
 	.section ".idmap.text","awx"
 
+ENTRY(kimage_vaddr)
+	.quad		_text - TEXT_OFFSET
+EXPORT_SYMBOL(kimage_vaddr)
+
 /*
- * Starting from EL2 or EL1, configure the CPU to execute at the highest
- * reachable EL supported by the kernel in a chosen default state. If dropping
- * from EL2 to EL1, configure EL2 before configuring EL1.
- *
- * Since we cannot always rely on ERET synchronizing writes to sysregs (e.g. if
- * SCTLR_ELx.EOS is clear), we place an ISB prior to ERET.
+ * If we're fortunate enough to boot at EL2, ensure that the world is
+ * sane before dropping to EL1.
  *
  * Returns either BOOT_CPU_MODE_EL1 or BOOT_CPU_MODE_EL2 in w0 if
  * booted in EL1 or EL2 respectively.
  */
-SYM_FUNC_START(init_kernel_el)
+ENTRY(el2_setup)
+	msr	SPsel, #1			// We want to use SP_EL{1,2}
 	mrs	x0, CurrentEL
 	cmp	x0, #CurrentEL_EL2
-	b.eq	init_el2
-
-SYM_INNER_LABEL(init_el1, SYM_L_LOCAL)
-	mov_q	x0, INIT_SCTLR_EL1_MMU_OFF
+	b.eq	1f
+	mov_q	x0, (SCTLR_EL1_RES1 | ENDIAN_SET_EL1)
 	msr	sctlr_el1, x0
+	mov	w0, #BOOT_CPU_MODE_EL1		// This cpu booted in EL1
 	isb
-	mov_q	x0, INIT_PSTATE_EL1
-	msr	spsr_el1, x0
-	msr	elr_el1, lr
-	mov	w0, #BOOT_CPU_MODE_EL1
-	eret
+	ret
 
-SYM_INNER_LABEL(init_el2, SYM_L_LOCAL)
+1:	mov_q	x0, (SCTLR_EL2_RES1 | ENDIAN_SET_EL2)
+	msr	sctlr_el2, x0
+
 #ifdef CONFIG_ARM64_VHE
 	/*
-	 * Check for VHE being present. x2 being non-zero indicates that we
-	 * do have VHE, and that the kernel is intended to run at EL2.
+	 * Check for VHE being present. For the rest of the EL2 setup,
+	 * x2 being non-zero indicates that we do have VHE, and that the
+	 * kernel is intended to run at EL2.
 	 */
 	mrs	x2, id_aa64mmfr1_el1
 	ubfx	x2, x2, #ID_AA64MMFR1_VHE_SHIFT, #4
 #else
 	mov	x2, xzr
 #endif
-	cbz	x2, init_el2_nvhe
+
+	/* Hyp configuration. */
+	mov_q	x0, HCR_HOST_NVHE_FLAGS
+	cbz	x2, set_hcr
+	mov_q	x0, HCR_HOST_VHE_FLAGS
+set_hcr:
+	msr	hcr_el2, x0
+	isb
 
 	/*
+	 * Allow Non-secure EL1 and EL0 to access physical timer and counter.
+	 * This is not necessary for VHE, since the host kernel runs in EL2,
+	 * and EL0 accesses are configured in the later stage of boot process.
+	 * Note that when HCR_EL2.E2H == 1, CNTHCTL_EL2 has the same bit layout
+	 * as CNTKCTL_EL1, and CNTKCTL_EL1 accessing instructions are redefined
+	 * to access CNTHCTL_EL2. This allows the kernel designed to run at EL1
+	 * to transparently mess with the EL0 bits via CNTKCTL_EL1 access in
+	 * EL2.
+	 */
+	cbnz	x2, 1f
+	mrs	x0, cnthctl_el2
+	orr	x0, x0, #3			// Enable EL1 physical timers
+	msr	cnthctl_el2, x0
+1:
+	msr	cntvoff_el2, xzr		// Clear virtual offset
+
+#ifdef CONFIG_ARM_GIC_V3
+	/* GICv3 system register access */
+	mrs	x0, id_aa64pfr0_el1
+	ubfx	x0, x0, #ID_AA64PFR0_GIC_SHIFT, #4
+	cbz	x0, 3f
+
+	mrs_s	x0, SYS_ICC_SRE_EL2
+	orr	x0, x0, #ICC_SRE_EL2_SRE	// Set ICC_SRE_EL2.SRE==1
+	orr	x0, x0, #ICC_SRE_EL2_ENABLE	// Set ICC_SRE_EL2.Enable==1
+	msr_s	SYS_ICC_SRE_EL2, x0
+	isb					// Make sure SRE is now set
+	mrs_s	x0, SYS_ICC_SRE_EL2		// Read SRE back,
+	tbz	x0, #0, 3f			// and check that it sticks
+	msr_s	SYS_ICH_HCR_EL2, xzr		// Reset ICC_HCR_EL2 to defaults
+
+3:
+#endif
+
+	/* Populate ID registers. */
+	mrs	x0, midr_el1
+	mrs	x1, mpidr_el1
+	msr	vpidr_el2, x0
+	msr	vmpidr_el2, x1
+
+#ifdef CONFIG_COMPAT
+	msr	hstr_el2, xzr			// Disable CP15 traps to EL2
+#endif
+
+	/* EL2 debug */
+	mrs	x1, id_aa64dfr0_el1
+	sbfx	x0, x1, #ID_AA64DFR0_PMUVER_SHIFT, #4
+	cmp	x0, #1
+	b.lt	4f				// Skip if no PMU present
+	mrs	x0, pmcr_el0			// Disable debug access traps
+	ubfx	x0, x0, #11, #5			// to EL2 and allow access to
+4:
+	csel	x3, xzr, x0, lt			// all PMU counters from EL1
+
+	/* Statistical profiling */
+	ubfx	x0, x1, #ID_AA64DFR0_PMSVER_SHIFT, #4
+	cbz	x0, 7f				// Skip if SPE not present
+	cbnz	x2, 6f				// VHE?
+	mrs_s	x4, SYS_PMBIDR_EL1		// If SPE available at EL2,
+	and	x4, x4, #(1 << SYS_PMBIDR_EL1_P_SHIFT)
+	cbnz	x4, 5f				// then permit sampling of physical
+	mov	x4, #(1 << SYS_PMSCR_EL2_PCT_SHIFT | \
+		      1 << SYS_PMSCR_EL2_PA_SHIFT)
+	msr_s	SYS_PMSCR_EL2, x4		// addresses and physical counter
+5:
+	mov	x1, #(MDCR_EL2_E2PB_MASK << MDCR_EL2_E2PB_SHIFT)
+	orr	x3, x3, x1			// If we don't have VHE, then
+	b	7f				// use EL1&0 translation.
+6:						// For VHE, use EL2 translation
+	orr	x3, x3, #MDCR_EL2_TPMS		// and disable access from EL1
+7:
+	msr	mdcr_el2, x3			// Configure debug traps
+
+	/* LORegions */
+	mrs	x1, id_aa64mmfr1_el1
+	ubfx	x0, x1, #ID_AA64MMFR1_LOR_SHIFT, 4
+	cbz	x0, 1f
+	msr_s	SYS_LORC_EL1, xzr
+1:
+
+	/* Stage-2 translation */
+	msr	vttbr_el2, xzr
+
+	cbz	x2, install_el2_stub
+
+	mov	w0, #BOOT_CPU_MODE_EL2		// This CPU booted in EL2
+	isb
+	ret
+
+install_el2_stub:
+	/*
+	 * When VHE is not in use, early init of EL2 and EL1 needs to be
+	 * done here.
 	 * When VHE _is_ in use, EL1 will not be used in the host and
 	 * requires no configuration, and all non-hyp-specific EL2 setup
 	 * will be done via the _EL1 system register aliases in __cpu_setup.
 	 */
-	mov_q	x0, HCR_HOST_VHE_FLAGS
-	msr	hcr_el2, x0
-	isb
-
-	init_el2_state vhe
-
-	isb
-
-	mov_q	x0, INIT_PSTATE_EL2
-	msr	spsr_el2, x0
-	msr	elr_el2, lr
-	mov	w0, #BOOT_CPU_MODE_EL2
-	eret
-
-SYM_INNER_LABEL(init_el2_nvhe, SYM_L_LOCAL)
-	/*
-	 * When VHE is not in use, early init of EL2 and EL1 needs to be
-	 * done here.
-	 */
-	mov_q	x0, INIT_SCTLR_EL1_MMU_OFF
+	mov_q	x0, (SCTLR_EL1_RES1 | ENDIAN_SET_EL1)
 	msr	sctlr_el1, x0
 
-	mov_q	x0, HCR_HOST_NVHE_FLAGS
-	msr	hcr_el2, x0
-	isb
+	/* Coprocessor traps. */
+	mov	x0, #0x33ff
+	msr	cptr_el2, x0			// Disable copro. traps to EL2
 
-	init_el2_state nvhe
+	/* SVE register access */
+	mrs	x1, id_aa64pfr0_el1
+	ubfx	x1, x1, #ID_AA64PFR0_SVE_SHIFT, #4
+	cbz	x1, 7f
+
+	bic	x0, x0, #CPTR_EL2_TZ		// Also disable SVE traps
+	msr	cptr_el2, x0			// Disable copro. traps to EL2
+	isb
+	mov	x1, #ZCR_ELx_LEN_MASK		// SVE: Enable full vector
+	msr_s	SYS_ZCR_EL2, x1			// length for EL1.
 
 	/* Hypervisor stub */
-	adr_l	x0, __hyp_stub_vectors
+7:	adr_l	x0, __hyp_stub_vectors
 	msr	vbar_el2, x0
-	isb
 
+	/* spsr */
+	mov	x0, #(PSR_F_BIT | PSR_I_BIT | PSR_A_BIT | PSR_D_BIT |\
+		      PSR_MODE_EL1h)
+	msr	spsr_el2, x0
 	msr	elr_el2, lr
-	mov	w0, #BOOT_CPU_MODE_EL2
+	mov	w0, #BOOT_CPU_MODE_EL2		// This CPU booted in EL2
 	eret
-SYM_FUNC_END(init_kernel_el)
+ENDPROC(el2_setup)
 
 /*
  * Sets the __boot_cpu_mode flag depending on the CPU boot mode passed
  * in w0. See arch/arm64/include/asm/virt.h for more info.
  */
-SYM_FUNC_START_LOCAL(set_cpu_boot_mode_flag)
+set_cpu_boot_mode_flag:
 	adr_l	x1, __boot_cpu_mode
 	cmp	w0, #BOOT_CPU_MODE_EL2
 	b.ne	1f
@@ -561,7 +658,7 @@ SYM_FUNC_START_LOCAL(set_cpu_boot_mode_flag)
 	dmb	sy
 	dc	ivac, x1			// Invalidate potentially stale cache line
 	ret
-SYM_FUNC_END(set_cpu_boot_mode_flag)
+ENDPROC(set_cpu_boot_mode_flag)
 
 /*
  * These values are written with the MMU off, but read with the MMU on.
@@ -577,17 +674,15 @@ SYM_FUNC_END(set_cpu_boot_mode_flag)
  * This is not in .bss, because we set it sufficiently early that the boot-time
  * zeroing of .bss would clobber it.
  */
-SYM_DATA_START(__boot_cpu_mode)
+ENTRY(__boot_cpu_mode)
 	.long	BOOT_CPU_MODE_EL2
 	.long	BOOT_CPU_MODE_EL1
-SYM_DATA_END(__boot_cpu_mode)
 /*
  * The booting CPU updates the failed status @__early_cpu_boot_status,
  * with MMU turned off.
  */
-SYM_DATA_START(__early_cpu_boot_status)
+ENTRY(__early_cpu_boot_status)
 	.quad 	0
-SYM_DATA_END(__early_cpu_boot_status)
 
 	.popsection
 
@@ -595,8 +690,8 @@ SYM_DATA_END(__early_cpu_boot_status)
 	 * This provides a "holding pen" for platforms to hold all secondary
 	 * cores are held until we're ready for them to initialise.
 	 */
-SYM_FUNC_START(secondary_holding_pen)
-	bl	init_kernel_el			// w0=cpu_boot_mode
+ENTRY(secondary_holding_pen)
+	bl	el2_setup			// Drop to EL1, w0=cpu_boot_mode
 	bl	set_cpu_boot_mode_flag
 	mrs	x0, mpidr_el1
 	mov_q	x1, MPIDR_HWID_BITMASK
@@ -607,19 +702,19 @@ pen:	ldr	x4, [x3]
 	b.eq	secondary_startup
 	wfe
 	b	pen
-SYM_FUNC_END(secondary_holding_pen)
+ENDPROC(secondary_holding_pen)
 
 	/*
 	 * Secondary entry point that jumps straight into the kernel. Only to
 	 * be used where CPUs are brought online dynamically by the kernel.
 	 */
-SYM_FUNC_START(secondary_entry)
-	bl	init_kernel_el			// w0=cpu_boot_mode
+ENTRY(secondary_entry)
+	bl	el2_setup			// Drop to EL1
 	bl	set_cpu_boot_mode_flag
 	b	secondary_startup
-SYM_FUNC_END(secondary_entry)
+ENDPROC(secondary_entry)
 
-SYM_FUNC_START_LOCAL(secondary_startup)
+secondary_startup:
 	/*
 	 * Common entry point for secondary CPUs.
 	 */
@@ -629,9 +724,9 @@ SYM_FUNC_START_LOCAL(secondary_startup)
 	bl	__enable_mmu
 	ldr	x8, =__secondary_switched
 	br	x8
-SYM_FUNC_END(secondary_startup)
+ENDPROC(secondary_startup)
 
-SYM_FUNC_START_LOCAL(__secondary_switched)
+__secondary_switched:
 	adr_l	x5, vectors
 	msr	vbar_el1, x5
 	isb
@@ -643,22 +738,16 @@ SYM_FUNC_START_LOCAL(__secondary_switched)
 	ldr	x2, [x0, #CPU_BOOT_TASK]
 	cbz	x2, __secondary_too_slow
 	msr	sp_el0, x2
-	scs_load x2, x3
 	mov	x29, #0
 	mov	x30, #0
-
-#ifdef CONFIG_ARM64_PTR_AUTH
-	ptrauth_keys_init_cpu x2, x3, x4, x5
-#endif
-
 	b	secondary_start_kernel
-SYM_FUNC_END(__secondary_switched)
+ENDPROC(__secondary_switched)
 
-SYM_FUNC_START_LOCAL(__secondary_too_slow)
+__secondary_too_slow:
 	wfe
 	wfi
 	b	__secondary_too_slow
-SYM_FUNC_END(__secondary_too_slow)
+ENDPROC(__secondary_too_slow)
 
 /*
  * The booting CPU updates the failed status @__early_cpu_boot_status,
@@ -690,7 +779,7 @@ SYM_FUNC_END(__secondary_too_slow)
  * Checks if the selected granule size is supported by the CPU.
  * If it isn't, park the CPU
  */
-SYM_FUNC_START(__enable_mmu)
+ENTRY(__enable_mmu)
 	mrs	x2, ID_AA64MMFR0_EL1
 	ubfx	x2, x2, #ID_AA64MMFR0_TGRAN_SHIFT, 4
 	cmp	x2, #ID_AA64MMFR0_TGRAN_SUPPORTED
@@ -714,9 +803,9 @@ SYM_FUNC_START(__enable_mmu)
 	dsb	nsh
 	isb
 	ret
-SYM_FUNC_END(__enable_mmu)
+ENDPROC(__enable_mmu)
 
-SYM_FUNC_START(__cpu_secondary_check52bitva)
+ENTRY(__cpu_secondary_check52bitva)
 #ifdef CONFIG_ARM64_VA_BITS_52
 	ldr_l	x0, vabits_actual
 	cmp	x0, #52
@@ -734,9 +823,9 @@ SYM_FUNC_START(__cpu_secondary_check52bitva)
 
 #endif
 2:	ret
-SYM_FUNC_END(__cpu_secondary_check52bitva)
+ENDPROC(__cpu_secondary_check52bitva)
 
-SYM_FUNC_START_LOCAL(__no_granule_support)
+__no_granule_support:
 	/* Indicate that this CPU can't boot and is stuck in the kernel */
 	update_early_cpu_boot_status \
 		CPU_STUCK_IN_KERNEL | CPU_STUCK_REASON_NO_GRAN, x1, x2
@@ -744,10 +833,10 @@ SYM_FUNC_START_LOCAL(__no_granule_support)
 	wfe
 	wfi
 	b	1b
-SYM_FUNC_END(__no_granule_support)
+ENDPROC(__no_granule_support)
 
 #ifdef CONFIG_RELOCATABLE
-SYM_FUNC_START_LOCAL(__relocate_kernel)
+__relocate_kernel:
 	/*
 	 * Iterate over each entry in the relocation table, and apply the
 	 * relocations in place.
@@ -849,10 +938,10 @@ SYM_FUNC_START_LOCAL(__relocate_kernel)
 #endif
 	ret
 
-SYM_FUNC_END(__relocate_kernel)
+ENDPROC(__relocate_kernel)
 #endif
 
-SYM_FUNC_START_LOCAL(__primary_switch)
+__primary_switch:
 #ifdef CONFIG_RANDOMIZE_BASE
 	mov	x19, x0				// preserve new SCTLR_EL1 value
 	mrs	x20, sctlr_el1			// preserve old SCTLR_EL1 value
@@ -882,6 +971,7 @@ SYM_FUNC_START_LOCAL(__primary_switch)
 
 	tlbi	vmalle1				// Remove any stale TLB entries
 	dsb	nsh
+	isb
 
 	msr	sctlr_el1, x19			// re-enable the MMU
 	isb
@@ -895,4 +985,4 @@ SYM_FUNC_START_LOCAL(__primary_switch)
 	ldr	x8, =__primary_switched
 	adrp	x0, __PHYS_OFFSET
 	br	x8
-SYM_FUNC_END(__primary_switch)
+ENDPROC(__primary_switch)

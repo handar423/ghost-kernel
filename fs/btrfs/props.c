@@ -383,7 +383,7 @@ static int inherit_props(struct btrfs_trans_handle *trans,
 
 		if (need_reserve) {
 			btrfs_block_rsv_release(fs_info, trans->block_rsv,
-					num_bytes, NULL);
+					num_bytes);
 			if (ret)
 				return ret;
 		}
@@ -408,14 +408,19 @@ int btrfs_subvol_inherit_props(struct btrfs_trans_handle *trans,
 			       struct btrfs_root *parent_root)
 {
 	struct super_block *sb = root->fs_info->sb;
+	struct btrfs_key key;
 	struct inode *parent_inode, *child_inode;
 	int ret;
 
-	parent_inode = btrfs_iget(sb, BTRFS_FIRST_FREE_OBJECTID, parent_root);
+	key.objectid = BTRFS_FIRST_FREE_OBJECTID;
+	key.type = BTRFS_INODE_ITEM_KEY;
+	key.offset = 0;
+
+	parent_inode = btrfs_iget(sb, &key, parent_root, NULL);
 	if (IS_ERR(parent_inode))
 		return PTR_ERR(parent_inode);
 
-	child_inode = btrfs_iget(sb, BTRFS_FIRST_FREE_OBJECTID, root);
+	child_inode = btrfs_iget(sb, &key, root, NULL);
 	if (IS_ERR(child_inode)) {
 		iput(parent_inode);
 		return PTR_ERR(child_inode);
@@ -431,6 +436,8 @@ int btrfs_subvol_inherit_props(struct btrfs_trans_handle *trans,
 void __init btrfs_props_init(void)
 {
 	int i;
+
+	hash_init(prop_handlers_ht);
 
 	for (i = 0; i < ARRAY_SIZE(prop_handlers); i++) {
 		struct prop_handler *p = &prop_handlers[i];

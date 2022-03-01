@@ -149,7 +149,7 @@ static int simple_dai_link_of_dpcm(struct asoc_simple_priv *priv,
 	if (li->cpu) {
 		int is_single_links = 0;
 
-		/* Codec is dummy */
+		/* BE is dummy */
 		codecs->of_node		= NULL;
 		codecs->dai_name	= "snd-soc-dummy-dai";
 		codecs->name		= "snd-soc-dummy";
@@ -179,7 +179,7 @@ static int simple_dai_link_of_dpcm(struct asoc_simple_priv *priv,
 	} else {
 		struct snd_soc_codec_conf *cconf;
 
-		/* CPU is dummy */
+		/* FE is dummy */
 		cpus->of_node		= NULL;
 		cpus->dai_name		= "snd-soc-dummy-dai";
 		cpus->name		= "snd-soc-dummy";
@@ -231,8 +231,8 @@ static int simple_dai_link_of_dpcm(struct asoc_simple_priv *priv,
 	if (ret < 0)
 		goto out_put_node;
 
-	snd_soc_dai_link_set_capabilities(dai_link);
-
+	dai_link->dpcm_playback		= 1;
+	dai_link->dpcm_capture		= 1;
 	dai_link->ops			= &simple_ops;
 	dai_link->init			= asoc_simple_dai_init;
 
@@ -258,7 +258,7 @@ static int simple_dai_link_of(struct asoc_simple_priv *priv,
 	struct device_node *plat = NULL;
 	char prop[128];
 	char *prefix = "";
-	int ret, single_cpu;
+	int ret, single_cpu = 0;
 
 	/*
 	 *	 |CPU   |Codec   : turn
@@ -371,7 +371,6 @@ static int simple_for_each_link(struct asoc_simple_priv *priv,
 	do {
 		struct asoc_simple_data adata;
 		struct device_node *codec;
-		struct device_node *plat;
 		struct device_node *np;
 		int num = of_get_child_count(node);
 
@@ -382,9 +381,6 @@ static int simple_for_each_link(struct asoc_simple_priv *priv,
 			ret = -ENODEV;
 			goto error;
 		}
-		/* get platform */
-		plat = of_get_child_by_name(node, is_top ?
-					    PREFIX "plat" : "plat");
 
 		/* get convert-xxx property */
 		memset(&adata, 0, sizeof(adata));
@@ -393,8 +389,6 @@ static int simple_for_each_link(struct asoc_simple_priv *priv,
 
 		/* loop for all CPU/Codec node */
 		for_each_child_of_node(node, np) {
-			if (plat == np)
-				continue;
 			/*
 			 * It is DPCM
 			 * if it has many CPUs,
@@ -422,6 +416,37 @@ static int simple_for_each_link(struct asoc_simple_priv *priv,
  error:
 	of_node_put(node);
 	return ret;
+}
+
+static int simple_parse_aux_devs(struct device_node *node,
+				 struct asoc_simple_priv *priv)
+{
+	struct device *dev = simple_priv_to_dev(priv);
+	struct device_node *aux_node;
+	struct snd_soc_card *card = simple_priv_to_card(priv);
+	int i, n, len;
+
+	if (!of_find_property(node, PREFIX "aux-devs", &len))
+		return 0;		/* Ok to have no aux-devs */
+
+	n = len / sizeof(__be32);
+	if (n <= 0)
+		return -EINVAL;
+
+	card->aux_dev = devm_kcalloc(dev,
+			n, sizeof(*card->aux_dev), GFP_KERNEL);
+	if (!card->aux_dev)
+		return -ENOMEM;
+
+	for (i = 0; i < n; i++) {
+		aux_node = of_parse_phandle(node, PREFIX "aux-devs", i);
+		if (!aux_node)
+			return -EINVAL;
+		card->aux_dev[i].dlc.of_node = aux_node;
+	}
+
+	card->num_aux_devs = n;
+	return 0;
 }
 
 static int simple_parse_of(struct asoc_simple_priv *priv)
@@ -473,7 +498,7 @@ static int simple_parse_of(struct asoc_simple_priv *priv)
 	if (ret < 0)
 		return ret;
 
-	ret = snd_soc_of_parse_aux_devs(card, PREFIX "aux-devs");
+	ret = simple_parse_aux_devs(top, priv);
 
 	return ret;
 }

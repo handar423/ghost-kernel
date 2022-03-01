@@ -84,7 +84,6 @@ static int decode_layoutget(struct xdr_stream *xdr, struct rpc_rqst *req,
 /* lock,open owner id:
  * we currently use size 2 (u64) out of (NFS4_OPAQUE_LIMIT  >> 2)
  */
-#define pagepad_maxsz		(1)
 #define open_owner_id_maxsz	(1 + 2 + 1 + 1 + 2)
 #define lock_owner_id_maxsz	(1 + 1 + 4)
 #define decode_lockowner_maxsz	(1 + XDR_QUADLEN(IDMAP_NAMESZ))
@@ -216,14 +215,14 @@ static int decode_layoutget(struct xdr_stream *xdr, struct rpc_rqst *req,
 				 nfs4_fattr_bitmap_maxsz)
 #define encode_read_maxsz	(op_encode_hdr_maxsz + \
 				 encode_stateid_maxsz + 3)
-#define decode_read_maxsz	(op_decode_hdr_maxsz + 2 + pagepad_maxsz)
+#define decode_read_maxsz	(op_decode_hdr_maxsz + 2 + 1)
 #define encode_readdir_maxsz	(op_encode_hdr_maxsz + \
 				 2 + encode_verifier_maxsz + 5 + \
 				nfs4_label_maxsz)
 #define decode_readdir_maxsz	(op_decode_hdr_maxsz + \
-				 decode_verifier_maxsz + pagepad_maxsz)
+				 decode_verifier_maxsz + 1)
 #define encode_readlink_maxsz	(op_encode_hdr_maxsz)
-#define decode_readlink_maxsz	(op_decode_hdr_maxsz + 1 + pagepad_maxsz)
+#define decode_readlink_maxsz	(op_decode_hdr_maxsz + 1 + 1)
 #define encode_write_maxsz	(op_encode_hdr_maxsz + \
 				 encode_stateid_maxsz + 4)
 #define decode_write_maxsz	(op_decode_hdr_maxsz + \
@@ -285,14 +284,14 @@ static int decode_layoutget(struct xdr_stream *xdr, struct rpc_rqst *req,
 #define decode_delegreturn_maxsz (op_decode_hdr_maxsz)
 #define encode_getacl_maxsz	(encode_getattr_maxsz)
 #define decode_getacl_maxsz	(op_decode_hdr_maxsz + \
-				 nfs4_fattr_bitmap_maxsz + 1 + pagepad_maxsz)
+				 nfs4_fattr_bitmap_maxsz + 1 + 1)
 #define encode_setacl_maxsz	(op_encode_hdr_maxsz + \
 				 encode_stateid_maxsz + 3)
 #define decode_setacl_maxsz	(decode_setattr_maxsz)
 #define encode_fs_locations_maxsz \
 				(encode_getattr_maxsz)
 #define decode_fs_locations_maxsz \
-				(pagepad_maxsz)
+				(1)
 #define encode_secinfo_maxsz	(op_encode_hdr_maxsz + nfs4_name_maxsz)
 #define decode_secinfo_maxsz	(op_decode_hdr_maxsz + 1 + ((NFS_MAX_SECFLAVORS * (16 + GSS_OID_MAX_LEN)) / 4))
 
@@ -394,13 +393,12 @@ static int decode_layoutget(struct xdr_stream *xdr, struct rpc_rqst *req,
 				  /* devaddr4 payload is read into page */ \
 				1 /* notification bitmap length */ + \
 				1 /* notification bitmap, word 0 */ + \
-				pagepad_maxsz /* possible XDR padding */)
+				1 /* possible XDR padding */)
 #define encode_layoutget_maxsz	(op_encode_hdr_maxsz + 10 + \
 				encode_stateid_maxsz)
 #define decode_layoutget_maxsz	(op_decode_hdr_maxsz + 8 + \
 				decode_stateid_maxsz + \
-				XDR_QUADLEN(PNFS_LAYOUT_MAXSIZE) + \
-				pagepad_maxsz)
+				XDR_QUADLEN(PNFS_LAYOUT_MAXSIZE) + 1)
 #define encode_layoutcommit_maxsz (op_encode_hdr_maxsz +          \
 				2 /* offset */ + \
 				2 /* length */ + \
@@ -1061,9 +1059,9 @@ static void encode_nfs4_verifier(struct xdr_stream *xdr, const nfs4_verifier *ve
 }
 
 static __be32 *
-xdr_encode_nfstime4(__be32 *p, const struct timespec64 *t)
+xdr_encode_nfstime4(__be32 *p, const struct timespec *t)
 {
-	p = xdr_encode_hyper(p, t->tv_sec);
+	p = xdr_encode_hyper(p, (__s64)t->tv_sec);
 	*p++ = cpu_to_be32(t->tv_nsec);
 	return p;
 }
@@ -1074,6 +1072,7 @@ static void encode_attrs(struct xdr_stream *xdr, const struct iattr *iap,
 				const struct nfs_server *server,
 				const uint32_t attrmask[])
 {
+	struct timespec ts;
 	char owner_name[IDMAP_NAMESZ];
 	char owner_group[IDMAP_NAMESZ];
 	int owner_namelen = 0;
@@ -1162,14 +1161,16 @@ static void encode_attrs(struct xdr_stream *xdr, const struct iattr *iap,
 	if (bmval[1] & FATTR4_WORD1_TIME_ACCESS_SET) {
 		if (iap->ia_valid & ATTR_ATIME_SET) {
 			*p++ = cpu_to_be32(NFS4_SET_TO_CLIENT_TIME);
-			p = xdr_encode_nfstime4(p, &iap->ia_atime);
+			ts = timespec64_to_timespec(iap->ia_atime);
+			p = xdr_encode_nfstime4(p, &ts);
 		} else
 			*p++ = cpu_to_be32(NFS4_SET_TO_SERVER_TIME);
 	}
 	if (bmval[1] & FATTR4_WORD1_TIME_MODIFY_SET) {
 		if (iap->ia_valid & ATTR_MTIME_SET) {
 			*p++ = cpu_to_be32(NFS4_SET_TO_CLIENT_TIME);
-			p = xdr_encode_nfstime4(p, &iap->ia_mtime);
+			ts = timespec64_to_timespec(iap->ia_mtime);
+			p = xdr_encode_nfstime4(p, &ts);
 		} else
 			*p++ = cpu_to_be32(NFS4_SET_TO_SERVER_TIME);
 	}
@@ -2344,7 +2345,7 @@ static void nfs4_xdr_enc_open(struct rpc_rqst *req, struct xdr_stream *xdr,
 		encode_layoutget(xdr, args->lg_args, &hdr);
 		rpc_prepare_reply_pages(req, args->lg_args->layout.pages, 0,
 					args->lg_args->layout.pglen,
-					hdr.replen - pagepad_maxsz);
+					hdr.replen);
 	}
 	encode_nops(&hdr);
 }
@@ -2390,7 +2391,7 @@ static void nfs4_xdr_enc_open_noattr(struct rpc_rqst *req,
 		encode_layoutget(xdr, args->lg_args, &hdr);
 		rpc_prepare_reply_pages(req, args->lg_args->layout.pages, 0,
 					args->lg_args->layout.pglen,
-					hdr.replen - pagepad_maxsz);
+					hdr.replen);
 	}
 	encode_nops(&hdr);
 }
@@ -2501,7 +2502,7 @@ static void nfs4_xdr_enc_readlink(struct rpc_rqst *req, struct xdr_stream *xdr,
 	encode_readlink(xdr, args, req, &hdr);
 
 	rpc_prepare_reply_pages(req, args->pages, args->pgbase,
-				args->pglen, hdr.replen - pagepad_maxsz);
+				args->pglen, hdr.replen);
 	encode_nops(&hdr);
 }
 
@@ -2522,7 +2523,7 @@ static void nfs4_xdr_enc_readdir(struct rpc_rqst *req, struct xdr_stream *xdr,
 	encode_readdir(xdr, args, req, &hdr);
 
 	rpc_prepare_reply_pages(req, args->pages, args->pgbase,
-				args->count, hdr.replen - pagepad_maxsz);
+				args->count, hdr.replen);
 	encode_nops(&hdr);
 }
 
@@ -2543,7 +2544,7 @@ static void nfs4_xdr_enc_read(struct rpc_rqst *req, struct xdr_stream *xdr,
 	encode_read(xdr, args, &hdr);
 
 	rpc_prepare_reply_pages(req, args->pages, args->pgbase,
-				args->count, hdr.replen - pagepad_maxsz);
+				args->count, hdr.replen);
 	req->rq_rcv_buf.flags |= XDRBUF_READ;
 	encode_nops(&hdr);
 }
@@ -2590,7 +2591,7 @@ static void nfs4_xdr_enc_getacl(struct rpc_rqst *req, struct xdr_stream *xdr,
 			ARRAY_SIZE(nfs4_acl_bitmap), &hdr);
 
 	rpc_prepare_reply_pages(req, args->acl_pages, 0,
-				args->acl_len, replen);
+				args->acl_len, replen + 1);
 	encode_nops(&hdr);
 }
 
@@ -2812,7 +2813,7 @@ static void nfs4_xdr_enc_fs_locations(struct rpc_rqst *req,
 	}
 
 	rpc_prepare_reply_pages(req, (struct page **)&args->page, 0,
-				PAGE_SIZE, replen);
+				PAGE_SIZE, replen + 1);
 	encode_nops(&hdr);
 }
 
@@ -3016,14 +3017,14 @@ static void nfs4_xdr_enc_getdeviceinfo(struct rpc_rqst *req,
 	encode_compound_hdr(xdr, req, &hdr);
 	encode_sequence(xdr, &args->seq_args, &hdr);
 
-	replen = hdr.replen + op_decode_hdr_maxsz + 2;
+	replen = hdr.replen + op_decode_hdr_maxsz;
 
 	encode_getdeviceinfo(xdr, args, &hdr);
 
 	/* set up reply kvec. device_addr4 opaque data is read into the
 	 * pages */
 	rpc_prepare_reply_pages(req, args->pdev->pages, args->pdev->pgbase,
-				args->pdev->pglen, replen);
+				args->pdev->pglen, replen + 2 + 1);
 	encode_nops(&hdr);
 }
 
@@ -3045,7 +3046,7 @@ static void nfs4_xdr_enc_layoutget(struct rpc_rqst *req,
 	encode_layoutget(xdr, args, &hdr);
 
 	rpc_prepare_reply_pages(req, args->layout.pages, 0,
-				args->layout.pglen, hdr.replen - pagepad_maxsz);
+				args->layout.pglen, hdr.replen);
 	encode_nops(&hdr);
 }
 
@@ -3682,8 +3683,6 @@ static int decode_attr_fs_locations(struct xdr_stream *xdr, uint32_t *bitmap, st
 	if (unlikely(!p))
 		goto out_eio;
 	n = be32_to_cpup(p);
-	if (n <= 0)
-		goto out_eio;
 	for (res->nlocations = 0; res->nlocations < n; res->nlocations++) {
 		u32 m;
 		struct nfs4_fs_location *loc;
@@ -4068,17 +4067,17 @@ static int decode_attr_space_used(struct xdr_stream *xdr, uint32_t *bitmap, uint
 }
 
 static __be32 *
-xdr_decode_nfstime4(__be32 *p, struct timespec64 *t)
+xdr_decode_nfstime4(__be32 *p, struct timespec *t)
 {
 	__u64 sec;
 
 	p = xdr_decode_hyper(p, &sec);
-	t-> tv_sec = sec;
+	t-> tv_sec = (time_t)sec;
 	t->tv_nsec = be32_to_cpup(p++);
 	return p;
 }
 
-static int decode_attr_time(struct xdr_stream *xdr, struct timespec64 *time)
+static int decode_attr_time(struct xdr_stream *xdr, struct timespec *time)
 {
 	__be32 *p;
 
@@ -4089,7 +4088,7 @@ static int decode_attr_time(struct xdr_stream *xdr, struct timespec64 *time)
 	return 0;
 }
 
-static int decode_attr_time_access(struct xdr_stream *xdr, uint32_t *bitmap, struct timespec64 *time)
+static int decode_attr_time_access(struct xdr_stream *xdr, uint32_t *bitmap, struct timespec *time)
 {
 	int status = 0;
 
@@ -4103,11 +4102,11 @@ static int decode_attr_time_access(struct xdr_stream *xdr, uint32_t *bitmap, str
 			status = NFS_ATTR_FATTR_ATIME;
 		bitmap[1] &= ~FATTR4_WORD1_TIME_ACCESS;
 	}
-	dprintk("%s: atime=%lld\n", __func__, time->tv_sec);
+	dprintk("%s: atime=%ld\n", __func__, (long)time->tv_sec);
 	return status;
 }
 
-static int decode_attr_time_metadata(struct xdr_stream *xdr, uint32_t *bitmap, struct timespec64 *time)
+static int decode_attr_time_metadata(struct xdr_stream *xdr, uint32_t *bitmap, struct timespec *time)
 {
 	int status = 0;
 
@@ -4121,12 +4120,12 @@ static int decode_attr_time_metadata(struct xdr_stream *xdr, uint32_t *bitmap, s
 			status = NFS_ATTR_FATTR_CTIME;
 		bitmap[1] &= ~FATTR4_WORD1_TIME_METADATA;
 	}
-	dprintk("%s: ctime=%lld\n", __func__, time->tv_sec);
+	dprintk("%s: ctime=%ld\n", __func__, (long)time->tv_sec);
 	return status;
 }
 
 static int decode_attr_time_delta(struct xdr_stream *xdr, uint32_t *bitmap,
-				  struct timespec64 *time)
+				  struct timespec *time)
 {
 	int status = 0;
 
@@ -4138,8 +4137,8 @@ static int decode_attr_time_delta(struct xdr_stream *xdr, uint32_t *bitmap,
 		status = decode_attr_time(xdr, time);
 		bitmap[1] &= ~FATTR4_WORD1_TIME_DELTA;
 	}
-	dprintk("%s: time_delta=%lld %ld\n", __func__, time->tv_sec,
-		time->tv_nsec);
+	dprintk("%s: time_delta=%ld %ld\n", __func__, (long)time->tv_sec,
+		(long)time->tv_nsec);
 	return status;
 }
 
@@ -4186,14 +4185,15 @@ static int decode_attr_security_label(struct xdr_stream *xdr, uint32_t *bitmap,
 		} else
 			printk(KERN_WARNING "%s: label too long (%u)!\n",
 					__func__, len);
+		if (label && label->label)
+			dprintk("%s: label=%.*s, len=%d, PI=%d, LFS=%d\n",
+				__func__, label->len, (char *)label->label,
+				label->len, label->pi, label->lfs);
 	}
-	if (label && label->label)
-		dprintk("%s: label=%s, len=%d, PI=%d, LFS=%d\n", __func__,
-			(char *)label->label, label->len, label->pi, label->lfs);
 	return status;
 }
 
-static int decode_attr_time_modify(struct xdr_stream *xdr, uint32_t *bitmap, struct timespec64 *time)
+static int decode_attr_time_modify(struct xdr_stream *xdr, uint32_t *bitmap, struct timespec *time)
 {
 	int status = 0;
 
@@ -4207,28 +4207,8 @@ static int decode_attr_time_modify(struct xdr_stream *xdr, uint32_t *bitmap, str
 			status = NFS_ATTR_FATTR_MTIME;
 		bitmap[1] &= ~FATTR4_WORD1_TIME_MODIFY;
 	}
-	dprintk("%s: mtime=%lld\n", __func__, time->tv_sec);
+	dprintk("%s: mtime=%ld\n", __func__, (long)time->tv_sec);
 	return status;
-}
-
-static int decode_attr_xattrsupport(struct xdr_stream *xdr, uint32_t *bitmap,
-				    uint32_t *res)
-{
-	__be32 *p;
-
-	*res = 0;
-	if (unlikely(bitmap[2] & (FATTR4_WORD2_XATTR_SUPPORT - 1U)))
-		return -EIO;
-	if (likely(bitmap[2] & FATTR4_WORD2_XATTR_SUPPORT)) {
-		p = xdr_inline_decode(xdr, 4);
-		if (unlikely(!p))
-			return -EIO;
-		*res = be32_to_cpup(p);
-		bitmap[2] &= ~FATTR4_WORD2_XATTR_SUPPORT;
-	}
-	dprintk("%s: XATTR support=%s\n", __func__,
-		*res == 0 ? "false" : "true");
-	return 0;
 }
 
 static int verify_attr_len(struct xdr_stream *xdr, unsigned int savep, uint32_t attrlen)
@@ -4885,11 +4865,6 @@ static int decode_fsinfo(struct xdr_stream *xdr, struct nfs_fsinfo *fsinfo)
 	if (status)
 		goto xdr_error;
 
-	status = decode_attr_xattrsupport(xdr, bitmap,
-					  &fsinfo->xattr_support);
-	if (status)
-		goto xdr_error;
-
 	status = verify_attr_len(xdr, savep, attrlen);
 xdr_error:
 	dprintk("%s: xdr returned %d!\n", __func__, -status);
@@ -5262,7 +5237,7 @@ static int decode_readlink(struct xdr_stream *xdr, struct rpc_rqst *req)
 	 * The XDR encode routine has set things up so that
 	 * the link text will be copied directly into the
 	 * buffer.  We just have to do overflow-checking,
-	 * and null-terminate the text (the VFS expects
+	 * and and null-terminate the text (the VFS expects
 	 * null-termination).
 	 */
 	xdr_terminate_string(rcvbuf, len);
@@ -5314,12 +5289,16 @@ static int decode_getacl(struct xdr_stream *xdr, struct rpc_rqst *req,
 	uint32_t attrlen,
 		 bitmap[3] = {0};
 	int status;
+	unsigned int pg_offset;
 
 	res->acl_len = 0;
 	if ((status = decode_op_hdr(xdr, OP_GETATTR)) != 0)
 		goto out;
 
 	xdr_enter_page(xdr, xdr->buf->page_len);
+
+	/* Calculate the offset of the page data */
+	pg_offset = xdr->buf->head[0].iov_len;
 
 	if ((status = decode_attr_bitmap(xdr, bitmap)) != 0)
 		goto out;
@@ -5333,15 +5312,15 @@ static int decode_getacl(struct xdr_stream *xdr, struct rpc_rqst *req,
 		/* The bitmap (xdr len + bitmaps) and the attr xdr len words
 		 * are stored with the acl data to handle the problem of
 		 * variable length bitmaps.*/
-		res->acl_data_offset = xdr_page_pos(xdr);
+		res->acl_data_offset = xdr_stream_pos(xdr) - pg_offset;
 		res->acl_len = attrlen;
 
 		/* Check for receive buffer overflow */
-		if (res->acl_len > xdr_stream_remaining(xdr) ||
+		if (res->acl_len > (xdr->nwords << 2) ||
 		    res->acl_len + res->acl_data_offset > xdr->buf->page_len) {
 			res->acl_flags |= NFS4_ACL_TRUNC;
-			dprintk("NFS: acl reply: attrlen %u > page_len %zu\n",
-				attrlen, xdr_stream_remaining(xdr));
+			dprintk("NFS: acl reply: attrlen %u > page_len %u\n",
+					attrlen, xdr->nwords << 2);
 		}
 	} else
 		status = -EOPNOTSUPP;
@@ -6409,8 +6388,10 @@ nfs4_xdr_dec_getacl(struct rpc_rqst *rqstp, struct xdr_stream *xdr,
 	struct compound_hdr hdr;
 	int status;
 
-	if (res->acl_scratch != NULL)
-		xdr_set_scratch_page(xdr, res->acl_scratch);
+	if (res->acl_scratch != NULL) {
+		void *p = page_address(res->acl_scratch);
+		xdr_set_scratch_buffer(xdr, p, PAGE_SIZE);
+	}
 	status = decode_compound_hdr(xdr, &hdr);
 	if (status)
 		goto out;
@@ -7485,8 +7466,6 @@ static struct {
 	{ NFS4ERR_SYMLINK,	-ELOOP		},
 	{ NFS4ERR_OP_ILLEGAL,	-EOPNOTSUPP	},
 	{ NFS4ERR_DEADLOCK,	-EDEADLK	},
-	{ NFS4ERR_NOXATTR,	-ENODATA	},
-	{ NFS4ERR_XATTR2BIG,	-E2BIG		},
 	{ -1,			-EIO		}
 };
 
@@ -7612,14 +7591,8 @@ const struct rpc_procinfo nfs4_procedures[] = {
 	PROC42(CLONE,		enc_clone,		dec_clone),
 	PROC42(COPY,		enc_copy,		dec_copy),
 	PROC42(OFFLOAD_CANCEL,	enc_offload_cancel,	dec_offload_cancel),
-	PROC42(COPY_NOTIFY,	enc_copy_notify,	dec_copy_notify),
 	PROC(LOOKUPP,		enc_lookupp,		dec_lookupp),
 	PROC42(LAYOUTERROR,	enc_layouterror,	dec_layouterror),
-	PROC42(GETXATTR,	enc_getxattr,		dec_getxattr),
-	PROC42(SETXATTR,	enc_setxattr,		dec_setxattr),
-	PROC42(LISTXATTRS,	enc_listxattrs,		dec_listxattrs),
-	PROC42(REMOVEXATTR,	enc_removexattr,	dec_removexattr),
-	PROC42(READ_PLUS,	enc_read_plus,		dec_read_plus),
 };
 
 static unsigned int nfs_version4_counts[ARRAY_SIZE(nfs4_procedures)];

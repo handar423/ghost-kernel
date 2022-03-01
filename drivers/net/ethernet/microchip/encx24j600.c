@@ -604,8 +604,9 @@ static void encx24j600_set_rxfilter_mode(struct encx24j600_priv *priv)
 	}
 }
 
-static void encx24j600_hw_init(struct encx24j600_priv *priv)
+static int encx24j600_hw_init(struct encx24j600_priv *priv)
 {
+	int ret = 0;
 	u16 macon2;
 
 	priv->hw_enabled = false;
@@ -648,6 +649,8 @@ static void encx24j600_hw_init(struct encx24j600_priv *priv)
 
 	if (netif_msg_hw(priv))
 		encx24j600_dump_config(priv, "Hw is initialized");
+
+	return ret;
 }
 
 static void encx24j600_hw_enable(struct encx24j600_priv *priv)
@@ -889,7 +892,7 @@ static netdev_tx_t encx24j600_tx(struct sk_buff *skb, struct net_device *dev)
 }
 
 /* Deal with a transmit timeout */
-static void encx24j600_tx_timeout(struct net_device *dev, unsigned int txqueue)
+static void encx24j600_tx_timeout(struct net_device *dev)
 {
 	struct encx24j600_priv *priv = netdev_priv(dev);
 
@@ -1024,9 +1027,12 @@ static int encx24j600_spi_probe(struct spi_device *spi)
 	priv->speed = SPEED_100;
 
 	priv->ctx.spi = spi;
-	devm_regmap_init_encx24j600(&spi->dev, &priv->ctx);
 	ndev->irq = spi->irq;
 	ndev->netdev_ops = &encx24j600_netdev_ops;
+
+	ret = devm_regmap_init_encx24j600(&spi->dev, &priv->ctx);
+	if (ret)
+		goto out_free;
 
 	mutex_init(&priv->lock);
 
@@ -1039,7 +1045,12 @@ static int encx24j600_spi_probe(struct spi_device *spi)
 	}
 
 	/* Initialize the device HW to the consistent state */
-	encx24j600_hw_init(priv);
+	if (encx24j600_hw_init(priv)) {
+		netif_err(priv, probe, ndev,
+			  DRV_NAME ": HW initialization error\n");
+		ret = -EIO;
+		goto out_free;
+	}
 
 	kthread_init_worker(&priv->kworker);
 	kthread_init_work(&priv->tx_work, encx24j600_tx_proc);

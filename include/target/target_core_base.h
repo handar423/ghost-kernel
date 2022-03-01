@@ -74,6 +74,8 @@
 #define DA_EMULATE_MODEL_ALIAS			0
 /* Emulation for WriteCache and SYNCHRONIZE_CACHE */
 #define DA_EMULATE_WRITE_CACHE			0
+/* Emulation for UNIT ATTENTION Interlock Control */
+#define DA_EMULATE_UA_INTLLCK_CTRL		0
 /* Emulation for TASK_ABORTED status (TAS) by default */
 #define DA_EMULATE_TAS				1
 /* Emulation for Thin Provisioning UNMAP using block/blk-lib.c:blkdev_issue_discard() */
@@ -195,6 +197,7 @@ enum target_sc_flags_table {
 	TARGET_SCF_ACK_KREF		= 0x02,
 	TARGET_SCF_UNKNOWN_SIZE		= 0x04,
 	TARGET_SCF_USE_CPUID		= 0x08,
+	TARGET_SCF_LOOKUP_LUN_FROM_TAG	= 0x10,
 };
 
 /* fabric independent task management function values */
@@ -206,7 +209,6 @@ enum tcm_tmreq_table {
 	TMR_LUN_RESET		= 5,
 	TMR_TARGET_WARM_RESET	= 6,
 	TMR_TARGET_COLD_RESET	= 7,
-	TMR_LUN_RESET_PRO	= 0x80,
 	TMR_UNKNOWN		= 0xff,
 };
 
@@ -431,13 +433,6 @@ enum target_prot_type {
 	TARGET_DIF_TYPE3_PROT,
 };
 
-/* Emulation for UNIT ATTENTION Interlock Control */
-enum target_ua_intlck_ctrl {
-	TARGET_UA_INTLCK_CTRL_CLEAR = 0,
-	TARGET_UA_INTLCK_CTRL_NO_CLEAR = 1,
-	TARGET_UA_INTLCK_CTRL_ESTABLISH_UA = 2,
-};
-
 enum target_core_dif_check {
 	TARGET_DIF_CHECK_GUARD  = 0x1 << 0,
 	TARGET_DIF_CHECK_APPTAG = 0x1 << 1,
@@ -539,11 +534,7 @@ struct se_cmd {
 	struct scatterlist	*t_prot_sg;
 	unsigned int		t_prot_nents;
 	sense_reason_t		pi_err;
-	u64			sense_info;
-	/*
-	 * CPU LIO will execute the cmd on. Defaults to the CPU the cmd is
-	 * initialized on. Drivers can override.
-	 */
+	sector_t		bad_sector;
 	int			cpuid;
 };
 
@@ -612,7 +603,7 @@ static inline struct se_node_acl *fabric_stat_to_nacl(struct config_item *item)
 }
 
 struct se_session {
-	atomic_t		stopped;
+	unsigned		sess_tearing_down:1;
 	u64			sess_bin_isid;
 	enum target_prot_op	sup_prot_ops;
 	enum target_prot_type	sess_prot_type;
@@ -622,9 +613,9 @@ struct se_session {
 	struct percpu_ref	cmd_count;
 	struct list_head	sess_list;
 	struct list_head	sess_acl_list;
+	struct list_head	sess_cmd_list;
 	spinlock_t		sess_cmd_lock;
-	wait_queue_head_t	cmd_count_wq;
-	struct completion	stop_done;
+	wait_queue_head_t	cmd_list_wq;
 	void			*sess_cmd_map;
 	struct sbitmap_queue	sess_tag_pool;
 };
@@ -672,26 +663,26 @@ struct se_dev_entry {
 };
 
 struct se_dev_attrib {
-	bool		emulate_model_alias;
-	bool		emulate_dpo;		/* deprecated */
-	bool		emulate_fua_write;
-	bool		emulate_fua_read;	/* deprecated */
-	bool		emulate_write_cache;
-	enum target_ua_intlck_ctrl emulate_ua_intlck_ctrl;
-	bool		emulate_tas;
-	bool		emulate_tpu;
-	bool		emulate_tpws;
-	bool		emulate_caw;
-	bool		emulate_3pc;
-	bool		emulate_pr;
+	int		emulate_model_alias;
+	int		emulate_dpo;
+	int		emulate_fua_write;
+	int		emulate_fua_read;
+	int		emulate_write_cache;
+	int		emulate_ua_intlck_ctrl;
+	int		emulate_tas;
+	int		emulate_tpu;
+	int		emulate_tpws;
+	int		emulate_caw;
+	int		emulate_3pc;
+	int		emulate_pr;
 	enum target_prot_type pi_prot_type;
 	enum target_prot_type hw_pi_prot_type;
-	bool		pi_prot_verify;
-	bool		enforce_pr_isids;
-	bool		force_pr_aptpl;
-	bool		is_nonrot;
-	bool		emulate_rest_reord;
-	bool		unmap_zeroes_data;
+	int		pi_prot_verify;
+	int		enforce_pr_isids;
+	int		force_pr_aptpl;
+	int		is_nonrot;
+	int		emulate_rest_reord;
+	int		unmap_zeroes_data;
 	u32		hw_block_size;
 	u32		block_size;
 	u32		hw_max_sectors;
@@ -764,11 +755,6 @@ struct se_dev_stat_grps {
 	struct config_group scsi_lu_group;
 };
 
-struct se_device_queue {
-	struct list_head	state_list;
-	spinlock_t		lock;
-};
-
 struct se_device {
 	/* RELATIVE TARGET PORT IDENTIFER Counter */
 	u16			dev_rpti_counter;
@@ -781,7 +767,6 @@ struct se_device {
 #define DF_USING_UDEV_PATH			0x00000008
 #define DF_USING_ALIAS				0x00000010
 #define DF_READ_ONLY				0x00000020
-	u8			transport_flags;
 	/* Physical device queue depth */
 	u32			queue_depth;
 	/* Used for SPC-2 reservations enforce of ISIDs */
@@ -796,11 +781,13 @@ struct se_device {
 	atomic_long_t		read_bytes;
 	atomic_long_t		write_bytes;
 	/* Active commands on this virtual SE device */
-	atomic_t		simple_cmds;
-	atomic_t		dev_ordered_sync;
+	atomic_t		non_ordered;
+	bool			ordered_sync_in_progress;
+	atomic_t		delayed_cmd_count;
 	atomic_t		dev_qf_count;
 	u32			export_count;
 	spinlock_t		delayed_cmd_lock;
+	spinlock_t		execute_task_lock;
 	spinlock_t		dev_reservation_lock;
 	unsigned int		dev_reservation_flags;
 #define DRF_SPC2_RESERVATIONS			0x00000001
@@ -818,7 +805,9 @@ struct se_device {
 	struct list_head	dev_sep_list;
 	struct list_head	dev_tmr_list;
 	struct work_struct	qf_work_queue;
+	struct work_struct	delayed_cmd_work;
 	struct list_head	delayed_cmd_list;
+	struct list_head	state_list;
 	struct list_head	qf_cmd_list;
 	/* Pointer to associated SE HBA */
 	struct se_hba		*se_hba;
@@ -845,8 +834,6 @@ struct se_device {
 	/* For se_lun->lun_se_dev RCU read-side critical access */
 	u32			hba_index;
 	struct rcu_head		rcu_head;
-	int			queue_cnt;
-	struct se_device_queue	*queues;
 };
 
 struct se_hba {
@@ -891,6 +878,7 @@ struct se_portal_group {
 	/* Spinlock for adding/removing sessions */
 	spinlock_t		session_lock;
 	struct mutex		tpg_lun_mutex;
+	struct list_head	se_tpg_node;
 	/* linked list for initiator ACL list */
 	struct list_head	acl_node_list;
 	struct hlist_head	tpg_lun_hlist;
