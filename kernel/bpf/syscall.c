@@ -44,10 +44,12 @@ int sysctl_unprivileged_bpf_disabled __read_mostly =
 
 static const struct bpf_map_ops * const bpf_map_types[] = {
 #define BPF_PROG_TYPE(_id, _ops)
+#define BPF_PROG_TYPE_4(_id, _name, prog_ctx_type, kern_ctx_type)
 #define BPF_MAP_TYPE(_id, _ops) \
 	[_id] = &_ops,
 #include <linux/bpf_types.h>
 #undef BPF_PROG_TYPE
+#undef BPF_PROG_TYPE_4
 #undef BPF_MAP_TYPE
 };
 
@@ -1197,9 +1199,12 @@ err_put:
 static const struct bpf_prog_ops * const bpf_prog_types[] = {
 #define BPF_PROG_TYPE(_id, _name) \
 	[_id] = & _name ## _prog_ops,
+#define BPF_PROG_TYPE_4(_id, _name, prog_ctx_type, kern_ctx_type) \
+	[_id] = & _name ## _prog_ops,
 #define BPF_MAP_TYPE(_id, _ops)
 #include <linux/bpf_types.h>
 #undef BPF_PROG_TYPE
+#undef BPF_PROG_TYPE_4
 #undef BPF_MAP_TYPE
 };
 
@@ -1623,6 +1628,14 @@ bpf_prog_load_check_attach_type(enum bpf_prog_type prog_type,
 		default:
 			return -EINVAL;
 		}
+	case BPF_PROG_TYPE_GHOST_SCHED:
+		switch (expected_attach_type) {
+		case BPF_GHOST_SCHED_SKIP_TICK:
+		case BPF_GHOST_SCHED_PNT:
+			return 0;
+		default:
+			return -EINVAL;
+		}
 	default:
 		return 0;
 	}
@@ -1958,6 +1971,10 @@ static int bpf_prog_attach(const union bpf_attr *attr)
 	case BPF_CGROUP_SETSOCKOPT:
 		ptype = BPF_PROG_TYPE_CGROUP_SOCKOPT;
 		break;
+	case BPF_GHOST_SCHED_SKIP_TICK:
+	case BPF_GHOST_SCHED_PNT:
+		ret = ghost_sched_bpf_prog_attach(attr, prog);
+		break;
 	default:
 		return -EINVAL;
 	}
@@ -2045,6 +2062,9 @@ static int bpf_prog_detach(const union bpf_attr *attr)
 	case BPF_CGROUP_SETSOCKOPT:
 		ptype = BPF_PROG_TYPE_CGROUP_SOCKOPT;
 		break;
+	case BPF_GHOST_SCHED_SKIP_TICK:
+	case BPF_GHOST_SCHED_PNT:
+		return ghost_sched_bpf_prog_detach(attr, ptype);
 	default:
 		return -EINVAL;
 	}

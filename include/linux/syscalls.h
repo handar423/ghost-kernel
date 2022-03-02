@@ -1421,4 +1421,9 @@ long compat_ksys_semtimedop(int semid, struct sembuf __user *tsems,
 			    unsigned int nsops,
 			    const struct old_timespec32 __user *timeout);
 
+asmlinkage long gsys_ghost_run(s64 gtid, u32 agent_barrier, u32 task_barrier,
+			       int run_cpu, int run_flags);
+asmlinkage long gsys_ghost(u64 op, u64 arg1, u64 arg2, u64 arg3, u64 arg4,
+			   u64 arg5);
+
 #endif

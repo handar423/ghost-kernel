@@ -25,9 +25,12 @@
 static const struct bpf_verifier_ops * const bpf_verifier_ops[] = {
 #define BPF_PROG_TYPE(_id, _name) \
 	[_id] = & _name ## _verifier_ops,
+#define BPF_PROG_TYPE_4(_id, _name, prog_ctx_type, kern_ctx_type) \
+	[_id] = & _name ## _verifier_ops,
 #define BPF_MAP_TYPE(_id, _ops)
 #include <linux/bpf_types.h>
 #undef BPF_PROG_TYPE
+#undef BPF_PROG_TYPE_4
 #undef BPF_MAP_TYPE
 };
 
@@ -6428,6 +6431,7 @@ static int check_return_code(struct bpf_verifier_env *env)
 	case BPF_PROG_TYPE_CGROUP_DEVICE:
 	case BPF_PROG_TYPE_CGROUP_SYSCTL:
 	case BPF_PROG_TYPE_CGROUP_SOCKOPT:
+	case BPF_PROG_TYPE_GHOST_SCHED:
 		break;
 	default:
 		return 0;

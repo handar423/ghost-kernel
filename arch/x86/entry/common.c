@@ -34,6 +34,10 @@
 #include <asm/fpu/api.h>
 #include <asm/nospec-branch.h>
 
+#ifdef CONFIG_SCHED_CLASS_GHOST
+#include <uapi/linux/ghost.h>
+#endif
+
 #define CREATE_TRACE_POINTS
 #include <trace/events/syscalls.h>
 
@@ -169,7 +173,9 @@ static void exit_to_usermode_loop(struct pt_regs *regs, u32 cached_flags)
 
 		/* Disable IRQs and retry */
 		local_irq_disable();
-
+#ifdef CONFIG_SCHED_CLASS_GHOST
+		ghost_commit_greedy_txn();
+#endif
 		cached_flags = READ_ONCE(current_thread_info()->flags);
 
 		if (!(cached_flags & EXIT_TO_USERMODE_LOOP_FLAGS))
@@ -186,6 +192,9 @@ __visible inline void prepare_exit_to_usermode(struct pt_regs *regs)
 	addr_limit_user_check();
 
 	lockdep_assert_irqs_disabled();
+#ifdef CONFIG_SCHED_CLASS_GHOST
+	ghost_commit_greedy_txn();
+#endif
 	lockdep_sys_exit();
 
 	cached_flags = READ_ONCE(ti->flags);

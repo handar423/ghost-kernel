@@ -89,7 +89,8 @@ struct task_group;
 #define TASK_WAKING			0x0200
 #define TASK_NOLOAD			0x0400
 #define TASK_NEW			0x0800
-#define TASK_STATE_MAX			0x1000
+#define __TASK_DEFERRABLE_WAKEUP	0x1000
+#define TASK_STATE_MAX			0x2000
 
 /* Convenience macros for the sake of set_current_state: */
 #define TASK_KILLABLE			(TASK_WAKEKILL | TASK_UNINTERRUPTIBLE)
@@ -565,6 +566,70 @@ struct sched_dl_entity {
 	struct hrtimer inactive_timer;
 };
 
+#ifdef CONFIG_SCHED_CLASS_GHOST
+struct ghost_queue;
+struct ghost_status_word;
+struct ghost_enclave;
+struct timerfd_ghost;
+
+struct sched_ghost_entity {
+	struct list_head run_list;
+	ktime_t last_runnable_at;
+
+	/* The following fields are protected by 'task_rq(p)->lock' */
+	struct ghost_queue *dst_q;
+	struct ghost_status_word *status_word;
+	struct ghost_enclave *enclave;
+
+	/*
+	 * See also ghost_prepare_task_switch() and ghost_deferred_msgs()
+	 * for flags that are used to defer messages.
+	 */
+	uint blocked_task : 1;
+	uint yield_task : 1;
+	uint new_task   : 1;
+	uint agent      : 1;
+
+	/*
+	 * Locking of 'twi' is awkward:
+	 * 1. wake_up_new_task: both select_task_rq() and task_woken_ghost()
+	 *    are called with 'pi->lock' held.
+	 * 2. ttwu_do_activate: both select_task_rq() and task_woken_ghost()
+	 *    are called with 'pi->lock' held when called via ttwu_queue()
+	 *    (i.e. not a remote wakeup).
+	 * 3. ttwu_do_activate: only 'rq->lock' is held when called via
+	 *    sched_ttwu_pending (i.e. indirectly via ttwu_queue_remote).
+	 *
+	 * (1) and (2) are easy because 'p->pi_lock' is held across both
+	 * select_task_rq() and task_woken_ghost().
+	 *
+	 * (3) is tricky because 'p->pi_lock' is held when select_task_rq()
+	 * is called on the waker's cpu while 'rq->lock' is held when
+	 * task_woken_ghost() is called on the remote cpu. We rely on the
+	 * following constraints:
+	 * a. Once a task is woken up there cannot be another wakeup until
+	 *    it gets oncpu and blocks (thus another wakeup cannot happen
+	 *    until task_woken_ghost() has been called).
+	 * b. flush_smp_call_function_queue()->llist_del_all() pairs with
+	 *    __ttwu_queue_wakelist()->llist_add() to guarantee visiblity
+	 *    of changes made to 'p->ghost.twi' on the waker's cpu when
+	 *    ttwu_do_activate() is called on the remote cpu.
+	 */
+	struct {
+		int last_ran_cpu;
+		int wake_up_cpu;
+		int waker_cpu;
+	} twi;	/* twi = task_wakeup_info */
+
+	struct list_head task_list;
+	struct rcu_head rcu;
+};
+
+extern void ghost_commit_greedy_txn(void);
+extern void ghost_timerfd_triggered(struct timerfd_ghost *timer);
+
+#endif
+
 #ifdef CONFIG_UCLAMP_TASK
 /* Number of utilization clamp buckets (shorter alias) */
 #define UCLAMP_BUCKETS CONFIG_UCLAMP_BUCKETS_COUNT
@@ -675,6 +740,10 @@ struct task_struct {
 	const struct sched_class	*sched_class;
 	struct sched_entity		se;
 	struct sched_rt_entity		rt;
+#ifdef CONFIG_SCHED_CLASS_GHOST
+	int64_t gtid;			/* ghost tid */
+	struct sched_ghost_entity ghost;
+#endif
 #ifdef CONFIG_CGROUP_SCHED
 	struct task_group		*sched_task_group;
 #endif
@@ -749,6 +818,7 @@ struct task_struct {
 	unsigned			sched_contributes_to_load:1;
 	unsigned			sched_migrated:1;
 	unsigned			sched_remote_wakeup:1;
+	unsigned			sched_deferrable_wakeup:1;
 #ifdef CONFIG_PSI
 	unsigned			sched_psi_wake_requeue:1;
 #endif
@@ -1284,6 +1354,19 @@ struct task_struct {
 	 * Do not put anything below here!
 	 */
 };
+
+struct bpf_ghost_sched_kern {
+};
+
+struct bpf_prog;
+union bpf_attr;
+enum bpf_prog_type;
+int ghost_sched_bpf_prog_attach(const union bpf_attr *attr,
+				struct bpf_prog *prog);
+int ghost_sched_bpf_prog_detach(const union bpf_attr *attr,
+				enum bpf_prog_type ptype);
+int ghost_sched_bpf_link_attach(const union bpf_attr *attr,
+				struct bpf_prog *prog);
 
 static inline struct pid *task_pid(struct task_struct *task)
 {
@@ -1848,6 +1931,9 @@ static inline bool vcpu_is_preempted(int cpu)
 	return false;
 }
 #endif
+
+extern int get_user_cpu_mask(unsigned long __user *user_mask_ptr, unsigned len,
+			     struct cpumask *new_mask);
 
 extern long sched_setaffinity(pid_t pid, const struct cpumask *new_mask);
 extern long sched_getaffinity(pid_t pid, struct cpumask *mask);

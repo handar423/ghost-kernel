@@ -7,6 +7,7 @@
  *  Copyright (C) 1991-2002  Linus Torvalds
  */
 #include "sched.h"
+#include "ghost.h"
 
 #include <linux/nospec.h>
 
@@ -246,6 +247,10 @@ static enum hrtimer_restart hrtick(struct hrtimer *timer)
 	rq->curr->sched_class->task_tick(rq, rq->curr, 1);
 	rq_unlock(rq, &rf);
 
+#ifdef CONFIG_SCHED_CLASS_GHOST
+	ghost_tick(rq);
+#endif
+
 	return HRTIMER_NORESTART;
 }
 
@@ -363,7 +368,7 @@ static inline void hrtick_rq_init(struct rq *rq)
  * this avoids any races wrt polling state changes and thereby avoids
  * spurious IPIs.
  */
-static bool set_nr_and_not_polling(struct task_struct *p)
+bool set_nr_and_not_polling(struct task_struct *p)
 {
 	struct thread_info *ti = task_thread_info(p);
 	return !(fetch_or(&ti->flags, _TIF_NEED_RESCHED) & _TIF_POLLING_NRFLAG);
@@ -394,7 +399,7 @@ static bool set_nr_if_polling(struct task_struct *p)
 }
 
 #else
-static bool set_nr_and_not_polling(struct task_struct *p)
+bool set_nr_and_not_polling(struct task_struct *p)
 {
 	set_tsk_need_resched(p);
 	return true;
@@ -536,6 +541,53 @@ void resched_cpu(int cpu)
 		resched_curr(rq);
 	raw_spin_unlock_irqrestore(&rq->lock, flags);
 }
+
+#ifdef CONFIG_SMP
+/*
+ * Guarantee that the given cpu will reschedule. Useful for situations where
+ * we cannot hold dst_rq->lock.
+ */
+void resched_cpu_unlocked(int cpu)
+{
+	struct rq *rq = cpu_rq(cpu);
+
+	if (cmpxchg(&rq->resched_ipi_work, 0, 1) == 0) {
+#if 0
+		/*
+		 * XXX unlike 4.15 the idle loop in 5.11 does not call
+		 * scheduler_ipi() after it detects that cpu needs to
+		 * reschedule (therefore we always send an IPI).
+		 */
+		if (READ_ONCE(rq->curr) == rq->idle &&
+		    set_nr_if_polling(rq->idle))
+			trace_sched_wake_idle_without_ipi(cpu);
+		else
+#endif
+			smp_send_reschedule(cpu);
+	}
+}
+
+/*
+ * Called from scheduler_ipi() in hardirq context with interrupts disabled.
+ */
+void do_resched_ipi_work(void)
+{
+	struct rq *rq = this_rq();
+	struct rq_flags rf;
+
+	if (!rq_has_resched_ipi_work(rq))
+		return;
+
+	irq_enter();
+	rq_lock_irqsave(rq, &rf);
+	if (rq_has_resched_ipi_work(rq)) {
+		rq->resched_ipi_work = 0;
+		resched_curr(rq);
+	}
+	rq_unlock_irqrestore(rq, &rf);
+	irq_exit();
+}
+#endif
 
 #ifdef CONFIG_SMP
 #ifdef CONFIG_NO_HZ_COMMON
@@ -1514,6 +1566,19 @@ void check_preempt_curr(struct rq *rq, struct task_struct *p, int flags)
 
 	if (p->sched_class == rq->curr->sched_class) {
 		rq->curr->sched_class->check_preempt_curr(rq, p, flags);
+#ifdef CONFIG_SCHED_CLASS_GHOST
+	} else if (&ghost_agent_sched_class > rq->curr->sched_class &&
+		 	   is_agent(rq, p)) {
+		/*
+		 * Normally, ghost threads have the lowest
+		 * priority. The ghost agent thread, however, is
+		 * allowed to run in the higher priority ghost
+		 * agent class when it would otherwise be
+		 * preempted by another sched_class. See
+		 * GHOST_SW_BOOST_PRIO for more details.
+		 */
+		resched_curr(rq);
+#endif
 	} else {
 		for_each_class(class) {
 			if (class == rq->curr->sched_class)
@@ -1580,8 +1645,8 @@ static inline bool is_cpu_allowed(struct task_struct *p, int cpu)
  *
  * Returns (locked) new rq. Old rq's lock is released.
  */
-static struct rq *move_queued_task(struct rq *rq, struct rq_flags *rf,
-				   struct task_struct *p, int new_cpu)
+struct rq *move_queued_task(struct rq *rq, struct rq_flags *rf,
+				   			struct task_struct *p, int new_cpu)
 {
 	lockdep_assert_held(&rq->lock);
 
@@ -1743,6 +1808,13 @@ static int __set_cpus_allowed_ptr(struct task_struct *p,
 	 * Must re-check here, to close a race against __kthread_bind(),
 	 * sched_setaffinity() is not guaranteed to observe the flag.
 	 */
+#ifdef CONFIG_SCHED_CLASS_GHOST
+	/* ghost agents do not allow affinity manipulations. */
+	if (p->sched_class == &ghost_sched_class && p->ghost.agent) {
+		ret = -EINVAL;
+		goto out;
+	}
+#endif
 	if (check && (p->flags & PF_NO_SETAFFINITY)) {
 		ret = -EINVAL;
 		goto out;
@@ -2096,6 +2168,26 @@ void kick_process(struct task_struct *p)
 	cpu = task_cpu(p);
 	if ((cpu != smp_processor_id()) && task_curr(p))
 		smp_send_reschedule(cpu);
+#ifdef CONFIG_SCHED_CLASS_GHOST
+	/*
+	 * When an agent is 'blocked_in_run' its 'task->state' is TASK_RUNNING
+	 * so it won't be "woken up" when a signal is delivered to it (see
+	 * signal_wake_up_state() for details). This in turn implies that
+	 * the signal handling is delayed until there is a scheduling edge
+	 * on the agent's CPU (see pick_agent() for details).
+	 *
+	 * Ensure timely signal handling by forcing a scheduling edge on
+	 * the agent's CPU.
+	 */
+	else if (unlikely(p->ghost.agent && signal_pending(p))) {
+		if (cpu == smp_processor_id()) {
+			set_tsk_need_resched(current);
+			set_preempt_need_resched();
+		} else {
+			resched_cpu_unlocked(cpu);
+		}
+	}
+#endif
 	preempt_enable();
 }
 EXPORT_SYMBOL_GPL(kick_process);
@@ -2404,14 +2496,32 @@ void sched_ttwu_pending(void)
 	rq_unlock_irqrestore(rq, &rf);
 }
 
+extern void do_resched_ipi_work(void);
 void scheduler_ipi(void)
 {
+#ifdef CONFIG_SCHED_CLASS_GHOST
+	/*
+	 * ghost_commit_pending_txn() needs RCU for correct operation so
+	 * make sure RCU is watching in case we interrupted an idle CPU.
+	 *
+	 * Rather than the full irq_enter/irq_exit we do the bare minimum
+	 * required for RCU to avoid pessimizing the common case (all work
+	 * done in the irq return path). Also see the comment below about
+	 * irq_enter/irq_exit.
+	 */
+	if (is_idle_task(current))
+		rcu_irq_enter();
+	ghost_commit_greedy_txn();
+	if (is_idle_task(current))
+		rcu_irq_exit();
+#endif
 	/*
 	 * Fold TIF_NEED_RESCHED into the preempt_count; anybody setting
 	 * TIF_NEED_RESCHED remotely (for the first time) will also send
 	 * this IPI.
 	 */
 	preempt_fold_need_resched();
+	do_resched_ipi_work();
 
 	if (llist_empty(&this_rq()->wake_list) && !got_nohz_idle_kick())
 		return;
@@ -2447,6 +2557,7 @@ static void ttwu_queue_remote(struct task_struct *p, int cpu, int wake_flags)
 	struct rq *rq = cpu_rq(cpu);
 
 	p->sched_remote_wakeup = !!(wake_flags & WF_MIGRATED);
+	p->sched_deferrable_wakeup = !!(wake_flags & WF_DEFERRABLE_WAKEUP);
 
 	if (llist_add(&p->wake_entry, &cpu_rq(cpu)->wake_list)) {
 		if (!set_nr_if_polling(rq->idle))
@@ -2615,6 +2726,7 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 {
 	unsigned long flags;
 	int cpu, success = 0;
+	bool deferrable_wakeup;
 
 	preempt_disable();
 	if (p == current) {
@@ -2715,13 +2827,23 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 	smp_cond_load_acquire(&p->on_cpu, !VAL);
 
 	p->sched_contributes_to_load = !!task_contributes_to_load(p);
+
+	/*
+	 * Latch 'sched_deferrable_wakeup' before we change 'p->state' below.
+	 * Everything before this was a light wakeup (wakee was 'current'
+	 * or 'on_rq') and thus don't actually produce TASK_WAKEUP msgs.
+	 */
+	deferrable_wakeup = !!(p->state & __TASK_DEFERRABLE_WAKEUP);
+
 	p->state = TASK_WAKING;
 
 	if (p->in_iowait) {
 		delayacct_blkio_end(p);
 		atomic_dec(&task_rq(p)->nr_iowait);
 	}
-
+	
+	p->sched_deferrable_wakeup = deferrable_wakeup;
+	
 	cpu = select_task_rq(p, p->wake_cpu, SD_BALANCE_WAKE, wake_flags);
 	if (task_cpu(p) != cpu) {
 		wake_flags |= WF_MIGRATED;
@@ -2808,6 +2930,10 @@ static void __sched_fork(unsigned long clone_flags, struct task_struct *p)
 	p->rt.time_slice	= sched_rr_timeslice;
 	p->rt.on_rq		= 0;
 	p->rt.on_list		= 0;
+
+#ifdef CONFIG_SCHED_CLASS_GHOST
+	sched_ghost_entity_init(p);
+#endif
 
 #ifdef CONFIG_PREEMPT_NOTIFIERS
 	INIT_HLIST_HEAD(&p->preempt_notifiers);
@@ -2957,7 +3083,7 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
 	 * Revert to default priority/policy on fork if requested.
 	 */
 	if (unlikely(p->sched_reset_on_fork)) {
-		if (task_has_dl_policy(p) || task_has_rt_policy(p)) {
+		if (task_has_dl_policy(p) || task_has_rt_policy(p) || task_has_ghost_policy(p)) {
 			p->policy = SCHED_NORMAL;
 			p->static_prio = NICE_TO_PRIO(0);
 			p->rt_priority = 0;
@@ -2974,6 +3100,18 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
 		p->sched_reset_on_fork = 0;
 	}
 
+#ifdef CONFIG_SCHED_CLASS_GHOST
+	if (task_has_ghost_policy(p)) {
+		int error;
+
+		p->sched_class = &ghost_sched_class;
+		error = ghost_sched_fork(p);
+		if (error) {
+			put_cpu();
+			return error;
+		}
+	} else
+#endif
 	if (dl_prio(p->prio))
 		return -EAGAIN;
 	else if (rt_prio(p->prio))
@@ -3014,6 +3152,14 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
 	RB_CLEAR_NODE(&p->pushable_dl_tasks);
 #endif
 	return 0;
+}
+
+void sched_cleanup_fork(struct task_struct *p)
+{
+#ifdef CONFIG_SCHED_CLASS_GHOST
+	if (task_has_ghost_policy(p))
+		ghost_sched_cleanup_fork(p);
+#endif
 }
 
 unsigned long to_ratio(u64 period, u64 runtime)
@@ -3235,6 +3381,104 @@ static inline void finish_lock_switch(struct rq *rq)
 # define finish_arch_post_lock_switch()	do { } while (0)
 #endif
 
+#ifdef CONFIG_SCHED_CLASS_GHOST
+#include <uapi/linux/ghost.h>
+static inline void ghost_prepare_task_switch(struct rq *rq,
+					     struct task_struct *prev,
+					     struct task_struct *next)
+{
+	struct ghost_status_word *agent_sw;
+
+	if (rq->ghost.agent) {
+		/*
+		 * XXX pick_next_task_fair() can return 'rq->idle' via
+		 * core_tag_pick_next_matching_rendezvous().
+		*/
+		agent_sw = rq->ghost.agent->ghost.status_word;
+		if (!task_has_ghost_policy(next) && next != rq->idle) {
+			ghost_sw_clear_flag(agent_sw, GHOST_SW_CPU_AVAIL);
+			if (rq->ghost.run_flags & NEED_CPU_NOT_IDLE) {
+				rq->ghost.run_flags &= ~NEED_CPU_NOT_IDLE;
+				ghost_need_cpu_not_idle(rq, next);
+			}
+		} else {
+			ghost_sw_set_flag(agent_sw, GHOST_SW_CPU_AVAIL);
+		}
+	}
+
+	if (!task_has_ghost_policy(prev))
+		goto done;
+
+	/* Who watches the watchmen? */
+	if (prev == rq->ghost.agent)
+		goto done;
+
+	/* If we're on the ghost.tasks list, then we're runnable. */
+	if (!list_empty(&prev->ghost.run_list)) {
+		/*
+		 * Keep ghost.tasks sorted by last_runnable_at.  Whenever we set
+		 * the time, we append to the tail.
+		 */
+		list_del_init(&prev->ghost.run_list);
+		list_add_tail(&prev->ghost.run_list, &rq->ghost.tasks);
+		prev->ghost.last_runnable_at = ktime_get();
+	}
+
+	if (rq->ghost.check_prev_preemption) {
+		rq->ghost.check_prev_preemption = false;
+		ghost_task_preempted(rq, prev);
+		ghost_wake_agent_of(prev);
+	}
+
+done:
+	/*
+	 * Clear the ONCPU bit after producing the task state change msg
+	 * (e.g. preempted). This guarantees that when a task is offcpu
+	 * its 'task_barrier' is stable.
+	 */
+	if (task_has_ghost_policy(prev)) {
+		struct ghost_status_word *prev_sw = prev->ghost.status_word;
+		WARN_ON_ONCE(!(prev_sw->flags & GHOST_SW_TASK_ONCPU));
+		ghost_sw_clear_flag(prev_sw, GHOST_SW_TASK_ONCPU);
+	}
+
+	/*
+	 * CPU is switching to a non-ghost task while a task is latched.
+	 *
+	 * Treat this like latched_task preemption because we don't know when
+	 * the CPU will be available again so no point in keeping it latched.
+	 */
+	if (rq->ghost.latched_task) {
+		/*
+		 * If 'next' was returned from pick_next_task_ghost() then
+		 * 'latched_task' must have been cleared. Conversely if
+		 * there is 'latched_task' then 'next' could not have
+		 * been returned from pick_next_task_ghost().
+		 */
+		WARN_ON_ONCE(task_has_ghost_policy(next) &&
+			     !is_agent(rq, next));
+		ghost_latched_task_preempted(rq);
+
+		/*
+		 * XXX the WARN above is susceptible to a false-negative
+		 * when pick_next_task_ghost returns the idle task. This
+		 * is not the common case but it highlights that what we
+		 * really need to check is the sched_class that produced
+		 * 'next'.
+		 */
+	}
+
+	if (task_has_ghost_policy(next) && !is_agent(rq, next))
+		ghost_task_got_oncpu(rq, next);
+
+	/*
+	 * The last task in the chain scheduled (blocked/yielded/preempted).
+	 */
+	if (rq->ghost.switchto_count < 0)
+		rq->ghost.switchto_count = 0;
+}
+#endif /* CONFIG_SCHED_CLASS_GHOST */
+
 /**
  * prepare_task_switch - prepare to switch tasks
  * @rq: the runqueue preparing to switch
@@ -3257,6 +3501,9 @@ prepare_task_switch(struct rq *rq, struct task_struct *prev,
 	perf_event_task_sched_out(prev, next);
 	rseq_preempt(prev);
 	fire_sched_out_preempt_notifiers(prev, next);
+#ifdef CONFIG_SCHED_CLASS_GHOST
+	ghost_prepare_task_switch(rq, prev, next);
+#endif
 	prepare_task(next);
 	prepare_arch_switch(next);
 }
@@ -3361,6 +3608,15 @@ static struct rq *finish_task_switch(struct task_struct *prev)
 	return rq;
 }
 
+void schedule_callback(struct rq *rq)
+{
+#ifdef CONFIG_SCHED_CLASS_GHOST
+	if (unlikely(ghost_need_rendezvous(rq)))
+		ghost_wait_for_rendezvous(rq);
+#endif
+}
+
+
 #ifdef CONFIG_SMP
 
 /* rq->lock is NOT held, but preemption is disabled */
@@ -3375,7 +3631,8 @@ static void __balance_callback(struct rq *rq)
 	rq->balance_callback = NULL;
 	while (head) {
 		func = (void (*)(struct rq *))head->func;
-		next = head->next;
+		/* The last element pointed to itself */
+		next = head->next == head ? NULL : head->next;
 		head->next = NULL;
 		head = next;
 
@@ -3384,7 +3641,7 @@ static void __balance_callback(struct rq *rq)
 	raw_spin_unlock_irqrestore(&rq->lock, flags);
 }
 
-static inline void balance_callback(struct rq *rq)
+inline void balance_callback(struct rq *rq)
 {
 	if (unlikely(rq->balance_callback))
 		__balance_callback(rq);
@@ -3417,7 +3674,9 @@ asmlinkage __visible void schedule_tail(struct task_struct *prev)
 	 */
 
 	rq = finish_task_switch(prev);
-	balance_callback(rq);
+	// 这里自己改的
+	// balance_callback(rq);
+	schedule_callback(rq);
 	preempt_enable();
 
 	if (current->set_child_tid)
@@ -3429,7 +3688,7 @@ asmlinkage __visible void schedule_tail(struct task_struct *prev)
 /*
  * context_switch - switch to the new MM and the new thread's register state.
  */
-static __always_inline struct rq *
+noinline struct rq *
 context_switch(struct rq *rq, struct task_struct *prev,
 	       struct task_struct *next, struct rq_flags *rf)
 {
@@ -3705,6 +3964,10 @@ void scheduler_tick(void)
 	rq_unlock(rq, &rf);
 
 	perf_event_task_tick();
+
+#ifdef CONFIG_SCHED_CLASS_GHOST
+	ghost_tick(rq);
+#endif
 
 #ifdef CONFIG_SMP
 	rq->idle_balance = idle_cpu(cpu);
@@ -4010,6 +4273,21 @@ pick_next_task(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 	const struct sched_class *class;
 	struct task_struct *p;
 
+#ifdef CONFIG_SCHED_CLASS_GHOST
+	rq->ghost.check_prev_preemption = ghost_produce_prev_msgs(rq, prev);
+
+	/* a negative 'switchto_count' indicates end of the chain */
+	rq->ghost.switchto_count = -rq->ghost.switchto_count;
+	WARN_ON_ONCE(rq->ghost.switchto_count > 0);
+	rq->ghost.pnt_bpf_once = true;
+#endif
+
+	/*
+	 * FIXME(ghost): in the common case a ghost agent is always runnable
+	 * and contributes to 'rq->nr_running'. This in turn means that the
+	 * 'rq->nr_running == rq->cfs.h_nr_running' check below will always
+	 * be false and disable the optimization for CFS.
+	 */
 	/*
 	 * Optimization: we know that if all tasks are in the fair class we can
 	 * call that function directly, but only if the @prev task wasn't of a
@@ -4028,7 +4306,7 @@ pick_next_task(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 		if (unlikely(!p))
 			p = idle_sched_class.pick_next_task(rq, prev, rf);
 
-		return p;
+		goto out_return;
 	}
 
 restart:
@@ -4052,11 +4330,24 @@ restart:
 	for_each_class(class) {
 		p = class->pick_next_task(rq, NULL, NULL);
 		if (p)
-			return p;
+			goto out_return;
 	}
 
 	/* The idle class should always have a runnable task: */
 	BUG();
+
+out_return:
+#ifdef CONFIG_SCHED_CLASS_GHOST
+	/*
+	 * pick_next_task opted to keep the same task running, but we left
+	 * check_prev_preemption on!  This will break switchto, which checks
+	 * that field during context_switch()
+	 */
+	if (WARN_ON_ONCE(p == prev && rq->ghost.check_prev_preemption))
+		rq->ghost.check_prev_preemption = false;
+#endif
+
+	return p;
 }
 
 /*
@@ -4183,8 +4474,8 @@ static void __sched notrace __schedule(bool preempt)
 		rq->clock_update_flags &= ~(RQCF_ACT_SKIP|RQCF_REQ_SKIP);
 		rq_unlock_irq(rq, &rf);
 	}
-
-	balance_callback(rq);
+	// 自己改的
+	schedule_callback(rq);
 }
 
 void __noreturn do_task_dead(void)
@@ -4252,6 +4543,32 @@ asmlinkage __visible void __sched schedule(void)
 	sched_update_worker(tsk);
 }
 EXPORT_SYMBOL(schedule);
+
+#ifdef CONFIG_SCHED_CLASS_GHOST
+void ghost_agent_schedule(void)
+{
+	const int cpu = raw_smp_processor_id();
+
+	/* Verify that agent is voluntarily giving up CPU. */
+	VM_BUG_ON(this_rq()->ghost.agent != current);
+	VM_BUG_ON(current->state != TASK_RUNNING);
+
+	VM_BUG_ON(preempt_count() != PREEMPT_DISABLE_OFFSET);
+
+	__schedule(false);
+
+	VM_BUG_ON(preempt_count() != PREEMPT_DISABLE_OFFSET);
+	VM_BUG_ON(this_rq()->ghost.blocked_in_run);
+
+	/*
+	 * The agent is per-cpu and must always schedule on that CPU.
+	 *
+	 * In other words it cannot __schedule() on one CPU and wake up
+	 * on a different one.
+	 */
+	VM_BUG_ON(this_rq()->cpu != cpu);
+}
+#endif
 
 /*
  * synchronize_rcu_tasks() makes sure that no task is stuck in preempted
@@ -4726,7 +5043,7 @@ int idle_cpu(int cpu)
 	if (rq->curr != rq->idle)
 		return 0;
 
-	if (rq->nr_running)
+	if (rq->nr_running > extra_nr_running(rq))
 		return 0;
 
 #ifdef CONFIG_SMP
@@ -4792,6 +5109,22 @@ static void __setscheduler_params(struct task_struct *p,
 
 	p->policy = policy;
 
+#ifdef CONFIG_SCHED_CLASS_GHOST
+	if (ghost_policy(policy)) {
+		if (ghost_agent(attr)) {
+			/*
+			 * This might catch an unlock in between
+			 * ghost_setscheduler() and here.
+			 */
+			WARN_ON_ONCE(task_rq(p)->ghost.agent != p);
+		}
+		p->rt_priority = 0;
+		p->normal_prio = normal_prio(p);
+		set_load_weight(p, true);
+		return;
+	}
+#endif
+
 	if (dl_policy(policy))
 		__setparam_dl(p, attr);
 	else if (fair_policy(policy))
@@ -4827,6 +5160,13 @@ static void __setscheduler(struct rq *rq, struct task_struct *p,
 	p->prio = normal_prio(p);
 	if (keep_boost)
 		p->prio = rt_effective_prio(p, p->prio);
+
+#ifdef CONFIG_SCHED_CLASS_GHOST
+	if (ghost_policy(attr->sched_policy)) {
+		p->sched_class = &ghost_sched_class;
+		return;
+	}
+#endif
 
 	if (dl_prio(p->prio))
 		p->sched_class = &dl_sched_class;
@@ -4865,6 +5205,10 @@ static int __sched_setscheduler(struct task_struct *p,
 	int reset_on_fork;
 	int queue_flags = DEQUEUE_SAVE | DEQUEUE_MOVE | DEQUEUE_NOCLOCK;
 	struct rq *rq;
+#ifdef CONFIG_SCHED_CLASS_GHOST
+	struct ghost_enclave *new_e;
+	struct fd f_enc;
+#endif
 
 	/* The pi code expects interrupts enabled */
 	BUG_ON(pi && in_interrupt());
@@ -4883,17 +5227,26 @@ recheck:
 	if (attr->sched_flags & ~(SCHED_FLAG_ALL | SCHED_FLAG_SUGOV))
 		return -EINVAL;
 
-	/*
-	 * Valid priorities for SCHED_FIFO and SCHED_RR are
-	 * 1..MAX_USER_RT_PRIO-1, valid priority for SCHED_NORMAL,
-	 * SCHED_BATCH and SCHED_IDLE is 0.
-	 */
-	if ((p->mm && attr->sched_priority > MAX_USER_RT_PRIO-1) ||
-	    (!p->mm && attr->sched_priority > MAX_RT_PRIO-1))
-		return -EINVAL;
-	if ((dl_policy(policy) && !__checkparam_dl(attr)) ||
-	    (rt_policy(policy) != (attr->sched_priority != 0)))
-		return -EINVAL;
+#ifdef CONFIG_SCHED_CLASS_GHOST
+	if (ghost_policy(policy)) {
+		retval = ghost_validate_sched_attr(attr);
+		if (retval)
+			return retval;
+	} else
+#endif
+	{
+		/*
+		 * Valid priorities for SCHED_FIFO and SCHED_RR are
+		 * 1..MAX_USER_RT_PRIO-1, valid priority for SCHED_NORMAL,
+		 * SCHED_BATCH and SCHED_IDLE is 0.
+		 */
+		if ((p->mm && attr->sched_priority > MAX_USER_RT_PRIO-1) ||
+		    (!p->mm && attr->sched_priority > MAX_RT_PRIO-1))
+			return -EINVAL;
+		if ((dl_policy(policy) && !__checkparam_dl(attr)) ||
+		    (rt_policy(policy) != (attr->sched_priority != 0)))
+			return -EINVAL;
+	}
 
 	/*
 	 * Allow unprivileged RT tasks to decrease priority:
@@ -4997,6 +5350,15 @@ recheck:
 		if (attr->sched_flags & SCHED_FLAG_UTIL_CLAMP)
 			goto change;
 
+#ifdef CONFIG_SCHED_CLASS_GHOST
+		/*
+		 * ghost_setscheduler() is the one-stop-shop for policy
+		 * and sched_attr changes.
+		 */
+		if (ghost_policy(policy))
+			goto change;
+#endif
+
 		p->sched_reset_on_fork = reset_on_fork;
 		retval = 0;
 		goto unlock;
@@ -5054,6 +5416,28 @@ change:
 		goto unlock;
 	}
 
+#ifdef CONFIG_SCHED_CLASS_GHOST
+	if (ghost_policy(policy)) {
+		new_e = ghost_fdget_enclave(ghost_schedattr_to_enclave_fd(attr),
+					    &f_enc);
+	} else {
+		new_e = NULL;
+	}
+	if (ghost_policy(policy) || ghost_policy(p->policy)) {
+		int error = ghost_setscheduler(p, rq, attr, new_e,
+					       &reset_on_fork);
+
+		if (error) {
+			task_rq_unlock(rq, p, &rf);
+			if (pi)
+				cpuset_read_unlock();
+			if (ghost_policy(policy))
+				ghost_fdput_enclave(new_e, &f_enc);
+			return error;
+		}
+	}
+#endif
+
 	p->sched_reset_on_fork = reset_on_fork;
 	oldprio = p->prio;
 
@@ -5066,7 +5450,12 @@ change:
 		 * itself.
 		 */
 		new_effective_prio = rt_effective_prio(p, newprio);
+#ifdef CONFIG_SCHED_CLASS_GHOST
+		if (!ghost_policy(policy) && !ghost_policy(oldpolicy) &&
+		    new_effective_prio == oldprio)
+#else
 		if (new_effective_prio == oldprio)
+#endif
 			queue_flags &= ~DEQUEUE_MOVE;
 	}
 
@@ -5109,6 +5498,11 @@ change:
 	/* Run balance callbacks after we've adjusted the PI chain: */
 	balance_callback(rq);
 	preempt_enable();
+
+#ifdef CONFIG_SCHED_CLASS_GHOST
+	if (ghost_policy(policy))
+		ghost_fdput_enclave(new_e, &f_enc);
+#endif
 
 	return 0;
 
@@ -5576,7 +5970,7 @@ out_put_task:
 	return retval;
 }
 
-static int get_user_cpu_mask(unsigned long __user *user_mask_ptr, unsigned len,
+int get_user_cpu_mask(unsigned long __user *user_mask_ptr, unsigned len,
 			     struct cpumask *new_mask)
 {
 	if (len < cpumask_size())
@@ -6616,6 +7010,9 @@ void __init sched_init_smp(void)
 
 	init_sched_rt_class();
 	init_sched_dl_class();
+#ifdef CONFIG_SCHED_CLASS_GHOST
+	init_sched_ghost_class();
+#endif
 
 	sched_smp_initialized = true;
 }
@@ -6730,6 +7127,9 @@ void __init sched_init(void)
 		init_cfs_rq(&rq->cfs);
 		init_rt_rq(&rq->rt);
 		init_dl_rq(&rq->dl);
+#ifdef CONFIG_SCHED_CLASS_GHOST
+		init_ghost_rq(&rq->ghost);
+#endif
 #ifdef CONFIG_FAIR_GROUP_SCHED
 		root_task_group.shares = ROOT_TASK_GROUP_LOAD;
 		INIT_LIST_HEAD(&rq->leaf_cfs_rq_list);
@@ -6778,6 +7178,8 @@ void __init sched_init(void)
 		INIT_LIST_HEAD(&rq->cfs_tasks);
 
 		rq_attach_root(rq, &def_root_domain);
+
+		rq->resched_ipi_work = 0;
 #ifdef CONFIG_NO_HZ_COMMON
 		rq->last_load_update_tick = jiffies;
 		rq->last_blocked_load_update_tick = jiffies;
@@ -8030,6 +8432,20 @@ struct cgroup_subsys cpu_cgrp_subsys = {
 };
 
 #endif	/* CONFIG_CGROUP_SCHED */
+
+#ifndef CONFIG_SCHED_CLASS_GHOST
+SYSCALL_DEFINE5(ghost_run, s64, gtid, u32, agent_barrier, u32, task_barrier,
+                int, run_cpu, int, run_flags)
+{
+	return -ENOSYS;
+}
+
+SYSCALL_DEFINE6(ghost, u64, op, u64, arg1, u64, arg2, u64, arg3, u64, arg4,
+                u64, arg5)
+{
+	return -ENOSYS;
+}
+#endif
 
 void dump_cpu_task(int cpu)
 {
