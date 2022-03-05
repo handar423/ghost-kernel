@@ -253,21 +253,6 @@ extern int ghost_run_gtid_on_check(s64 gtid, u32 task_barrier, int run_flags,
 				   int cpu);
 
 struct rq_flags;
-#ifdef CONFIG_BPF
-extern bool ghost_bpf_skip_tick(struct ghost_enclave *e, struct rq *rq);
-extern bool ghost_bpf_pnt(struct ghost_enclave *e, struct rq *rq,
-			  struct rq_flags *rf);
-#else
-static inline bool ghost_bpf_skip_tick(struct ghost_enclave *e, struct rq *rq)
-{
-	return false;
-}
-static inline bool ghost_bpf_pnt(struct ghost_enclave *e, struct rq *rq,
-				 struct rq_flags *rf)
-{
-	return false;
-}
-#endif
 
 extern void ghost_wait_for_rendezvous(struct rq *rq);
 extern void ghost_need_cpu_not_idle(struct rq *rq, struct task_struct *next);

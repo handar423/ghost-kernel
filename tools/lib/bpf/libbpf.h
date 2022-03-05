@@ -264,6 +264,8 @@ LIBBPF_API int bpf_program__set_xdp(struct bpf_program *prog);
 LIBBPF_API int bpf_program__set_perf_event(struct bpf_program *prog);
 LIBBPF_API void bpf_program__set_type(struct bpf_program *prog,
 				      enum bpf_prog_type type);
+LIBBPF_API enum bpf_attach_type
+bpf_program__get_expected_attach_type(struct bpf_program *prog);
 LIBBPF_API void
 bpf_program__set_expected_attach_type(struct bpf_program *prog,
 				      enum bpf_attach_type type);
@@ -540,6 +542,44 @@ bpf_program__bpil_offs_to_addr(struct bpf_prog_info_linear *info_linear);
  *
  */
 LIBBPF_API int libbpf_num_possible_cpus(void);
+
+struct bpf_map_skeleton {
+	const char *name;
+	struct bpf_map **map;
+	void **mmaped;
+};
+
+struct bpf_prog_skeleton {
+	const char *name;
+	struct bpf_program **prog;
+	struct bpf_link **link;
+};
+
+struct bpf_object_skeleton {
+	size_t sz; /* size of this struct, for forward/backward compatibility */
+
+	const char *name;
+	void *data;
+	size_t data_sz;
+
+	struct bpf_object **obj;
+
+	int map_cnt;
+	int map_skel_sz; /* sizeof(struct bpf_skeleton_map) */
+	struct bpf_map_skeleton *maps;
+
+	int prog_cnt;
+	int prog_skel_sz; /* sizeof(struct bpf_skeleton_prog) */
+	struct bpf_prog_skeleton *progs;
+};
+
+LIBBPF_API int
+bpf_object__open_skeleton(struct bpf_object_skeleton *s,
+			  const struct bpf_object_open_opts *opts);
+LIBBPF_API int bpf_object__load_skeleton(struct bpf_object_skeleton *s);
+LIBBPF_API int bpf_object__attach_skeleton(struct bpf_object_skeleton *s);
+LIBBPF_API void bpf_object__detach_skeleton(struct bpf_object_skeleton *s);
+LIBBPF_API void bpf_object__destroy_skeleton(struct bpf_object_skeleton *s);
 
 #ifdef __cplusplus
 } /* extern "C" */

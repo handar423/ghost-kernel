@@ -808,7 +808,6 @@ static int balance_ghost(struct rq *rq, struct task_struct *prev,
 			 struct rq_flags *rf)
 {
 
-	bool bpf_ret;
 	struct task_struct *agent = rq->ghost.agent;
 
 	if (!agent || !agent->on_rq)
@@ -834,7 +833,6 @@ static int balance_ghost(struct rq *rq, struct task_struct *prev,
 		rq->ghost.pnt_bpf_once = false;
 		/* If there is a BPF program, this will unlock the RQ */
 		rq->ghost.in_pnt_bpf = true;
-		bpf_ret = ghost_bpf_pnt(agent->ghost.enclave, rq, rf);
 		rq->ghost.in_pnt_bpf = false;
 	}
 
@@ -842,10 +840,10 @@ static int balance_ghost(struct rq *rq, struct task_struct *prev,
 	 * We have something to run in 'latched_task' or a higher priority
 	 * sched_class became runnable while the rq->lock was dropped.
 	 */
-	return rq->ghost.latched_task || rq_adj_nr_running(rq) || bpf_ret;
+	return rq->ghost.latched_task || rq_adj_nr_running(rq);
 }
 
-static int select_task_rq_ghost(struct task_struct *p, int cpu, int wake_flags)
+static int select_task_rq_ghost(struct task_struct *p, int cpu, int wake_flags, int flags)
 {
 	int waker_cpu = smp_processor_id();
 
@@ -1114,13 +1112,12 @@ static inline void ghost_update_boost_prio(struct task_struct *p,
 		ghost_sw_clear_flag(p->ghost.status_word, GHOST_SW_BOOST_PRIO);
 }
 
-static struct task_struct *pick_next_ghost_agent(struct rq *rq)
+static struct task_struct *pick_next_ghost_agent(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 {
 	struct task_struct *agent = rq->ghost.agent;
 	struct task_struct *next = NULL;
 	int nr_running;
 	bool preempted;
-	struct task_struct *prev = rq->curr;
 
 	if (!agent || !agent->on_rq)
 		goto done;
@@ -1191,10 +1188,9 @@ done:
 	return next;
 }
 
-static struct task_struct *pick_next_task_ghost(struct rq *rq)
+static struct task_struct *pick_next_task_ghost(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 {
 	struct task_struct *agent = rq->ghost.agent;
-	struct task_struct *prev = rq->curr;
 	struct task_struct *next = NULL;
 
 	/*
@@ -1317,7 +1313,7 @@ static struct task_struct *pick_next_task_ghost(struct rq *rq)
 done:
 	if (unlikely(!next && rq->ghost.run_flags & RTLA_ON_IDLE)) {
 		rq->ghost.blocked_in_run = false;
-		return pick_next_ghost_agent(rq);
+		return pick_next_ghost_agent(rq, rq->curr, rf);
 	}
 
 	ghost_prepare_switch(rq, prev, next);
@@ -3550,7 +3546,7 @@ static inline bool cpu_deliver_msg_tick(struct rq *rq)
 		return false;
 	rcu_read_lock();
 	e = rcu_dereference(per_cpu(enclave, cpu_of(rq)));
-	if (!e || ghost_bpf_skip_tick(e, rq)) {
+	if (!e) {
 		rcu_read_unlock();
 		return false;
 	}

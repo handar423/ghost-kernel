@@ -1628,14 +1628,6 @@ bpf_prog_load_check_attach_type(enum bpf_prog_type prog_type,
 		default:
 			return -EINVAL;
 		}
-	case BPF_PROG_TYPE_GHOST_SCHED:
-		switch (expected_attach_type) {
-		case BPF_GHOST_SCHED_SKIP_TICK:
-		case BPF_GHOST_SCHED_PNT:
-			return 0;
-		default:
-			return -EINVAL;
-		}
 	default:
 		return 0;
 	}
@@ -1971,10 +1963,6 @@ static int bpf_prog_attach(const union bpf_attr *attr)
 	case BPF_CGROUP_SETSOCKOPT:
 		ptype = BPF_PROG_TYPE_CGROUP_SOCKOPT;
 		break;
-	case BPF_GHOST_SCHED_SKIP_TICK:
-	case BPF_GHOST_SCHED_PNT:
-		ret = ghost_sched_bpf_prog_attach(attr, prog);
-		break;
 	default:
 		return -EINVAL;
 	}
@@ -2062,9 +2050,6 @@ static int bpf_prog_detach(const union bpf_attr *attr)
 	case BPF_CGROUP_SETSOCKOPT:
 		ptype = BPF_PROG_TYPE_CGROUP_SOCKOPT;
 		break;
-	case BPF_GHOST_SCHED_SKIP_TICK:
-	case BPF_GHOST_SCHED_PNT:
-		return ghost_sched_bpf_prog_detach(attr, ptype);
 	default:
 		return -EINVAL;
 	}

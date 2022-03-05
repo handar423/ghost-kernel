@@ -613,42 +613,42 @@ static struct kernfs_ops gf_ops_e_status = {
 static struct gf_dirent enclave_dirtab[] = {
 	{
 		.name		= "sw_regions",
-		.mode		= 0555,
+		.mode		= 0777,
 		.is_dir		= true,
 	},
 	{
 		.name		= "agent_online",
-		.mode		= 0664,
+		.mode		= 0777,
 		.ops		= &gf_ops_e_agent_online,
 	},
 	{
 		.name		= "cpu_data",
-		.mode		= 0660,
+		.mode		= 0777,
 		.ops		= &gf_ops_e_cpu_data,
 	},
 	{
 		.name		= "cpulist",
-		.mode		= 0664,
+		.mode		= 0777,
 		.ops		= &gf_ops_e_cpulist,
 	},
 	{
 		.name		= "cpumask",
-		.mode		= 0664,
+		.mode		= 0777,
 		.ops		= &gf_ops_e_cpumask,
 	},
 	{
 		.name		= "ctl",
-		.mode		= 0664,
+		.mode		= 0777,
 		.ops		= &gf_ops_e_ctl,
 	},
 	{
 		.name		= "runnable_timeout",
-		.mode		= 0664,
+		.mode		= 0777,
 		.ops		= &gf_ops_e_runnable_timeout,
 	},
 	{
 		.name		= "status",
-		.mode		= 0444,
+		.mode		= 0777,
 		.ops		= &gf_ops_e_status,
 	},
 	{0},

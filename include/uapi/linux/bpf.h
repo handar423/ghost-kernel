@@ -173,7 +173,6 @@ enum bpf_prog_type {
 	BPF_PROG_TYPE_CGROUP_SYSCTL,
 	BPF_PROG_TYPE_RAW_TRACEPOINT_WRITABLE,
 	BPF_PROG_TYPE_CGROUP_SOCKOPT,
-	BPF_PROG_TYPE_GHOST_SCHED = 35,
 };
 
 enum bpf_attach_type {
@@ -200,8 +199,6 @@ enum bpf_attach_type {
 	BPF_CGROUP_UDP6_RECVMSG,
 	BPF_CGROUP_GETSOCKOPT,
 	BPF_CGROUP_SETSOCKOPT,
-	BPF_GHOST_SCHED_SKIP_TICK = 50,
-	BPF_GHOST_SCHED_PNT = 51,
 	__MAX_BPF_ATTACH_TYPE
 };
 
@@ -2881,48 +2878,6 @@ union bpf_attr {
 	FN(sk_storage_delete),		\
 	FN(send_signal),		\
 	FN(tcp_gen_syncookie), \
-	FN(placeholder_999),		\
-	FN(placeholder_001),		\
-	FN(placeholder_002),		\
-	FN(placeholder_003),		\
-	FN(placeholder_004),		\
-	FN(placeholder_005),		\
-	FN(placeholder_006),		\
-	FN(placeholder_007),		\
-	FN(placeholder_008),		\
-	FN(placeholder_009),		\
-	FN(placeholder_010),		\
-	FN(placeholder_011),		\
-	FN(placeholder_012),		\
-	FN(placeholder_013),		\
-	FN(placeholder_014),		\
-	FN(placeholder_015),		\
-	FN(placeholder_016),		\
-	FN(placeholder_017),		\
-	FN(placeholder_018),		\
-	FN(placeholder_019),		\
-	FN(placeholder_020),		\
-	FN(placeholder_021),		\
-	FN(placeholder_022),		\
-	FN(placeholder_023),		\
-	FN(placeholder_024),		\
-	FN(placeholder_025),		\
-	FN(placeholder_026),		\
-	FN(placeholder_027),		\
-	FN(placeholder_028),		\
-	FN(placeholder_029),		\
-	FN(placeholder_030),		\
-	FN(placeholder_031),		\
-	FN(placeholder_032),		\
-	FN(placeholder_033),		\
-	FN(placeholder_034),		\
-	FN(placeholder_035),		\
-	FN(placeholder_036),		\
-	FN(placeholder_037),		\
-	FN(placeholder_038),		\
-	FN(placeholder_039),		\
-	FN(ghost_wake_agent),		\
-	FN(ghost_run_gtid),		\
 
 /* integer value in 'imm' field of BPF_CALL instruction selects which helper
  * function eBPF program intends to call
